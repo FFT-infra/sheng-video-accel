@@ -565,6 +565,7 @@ capture noshow token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu
                                                                       one, else by decode order)
 capture token=<n> index=<i> flags=<hex> publish=drop                 (released target; not published)
 capture token=<n> index=<i> flags=<hex> publish=error                (firmware error; not published)
+capture token=<n> index=<i> flags=<hex> publish=invisible            (VP9 alt-ref: first of two completions under one token, ERROR with no picture-type bit and no payload; keep the target pending for the visible frame)
 capture token=<n> index=<i> flags=<hex> publish=misplaced slot_token=<n>
                                                                      (Import: buffer was queued for
                                                                       another token; both surfaces fail)

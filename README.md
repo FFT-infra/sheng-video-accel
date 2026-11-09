@@ -1,11 +1,16 @@
-# Qualcomm Iris V4L2/libVA backend
+# sheng video acceleration: Qualcomm Iris VA-API for the Xiaomi Pad 6S Pro (SM8550)
 
 **English** | [中文](README.zh-CN.md)
 
-A libva driver for the stateful V4L2 decoder that Qualcomm's Iris VPU exposes
-on SM8550 and related SoCs. It gives Google Chrome, Electron and Firefox on
-ARM64 Linux a hardware video decoder, and on the qualified target the frames
-go from the firmware into Chrome's own buffers with no copy in between.
+This is the video-acceleration bundle for `sheng` (Xiaomi Pad 6S Pro, SM8550)
+on ARM64 Linux: a libva / VA-API driver for the stateful V4L2 decoder and
+encoder Qualcomm's Iris VPU exposes, the four `qcom-iris` kernel patches it
+needs, and Fedora RPM / Arch PKGBUILD packages. On the one qualified target
+(Fedora 44 with a self-built `ianchb/sm8550-mainline` kernel) Google Chrome,
+Electron and Firefox get hardware decode, and H.264/HEVC frames go from the
+firmware into Chrome's own buffers with no copy in between; VP9 stays on Copy.
+The driver is shared by every VA-API client on the tablet; it carries recorded
+evidence on this device only.
 
 ## Why this exists
 
@@ -211,8 +216,13 @@ depends on the kernel, the condition names the kernel feature.
   choose between them, and about a quarter of the completions land in the
   wrong buffer. The session now lends one picture one buffer per completion
   instead, which is a different thing: the firmware still chooses only
-  between the same picture's memory. That path has host tests but no
-  hardware gate yet, so the driver keeps copying for VP9.
+  between the same picture's memory. On the target that path is exact for
+  FFmpeg (515/515, no misplaced completions, framemd5 equal to software), but
+  Chrome releases a VP9 surface before its picture completes: 564 of 768
+  queueings were abandoned and 541 completions dropped, against 2 and 4 for
+  the H.264 control. Chrome still reports 480 frames and 0 dropped, which is
+  silent degradation rather than a pass. VP9 therefore stays on Copy until
+  that browser path is clean (TEST-RESULTS.md, 2026-10-24).
 - **AV1 holds one picture.** VA carries no `refresh_frame_flags`. For this
   reason the translator keeps each AV1 picture until the next access unit's
   reference map names the slots that the picture refreshed.
@@ -250,9 +260,13 @@ depends on the kernel, the condition names the kernel feature.
   [CFM880/iris-vaapi](https://github.com/CFM880/iris-vaapi) reported and
   bisected it on SM8150, and filed it as
   [Chromium issue 563075803](https://issues.chromium.org/issues/563075803).
-  This project did not reproduce it, because the target runs Chrome 152. On
-  Chrome 153, launch with
+  This project did not reproduce it, because the target runs Chrome 152.
+  CFM880 now marks the regression resolved in Chrome 156.0.8078.47
+  (`stale_repeats = 0/445`, no workaround flags) and says the workaround can
+  be dropped; their report also warns that a launcher wrapper injecting the
+  flag makes an A/B look fixed. On Chrome 153, launch with
   `--disable-features=ExtendedVideoBitstreamValidation`, or stay on 152.
+  Chrome 156+ needs neither.
 - **One device is qualified.** All results above come from one SM8550
   tablet. Other Iris gen2 SoCs should work, but they carry no evidence yet.
   Arch packaging is provided but not validated.
@@ -292,8 +306,9 @@ depends on the kernel, the condition names the kernel feature.
   - GStreamer's VA encoder rejects a driver that answers
     `VA_ATTRIB_NOT_SUPPORTED` there, because it cannot tell that from a
     client error. Zero passes its check, so `vah264enc` and `vah265enc` get
-    past it. Whether they then produce a correct stream is not yet verified
-    on hardware.
+    past it. Both then encode 90 frames on the target and the streams decode
+    clean; the second blocker was a double claim on the completion, now
+    funnelled through `claim_coded()` (TEST-RESULTS.md, 2026-10-24).
 - **Encode is pipelined, and `-async_depth` works.** `vaEndPicture` queues
   the picture and returns. The access unit arrives through `vaSyncBuffer` on
   the coded buffer, or through `vaMapBuffer` for a client that never syncs.
@@ -377,8 +392,9 @@ MIT with LGPL-2.1-covered parts, the same terms as upstream; see `COPYING`,
 - `include/linux/` vendors the kernel UAPI headers under their own SPDX tag
   (`GPL-2.0+ WITH Linux-syscall-note OR BSD-3-Clause`).
 - `packaging/kernel/` carries five Iris kernel changes in four patches:
-  four from [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2)
-  (Radxa, Xilin Wu) and the encoder half of an upstream `REQUEST_SYNC_FRAME`
+  four from [radxa-pkg/qcom-va-driver](https://github.com/radxa-pkg/qcom-va-driver)
+  (Radxa, Xilin Wu; the repository was `strongtz/libva-v4l2` before
+  its 2026-10-26 rename) and the encoder half of an upstream `REQUEST_SYNC_FRAME`
   commit (Wangao Wang, Qualcomm). They touch GPL-2.0 kernel code and carry
   that license, not the driver's. The explicit-RPS HEVC slice rewrite follows
   the same project's approach.

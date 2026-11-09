@@ -1,10 +1,14 @@
 # Iris kernel module patches
 
 Four patches. The first two are from
-[strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2) (Radxa, Xilin
-Wu), the third is the encoder half of an upstream commit (Wangao Wang), and
-the fourth is also strongtz's (Xilin Wu), all rebased onto
-`ianchb/sm8550-mainline` branch `sheng-7.2.6` (commit `42f3b40c702a`):
+[radxa-pkg/qcom-va-driver](https://github.com/radxa-pkg/qcom-va-driver)
+(Radxa, Xilin Wu; the repository was `strongtz/libva-v4l2` before its
+2026-10-26 rename), the third is the encoder half of an upstream commit
+(Wangao Wang), and the fourth is also Radxa's (Xilin Wu), all
+rebased onto `ianchb/sm8550-mainline` branch `sheng-7.2.6` (commit
+`42f3b40c702a`). Upstream now carries five patches (its 0005 recycles
+non-display decoder buffers for AV1); this tree's mapping is 0001+0002 /
+0003 / upstream `6f62dcefd249` / 0004, unchanged:
 
 | Patch | Upstream | What it changes | Why the driver wants it |
 | --- | --- | --- | --- |
@@ -30,7 +34,29 @@ patch edited in place fails a check instead of reaching a build.
 `test/iris-kernel-patch-check.sh` compares the files to it, asserts every path
 a patch touches is under `drivers/media/platform/qcom/iris/`, and pins the
 one-line marker of each change — the counts it checks are the same greps the
-"check these by hand" list below gives an operator.
+"check these by hand" list below gives an operator. The script resolves the
+downstream spec in exactly one of two ways: the explicit
+`IRIS_DOWNSTREAM_SPEC` override, or the sibling
+`../sheng-fedora-packages/kernel-sm8550/kernel-sm8550.spec` checkout. A stale
+clone under `~/Lab/Bridge/tmp/` is deliberately not a candidate: it can pin an
+older commit and produce four false URL-pin failures. With the spec present,
+the same script also asserts that its four `IRIS_PATCHn_SHA256` values equal
+`SHA256SUMS`, that at least one `Source6-9` URL exists, and that every such URL
+pins the commit `iris-kernel-patches-v1` resolves to. Editing a patch without
+re-tagging and re-pinning then fails on the host instead of an hour into a
+kernel build. CI checks out only this repository, so it skips that half and
+still checks everything above.
+
+`rpmbuild -bp --nodebuginfo --nodeps kernel-sm8550/kernel-sm8550.spec` was run
+against the downstream spec on 2026-11-10: `spectool -g -R` fetched all nine
+sources, `%prep` verified all four hashes and applied all four patches at
+`--fuzz=0` (0004 at its recorded −3-line offset), and the applied tree carries
+the decode-order define, the deblocking and sync-frame capabilities in
+`enum platform_inst_fw_cap_type`, and the ERROR-branch timestamp copy. A full
+`-ba` was not run: it needs ten BuildRequires absent on this host and a
+30–90 minute aarch64 kernel build. `%prep` is the stage that verifies this
+directory's payload, so the unbuilt half is the RPM's own compile, not the
+patch contract.
 
 These patches are consumed by
 [`GhfunNiHe/sheng-fedora-packages`](https://github.com/GhfunNiHe/sheng-fedora-packages)

@@ -14,6 +14,11 @@
 #   * a patch grows a hunk in a file it should not touch. 0001 applies at
 #     fuzz 0 against the `sheng-7.2.6` tag and the downstream spec relies on
 #     that; a stray path is how a rebase goes wrong quietly.
+#   * a patch is edited here but the downstream kernel spec still carries the
+#     old sha256, or its Source URLs still point at a commit the tag no longer
+#     names. The spec is a second repository, so this check only binds the two
+#     when that checkout is available; CI runs without it and still checks
+#     everything above.
 #
 # What it asserts, per patch:
 #   * the file exists and its sha256 matches `packaging/kernel/SHA256SUMS`
@@ -23,6 +28,11 @@
 #     timestamp copy sits inside the ERROR branch
 #   * README.md names the file, so a renamed patch cannot leave the recipe
 #     pointing at nothing
+#
+# With the downstream checkout present (IRIS_DOWNSTREAM_SPEC or the usual
+# sibling path), it also asserts:
+#   * each IRIS_PATCHn_SHA256 in the spec equals the recorded hash
+#   * each Source6-9 URL pins the commit `iris-kernel-patches-v1` resolves to
 
 set -eu
 
@@ -134,6 +144,45 @@ for patch in "$kernel_dir"/0*.patch; do
     grep -Fq "${patch##*/}" "$readme" \
         || fail "README.md does not name ${patch##*/}"
 done
+
+# The kernel spec lives in a second repository and fetches these files by
+# URL. Bind its copy of the hashes and its commit pin to this tree, so editing
+# a patch without re-tagging and re-pinning fails here instead of an hour into
+# a kernel build. CI checks out only this repository, where the spec is absent;
+# an explicit IRIS_DOWNSTREAM_SPEC is how that environment opts in.
+spec=${IRIS_DOWNSTREAM_SPEC:-}
+if [ -z "$spec" ]; then
+    candidate=$root/../sheng-fedora-packages/kernel-sm8550/kernel-sm8550.spec
+    if [ -f "$candidate" ]; then spec=$candidate; fi
+fi
+if [ -n "$spec" ] && [ -f "$spec" ]; then
+    base_failures=$failures
+    for name in 0001 0002 0003 0004; do
+        recorded=$(awk -v n="$name" '$2 ~ "^"n"-" {print $1}' "$sums")
+        case $name in
+            0001) var=IRIS_PATCH1_SHA256 ;;
+            0002) var=IRIS_PATCH2_SHA256 ;;
+            0003) var=IRIS_PATCH3_SHA256 ;;
+            0004) var=IRIS_PATCH4_SHA256 ;;
+        esac
+        downstream=$(sed -n "s/^%global $var \([0-9a-f]\{64\}\).*/\1/p" "$spec")
+        [ "$downstream" = "$recorded" ] \
+            || fail "downstream spec $var is ${downstream:-unset}, SHA256SUMS has $recorded"
+    done
+    pinned=$(git -C "$root" rev-list -n1 iris-kernel-patches-v1 2>/dev/null || true)
+    [ -n "$pinned" ] || fail "iris-kernel-patches-v1 tag is missing"
+    urls=$(sed -n 's/^Source[6-9]:[[:space:]]*//p' "$spec")
+    [ -n "$urls" ] || fail "downstream spec has no Source6-9 patch URLs"
+    for url in $urls; do
+        printf '%s\n' "$url" | grep -Fq "/$pinned/packaging/kernel/" \
+            || fail "downstream Source URL does not pin tag commit $pinned: $url"
+    done
+    if [ "$failures" -eq "$base_failures" ]; then
+        printf 'PASS kernel patches: downstream spec hashes and commit pin agree\n'
+    fi
+else
+    printf 'NOTE kernel patches: downstream spec not present, cross-repo check skipped\n'
+fi
 
 if [ "$failures" -ne 0 ]; then
     printf 'FAIL kernel patches: %d problem(s)\n' "$failures" >&2

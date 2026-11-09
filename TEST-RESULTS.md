@@ -4607,3 +4607,184 @@ PASS browser=Chrome/152.0.7977.82 decoder=VaapiVideoDecoder platform=True
 with `driver_mapped_in_gpu_process=/usr/lib64/dri/v4l2_drv_video.so`, sampled
 during playback. That closes the loop: the package a user installs decodes in
 Chrome with no launcher, no desktop entry, no flags and no environment.
+
+## Distribution check and deferred hardware runs (2026-11-10)
+
+Host-side work on `feat/encode-entrypoints`, no product-code changes. The four
+Iris patches, both READMEs' known-limits text and the downstream kernel spec
+were brought into agreement; the static check that binds them is new.
+
+| Check | Result |
+| --- | --- |
+| `rpmspec -P kernel-sm8550/kernel-sm8550.spec` | expands; Source6-9 pin `5a0fcb58461deeb8b6392f07cb42b2804accbe9e`, Release `8.sheng.iris1.fc44` |
+| `spectool -g -R` (downstream spec) | all nine sources fetched; the four patch URLs returned 200 |
+| `rpmbuild -bp --nodebuginfo --nodeps` | `%prep` verified all four recorded sha256 values, then applied 0001-0004 at `--fuzz=0`; 0004 at the recorded −3-line offset; `Tag 7.2.6-mac commit: 42f3b40`, `.lkv_suffix=-sm8550-g42f3b40-iris1` |
+| Applied tree | `HFI_PROP_DECODE_ORDER_OUTPUT` defined; `DISPLAY_DELAY_ENABLE`/`DISPLAY_DELAY`/`REQUEST_SYNC_FRAME` in `enum platform_inst_fw_cap_type` (not the flags enum); `DEBLOCK_MODE_H264` once; `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` handled twice in `iris_ctrls.c`; error-branch `vb2->timestamp = buf->timestamp` present |
+| `test/iris-kernel-patch-check.sh` | passes with the downstream spec present, skips the cross-repo half without it, fails on a tampered `IRIS_PATCHn_SHA256` and on a URL pin that no longer names the tag commit |
+
+`rpmbuild -ba` was not run: ten BuildRequires (bindgen, ccache, clippy,
+net-tools, opencsd-devel, python3-pyyaml, rust-src, rustfmt,
+systemd-boot-unsigned, systemd-ukify) are absent on this host, the workflow
+allows 30–90 minutes for the aarch64 kernel build, and the host volume had
+2.1 GB free. `%prep` is the stage that checks this repository's payload; the
+unbuilt half is the RPM's own compile. The 266 MB source tarball and the
+prepped BUILD tree were removed afterwards.
+
+Target probes over ssh `sheng`, read-only, boot `20dcd8af-…`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`:
+
+- encoder `/dev/video1` lists `force_key_frame` and all six loop-filter
+  controls, so the loaded module still carries 0002+0003.
+- `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` is probed once in
+  `EncodeSession::configure()`; there is no environment override that selects
+  the intra-period lever. The stock-kernel promoted-IDR run therefore needs a
+  module without 0003 and a reboot. It was not attempted: that changes the
+  installed system and the tablet was discharging.
+- The two-hour concurrency soak was not run either. Battery was 26 % and
+  `Discharging` at −2.195 A at the start of this session and 23 % by the end.
+  The soak guards boot ID and an 85 °C ceiling but does not check the pack.
+  A charged supply is the prerequisite; the 2026-09-21 full-length soak
+  (`dual-h264` and `mixed`, 172800 frames per context) remains the record for
+  the earlier tree.
+
+## Sibling backends: the 2026-09-22 deep read, closed (2026-11-10)
+
+Source-only research against the public GitHub API and raw trees; no build,
+no target access. It closes the item left open when four 2026-09-22 subagents
+were killed by a billing error. Repo state checked 2026-11-10 UTC:
+
+| Repo | HEAD | Last commit | Verdict |
+| --- | --- | --- | --- |
+| `CFM880/iris-vaapi` | `9852479` | 2026-10-23 | gen1 Iris (SM8150/nabu), decode-only |
+| `radxa-pkg/qcom-va-driver` | `0980a1d` | 2026-10-28 | same HFI gen2 / `iris_driver` name |
+| `snowf14k3/venus-vaapi-driver` | `37e1030` | 2026-10-07 | older `qcom-venus` stack |
+
+`radxa-pkg/libva-v4l2` and `strongtz/libva-v4l2` both 301-redirect to
+`radxa-pkg/qcom-va-driver` (repo id 1360998480, renamed 2026-10-26, tag
+`v1.1.1`). The old URLs in our credits were stale and now name the current
+repository with the rename recorded.
+
+Findings that changed this tree:
+
+- **Chrome 153 HEVC seek regression is resolved upstream in Chrome 156.**
+  CFM880's `docs/chromium-bug-m153-hevc-seek.md` was updated 2026-10-23 to
+  `Status: resolved`: Chrome `156.0.8078.47`, 4K HEVC 8-bit, no workaround
+  flags, `stale_repeats = 0/445`. It also warns that a launcher wrapper
+  injecting `--disable-features=ExtendedVideoBitstreamValidation` makes an A/B
+  look fixed. Both READMEs now say 153 needs the flag or 152, 156+ needs
+  neither. The Chromium issue page itself was not fetched.
+- **Upstream now carries five kernel patches, not three.** `patches/` holds
+  0001 decode-order, 0002 larger CAPTURE pools, 0003 deblocking, 0004
+  error-buffer timestamps (2026-10-21) and 0005 recycle non-display decoder
+  buffers for AV1 (2026-10-26). Our four still map to 0001+0002 / 0003 /
+  upstream `6f62dcefd249` / 0004; patch bodies were not diffed.
+
+Findings that did not change this tree:
+
+- CFM880's `99-qcom-iris-dmaheap.rules` (`MODE="0666"` on
+  `/dev/dma_heap/system`) fixes Chrome black video caused by memfd fallback on
+  gen1. Our Import path takes a client-exported DMA-BUF and the Chrome 152
+  acceptance on this target passes 599 frames with no drops, so the udev rule
+  was not added. Their line "`vainfo` succeeding does not prove the
+  presentation path works" is already stronger in our gate, which requires a
+  media surface reporting `VaapiVideoDecoder` with frame and drop evidence.
+  Their `VPU_DIRECT_CAPTURE=1` queues the whole client pool into CAPTURE with
+  permanent slot/surface association, a different ownership model from our
+  one-picture-in-flight Import; their in-place VP9 resize uses a gen1 firmware
+  quirk. Neither is transferable.
+- Radxa's `src/vp9.cpp` answers the invisible alt-ref with a synthetic VP9
+  superframe showing the refreshed slot, and refuses `show_existing`. A
+  genuinely different answer to the same alt-ref problem; our translator
+  appends a `show_existing_frame` header instead and qualifies FFmpeg at
+  515/515 with `misplaced=0`. `src/decoder.cpp` has no Import path
+  (CAPTURE is MMAP + EXPBUF; imported client surfaces are copied into) and
+  refuses in-context DRC at line 389, which this tree qualifies. Nothing to
+  adopt.
+- `snowf14k3/venus-vaapi-driver` is plain C on the `qcom-venus` stack: no
+  kernel patches, no decode-order control, no Import, CPU row-copy of every
+  frame into MSM GEM surfaces. Its env-gated experimental HEVC and
+  `ENUM_FMT`-derived capabilities are already covered by our evidence-before-
+  capability rule. Leaving it unmentioned was correct.
+
+Not verified: no runtime or hardware behaviour, no patch-body diff, no read of
+CFM880's companion `nabu-iris` module, and the pre-rename `strongtz` history
+could not be separated from the shared renamed history.
+
+## Docs, cross-repo check and fork rename (2026-11-10)
+
+Host-side work on `feat/encode-entrypoints`. No product code, capability,
+profile or publish policy changed; `data/iris-codec-capabilities.json`,
+`packaging/kernel/000[1-4]-*.patch` and `SHA256SUMS` are byte-identical to
+`HEAD` (four `sha256sum -c` OK). The four patch files and their hashes are
+hash-pinned by the downstream spec and the `iris-kernel-patches-v1` tag, so
+this batch does not touch them and creates no new tag: the tag still resolves
+to `5a0fcb58461deeb8b6392f07cb42b2804accbe9e` and the four
+`%global IRIS_PATCHn_SHA256` values are unchanged.
+
+Three small fixes to `test/iris-kernel-patch-check.sh`'s cross-repo half
+(added earlier in this working tree):
+
+- The final PASS message was an AND-list as the last command of the `if`
+  branch. It does not abort under this host's `/bin/sh` (bash), but it is
+  fragile on dash-based CI or if the trailing lines move; it is now a plain
+  `if ... then printf ... fi`.
+- The stale experimental clone
+  `~/Lab/Bridge/tmp/sheng-fedora-packages/...` was a second fallback
+  candidate. It pins `8dd655e…` with `phxinyang/` URLs and produced four
+  false URL-pin failures. Only the explicit `IRIS_DOWNSTREAM_SPEC` override
+  and the sibling `../sheng-fedora-packages` checkout remain.
+- A spec with zero `Source6-9` lines now fails instead of silently passing.
+  `packaging/kernel/README.md` documents the same resolution rules.
+
+Verification of that check, fixtures under `~/Lab/Bridge/tmp/iris-check-fixtures`:
+
+| Fixture | Exit | Result |
+| --- | --- | --- |
+| canonical spec, `IRIS_DOWNSTREAM_SPEC` set | 0 | both PASS lines |
+| `IRIS_PATCH1_SHA256` zeroed | 1 | one hash-mismatch FAIL |
+| four URLs pinned to `8dd655e…` | 1 | four URL-pin FAILs |
+| `Source6-9` lines deleted | 1 | `downstream spec has no Source6-9 patch URLs` |
+| no override, no sibling (CI shape) | 0 | `NOTE ... skipped`, cross-repo half skipped |
+
+`docs/architecture.md` §8 gained the missing `publish=invisible` record,
+matching `src/iris/session.cc` and the five `publish=invisible` counts in
+this file; no consumer parses it, so no other file moved. `sh -n`,
+`sh test/run-static-checks.sh`, `meson test -C build-local` (20/20) and
+`git diff --check` are green.
+
+Fork rename: `FFT-infra/qualcomm-iris-vaapi` → `FFT-infra/sheng-video-accel`
+(GitHub repo name and description only; the base repo
+`phxinyang/qualcomm-iris-vaapi` is not renamed). New description:
+
+> Video acceleration for sheng (Xiaomi Pad 6S Pro / SM8550) on ARM64 Linux:
+> libva VA-API backend for the Qualcomm Iris V4L2 decoder and encoder, four
+> qcom-iris kernel patches, and Fedora/Arch packages. Hardware decode/encode
+> in Chrome/Firefox/Electron, zero-copy H.264/HEVC decode. Qualified on this
+> one tablet; shared by all its VA-API clients.
+
+Both READMEs' titles and lead paragraphs now name `sheng` / Xiaomi Pad 6S Pro
+(SM8550) and state the single qualified target and the device-only evidence
+boundary; they make no cross-SoC claim. Package identities
+(`meson.build` `project('libva-v4l2')`, `libva-v4l2-iris`,
+`qualcomm-iris-vaapi/system-install-v1`) and the packaging `URL:`/`url=` are
+untouched. GitHub redirects old-name raw URLs (verified with the
+`strongtz/libva-v4l2` → `radxa-pkg/qcom-va-driver` precedent), and the check
+validates only the `/5a0fcb5…/packaging/kernel/` commit segment, so no
+re-tag or re-hash was needed.
+
+The downstream spec repo `sheng-fedora-packages` (separate checkout, local
+commit `3b202951de801dce2e94a46ebabfb130295b928a`, **not pushed**) changes only
+the four `Source6-9` URL owner/repo substrings to `FFT-infra/sheng-video-accel`;
+the commit pin, the four hashes, `Release` and all `%changelog` entries stay
+verbatim. `rpmspec -P` expands, the positive kernel-patch check still passes
+against the edited spec, and `git diff --check` is clean.
+
+PR #1 remains `state=OPEN`, `isDraft=true`, `mergeable=MERGEABLE`,
+`mergeStateStatus=CLEAN`, head `FFT-infra:feat/encode-entrypoints`. Its
+`pull_request` CI runs still need base-repo admin approval (cross-repo fork
+PR `action_required`); the permissions fact is recorded in the section
+"CI: the inventory check failed on the meson version (2026-10-24)" and is not
+changed here. Fork `push` runs are green.
+
+The short-window, low-power browser acceptance for this date is recorded in
+the following commit.

@@ -1,11 +1,13 @@
-# Qualcomm Iris V4L2/libVA 后端
+# sheng 视频加速：面向小米平板 6S Pro（SM8550）的 Qualcomm Iris VA-API 后端
 
 [English](README.md) | **中文**
 
-给高通 Iris 视频解码器写的 libva 驱动。Iris 是 SM8550 这一代 SoC 上的
-stateful V4L2 解码器；有了这个驱动，ARM64 Linux 上的 Google Chrome、Electron
-和 Firefox 就能用上硬件解码。在合格的目标机上，固件把画面直接解到 Chrome
-自己的缓冲区里，中间没有任何拷贝。
+面向小米平板 6S Pro（`sheng`，骁龙 SM8550）的 ARM64 Linux 视频加速套件：给高通
+Iris VPU 的 stateful V4L2 解码器/编码器写的 libva / VA-API 驱动、它需要的四个
+`qcom-iris` 内核补丁，以及 Fedora RPM / Arch PKGBUILD 打包。在这唯一一台合格目标机上
+（Fedora 44、自编译 `ianchb/sm8550-mainline` 内核），Google Chrome、Electron 和
+Firefox 走硬件解码，H.264/HEVC 画面从固件直接进 Chrome 自己的缓冲区、中间不拷贝；
+VP9 仍走 Copy。驱动由这台机器上所有 VA-API 客户端共用，只在本设备上有实测证据。
 
 ## 为什么要有这个项目
 
@@ -168,8 +170,12 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
   - 挂两个不同图片的缓冲区时，固件自己挑，大约四分之一的完成结果落错位置。
 
   现在会话改成给一张图按它的完成次数挂缓冲区：同一个客户端缓冲区排两次，
-  固件能挑的仍然只有这张图自己的内存。这条路有主机测试，还没有硬件门禁，
-  所以 VP9 继续走拷贝。
+  固件能挑的仍然只有这张图自己的内存。目标机上 FFmpeg 这条路是精确的
+  （515/515、没有错位的完成结果、framemd5 与软解一致），但 Chrome 会在一张图
+  完成之前就释放它的 surface：768 次排队里有 564 次被放弃，541 个完成结果被
+  丢掉，同样形状的 H.264 对照只有 2 和 4。Chrome 仍报 480 帧、0 丢帧，这是
+  静默降级，不算通过。浏览器这条路干净之前 VP9 继续走拷贝（TEST-RESULTS.md，
+  2026-10-24）。
 - **AV1 会压后一张图。** VA 不提供 `refresh_frame_flags`，所以翻译器只能等
   下一个访问单元的参考表，才知道这张图刷新了哪些槽位。
   - 客户端领先一张图解码时（FFmpeg 带滤镜或下载、Chrome 都是），感觉不到
@@ -197,8 +203,12 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
   第一个 SPS 当成配置变更，合成器会一直显示 seek 之前的画面。
   [CFM880/iris-vaapi](https://github.com/CFM880/iris-vaapi) 在 SM8150 上定位
   并提交了 [Chromium issue 563075803](https://issues.chromium.org/issues/563075803)。
-  本项目没有复现，因为目标机跑的是 Chrome 152。用 153 的话，加
-  `--disable-features=ExtendedVideoBitstreamValidation` 启动，或者留在 152。
+  本项目没有复现，因为目标机跑的是 Chrome 152。CFM880 现在把这个回归标为
+  在 Chrome 156.0.8078.47 里已修好（`stale_repeats = 0/445`，不加任何
+  workaround flag），说可以去掉那个开关；他们的报告也提醒，launcher 包装
+  脚本偷偷注入同一个 flag 会让 A/B 看起来像是修好了。用 153 的话，加
+  `--disable-features=ExtendedVideoBitstreamValidation` 启动，或者留在 152；
+  156 及以后两者都不需要。
 - **只在一台设备上合格过。** 上面所有数据都来自一台 SM8550 平板。其他 Iris
   gen2 SoC 应该能用，但目前没有证据。Arch 打包提供了，没有验证过。
 - **按需 IDR 在目标机上是直接控制项，在 stock 内核上是挪 GOP。** 分两种
@@ -229,8 +239,9 @@ Import 靠两条实测出来的规则成立：同一时刻固件手里只有一�
     字节，HEVC 124 字节。
   - GStreamer 的 VA 编码器在那一项回 `VA_ATTRIB_NOT_SUPPORTED` 时会拒绝，
     因为它分不清这是驱动不认识还是自己问错了。回 0 能过它的检查，所以
-    `vah264enc` / `vah265enc` 能启动起来。它们接着编出来的流对不对，还没
-    在硬件上验证。
+    `vah264enc` / `vah265enc` 能启动起来。两者在目标机上各编了 90 帧，
+    码流解码干净；第二个卡点是完成结果被认领两次，现在统一走
+    `claim_coded()`（TEST-RESULTS.md，2026-10-24）。
 - **编码是流水线的，`-async_depth` 生效。** `vaEndPicture` 把图排进队列就
   返回。码流由 `vaSyncBuffer` 在 coded buffer 上取；不调同步的客户端在
   `vaMapBuffer` 时取。FFmpeg 看到 `vaSyncBuffer` 就走异步路径。因此
@@ -299,10 +310,11 @@ MIT，含 LGPL-2.1 覆盖的部分，与上游相同；见 `COPYING`、`COPYING.
 - `include/linux/` 内置的内核 UAPI 头文件带各自的 SPDX 标记
   （`GPL-2.0+ WITH Linux-syscall-note OR BSD-3-Clause`）。
 - `packaging/kernel/` 用四个补丁携带五项 Iris 内核改动：四项来自
-  [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2)（Radxa，Xilin
-  Wu），一项是上游 `REQUEST_SYNC_FRAME` 提交的编码器部分（Wangao Wang，
-  高通）。它们改的是 GPL-2.0 的内核代码，许可证也是 GPL-2.0，与驱动本身
-  不同。HEVC 显式 RPS 的 slice 重写沿用了同一项目的做法。
+  [radxa-pkg/qcom-va-driver](https://github.com/radxa-pkg/qcom-va-driver)
+  （Radxa，Xilin Wu；这个仓库 2026-10-26 之前叫 `strongtz/libva-v4l2`），
+  一项是上游 `REQUEST_SYNC_FRAME` 提交的编码器部分（Wangao Wang，高通）。
+  它们改的是 GPL-2.0 的内核代码，许可证也是 GPL-2.0，与驱动本身不同。
+  HEVC 显式 RPS 的 slice 重写沿用了同一项目的做法。
 
 ## 环境变量
 
