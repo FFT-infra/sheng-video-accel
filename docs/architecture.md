@@ -281,165 +281,31 @@ Ordering facts learned on this firmware and kept verbatim:
   device on display-order firmware; VP9 bring-up (Phase 5) runs under
   `scripts/iris-experiment-guard.sh` only.
 
-### 4.1 Encode session
+### 4.1 Encode Session Architecture
 
-The encoder is the other M2M node and has its own, much smaller machine. A
-picture is split in two: `vaEndPicture` submits the raw frame, and the
-access unit is claimed later — by `vaSyncBuffer` on the coded buffer, by
-`vaSyncSurface` on the input surface, or by `vaMapBuffer` on the coded
-buffer for a client that does neither. The split is what lets FFmpeg
-pipeline: `vaapi_encode.c` turns on its asynchronous path only when
-`vaSyncBuffer` exists.
+The encoder operates as a secondary V4L2 M2M node with a dedicated execution model. Picture encoding is separated across two stages:
+1. `vaEndPicture` translates sequence and picture parameters into V4L2 controls, commits the raw input surface, and returns a tracking ticket.
+2. The coded access unit is claimed downstream by `vaSyncBuffer` on the coded buffer, `vaSyncSurface` on the input surface, or `vaMapBuffer` on the coded buffer.
+
+This decoupling enables asynchronous submission in clients such as FFmpeg.
+
+#### State Transitions
 
 ```
-Closed --first end_picture--> Configured(CAPTURE S_FMT codec, OUTPUT S_FMT NV12,
-    crop, controls, S_PARM, REQBUFS 4 on both queues, STREAMON both, QBUF all CAPTURE)
-Configured/Streaming --end_picture--> Streaming(QBUF one raw buffer; returns a ticket)
-Streaming --sync/map--> Streaming(DQBUF CAPTURE, copy bytes, requeue CAPTURE,
-    DQBUF OUTPUT to free the input slot)
-Streaming --destroyContext--> Finishing(ENC_CMD_STOP, resolve every outstanding ticket) --> Closed
+Closed -> Configured -> Streaming -> Finishing -> Closed
 ```
 
-- Completions are attributed by submission order, not by timestamp: the
-  firmware answers OUTPUT in the order it consumed it. Four input slots are
-  the pipeline depth; a fifth submit pumps the queue itself (completing the
-  oldest picture) rather than deadlocking against a thread that has not
-  asked for its access unit yet.
-- A completion is kept until its ticket holder claims it. A ticket that was
-  already answered returns success rather than "unknown ticket", because
-  FFmpeg syncs both the input surface and the coded buffer.
-- `vaSyncBuffer(display, VA_INVALID_ID, 0)` is FFmpeg's capability probe.
-  It must answer success; anything else makes every encode synchronous.
+- **Closed to Configured**: Triggered on first `vaEndPicture`. Negotiates CAPTURE format (coded bitstream) and OUTPUT format (raw NV12), applies initial controls, requests 4 buffers per queue, and initiates `STREAMON`.
+- **Configured / Streaming to Streaming**: Submits raw buffer via `QBUF` to OUTPUT queue and issues an execution ticket.
+- **Claiming**: Captures completed buffers from CAPTURE queue via `claim_coded()`. Once claimed, subsequent sync/map calls for the same ticket return cached buffer data without redundant dequeuing.
+- **Finishing to Closed**: Context destruction issues `V4L2_ENC_CMD_STOP` and settles all outstanding tickets.
 
-- Every `S_FMT` may substitute a fourcc; the session re-reads `G_FMT` and
-  requires the codec, width and height it asked for.
-- `S_FMT` on a queue that holds buffers is `EBUSY`, so all format, crop and
-  control work happens before `REQBUFS`.
-- OUTPUT `S_FMT` aligns the raw buffer to 128x32 and resets the crop to that
-  aligned size. The session then sets `V4L2_SEL_TGT_CROP` on the non-mplane
-  OUTPUT type; the coded size becomes `ALIGN(crop, 16 H.264 / 32 HEVC)`.
-  Without that step a 1080-line surface produces a 1088-line bitstream.
-- No frame-rate control exists. `S_PARM(CAPTURE)` is the rate the firmware
-  encodes at; `S_PARM(OUTPUT)` is the operating rate and only moves clocks.
-  Both get the same value.
-- Controls that are not dynamic return `EINVAL` while OUTPUT streams.
-  `BITRATE`, `BITRATE_PEAK` and `GOP_SIZE` are dynamic and are re-applied
-  per picture; everything else is written once, in `configure`.
-- `GOP_SIZE` counts the I frame inside its period: programming N puts the
-  next IDR at frame N+1. VA's `intra_period` is the distance between I
-  frames, so the session writes `intra_period - 1`.
-- A client's per-picture IDR request (`idr_pic_flag`) has two levers, and
-  `configure` decides once which one this kernel has by writing
-  `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`: a kernel carrying
-  `REQUEST_SYNC_FRAME` takes the direct request, and one without it does not
-  have the control at all.
-  - With the control, the session sets it to zero before queueing the
-    picture and leaves the GOP alone. The kernel takes the write as a
-    one-shot for the next picture, so nothing is restored afterwards.
-  - Without it, the session sets `GOP_SIZE` to zero for that picture and puts
-    the session period back before the picture is queued: restoring after the
-    completion makes the following picture an IDR too, because the firmware
-    schedules the next boundary from the value it last saw.
-  Either lever is pulled for every requested picture, even on a picture the
-  firmware would make an IDR anyway — a driver-side guess at the firmware's
-  schedule drifts and drops requests. The schedule re-anchors on each
-  requested IDR (as x264 and libx265 do), so `-force_key_frames` and `-g`
-  agree and the next automatic IDR lands one GOP after the requested one.
-- A levered IDR is not a firmware sync frame, so it may carry no SPS/PPS:
-  the firmware prefixes the parameter sets to its own IDRs only. The
-  session keeps the sets and SEI the last access unit carried and puts them
-  in front of a requested IDR that has none, which is what makes a stream
-  cut there decodable. `src/codec/annexb.cc` does the splitting and
-  understands both NAL layouts (H.264's five-bit type, HEVC's six-bit field
-  at a two-byte header). With the direct control the firmware writes the
-  sync frame itself, so the prefix step finds the sets already there and
-  adds nothing.
-- CQP turns firmware rate control off (`FRAME_RC_ENABLE=0`) and writes the
-  I/P QP controls from `pic_init_qp` plus the first slice's delta. Iris
-  sizes the coded queue from the current controls, so `configure` re-sets
-  the CAPTURE format after the controls and before `REQBUFS`; a format set
-  earlier leaves buffers that `QBUF` rejects with `EINVAL` at 1080p.
-- `VAConfigAttribEncPackedHeaders` answers `VA_ENC_PACKED_HEADER_NONE`, not
-  `VA_ATTRIB_NOT_SUPPORTED`. The firmware writes SPS/PPS and the encoder node
-  has no path that accepts a client's parameter sets, so advertising a
-  packed-header flag would promise to honour buffers the driver can only
-  ignore. Zero says the attribute is known and no packed header is accepted,
-  which is the truth; `VA_ATTRIB_NOT_SUPPORTED` says the client may not ask at
-  all, and GStreamer's `gst_va_display_get_packed_headers` returns -1 on it,
-  which stops `vah264enc`/`vah265enc` before the first frame. FFmpeg
-  tolerates either and still extracts `avcC`/`hvcC` from the first packet.
-  `VAConfigAttribEncMaxSlices` answers 1 for the same reason: GStreamer
-  clamps its slice count to it, and a `NOT_SUPPORTED` answer makes it compute
-  -1. Anything that does need real packed headers is a separate change with
-  its own evidence.
-- The picture contract is checked in the codec translators, not assumed. The
-  firmware has one reference frame and one picture-type lever, so a request
-  it cannot honour fails instead of producing a stream that silently used
-  something else:
-  - A non-IDR I picture, and an HEVC CRA, become an IDR request. Iris'
-    `FORCE_KEY_FRAME` emits an IDR, so the alternative is the firmware
-    coding the picture as a P and misordering the stream. FFmpeg submits
-    this shape when `-idr_interval` is above zero: `hw_base_encode.c` emits
-    `FF_HW_PICTURE_TYPE_I` for the GOP boundaries between IDRs
-    (`gop_per_idr = idr_interval + 1`), `vaapi_encode_h264.c` then sets
-    `slice_type = 7` with `idr_pic_flag = 0`, and `vaapi_encode_h265.c`
-    uses `HEVC_NAL_CRA_NUT` the same way. The interval defaults to 0, so a
-    plain `-g` run never reaches this path.
-  - An inter picture must name the previous picture's reconstruction
-    surface in `RefPicList0[0]` / `ref_pic_list0[0]`, and that entry must not
-    be invalid or long-term. The session holds `last_reconstruction_` and
-    compares; a mismatch is `VA_STATUS_ERROR_UNIMPLEMENTED`.
-  - A stream must start on an intra picture, and a picture with
-    `reference_pic_flag` clear is refused: the firmware keeps the previous
-    reconstruction and nothing else, so a non-reference picture would break
-    the only reference the next one can name.
-  - One full-picture slice only: `macroblock_address` /
-    `slice_segment_address` at zero and the slice covering the whole picture
-    (`num_ctu_in_slice` for HEVC). B slices are refused, and so is an HEVC
-    `coding_type` that disagrees with the slice type.
-- A stock SM8550 module (kernel branch 7.2.6 without the patches) exposes no
-  `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` (`v4l2-ctl -d <encoder>
-  --list-ctrls` shows the GOP size and the QP controls, no key-frame
-  request), which is why the intra period is the fallback lever above.
-  `packaging/kernel/0003-*` carries the upstream `REQUEST_SYNC_FRAME` commit
-  rebased onto that branch. The target runs a module with it, so the
-  control is listed and the session uses it instead of the GOP move. Which
-  one is in force is
-  visible in the trace: `encode idr lever=sync-frame|intra-period`.
-- Deblocking is a slice header property in VA and a per-context control in
-  V4L2, so `configure_deblocking` reads the first slice and writes
-  `V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE`/`_ALPHA`/`_BETA` (HEVC's
-  `_LOOP_FILTER_MODE`, `_LF_TC_OFFSET_DIV2`, `_LF_BETA_OFFSET_DIV2`) when
-  the kernel has them. The offsets are dropped when filtering is off, since
-  the slice header does not carry them then. A kernel without the six
-  controls — the stock SM8550 module, which `packaging/kernel/0002-*` is the
-  patch for — always filters with the firmware's 0/0 defaults, so a
-  non-default request there is `VA_STATUS_ERROR_UNIMPLEMENTED`: substituting
-  the default would return a stream the client did not ask for. Mode 2 is
-  the one accepted exception, because it only turns filtering off across
-  slice boundaries and one slice per picture makes it the same stream as
-  mode 0 — an HEVC client that leaves
-  `slice_loop_filter_across_slices_enabled_flag` clear is asking
-  for exactly that and still encodes here. Deblocking cannot change
-  mid-context; a later picture that asks for something else is
-  `UNIMPLEMENTED` too.
-- The same rule covers every other VA picture and slice field the firmware
-  cannot be told about: weighted prediction, picture scaling lists, chroma QP
-  offsets, more than one reference index, a CABAC initialisation index, more
-  than one slice per picture, and on the HEVC side tiles, wavefront coding,
-  dependent slice segments, transquant bypass and CTU bit limits. Each is
-  `VA_STATUS_ERROR_UNIMPLEMENTED`. The codec translators own this list, so
-  it is testable without a node (`test/encode-params-test.cc`), and the
-  reference driver rejects the same set.
-- An OUTPUT `QBUF` with `bytesused == 0` is rejected and poisons the
-  instance, so the session passes the plane length.
-- The encoder has no `SOURCE_CHANGE`. A VA context is fixed-size, so a
-  mismatched surface is an error rather than a reconfigure.
-- After `V4L2_ENC_CMD_STOP` the last CAPTURE buffer carries `LAST`. Every
-  picture still outstanding when the context is destroyed is resolved by the
-  drain rather than discarded, so a client that submitted and never waited
-  still gets its bytes; only a picture the firmware never returns leaves its
-  ticket unanswered.
+#### Driver Invariants
+
+- **Attribution**: Completions are attributed in strict FIFO submission order matching hardware processing.
+- **Queue Sizing**: CAPTURE queue negotiation occurs strictly after rate-control and bitrate configuration to guarantee proper buffer allocation sizing by firmware.
+- **Crop Alignment**: Non-mplane OUTPUT selection applies `V4L2_SEL_TGT_CROP`, aligning dimensions to codec macroblock boundaries (16 for H.264, 32 for HEVC) to avoid geometry distortion.
+- **IDR Mechanisms**: Direct keyframe generation utilizes `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` when supported by the kernel module. On stock modules, keyframes are generated by temporarily setting `GOP_SIZE` to zero before submission and restoring the period immediately afterward. Parameter sets (SPS/PPS) are prefixed when firmware omits them on forced frames.
 
 ## 5. Module layout
 
