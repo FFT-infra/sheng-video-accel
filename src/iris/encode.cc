@@ -210,23 +210,54 @@ void EncoderSession::configure(
     require(coded.pixelformat == config_.codec, "encoder lost the codec after configuration",
         VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
 
-    require(device_->request_buffers(Queue::Output, kOutputSlots, V4L2_MEMORY_DMABUF) >= kOutputSlots,
-        "encoder input buffers", VA_STATUS_ERROR_OPERATION_FAILED);
-    const unsigned capture_count = device_->request_buffers(Queue::Capture, kCaptureSlots);
-    require(capture_count > 0, "encoder output buffers", VA_STATUS_ERROR_OPERATION_FAILED);
-    for (unsigned index = 0; index < capture_count; ++index) {
-        const BufferInfo info = device_->query_buffer(Queue::Capture, index);
-        capture_.push_back(CaptureSlot { index, info.length, static_cast<uint8_t*>(device_->map_buffer(
-                                                                     Queue::Capture, info)) });
-    }
-    free_output_.clear();
-    for (unsigned index = 0; index < kOutputSlots; ++index)
-        free_output_.push_back(index);
+    // Everything below touches kernel state. A failure halfway through must
+    // leave nothing behind: configured_ stays false, so a retry runs this
+    // function again, and a retry that still found the old mappings in
+    // capture_ would append a second set and read completions out of stale
+    // slots.
+    try {
+        require(device_->request_buffers(Queue::Output, kOutputSlots, V4L2_MEMORY_DMABUF) >= kOutputSlots,
+            "encoder input buffers", VA_STATUS_ERROR_OPERATION_FAILED);
+        const unsigned capture_count = device_->request_buffers(Queue::Capture, kCaptureSlots);
+        require(capture_count > 0, "encoder output buffers", VA_STATUS_ERROR_OPERATION_FAILED);
+        for (unsigned index = 0; index < capture_count; ++index) {
+            const BufferInfo info = device_->query_buffer(Queue::Capture, index);
+            capture_.push_back(CaptureSlot { index, info.length, static_cast<uint8_t*>(device_->map_buffer(
+                                                                         Queue::Capture, info)) });
+        }
+        free_output_.clear();
+        for (unsigned index = 0; index < kOutputSlots; ++index)
+            free_output_.push_back(index);
 
-    device_->stream(Queue::Output, true);
-    device_->stream(Queue::Capture, true);
-    for (const CaptureSlot& slot : capture_)
-        device_->queue_buffer(Queue::Capture, slot.index, slot.length, 0, 0);
+        device_->stream(Queue::Output, true);
+        device_->stream(Queue::Capture, true);
+        for (const CaptureSlot& slot : capture_)
+            device_->queue_buffer(Queue::Capture, slot.index, slot.length, 0, 0);
+    } catch (...) {
+        for (const CaptureSlot& slot : capture_) {
+            try {
+                device_->unmap_buffer(slot.mapping, slot.length);
+            } catch (...) {
+            }
+        }
+        capture_.clear();
+        free_output_.clear();
+        for (Queue queue : { Queue::Capture, Queue::Output }) {
+            try {
+                device_->stream(queue, false);
+            } catch (...) {
+            }
+        }
+        try {
+            device_->request_buffers(Queue::Capture, 0);
+        } catch (...) {
+        }
+        try {
+            device_->request_buffers(Queue::Output, 0, V4L2_MEMORY_DMABUF);
+        } catch (...) {
+        }
+        throw;
+    }
 
     applied_ = params;
     configured_ = true;
@@ -371,7 +402,14 @@ void EncoderSession::take_output_slot(Clock::time_point limit)
         // Drop the lock across poll(): a thread waiting on an earlier picture
         // needs it to claim its completion.
         mutex_.unlock();
-        device_->poll(POLLIN | POLLPRI, kPollMs);
+        try {
+            device_->poll(POLLIN | POLLPRI, kPollMs);
+        } catch (...) {
+            // The enclosing lock_guard still owns mutex_: re-lock before
+            // unwinding, or its destructor would unlock an unlocked mutex.
+            mutex_.lock();
+            throw;
+        }
         mutex_.lock();
     }
 }
@@ -424,8 +462,6 @@ EncodeTicket EncoderSession::submit(int dmabuf_fd, unsigned dmabuf_length, const
     // drift from the firmware's and silently dropped requests. A stream that
     // is intra-only needs no lever at all.
     const bool force_idr = params.keyframe && params.gop_size != 0;
-    if (force_idr && !sync_frame_control_)
-        set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, 0, "gop size");
 
     // The device layer takes microseconds and the encoder echoes the value
     // into the access unit. Advance by one frame duration per picture rather
@@ -445,6 +481,11 @@ EncodeTicket EncoderSession::submit(int dmabuf_fd, unsigned dmabuf_length, const
     take_output_slot(limit);
     const unsigned index = free_output_.front();
     free_output_.pop_front();
+    // Both intra-period writes happen after take_output_slot(), which can
+    // throw when no input slot comes back: pulling the lever before it would
+    // leave the session coding intra-only after a stall.
+    if (force_idr && !sync_frame_control_)
+        set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, 0, "gop size");
     // The intra period goes back to the session's value before the picture is
     // queued, not after its completion: the firmware schedules the next GOP
     // boundary from the period it sees, so restoring afterwards made the
@@ -477,6 +518,8 @@ bool EncoderSession::complete_one()
     // which is the order submit() queued them. The finished picture leaves
     // pending_ and waits in `completed_` for whichever thread holds its
     // ticket, so a later completion can never overwrite it.
+    if (!healthy_)
+        throw Error(VA_STATUS_ERROR_ENCODING_ERROR, "encoder session failed");
     const std::optional<Dequeued> done = device_->dequeue_buffer(Queue::Capture);
     if (!done)
         return false;
@@ -487,13 +530,39 @@ bool EncoderSession::complete_one()
         trace_("encode drain marker");
         return false;
     }
-    require(!done->error(), "encoder returned an error buffer", VA_STATUS_ERROR_ENCODING_ERROR);
-    require(done->index < capture_.size(), "encoder returned an unknown buffer", VA_STATUS_ERROR_ENCODING_ERROR);
+    // A completion that cannot be attributed to the oldest picture leaves
+    // pending_ misaligned: the next picture's bytes would be stored under
+    // this ticket. Every one of these failures stops the session instead, so
+    // the outstanding tickets fail rather than receive a shifted stream.
+    if (done->error()) {
+        healthy_ = false;
+        trace_("encode error completion index=%u flags=%#x", done->index, done->flags);
+        throw Error(VA_STATUS_ERROR_ENCODING_ERROR, "encoder returned an error buffer");
+    }
+    if (done->index >= capture_.size()) {
+        healthy_ = false;
+        throw Error(VA_STATUS_ERROR_ENCODING_ERROR, "encoder returned an unknown buffer");
+    }
     const CaptureSlot& slot = capture_[done->index];
-    require(done->data_offset <= done->bytesused && done->bytesused <= slot.length,
-        "encoder payload exceeds its buffer", VA_STATUS_ERROR_ENCODING_ERROR);
-    require(!pending_.empty(), "encoder completed a picture that was never submitted",
-        VA_STATUS_ERROR_ENCODING_ERROR);
+    if (done->data_offset > done->bytesused || done->bytesused > slot.length) {
+        healthy_ = false;
+        throw Error(VA_STATUS_ERROR_ENCODING_ERROR, "encoder payload exceeds its buffer");
+    }
+    if (pending_.empty()) {
+        healthy_ = false;
+        throw Error(VA_STATUS_ERROR_ENCODING_ERROR, "encoder completed a picture that was never submitted");
+    }
+    // The firmware echoes the submitted timestamp into the access unit. A
+    // mismatch means this completion is not the oldest picture's, and storing
+    // it would shift every later ticket; a zero means the kernel did not echo
+    // one, and the submission order is all there is to go on.
+    if (done->timestamp_us != 0 && done->timestamp_us != pending_.front().ticket.timestamp_us) {
+        healthy_ = false;
+        trace_("encode completion timestamp=%llu expected=%llu",
+            static_cast<unsigned long long>(done->timestamp_us),
+            static_cast<unsigned long long>(pending_.front().ticket.timestamp_us));
+        throw Error(VA_STATUS_ERROR_ENCODING_ERROR, "encoder completed a picture out of order");
+    }
 
     Pending picture = std::move(pending_.front());
     pending_.pop_front();
@@ -532,7 +601,11 @@ EncodeResult EncoderSession::wait_timeout(EncodeTicket ticket, uint64_t timeout_
     for (;;) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            require(healthy_, "encoder is in a failed state", VA_STATUS_ERROR_ENCODING_ERROR);
+            // A picture that finished before the session failed still owns
+            // its bytes, so the completed table is consulted first: failing
+            // this ticket would throw away an access unit that is already
+            // here. The same applies after a drain that left a later picture
+            // unresolved, which is the other place healthy_ goes false.
             auto it = completed_.find(ticket.timestamp_us);
             if (it != completed_.end()) {
                 EncodeResult result = std::move(it->second);
@@ -545,6 +618,7 @@ EncodeResult EncoderSession::wait_timeout(EncodeTicket ticket, uint64_t timeout_
             // call has nothing left to wait for.
             if (claimed(ticket))
                 return EncodeResult {};
+            require(healthy_, "encoder is in a failed state", VA_STATUS_ERROR_ENCODING_ERROR);
             require(!finished_, "encoder finished with a picture outstanding", VA_STATUS_ERROR_OPERATION_FAILED);
             require(ticket_known(ticket), "ticket does not belong to this session", VA_STATUS_ERROR_INVALID_PARAMETER);
             complete_one();
@@ -615,7 +689,14 @@ void EncoderSession::finish()
             // needs time, and holding mutex_ across poll() would block the
             // thread that submitted.
             mutex_.unlock();
-            device_->poll(POLLIN | POLLPRI, kPollMs);
+            try {
+                device_->poll(POLLIN | POLLPRI, kPollMs);
+            } catch (...) {
+                // The enclosing lock_guard still owns mutex_: re-lock before
+                // unwinding, or its destructor would unlock an unlocked mutex.
+                mutex_.lock();
+                throw;
+            }
             mutex_.lock();
         }
         if (pending_.empty() && !drained_)
