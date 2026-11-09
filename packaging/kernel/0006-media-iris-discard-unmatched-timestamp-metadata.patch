@@ -1,0 +1,32 @@
+From 7c28b2795e6059cf1b015b600d546abfe5b277c7 Mon Sep 17 00:00:00 2001
+From: yzddmr6 <46088090+yzddmr6@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 11:39:44 +0800
+Subject: [PATCH] media: iris: discard unmatched timestamp metadata
+
+With slow CAPTURE consumption, VP9 can overwrite timestamp metadata before the corresponding decoded frame is returned. The fallback reads the next write slot; metadata_idx can equal ARRAY_SIZE(tss), so this copies unrelated instance fields into buffer flags and timecode. A spurious LAST bit then causes EPIPE and EOS before any decoder STOP command (32 of 150 frames on SM8750).
+
+Keep exact timestamp matches. When the record was evicted, clear the optional timecode and timestamp-source metadata instead of borrowing it from a different input or reading past the ring.
+
+Fixes: 17f2a485ca67 ("media: iris: implement vb2 ops for buf_queue and firmware response")
+---
+ drivers/media/platform/qcom/iris/iris_buffer.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_buffer.c b/drivers/media/platform/qcom/iris/iris_buffer.c
+index 246ad0abbac3..af1c8b6d0647 100644
+--- a/drivers/media/platform/qcom/iris/iris_buffer.c
++++ b/drivers/media/platform/qcom/iris/iris_buffer.c
+@@ -928,9 +928,11 @@ static void iris_get_ts_metadata(struct iris_inst *inst, u64 timestamp_ns,
+ 		return;
+ 	}
+
++	/* Capture can lag behind the metadata ring. Do not copy metadata from
++	 * an unrelated input, or the next write slot which may be past its end.
++	 */
+ 	vbuf->flags &= ~mask;
+-	vbuf->flags |= inst->tss[inst->metadata_idx].flags;
+-	vbuf->timecode = inst->tss[inst->metadata_idx].tc;
++	memset(&vbuf->timecode, 0, sizeof(vbuf->timecode));
+ }
+
+ int iris_vb2_buffer_done(struct iris_inst *inst, struct iris_buffer *buf)

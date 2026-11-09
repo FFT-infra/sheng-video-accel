@@ -1,6 +1,6 @@
 # Iris Kernel Module Patches
 
-This directory provides four rebased kernel patches targeting the `qcom-iris` driver on `ianchb/sm8550-mainline` (branch `sheng-7.2.6`, commit `42f3b40c702a`).
+This directory provides six rebased kernel patches targeting the `qcom-iris` driver on `ianchb/sm8550-mainline` (branch `sheng-7.2.6`, commit `42f3b40c702a`).
 
 These patches are optional supporting assets for hardware validation. The driver detects missing kernel controls at runtime and degrades gracefully on stock kernels.
 
@@ -12,6 +12,8 @@ These patches are optional supporting assets for hardware validation. The driver
 | `0002-media-iris-deblocking-filter-controls.patch` | Radxa / `qcom-va-driver` | Exposes H.264 and HEVC loop-filter controls (`HFI_PROP_DEBLOCKING_MODE`) | Allows forwarding of client slice deblocking requests |
 | `0003-media-iris-encoder-request-sync-frame.patch` | Qualcomm (Wangao Wang) | Implements `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` (`HFI_PROP_REQUEST_SYNC_FRAME`) | Enables direct hardware sync-frame requests |
 | `0004-media-iris-preserve-timestamps-on-error-buffers.patch` | Radxa / `qcom-va-driver` | Preserves buffer timestamp on `V4L2_BUF_FLAG_ERROR` completions | Allows immediate failure attribution for corrupted frames |
+| `0005-media-iris-recycle-decoder-buffers-for-non-display-pictures.patch` | Radxa / `qcom-va-driver` | Recycles non-display (NOSHOW) decoder buffers internally | Eliminates fake error completions on AV1 hidden reference frames |
+| `0006-media-iris-discard-unmatched-timestamp-metadata.patch` | yzddmr6 / `linux-sm8750-piano` | Discards unmatched timestamp metadata instead of borrowing | Prevents timestamp ring overflow from injecting spurious LAST bits |
 
 ## Verification & Integrity
 
@@ -29,7 +31,7 @@ To build and install the modified module on the target device:
 ```sh
 git clone --depth 1 -b sheng-7.2.6 https://github.com/ianchb/sm8550-mainline linux
 cd linux
-git am ../0001-*.patch ../0002-*.patch ../0003-*.patch ../0004-*.patch
+git am ../0001-*.patch ../0002-*.patch ../0003-*.patch ../0004-*.patch ../0005-*.patch ../0006-*.patch
 
 cp /boot/config-$(uname -r) .config
 echo "-sm8550-g42f3b40-iris1" > localversion
