@@ -229,14 +229,12 @@ extern "C" VAStatus __attribute__((visibility("default"))) VA_DRIVER_INIT_FUNC(V
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
     d->render_fd = render_fd_of(ctx);
-    if (d->options.copy_mode == iris::CopyMode::Gpu)
-        d->copier = iris::make_gpu_copy(d->render_fd);
-    if (!d->copier)
-        d->copier = iris::make_cpu_copy();
-    d->trace("va init node=%s encoder=%s render_fd=%d copy=%s profiles=%zu encode_profiles=%zu",
+    // Defer copy-engine creation until context creation so capability probing
+    // stays thread-free for Chromium GPU sandbox initialization.
+    d->trace("va init node=%s encoder=%s render_fd=%d copy=deferred profiles=%zu encode_profiles=%zu",
         d->capabilities.node.c_str(),
         d->capabilities.encoder_node.empty() ? "-" : d->capabilities.encoder_node.c_str(), d->render_fd,
-        d->copier->name(), d->capabilities.profiles.size(), d->capabilities.encode_profiles.size());
+        d->capabilities.profiles.size(), d->capabilities.encode_profiles.size());
 
     ctx->version_major = VA_MAJOR_VERSION;
     ctx->version_minor = VA_MINOR_VERSION;

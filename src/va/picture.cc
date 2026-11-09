@@ -127,6 +127,14 @@ VAStatus createContext(VADriverContextP ctx, VAConfigID config, int width, int h
             auto it = d.configs.find(config);
             iris::require(it != d.configs.end(), "invalid config", VA_STATUS_ERROR_INVALID_CONFIG);
             cfg = it->second;
+            // Defer copy-engine creation until an actual context is requested,
+            // keeping capability queries thread-free.
+            if (!d.copier) {
+                if (d.options.copy_mode == iris::CopyMode::Gpu)
+                    d.copier = iris::make_gpu_copy(d.render_fd);
+                if (!d.copier)
+                    d.copier = iris::make_cpu_copy();
+            }
         }
         auto c = std::make_shared<Context>();
         c->profile = cfg.profile;
