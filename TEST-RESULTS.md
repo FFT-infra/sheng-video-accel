@@ -4788,3 +4788,29 @@ changed here. Fork `push` runs are green.
 
 The short-window, low-power browser acceptance for this date is recorded in
 the following commit.
+
+## Short-window browser acceptance — blocked (2026-11-10)
+
+The low-power gate failed at execution time, so the run was skipped. A
+read-only ssh probe of `sheng` reported
+`STATUS=Discharging CAPACITY=100 CURRENT_NOW=-1798000` from
+`/sys/class/power_supply/qcom-battmgr-bat`, boot
+`20dcd8af-e763-4142-9ae7-85f7f3ac0ed7`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`. Charge level is high, but the pack is on
+battery and draining at ~1.8 A; the locked precondition for this batch was
+"only short-window, low-power, check battery first", with the earlier
+two-hour soak explicitly deferred on the same charged-supply prerequisite.
+An earlier read-only probe in this session had shown `Charging 82%`; the
+state changed before the run, which is why the gate is re-checked rather
+than assumed.
+
+No browser was launched, no `LIBVA_*` override was set, no kernel module was
+swapped, and the tablet was not rebooted. This section is a blocked-run
+record, not hardware evidence: it makes no decode, frame or drop claim and
+does not qualify any codec, profile or publish policy. The installed driver
+(`/usr/lib64/dri/v4l2_drv_video.so`, with the `msm_drv_video.so` alias) and
+the 1080p H.264 clip on the target are unchanged. The 2026-09-21 full-length
+soak (`dual-h264` and `mixed`, 172800 frames per context) remains the
+standing concurrency record, and the 2026-10-24 Chrome 152 acceptance runs
+remain the standing browser-decode record. No rerun is attempted in this
+batch; a charged supply is the prerequisite for a later short window.
