@@ -109,6 +109,19 @@ public:
             bits(source[i], 8);
     }
 
+    // Whole bytes, used by BitReader::copy for slice payloads that can run to
+    // hundreds of kilobytes at 4K. Avoids a call and a bounds check per bit.
+    void append(const uint8_t* source, size_t count)
+    {
+        if (count == 0)
+            return;
+        if (bit_offset_ == 0) {
+            data_.insert(data_.end(), source, source + count);
+            return;
+        }
+        bytes(source, count);
+    }
+
     bool byte_aligned() const { return bit_offset_ == 0; }
 
     const std::vector<uint8_t>& data() const { return data_; }
@@ -127,6 +140,7 @@ public:
     // verbatim, the rest has emulation prevention removed.
     BitReader(const uint8_t* nal, size_t size, size_t header_bytes)
     {
+        bytes_.reserve(size);
         unsigned zeros = 0;
         for (size_t i = 0; i < size; ++i) {
             const uint8_t byte = nal[i];
@@ -169,10 +183,22 @@ public:
         const uint32_t code = ue();
         return (code & 1) ? static_cast<int32_t>((code + 1) / 2) : -static_cast<int32_t>(code / 2);
     }
-    // Copy bits [position, end) into the writer.
+    // Copy bits [position, end) into the writer. Slice data is by far the
+    // largest thing this moves, and it usually starts and ends on byte
+    // boundaries, so take the whole-byte path whenever both sides allow it.
     void copy(BitWriter& writer, size_t end)
     {
-        while (position_ < end && position_ < size_bits())
+        if (end > size_bits())
+            end = size_bits();
+        if (position_ >= end)
+            return;
+        if (writer.byte_aligned() && position_ % 8 == 0) {
+            const size_t stop = end / 8;
+            const size_t from = position_ / 8;
+            writer.append(bytes_.data() + from, stop - from);
+            position_ = stop * 8;
+        }
+        while (position_ < end)
             writer.bit(bit());
     }
     const uint8_t* data() const { return bytes_.data(); }

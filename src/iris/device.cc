@@ -5,6 +5,7 @@
 #include "alloc.h"
 
 #include "../util/error.h"
+#include "../util/fourcc.h"
 
 #include <cerrno>
 #include <cstring>
@@ -96,6 +97,20 @@ public:
             return std::nullopt;
         return Selection { static_cast<unsigned>(selection.r.left), static_cast<unsigned>(selection.r.top),
             selection.r.width, selection.r.height };
+    }
+
+    void set_crop(unsigned left, unsigned top, unsigned width, unsigned height) override
+    {
+        v4l2_selection selection = {};
+        // The encoder's crop target is only reachable on the single-planar
+        // OUTPUT type; _MPLANE returns EINVAL.
+        selection.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+        selection.target = V4L2_SEL_TGT_CROP;
+        selection.r.left = static_cast<int32_t>(left);
+        selection.r.top = static_cast<int32_t>(top);
+        selection.r.width = width;
+        selection.r.height = height;
+        checked(fd_, VIDIOC_S_SELECTION, &selection, "S_SELECTION");
     }
 
     bool format_supported(Queue queue, uint32_t pixelformat) override
@@ -253,6 +268,20 @@ public:
         checked(fd_, on ? VIDIOC_STREAMON : VIDIOC_STREAMOFF, &type, on ? "STREAMON" : "STREAMOFF");
     }
 
+    void set_frame_rate(Queue queue, unsigned num, unsigned den) override
+    {
+        v4l2_streamparm parm = {};
+        parm.type = buf_type(queue);
+        v4l2_fract& interval = queue == Queue::Output ? parm.parm.output.timeperframe
+                                                      : parm.parm.capture.timeperframe;
+        // The ioctl takes the frame interval, not the rate. The kernel
+        // rejects a rate below 1 fps with EINVAL, so an inverted pair (30/1
+        // as 30 s per frame) is not a harmless mistake.
+        interval.numerator = den;
+        interval.denominator = num;
+        checked(fd_, VIDIOC_S_PARM, &parm, "S_PARM");
+    }
+
     void subscribe(uint32_t event_type) override
     {
         v4l2_event_subscription subscription = {};
@@ -283,6 +312,17 @@ public:
         throw Error(VA_STATUS_ERROR_OPERATION_FAILED, std::string("DECODER_CMD: ") + std::strerror(errno));
     }
 
+    bool encoder_command(uint32_t cmd) override
+    {
+        v4l2_encoder_cmd command = {};
+        command.cmd = cmd;
+        if (call(fd_, VIDIOC_ENCODER_CMD, &command) == 0)
+            return true;
+        if (errno == EBUSY)
+            return false;
+        throw Error(VA_STATUS_ERROR_OPERATION_FAILED, std::string("ENCODER_CMD: ") + std::strerror(errno));
+    }
+
     short poll(short events, int timeout_ms) override
     {
         pollfd pfd = { fd_, events, 0 };
@@ -307,7 +347,17 @@ private:
     uint32_t memory_[2] = { V4L2_MEMORY_MMAP, V4L2_MEMORY_MMAP };
 };
 
-bool is_iris_decoder(int fd)
+// A coded bitstream, as opposed to the compressed *raw* formats (QC08C,
+// QC10C) the decoder's CAPTURE queue also enumerates. Both carry
+// V4L2_FMT_FLAG_COMPRESSED, so the flag alone does not decide the node's
+// role: only these fourccs are access units.
+bool is_bitstream(uint32_t format)
+{
+    return format == V4L2_PIX_FMT_H264 || format == V4L2_PIX_FMT_HEVC || format == V4L2_PIX_FMT_VP9
+        || format == V4L2_PIX_FMT_AV1;
+}
+
+bool is_iris_node(int fd, NodeRole role)
 {
     v4l2_capability capability = {};
     if (call(fd, VIDIOC_QUERYCAP, &capability) < 0)
@@ -318,12 +368,13 @@ bool is_iris_decoder(int fd)
                                                                             : capability.capabilities;
     if (!(caps & V4L2_CAP_VIDEO_M2M_MPLANE))
         return false;
-    // The encoder node is also iris_driver M2M; only the decoder advertises
-    // a compressed OUTPUT format.
+    // Both nodes carry the same driver name. The decoder consumes a coded
+    // OUTPUT format; the encoder produces a coded CAPTURE one, so the role
+    // is decided by which queue enumerates a bitstream.
     v4l2_fmtdesc desc = {};
-    desc.type = OUTPUT;
+    desc.type = role == NodeRole::Decoder ? OUTPUT : CAPTURE;
     while (call(fd, VIDIOC_ENUM_FMT, &desc) == 0) {
-        if (desc.flags & V4L2_FMT_FLAG_COMPRESSED)
+        if ((desc.flags & V4L2_FMT_FLAG_COMPRESSED) && is_bitstream(desc.pixelformat))
             return true;
         desc.index++;
     }
@@ -332,8 +383,10 @@ bool is_iris_decoder(int fd)
 
 } // namespace
 
-std::unique_ptr<Device> open_device(const std::string& explicit_path)
+std::unique_ptr<Device> open_device(const std::string& explicit_path, NodeRole role)
 {
+    const bool encoder = role == NodeRole::Encoder;
+    const char* variable = encoder ? "LIBVA_V4L2_ENCODER_PATH" : "LIBVA_V4L2_VIDEO_PATH";
     std::vector<std::string> candidates;
     if (!explicit_path.empty()) {
         candidates.push_back(explicit_path);
@@ -348,13 +401,16 @@ std::unique_ptr<Device> open_device(const std::string& explicit_path)
         const int fd = open(candidate.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
         if (fd < 0)
             continue;
-        if (is_iris_decoder(fd))
+        if (is_iris_node(fd, role))
             return std::make_unique<RealDevice>(candidate, fd);
         close(fd);
     }
     throw Error(VA_STATUS_ERROR_OPERATION_FAILED,
-        explicit_path.empty() ? "no /dev/video* node reports iris_driver with a compressed OUTPUT format"
-                              : "LIBVA_V4L2_VIDEO_PATH is not an iris_driver decoder: " + explicit_path);
+        explicit_path.empty()
+            ? std::string("no /dev/video* node reports iris_driver with a compressed ")
+                + (encoder ? "CAPTURE" : "OUTPUT") + " format"
+            : std::string(variable) + " is not an iris_driver "
+                + (encoder ? "encoder: " : "decoder: ") + explicit_path);
 }
 
 } // namespace iris

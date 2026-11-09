@@ -30,11 +30,6 @@ constexpr int kSourceChangeWaitMs = 5000;
 // Bound on the client buffer's implicit fence before it is handed to the
 // firmware: the compositor may still be sampling the previous picture.
 constexpr int kImportFenceMs = 2000;
-// One client buffer with the firmware at a time. Measured: with several it
-// picks its own buffer for each picture (246/360 wrong in the cleanest
-// probe run; TEST-RESULTS.md 2026-09-22), so only an empty choice is a
-// determined one.
-constexpr unsigned kImportWindow = 1;
 
 // Compressed AU capacity when the caller has no better estimate: Chromium
 // and GStreamer both size the OUTPUT plane from the coded area with a floor.
@@ -96,6 +91,9 @@ Session::~Session()
         target->error = true;
     }
     pending_.clear();
+    // A session destroyed without finish() still owns one duplicated client
+    // fd per unresolved Import entry.
+    clear_import_backlog();
     if (dump_)
         std::fclose(static_cast<FILE*>(dump_));
 }
@@ -172,10 +170,24 @@ void Session::configure_capture()
 {
     // Only meaningful after SOURCE_CHANGE: the decoder has parsed the
     // stream and knows the coded geometry.
+    //
+    // At a resolution change the driver has already derived the new coded
+    // size, stride and crop from the bitstream (iris_hfi_gen2_handle_src_change
+    // -> iris_hfi_gen2_read_input_subcr_params) and hands them to the firmware
+    // on the resume. Asking for the format again would replace them with this
+    // client's guess before that resume, and the firmware then decodes at a
+    // geometry the stream never asked for: the rest of the segment is consumed
+    // and never produces a picture. So the format is set only when the driver's
+    // answer is not the one the client needs (a P010 surface against an NV12
+    // default, an Import layout). G_FMT first, exactly as the Capture Setup
+    // sequence in dev-decoder.rst prescribes.
     const uint32_t pixelformat = config_.capture_fourcc == VA_FOURCC_P010 ? V4L2_PIX_FMT_P010 : V4L2_PIX_FMT_NV12;
     FormatInfo current = device_->get_format(Queue::Capture);
-    current.pixelformat = pixelformat;
-    const FormatInfo granted = device_->set_format(Queue::Capture, current);
+    FormatInfo granted = current;
+    if (current.pixelformat != pixelformat) {
+        current.pixelformat = pixelformat;
+        granted = device_->set_format(Queue::Capture, current);
+    }
     if (granted.pixelformat != pixelformat || granted.num_planes != 1) {
         trace_("capture format rejected wanted=%c%c%c%c granted=%c%c%c%c planes=%u %ux%u", pixelformat & 0xff,
             (pixelformat >> 8) & 0xff, (pixelformat >> 16) & 0xff, (pixelformat >> 24) & 0xff,
@@ -250,21 +262,38 @@ void Session::configure_capture()
 
 void Session::enter_streaming()
 {
+    // CAPTURE STREAMON has to precede every CAPTURE QBUF on this path, both
+    // memories alike. The kernel keeps a DRC boundary sub-state
+    // (DRC | DRC_LAST) after the firmware PSC_LAST and clears it inside
+    // iris_process_streamon_output. A CAPTURE QBUF that reaches
+    // iris_vb2_buf_queue while those bits are still set is not handed to the
+    // firmware: the driver completes it on the spot as an empty
+    // V4L2_BUF_FLAG_LAST buffer, which makes vb2 set q->last_buffer_dequeued
+    // and turns every later CAPTURE DQBUF into -EPIPE. Queueing before
+    // STREAMON therefore loses the whole new segment; queueing after it does
+    // not. v4l2av1dec survives the same window only by luck of timing.
+    device_->stream(Queue::Capture, true);
     if (pool_.capture_memory() == CaptureMemory::Import) {
+        // `lent` counts slots in the pool that exists now, and this is a new
+        // one: after a resolution change the slots an old entry was queued
+        // into are gone, so its count would otherwise say "already lent" for
+        // buffers the firmware never got.
+        for (ImportEntry& entry : import_backlog_)
+            entry.lent = 0;
         // Pictures already submitted (the first AU, or the one that
         // announced a resolution change) wait in the backlog; the first
-        // gets its buffer now, the rest follow one completion at a time.
+        // gets its buffers now, the rest follow one picture at a time.
         for (const auto& [token, target] : pending_) {
             const bool queued = std::any_of(import_backlog_.begin(), import_backlog_.end(),
                 [&](const ImportEntry& e) { return e.token == token; });
             if (!queued && target->destination)
-                import_backlog_.push_back({ token, fcntl(target->destination->fd(), F_DUPFD_CLOEXEC, 0) });
+                import_backlog_.push_back({ token, fcntl(target->destination->fd(), F_DUPFD_CLOEXEC, 0),
+                    target->completions, 0 });
         }
         queue_import_next();
     } else {
         pool_.requeue_capture();
     }
-    device_->stream(Queue::Capture, true);
     source_change_ = false;
     saw_last_ = false;
     state_ = SessionState::Streaming;
@@ -272,27 +301,51 @@ void Session::enter_streaming()
 
 void Session::queue_import_next()
 {
-    if (pool_.capture_memory() != CaptureMemory::Import || import_backlog_.empty()
-        || pool_.capture_queued() >= kImportWindow)
+    if (pool_.capture_memory() != CaptureMemory::Import || import_backlog_.empty())
         return;
-    const ImportEntry entry = import_backlog_.front();
-    if (entry.fd < 0) {
+    ImportEntry& entry = import_backlog_.front();
+    const unsigned queued_for_this = pool_.capture_queued_for(entry.token);
+    // The window is one picture, not one buffer. A picture the firmware
+    // decodes as several (a VP9 alt-ref) gets a buffer for each of its
+    // completions, and only that picture's buffers are ever with it. Moving
+    // on to the next picture before this one is answered is what gave the
+    // firmware a choice, and a choice is what the misplaced count measures.
+    if (queued_for_this == 0 && entry.lent >= entry.completions) {
+        // Every buffer this picture needed has been lent and has come back:
+        // it is answered, or it was abandoned and its completion dropped.
+        const int fd = entry.fd;
         import_backlog_.pop_front();
+        if (fd >= 0)
+            close(fd);
         queue_import_next();
         return;
     }
+    if (entry.lent >= entry.completions)
+        return; // fully lent; the firmware still holds one of them
     auto it = pending_.find(entry.token);
     Target* target = it == pending_.end() ? nullptr : it->second;
     if (target && (target->publish == Publish::Direct || !target->destination)) {
         // The client never gave this picture a buffer; nothing to decode
-        // into. (An Import session requires every surface exported.)
+        // into. (An Import session requires every surface exported.) This
+        // check has to come before the fd test below: a Direct target is
+        // exactly the one whose fd is -1, and popping the entry silently
+        // left its target pending forever.
+        const int fd = entry.fd;
         import_backlog_.pop_front();
-        close(entry.fd);
+        if (fd >= 0)
+            close(fd);
         pending_.erase(it);
         target->pending = false;
         target->error = true;
         ++stats_.errors;
         trace_("import token=%llu failed: no client buffer", static_cast<unsigned long long>(entry.token));
+        queue_import_next();
+        return;
+    }
+    if (entry.fd < 0) {
+        // No client buffer and no target left to fail: the surface was
+        // released or destroyed. Nothing to queue, now or later.
+        import_backlog_.pop_front();
         queue_import_next();
         return;
     }
@@ -304,21 +357,33 @@ void Session::queue_import_next()
         // whatever is queued next and is reported misplaced.
         return;
     // The compositor may still be sampling the previous picture from this
-    // buffer; the firmware must not write under it.
-    const auto fence_start = std::chrono::steady_clock::now();
-    wait_dma_buf(entry.fd, true, kImportFenceMs);
-    const auto fence_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - fence_start)
-                              .count();
-    if (fence_ms >= 20)
-        trace_("import fence token=%llu fd=%d waited=%lldms", static_cast<unsigned long long>(entry.token),
-            entry.fd, static_cast<long long>(fence_ms));
-    const auto slot = pool_.queue_capture_import(entry.fd, pool_.capture_layout().size, entry.token);
-    require(slot.has_value(), "no free CAPTURE slot with nothing in flight");
-    import_backlog_.pop_front();
-    close(entry.fd);
-    trace_("import token=%llu index=%u fd=%d backlog=%zu abandoned=%d", static_cast<unsigned long long>(entry.token),
-        *slot, entry.fd, import_backlog_.size(), target == nullptr ? 1 : 0);
+    // buffer; the firmware must not write under it. The fence is waited for
+    // once per picture: every half of a superframe lands in the same client
+    // buffer, so the wait is on the buffer, not on the completion.
+    if (entry.lent == 0) {
+        const auto fence_start = std::chrono::steady_clock::now();
+        wait_dma_buf(entry.fd, true, kImportFenceMs);
+        const auto fence_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - fence_start)
+                                  .count();
+        if (fence_ms >= 20)
+            trace_("import fence token=%llu fd=%d waited=%lldms", static_cast<unsigned long long>(entry.token),
+                entry.fd, static_cast<long long>(fence_ms));
+    }
+    // Every completion of this picture gets a slot now, not one per
+    // returned completion: the firmware does not hand the first half back
+    // before it has somewhere to put the second, and waiting for a return
+    // that needs a buffer is the stall this replaces. The slots all carry
+    // the same client buffer, so the firmware still has no choice between
+    // different pictures' memory — which is what the window rule protects.
+    while (entry.lent < entry.completions) {
+        const auto slot = pool_.queue_capture_import(entry.fd, pool_.capture_layout().size, entry.token);
+        require(slot.has_value(), "no free CAPTURE slot with nothing in flight");
+        ++entry.lent;
+        trace_("import token=%llu index=%u fd=%d backlog=%zu abandoned=%d lent=%u/%u",
+            static_cast<unsigned long long>(entry.token), *slot, entry.fd, import_backlog_.size(),
+            target == nullptr ? 1 : 0, entry.lent, entry.completions);
+    }
 }
 
 void Session::clear_import_backlog()
@@ -339,6 +404,8 @@ void Session::submit(const uint8_t* data, size_t size, Target& target)
     require(state_ != SessionState::Finished, "decoder session finished", VA_STATUS_ERROR_OPERATION_FAILED);
     require(size > 0 && size <= config_.au_capacity, "access unit does not fit the OUTPUT slot",
         VA_STATUS_ERROR_NOT_ENOUGH_BUFFER);
+    require(target.completions >= 1, "a picture produces at least one completion",
+        VA_STATUS_ERROR_INVALID_PARAMETER);
     // A target that still owns a token from an earlier picture is being
     // reused without release(); treat it as released.
     if (target.pending)
@@ -390,7 +457,7 @@ void Session::submit(const uint8_t* data, size_t size, Target& target)
         // duplicated so the entry survives a released (or destroyed)
         // surface: its picture still needs a buffer.
         const int fd = target.destination ? fcntl(target.destination->fd(), F_DUPFD_CLOEXEC, 0) : -1;
-        import_backlog_.push_back({ token, fd });
+        import_backlog_.push_back({ token, fd, target.completions, 0 });
         queue_import_next();
     }
     trace_("submit token=%llu bytes=%zu output=%u", static_cast<unsigned long long>(token), size, slot->index);
@@ -501,11 +568,112 @@ bool Session::handle_capture_returns()
             last = true;
             saw_last_ = true;
         }
+        constexpr uint32_t picture
+            = V4L2_BUF_FLAG_KEYFRAME | V4L2_BUF_FLAG_PFRAME | V4L2_BUF_FLAG_BFRAME;
+        const bool noshow_shape = !(returned->flags & picture) && !payload;
         if (returned->error() && returned->timestamp_us == 0) {
-            // Firmware error marker: no token, no pixels. Requeued by the
-            // next requeue pass (use count returns to 1 when frame drops).
+            // A picture the firmware decoded but does not show (an AV1
+            // alt-ref) comes back with V4L2_BUF_FLAG_ERROR, no picture-type
+            // bit and no timestamp. It is not a failure: the frame is
+            // decoded, and the stream displays it later with
+            // show_existing_frame, which VA never routes here, so the
+            // client still downloads this surface. The CAPTURE returns
+            // follow decode order, so it belongs to the oldest target
+            // submitted as hidden. Anything else is a real failure marker
+            // with no token it could be trusted against.
+            auto hidden = pending_.end();
+            if (noshow_shape) {
+                for (auto it = pending_.begin(); it != pending_.end(); ++it) {
+                    if (it->second->hidden) {
+                        hidden = it;
+                        break;
+                    }
+                }
+            }
+            if (hidden != pending_.end()) {
+                Target& target = *hidden->second;
+                pending_.erase(hidden);
+                frame->layout().data_offset = returned->data_offset;
+                // A hidden picture carries no output plane in the firmware's
+                // accounting (bytes=0) but it did decode it, and the stream
+                // displays it later through show_existing_frame; publish
+                // what it decoded all the same.
+                publish(target, frame, *returned, "capture noshow");
+                cold_ = false;
+                ++stats_.completed;
+                ++progress_;
+                continue;
+            }
             ++stats_.errors;
             trace_("capture error index=%u flags=%#x", returned->index, returned->flags);
+            continue;
+        }
+        if (returned->error()) {
+            // A kernel carrying packaging/kernel/0004-* keeps the firmware's
+            // timestamp on an error completion, which names the picture. A
+            // hidden picture still has no picture-type bit and no payload and
+            // is published; anything else failed to decode and fails its own
+            // target here, without waiting for a drain. This runs before the
+            // payload check below because an error completion carries none.
+            auto it = pending_.find(returned->timestamp_us);
+            if (it == pending_.end()) {
+                ++stats_.errors;
+                trace_("capture error index=%u flags=%#x token=%llu publish=drop", returned->index,
+                    returned->flags, static_cast<unsigned long long>(returned->timestamp_us));
+                continue;
+            }
+            Target& target = *it->second;
+            if (noshow_shape && !target.hidden) {
+                // A VP9 alt-ref is one VA picture the firmware decodes as
+                // two. The invisible frame completes first with ERROR, no
+                // picture-type bit and no payload, under the same token the
+                // visible frame will carry. Its pixels arrive on that second
+                // completion, so this one is not a failure: keep the target
+                // pending and let the next completion publish it. A picture
+                // the firmware really rejected carries a picture-type bit
+                // (0x4049 for the truncated HEVC in TEST-RESULTS) and falls
+                // through to the failure below.
+                trace_("capture token=%llu index=%u flags=%#x publish=invisible",
+                    static_cast<unsigned long long>(returned->timestamp_us), returned->index, returned->flags);
+                continue;
+            }
+            // An error completion that landed in another picture's buffer is
+            // the same misplacement the payload path refuses: the timestamp
+            // names the picture the firmware was coding, the slot names the
+            // buffer that was written. Failing only the timestamp's surface
+            // left the buffer's owner pending and kept the misplaced count
+            // at zero.
+            if (pool_.capture_memory() == CaptureMemory::Import && slot_token != returned->timestamp_us) {
+                target.pending = false;
+                target.error = true;
+                ++stats_.errors;
+                ++stats_.misplaced;
+                pending_.erase(it);
+                if (auto owner = pending_.find(slot_token); owner != pending_.end()) {
+                    owner->second->pending = false;
+                    owner->second->error = true;
+                    ++stats_.errors;
+                    pending_.erase(owner);
+                }
+                trace_("capture error token=%llu index=%u flags=%#x publish=misplaced slot_token=%llu",
+                    static_cast<unsigned long long>(returned->timestamp_us), returned->index, returned->flags,
+                    static_cast<unsigned long long>(slot_token));
+                continue;
+            }
+            pending_.erase(it);
+            target.pending = false;
+            if (noshow_shape && target.hidden) {
+                frame->layout().data_offset = returned->data_offset;
+                publish(target, frame, *returned, "capture noshow");
+                cold_ = false;
+                ++stats_.completed;
+                ++progress_;
+                continue;
+            }
+            target.error = true;
+            ++stats_.errors;
+            trace_("capture token=%llu index=%u flags=%#x publish=error",
+                static_cast<unsigned long long>(returned->timestamp_us), returned->index, returned->flags);
             continue;
         }
         if (!payload) {
@@ -525,14 +693,6 @@ bool Session::handle_capture_returns()
         }
         Target& target = *it->second;
         pending_.erase(it);
-        if (returned->error()) {
-            target.pending = false;
-            target.error = true;
-            ++stats_.errors;
-            trace_("capture token=%llu index=%u flags=%#x publish=error",
-                static_cast<unsigned long long>(returned->timestamp_us), returned->index, returned->flags);
-            continue;
-        }
         if (pool_.capture_memory() == CaptureMemory::Import && slot_token != returned->timestamp_us) {
             // The firmware wrote this picture into a buffer queued for a
             // different token. Neither surface can be trusted: the one this
@@ -564,7 +724,7 @@ bool Session::handle_capture_returns()
     return last;
 }
 
-void Session::publish(Target& target, FrameRef frame, const Dequeued& completion)
+void Session::publish(Target& target, FrameRef frame, const Dequeued& completion, const char* event)
 {
     const char* how = "direct";
     if (pool_.capture_memory() == CaptureMemory::Import) {
@@ -597,7 +757,7 @@ void Session::publish(Target& target, FrameRef frame, const Dequeued& completion
     target.pending = false;
     target.completed = true;
     target.error = false;
-    trace_("capture token=%llu index=%u flags=%#x publish=%s%s",
+    trace_("%s token=%llu index=%u flags=%#x publish=%s%s", event ? event : "capture",
         static_cast<unsigned long long>(completion.timestamp_us), completion.index, completion.flags,
         target.publish == Publish::Copy ? "copy-" : "", how);
 }
@@ -758,15 +918,21 @@ void Session::restart()
 
 void Session::reconfigure()
 {
-    // Mid-stream resolution change. The kernel contract: STOP, wait LAST,
-    // STREAMOFF CAPTURE, REQBUFS(0), then re-read the format and rebuild.
-    // OUTPUT keeps streaming. Held frames from the old geometry stay valid
-    // for their holders (they own the fd); the pool must be empty of holds
-    // before REQBUFS(0), so callers are expected to have released targets
-    // they no longer display. If one is still held, the change waits.
+    // Mid-stream resolution change. The kernel contract: SOURCE_CHANGE is an
+    // implicit drain (dev-decoder.rst), so the last picture from before the
+    // change comes back with LAST and the decoder is already stopped. Waiting
+    // for that LAST is this side's whole drain; a DECODER_CMD_STOP on top of
+    // it starts a second drain the firmware has nothing left to finish, and
+    // no second LAST ever arrives. Then STREAMOFF CAPTURE, REQBUFS(0), re-read
+    // the format and rebuild. OUTPUT keeps streaming. Held frames from the
+    // old geometry stay valid for their holders (they own the fd); the pool
+    // must be empty of holds before REQBUFS(0), so callers are expected to
+    // have released targets they no longer display. If one is still held, the
+    // change waits.
     ++stats_.reconfigures;
     trace_("session reconfigure %ux%u ->", config_.width, config_.height);
-    drain("drc", false);
+    await_drc_last();
+    fail_unrecoverable_tokens();
     state_ = SessionState::Reconfiguring;
     device_->stream(Queue::Capture, false);
     pool_.mark_all_capture_returned();
@@ -778,17 +944,48 @@ void Session::reconfigure()
     continue_reconfigure();
 }
 
+void Session::await_drc_last()
+{
+    // The kernel marks the boundary on a CAPTURE buffer, which has to be
+    // queued for it to come back; the marker may carry no pixels and is not
+    // attributed to any picture.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kLastWaitMs);
+    ++stats_.drains;
+    trace_("drc drain begin pending=%zu", pending_.size());
+    while (!saw_last_) {
+        if (expired(deadline)) {
+            fail("no LAST after SOURCE_CHANGE");
+            throw Error(VA_STATUS_ERROR_DECODING_ERROR, "decoder did not drain");
+        }
+        if (pool_.capture_memory() == CaptureMemory::Import) {
+            // An import pool only queues buffers the client exported, one at
+            // a time and only for pictures it still owes. The boundary marker
+            // is not a picture; lend it a scratch buffer when nothing is
+            // queued, exactly as the explicit drain does.
+            queue_import_next();
+            if (pool_.capture_queued() == 0)
+                pool_.queue_capture_scratch();
+        } else {
+            pool_.requeue_capture();
+        }
+        device_->poll(POLLIN | POLLPRI, 5);
+        handle_output_returns();
+        handle_capture_returns();
+    }
+    trace_("drc drain complete last=1");
+}
+
 void Session::continue_reconfigure()
 {
     require(state_ == SessionState::Reconfiguring, "continue_reconfigure outside Reconfiguring");
-    // vb2 refuses REQBUFS(0) while an exported buffer is still open. A Direct
-    // client may legitimately hold frames of the old geometry for display;
-    // the change waits for release() and submit() reports SURFACE_BUSY in
-    // the meantime. Copy clients never hold, so Chrome never waits here.
-    if (pool_.capture_held() > 0) {
-        trace_("session reconfigure deferred held=%u", pool_.capture_held());
-        return;
-    }
+    // A Direct client may still hold frames of the old geometry for display.
+    // It must not be asked to release them first: the usual cause of the
+    // change is that client's own submit() of the new-resolution picture, so
+    // waiting would wait on the call that is waiting here. Each held slot
+    // owns the DMA-BUF it came from and vb2 keeps the memory alive after
+    // REQBUFS(0) (orphaning), so the pool is dropped under the holders and
+    // their frames keep reading back (verified on the target, see
+    // docs/architecture.md §4).
     pool_.release_capture();
     // Per the V4L2 stateful decoder contract, CAPTURE STREAMON after the
     // drain resumes decoding at the new geometry; no START is issued and
@@ -841,6 +1038,9 @@ void Session::finish()
     } catch (const Error&) {
         // fail() already ran.
     }
+    // An entry the drain never resolved still holds a duplicate of the
+    // client's fd. Nothing retires it after this point, so close it here.
+    clear_import_backlog();
     state_ = state_ == SessionState::Failed ? SessionState::Failed : SessionState::Finished;
     trace_("session finish submitted=%llu completed=%llu errors=%llu drops=%llu timeouts=%llu drains=%llu "
            "misplaced=%llu",

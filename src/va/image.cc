@@ -47,11 +47,33 @@ void fill_image(VAImage& image, uint32_t fourcc, unsigned width, unsigned height
     image.entry_bytes = 0;
 }
 
+// A derived image describes the surface's own memory: the pitches, offsets
+// and size come from the DMA-BUF layout, not from a packed copy.
+void view_image(VAImage& image, uint32_t fourcc, unsigned width, unsigned height, const iris::Layout& layout)
+{
+    const unsigned bytes = fourcc == VA_FOURCC_P010 ? 2 : 1;
+    image.format.fourcc = fourcc;
+    image.format.byte_order = VA_LSB_FIRST;
+    image.format.bits_per_pixel = bytes == 2 ? 24 : 12;
+    image.width = static_cast<uint16_t>(width);
+    image.height = static_cast<uint16_t>(height);
+    image.num_planes = 2;
+    image.pitches[0] = layout.stride;
+    image.pitches[1] = layout.stride;
+    image.offsets[0] = layout.data_offset;
+    image.offsets[1] = layout.chroma_offset();
+    image.data_size = layout.size;
+    image.num_palette_entries = 0;
+    image.entry_bytes = 0;
+}
+
 // Copy the visible width x height from a surface's current pixels (held
 // CAPTURE frame, or stable buffer) into a packed image buffer.
 void copy_pixels(DriverData& d, Surface& s, const VAImage& image, uint8_t* destination)
 {
-    iris::require(s.has_pixels(), "surface has no decoded pixels", VA_STATUS_ERROR_OPERATION_FAILED);
+    iris::require(s.has_pixels(), s.unsent ? "surface holds a picture that has not been submitted yet"
+                                           : "surface has no decoded pixels",
+        VA_STATUS_ERROR_OPERATION_FAILED);
     const uint8_t* source = nullptr;
     iris::Layout layout;
     int fd = -1;
@@ -156,28 +178,51 @@ VAStatus deriveImage(VADriverContextP ctx, VASurfaceID id, VAImage* image)
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
             s = surface(d, id);
         }
-        // Derive is a copy in this driver: the image buffer is a packed
-        // CPU copy of the surface's pixels at derive time. That is what
-        // vaGetImage users (FFmpeg download) need; zero-copy consumers use
-        // vaExportSurfaceHandle.
-        if (s->rendering())
+        if (s->rendering() || s->unsent)
             syncSurface(ctx, id);
-        VAImageFormat format = {};
-        format.fourcc = s->fourcc;
-        const VAStatus status = createImage(ctx, &format, static_cast<int>(s->width), static_cast<int>(s->height), image);
-        if (status != VA_STATUS_SUCCESS)
-            return status;
-        std::shared_ptr<Buffer> b;
+        // A view, not a copy. FFmpeg's encode upload maps the derived image
+        // and writes straight into it, then unmaps without ever calling
+        // vaPutImage; anything else silently drops the frame.
+        iris::Layout layout;
+        int fd = -1;
+        void* mapping = nullptr;
+        if (s->target.frame) {
+            layout = s->target.frame->layout();
+            fd = s->target.frame->fd();
+            mapping = s->target.frame->map();
+        } else {
+            iris::StableBuffer* stable = nullptr;
+            {
+                std::lock_guard<std::recursive_mutex> lock(d.mutex);
+                stable = &ensure_stable(d, *s);
+            }
+            layout = stable->layout();
+            fd = stable->fd();
+            mapping = stable->map();
+        }
+        iris::require(mapping != nullptr, "surface has no CPU mapping", VA_STATUS_ERROR_OPERATION_FAILED);
+
+        VAImage view = {};
+        view_image(view, s->fourcc, s->width, s->height, layout);
+        auto b = std::make_shared<Buffer>();
+        b->type = VAImageBufferType;
+        b->size = layout.size;
+        b->count = 1;
+        b->alias = mapping;
+        b->alias_surface = id;
+        b->alias_fd = fd;
+        b->alias_owner = s;
+        b->alias_frame = s->target.frame;
+        b->derived_surface = id;
         {
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
-            b = buffer(d, image->buf);
-            b->derived_surface = id;
+            view.buf = d.next_id++;
+            view.image_id = d.next_id++;
+            d.buffers[view.buf] = b;
+            d.images[view.image_id] = view;
             ++s->derived_images;
         }
-        if (s->has_pixels())
-            copy_pixels(d, *s, *image, b->data.data());
-        else
-            std::memset(b->data.data(), 0, b->data.size());
+        *image = view;
         return VA_STATUS_SUCCESS;
     });
 }
@@ -202,8 +247,16 @@ VAStatus getImage(VADriverContextP ctx, VASurfaceID id, int x, int y, unsigned w
         }
         iris::require(x == 0 && y == 0 && width == image.width && height == image.height,
             "partial vaGetImage is not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
-        if (s->rendering())
+        if (s->rendering() || s->unsent)
             syncSurface(ctx, id);
+        // An image obtained from vaDeriveImage already is a view of these
+        // pixels; copying a surface onto itself would need a direction the
+        // VAImage does not carry.
+        if (b->alias) {
+            iris::require(b->alias_surface == id, "vaGetImage into an image derived from another surface",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
+            return VA_STATUS_SUCCESS;
+        }
         copy_pixels(d, *s, image, b->data.data());
         return VA_STATUS_SUCCESS;
     });

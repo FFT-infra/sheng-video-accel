@@ -6,14 +6,73 @@ Run the host-side unit tests without hardware:
 meson test -C build-local
 ```
 
+## On an installed system
+
+`scripts/iris-verify.sh` is the user-facing check, not a gate: it generates
+its own clip, requires libva to open the driver with no environment set,
+requires a decode and an encode to each move the Iris interrupt counter, and
+requires the encoded stream to decode. `scripts/iris-device-check.sh` is the
+read-only report in front of it: which nodes exist, what each queue exposes,
+which optional kernel controls are present. Neither is a substitute for the
+gates below; both are what to run first when a report says "hardware decode
+does not work".
+
 ## Hardware Gates
 On the tablet, run the following verification gates:
 - `test/iris-browser-acceptance.sh --clip ...`: verifies Chrome `VaapiVideoDecoder` selection, platform decoder status, and zero dropped frames.
 - `test/iris-matrix.sh`: framemd5 output equivalence against software.
+- `test/iris-throughput.sh`: decode fps through this driver against the native V4L2 decoders, plus per-frame MD5 at every size it runs.
+- `test/iris-power-sampler.sh`: battery-side power of a saturated decode, this driver against software, arms interleaved. Needs the screen off; a paced playback run does not resolve the difference on this gauge.
 - `test/iris-structure-matrix.sh`: decoding structural variants (all-I, B-frames).
 - `test/iris-dynamic-resolution.sh`: handles in-stream resolution changes.
 - `test/iris-concurrency-soak.sh`: multi-context thermal/stability soaking.
 - `test/av1-obu-roundtrip.sh`: software oracle for AV1 OBU repacking.
+
+`annexb-test` covers the NAL splitting a requested IDR needs (both NAL
+layouts, the parameter sets a cut stream must carry);
+`encode-session-test` covers the session rules, including the on-demand
+IDR lever and the strictly rising timestamps.
+
+Two probes build with the tree and run on the target only:
+
+- `test/iris-import-probe.cc <decoder-node> <stream.264>`: the Import
+  acceptance program — proves the firmware writes picture k into the k-th
+  queued client DMA-BUF (docs/architecture.md §9). The stream must be an
+  H.264 Annex-B file with one AUD per picture and flat luma encoding the
+  decode-order index (`16 + 2*(k%100)`), and it must be **High or Main
+  profile**: x264's `-qp 0` produces High 4:4:4 Predictive, which the
+  firmware rejects with `session error 0x4000008 unsupported stream` and no
+  SOURCE_CHANGE, so the probe exits at bring-up. `-qp 1 -profile:v high`
+  is lossless enough for the grey values and decodes.
+- `test/iris-va-import-probe.cc <render-node>`: the same client memory
+  entered through the public API. It needs `LIBVA_DRIVER_NAME=v4l2` and
+  `LIBVA_DRIVERS_PATH` pointing at the build tree; it checks DRM_PRIME_2 and
+  PRIME_1 import, that the surface aliases the client's bytes, that an
+  encode from it matches the same picture from a driver-allocated surface,
+  and that a wrong pitch is refused.
+- `test/iris-encode-control-probe.cc <encoder-node>`: which loop-filter
+  controls the node exposes, and that a deblocking request it cannot honour
+  is refused rather than ignored.
+- `test/iris-encode-fence-probe.cc <encoder-node> <render-node> [w h]`:
+  whether an input surface's pending GPU write is waited for before the
+  picture is queued. It submits a buffer whose last GPU blit is still in
+  flight and compares the access unit against the picture before and after
+  that write; with the wait removed it encodes the stale picture, which is
+  what makes the comparison evidence rather than a coincidence.
+- `test/gpu-fence-check.cc <render-node> [w h]`: whether a GPU job leaves a
+  pollable pending fence on its destination after `glFlush()`. That is the
+  window the probe above depends on; if it is not observable on a GPU, no
+  probe can claim the wait mattered.
+- `test/iris-fd-leak-probe.cc <render-node> [cycles]`: whether the descriptor
+  count returns to its starting value across the surface lifecycle. Counts
+  `/proc/self/fd`, and with `IRIS_TEST_FD_LEAK=1` leaks on purpose to prove
+  the accounting can fail.
+- `test/iris-encode-quality.sh [encoder-node] [render-node]`: encode fidelity
+  against the source. Asserts the encode moved the Iris IRQ counter, the
+  stream decodes, every decoded frame matches a software decode, and both the
+  mean and the worst-frame SSIM against the source clear a floor that a blank
+  stream cannot. It measures `$LIBVA_DRIVERS_PATH` (default `build/src`), so
+  naming `/usr/lib64/dri` verifies an installed package.
 
 ## Qualcomm Iris codec matrix
 
@@ -26,9 +85,10 @@ and keeps artifacts under `$IRIS_LAB_ROOT/artifacts/` by default:
 LIBVA_DRIVERS_PATH=$PWD/build/src ./test/iris-matrix.sh
 ```
 
-H.264, HEVC and VP9 run through VA and must match software exactly; AV1 runs
-its native GStreamer baseline only (its VA lane is opt-in and documented in
-the README). `IRIS_MATRIX_FRAMES` shortens a development run.
+H.264, HEVC, VP9 and AV1 run through VA and must match software exactly;
+AV1's lane passes `--hidden-pictures` because the stream's alt-ref pictures
+are decoded but shown later by the client. `IRIS_MATRIX_FRAMES` shortens a
+development run.
 
 `test/iris-structure-matrix.sh` isolates H.264 reference structure: all-I,
 IP-only, B=2 and B=4 streams with exact MD5 equality. Keep GOP-middle
@@ -38,6 +98,27 @@ picture without its references is a negative random-access test.
 `test/iris-zero-copy-suite.sh` is the Direct-path oracle: FFmpeg does not
 pre-export surfaces, so every completion must be `publish=direct` with zero
 copy-engine involvement and software-identical pixels.
+
+`test/iris-alloc-chain.sh` walks the stable-buffer allocation chain
+(`docs/architecture.md` §3.4): MSM GEM cached-coherent, MSM GEM
+write-combined, system DMA heap. The last rung is only reached when the
+first two are refused, which no ordinary run does, so the script runs
+`test/iris-alloc-probe` under `test/alloc-fault.so` — an `LD_PRELOAD` shim
+that returns `EINVAL` (or, for the `coherent-enomem` mode, `ENOMEM`) from the
+MSM GEM allocations the probe asks it to refuse. Each mode asserts the
+resulting `MemoryOrigin`, that the allocation log shows exactly the rungs the
+chain may try, and that a written pattern survives a CPU sync:
+
+```
+./test/iris-alloc-chain.sh /dev/dri/renderD128 build
+```
+
+The `ENOMEM` mode is the one that matters for correctness: `msm_alloc.c`
+masks only `EINVAL` and `EOPNOTSUPP`, so a real failure must fall straight to
+the DMA heap without a write-combined retry. The probe refuses to run an
+injected mode without the shim, or with the shim loaded but
+`IRIS_TEST_ALLOC_FAULT` unset, so a pass cannot come from the fast path
+happening to work.
 
 `test/iris-dynamic-resolution.sh` alternates 640x360 and 1280x720 one
 hundred times for H.264 (default) or VP9 (`IRIS_DYNAMIC_CODECS=vp9`) and

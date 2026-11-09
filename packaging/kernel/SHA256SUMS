@@ -1,0 +1,4 @@
+be465d291212c127a93f87a98a68d8f299f82e16f27999b907ca16c6ea2071b7  0001-media-iris-decode-order-output-and-64-capture-buffers.patch
+f742c7aa1fd7a986070798813dd58b77765d9053a228e1897fca3021829ddf3a  0002-media-iris-deblocking-filter-controls.patch
+b8e3600e79b9277448d7b84445cf28b623dbbac546081c685153e3dba247f0a9  0003-media-iris-encoder-request-sync-frame.patch
+75321dfa1731fcebcc171129e6f290ff6dd97b244ff087b25357673f9696ca52  0004-media-iris-preserve-timestamps-on-error-buffers.patch

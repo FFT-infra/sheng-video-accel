@@ -31,7 +31,7 @@ license=('MIT' 'LGPL-2.1-or-later')
 # refuses to fall back to a fixed /dev/video number that may be a camera.
 depends=('libva' 'libdrm' 'mesa' 'v4l-utils')
 makedepends=('meson' 'ninja' 'pkgconf' 'python')
-optdepends=('google-chrome: Google Chrome (Iris VA-API) desktop entry')
+optdepends=('google-chrome: Google Chrome, the qualified VA-API decode client')
 source=("$pkgname-$pkgver.tar.gz")
 sha256sums=('SKIP')
 # makepkg normally strips payloads after package(); do it explicitly before the

@@ -1,59 +1,60 @@
-# Iris kernel module patch
+# Iris Kernel Module Patches
 
-`0001-media-iris-decode-order-output-and-64-capture-buffers.patch` is the
-two [strongtz/libva-v4l2](https://github.com/strongtz/libva-v4l2) (Radxa)
-Iris patches (decode-order output through
-`V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY{,_ENABLE}`, CAPTURE pool up to 64)
-rebased onto `ianchb/sm8550-mainline` branch `sheng-7.2.6`
-(commit `42f3b40c702a`).
+This directory provides four rebased kernel patches targeting the `qcom-iris` driver on `ianchb/sm8550-mainline` (branch `sheng-7.2.6`, commit `42f3b40c702a`).
 
-The patch modifies GPL-2.0 kernel code (`drivers/media/platform/qcom/iris/`)
-and is therefore GPL-2.0, unlike the driver itself; the upstream author is
-credited in the patch subject and in the driver's README. The driver works without it (display-order
-fallback) but Chrome zero-copy and the VP9 dynamic-resolution qualification
-need it.
+These patches are optional supporting assets for hardware validation. The driver detects missing kernel controls at runtime and degrades gracefully on stock kernels.
 
-Rebuild only the module, on the target, against the running kernel:
+## Patch Summary
+
+| Patch | Upstream Reference | Description | Purpose |
+| --- | --- | --- | --- |
+| `0001-media-iris-decode-order-output-and-64-capture-buffers.patch` | Radxa / `qcom-va-driver` | Implements `V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY` and expands CAPTURE queue to 64 buffers | Enables zero-copy Import decode path and dynamic resolution changes |
+| `0002-media-iris-deblocking-filter-controls.patch` | Radxa / `qcom-va-driver` | Exposes H.264 and HEVC loop-filter controls (`HFI_PROP_DEBLOCKING_MODE`) | Allows forwarding of client slice deblocking requests |
+| `0003-media-iris-encoder-request-sync-frame.patch` | Qualcomm (Wangao Wang) | Implements `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` (`HFI_PROP_REQUEST_SYNC_FRAME`) | Enables direct hardware sync-frame requests |
+| `0004-media-iris-preserve-timestamps-on-error-buffers.patch` | Radxa / `qcom-va-driver` | Preserves buffer timestamp on `V4L2_BUF_FLAG_ERROR` completions | Allows immediate failure attribution for corrupted frames |
+
+## Verification & Integrity
+
+`SHA256SUMS` records the authoritative hash for each patch file. Integrity is verified automatically via:
+```sh
+sh test/iris-kernel-patch-check.sh
+```
+
+Downstream packaging in `GhfunNiHe/sheng-fedora-packages` pins these patches by commit hash against the immutable tag `iris-kernel-patches-v1`.
+
+## Module Rebuild Guide
+
+To build and install the modified module on the target device:
 
 ```sh
 git clone --depth 1 -b sheng-7.2.6 https://github.com/ianchb/sm8550-mainline linux
-cd linux && git am ../0001-*.patch
-```
+cd linux
+git am ../0001-*.patch ../0002-*.patch ../0003-*.patch ../0004-*.patch
 
-`git am` applies cleanly on `sheng-7.2.6`. On any other Iris tree expect
-fuzz, and check one hunk by hand before building: the two new capability
-IDs `DISPLAY_DELAY_ENABLE` and `DISPLAY_DELAY` belong at the end of
-`enum platform_inst_fw_cap_type` in `iris_platform_common.h`. A fuzzy apply
-has put them into the neighbouring `enum platform_inst_fw_cap_flags`
-instead (seen on `sheng-7.2.2`); move them into the type enum.
-
-```sh
 cp /boot/config-$(uname -r) .config
-export LOCALVERSION=""                      # keep the "+" off the release string
+echo "-sm8550-g42f3b40-iris1" > localversion
+export LOCALVERSION=""
 make ARCH=arm64 LLVM=1 olddefconfig modules_prepare
-# Module.symvers is not shipped; derive the dependency symbols from the
-# running kernel so modpost records "depends:" correctly.
+
+# Generate Module.symvers from active kernel exports
 awk '$4 ~ /^\[/ && $2 ~ /[TDR]/ {gsub(/[\[\]]/,"",$4); print "0x00000000\t"$3"\t"$4"\tEXPORT_SYMBOL\t"}' /proc/kallsyms \
   | grep -E 'videobuf2|videodev|v4l2_mem2mem' > Module.symvers
-make ARCH=arm64 LLVM=1 KBUILD_MODPOST_WARN=1 \
-     KCFLAGS=-mbranch-protection=pac-ret+bti \
-     M=drivers/media/platform/qcom/iris modules
-llvm-readelf -n drivers/media/platform/qcom/iris/qcom-iris.ko | grep -q 'BTI, PAC'
+
+make ARCH=arm64 LLVM=1 LOCALVERSION= KBUILD_MODPOST_WARN=1 M=drivers/media/platform/qcom/iris modules
 ```
 
-`KCFLAGS=-mbranch-protection=pac-ret+bti` is required: the kernel is built
-with `CONFIG_ARM64_BTI_KERNEL`, but Kconfig drops that option under
-clang ≥ 21, and a module without BTI landing pads oopses on load.
+### Installation
 
-Install by replacing the file and rebooting. Do not `modprobe -r qcom_iris`
-on a booted system: unloading hangs in `iris_vpu_power_off` while the VPU
-is powered.
+Compress and replace the installed kernel module:
 
 ```sh
-zstd -19 -f qcom-iris.ko -o qcom-iris.ko.zst
+zstd -19 -f drivers/media/platform/qcom/iris/qcom-iris.ko -o qcom-iris.ko.zst
 sudo cp qcom-iris.ko.zst /lib/modules/$(uname -r)/kernel/drivers/media/platform/qcom/iris/
-sudo depmod -a && sudo systemctl reboot
-v4l2-ctl -d /dev/videoN --list-ctrls | grep display_delay   # present = decode-order
+sudo depmod -a
+sudo systemctl reboot
 ```
 
-Keep the stock `qcom-iris.ko.zst` beside it for rollback.
+After reboot, verify active controls on the video nodes:
+```sh
+v4l2-ctl -d /dev/videoN --list-ctrls | grep -E 'display_delay|loop_filter|force_key_frame'
+```

@@ -67,4 +67,37 @@ if sh "$root/test/iris-eos-check.sh" "$log" 1 2>/dev/null; then
     exit 1
 fi
 
+# An AV1 alt-ref is submitted, completes without a timestamp, and is
+# published: more pictures than output frames, and not an error.
+cat >"$log" <<'EOF'
+va create_context id=0
+submit token=1
+submit token=2
+submit token=3
+capture token=1 index=0 flags=0x4009 publish=direct
+capture noshow token=0 index=1 flags=0x4041 publish=direct
+capture token=3 index=2 flags=0x4011 publish=direct
+capture last
+drain complete last=1
+EOF
+sh "$root/test/iris-eos-check.sh" "$log" 2 --hidden-pictures || exit 1
+if sh "$root/test/iris-eos-check.sh" "$log" 2 2>/dev/null; then
+    echo "FAIL allowed a hidden picture in a strict trace" >&2
+    exit 1
+fi
+
+# An Import publish is a completed picture like any other: the firmware wrote
+# straight into the client's buffer. Counting only direct and copy made a
+# fully successful Import run report capture=0.
+cat >"$log" <<'EOF'
+va create_context id=0
+submit token=1
+submit token=2
+capture token=1 index=0 flags=0x4010 publish=import
+capture token=2 index=0 flags=0x4010 publish=import
+capture last
+drain complete last=1
+EOF
+sh "$root/test/iris-eos-check.sh" "$log" 2 || exit 1
+
 echo 'PASS multi-context EOS checker'

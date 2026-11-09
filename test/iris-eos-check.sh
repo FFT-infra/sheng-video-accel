@@ -9,10 +9,17 @@
 set -eu
 
 strict_sync=1
+hidden_pictures=0
 if [ "$#" -eq 3 ] && [ "$3" = "--allow-bounded-sync" ]; then
     strict_sync=0
+elif [ "$#" -eq 3 ] && [ "$3" = "--hidden-pictures" ]; then
+    # AV1 decodes alt-ref pictures that the stream displays later through
+    # show_existing_frame. They are submitted and completed like any other
+    # picture, so the trace holds more submissions than frames the client
+    # outputs; only the output side can be compared frame for frame.
+    hidden_pictures=1
 elif [ "$#" -ne 2 ]; then
-    echo "usage: $0 TRACE_LOG FRAME_COUNT [--allow-bounded-sync]" >&2
+    echo "usage: $0 TRACE_LOG FRAME_COUNT [--allow-bounded-sync|--hidden-pictures]" >&2
     exit 2
 fi
 
@@ -39,7 +46,12 @@ contexts=$(count 'va create_context id=')
 [ "$contexts" -gt 0 ] || contexts=1
 
 submitted=$(count 'submit token=')
-capture=$(grep -E -c 'capture token=.*publish=(direct|copy-gpu|copy-cpu)' "$log" || true)
+# Every publish policy a capture can name: the trace prints how the pixels
+# reached the client, and an Import capture is as much a published picture as
+# a Direct or a copied one. Leaving `import` out made a fully successful
+# Import run report capture=0.
+capture=$(grep -E -c 'capture (noshow )?token=.*publish=(direct|import|copy-gpu|copy-cpu)' "$log" || true)
+noshow=$(count 'capture noshow token=')
 drain=$(count 'drain complete last=1')
 capture_errors=$(grep -E -c 'publish=error|capture error index=' "$log" || true)
 timeouts=$(count 'sync timeout token=')
@@ -64,8 +76,32 @@ check() {
     fi
 }
 
-check submitted_frames "$submitted" "$expected"
-check capture "$capture" "$expected_capture"
+# Every submitted picture completes, and every picture the client can display
+# is published at least once.
+check_at_least() {
+    name=$1
+    actual=$2
+    wanted=$3
+    if [ "$actual" -lt "$wanted" ]; then
+        echo "FAIL $name=$actual (expected at least $wanted)" >&2
+        fail=1
+    fi
+}
+
+if [ "$hidden_pictures" -eq 1 ]; then
+    check_at_least submitted_frames "$submitted" "$expected"
+    check_at_least capture "$capture" "$expected_capture"
+    if [ "$noshow" -gt "$capture" ]; then
+        echo "FAIL noshow=$noshow (more than capture=$capture)" >&2
+        fail=1
+    fi
+else
+    check submitted_frames "$submitted" "$expected"
+    check capture "$capture" "$expected_capture"
+    # A picture the firmware did not show is only legitimate for a codec
+    # whose stream carries hidden references (AV1 alt-refs).
+    check noshow_pictures "$noshow" 0
+fi
 check drain "$drain" "$contexts"
 check capture_errors "$capture_errors" 0
 check terminal_last "$terminal_last" 0
@@ -80,4 +116,4 @@ if [ "$fail" -ne 0 ]; then
     exit 1
 fi
 
-echo "PASS frames=$expected contexts=$contexts submitted=$submitted capture=$capture drain=$drain timeouts=$timeouts drops=$drops"
+echo "PASS frames=$expected contexts=$contexts submitted=$submitted capture=$capture drain=$drain timeouts=$timeouts drops=$drops noshow=$noshow"

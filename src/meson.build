@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: MIT
 #
 # Three layers (docs/architecture.md §5):
-#   util/   options, trace, error
-#   iris/   the only code that touches the decoder node
-#   codec/  VA parameters -> bitstream, pure
+#   util/   options, trace, error, the encode parameter contract
+#   iris/   the only code that touches a codec node
+#   codec/  VA parameters <-> bitstream, pure
 #   va/     libva entry points on top of the two above
 # iris + codec are a static library so the unit tests link them without the
 # VA glue.
@@ -16,17 +16,23 @@ core_deps = [libva_dep, libdrm_dep, kernel_dep]
 
 core_sources = [
 	'util/options.cc',
+	'util/prime.cc',
+	'util/prime.cc',
 	'iris/device.cc',
 	'iris/slots.cc',
 	'iris/alloc.cc',
 	'iris/msm_alloc.c',
 	'iris/publish.cc',
 	'iris/session.cc',
+	'iris/encode.cc',
 	'codec/h264.cc',
 	'codec/hevc.cc',
 	'codec/vp9.cc',
 	'codec/av1.cc',
 	'codec/av1_obu.cc',
+	'codec/annexb.cc',
+	'codec/encode_h264.cc',
+	'codec/encode_hevc.cc',
 ]
 if have_gpu_copy
 	core_sources += 'iris/gpu_copy.cc'

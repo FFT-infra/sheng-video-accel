@@ -16,26 +16,47 @@ schema=$(get schema)
 # The manifest records target paths without DESTDIR so a packaged build does
 # not carry its build root; a staged uninstall re-applies its own.
 driver=$destdir$(get driver_path)
-launcher=$destdir$(get launcher_path)
-desktop_dir=$destdir$(get desktop_dir)
+alias_path=$destdir$(get driver_alias_path)
 expected=$(get artifact_sha256)
 backup=$(get previous_driver_backup)
 [ -n "$backup" ] && backup=$destdir$backup
 [ -n "$driver" ] || fail 'manifest has no driver path'
-[ -n "$launcher" ] || fail 'manifest has no launcher path'
-[ -n "$desktop_dir" ] || fail 'manifest has no desktop directory'
 case "$driver" in
     *'/../'*|*'/..'|*'/./'*|*'/.'|*'//') fail "unsafe driver path: $driver" ;;
 esac
 case "$driver" in /*/v4l2_drv_video.so) ;; *) fail "unexpected driver path: $driver" ;; esac
-case "$launcher" in
-    *'/../'*|*'/..'|*'/./'*|*'/.'|*'//') fail "unsafe launcher path: $launcher" ;;
+case "$alias_path" in
+    ''|/*/msm_drv_video.so) ;;
+    *) fail "unexpected driver alias path: $alias_path" ;;
 esac
-case "$launcher" in /*/iris-vaapi-browser) ;; *) fail "unexpected launcher path: $launcher" ;; esac
-case "$desktop_dir" in
-    *'/../'*|*'/..'|*'/./'*|*'/.'|*'//') fail "unsafe desktop directory: $desktop_dir" ;;
-esac
-case "$desktop_dir" in /*/applications) ;; *) fail "unexpected desktop directory: $desktop_dir" ;; esac
+
+# Two layouts exist. The current one records the shared node rule; manifests
+# written before the browser launcher was removed record a launcher path and a
+# desktop directory instead. Both have to uninstall, or a machine that already
+# has the old layout can never be cleaned up by the new script.
+node_lib=$(get node_lib_path)
+launcher=$(get launcher_path)
+desktop_dir=$(get desktop_dir)
+if [ -n "$node_lib" ]; then
+    node_lib=$destdir$node_lib
+    case "$node_lib" in
+        *'/../'*|*'/..'|*'/./'*|*'/.'|*'//') fail "unsafe node rule path: $node_lib" ;;
+    esac
+    case "$node_lib" in /*/iris-vaapi/iris-node.sh) ;; *) fail "unexpected node rule path: $node_lib" ;; esac
+elif [ -n "$launcher" ]; then
+    launcher=$destdir$launcher
+    desktop_dir=$destdir$desktop_dir
+    case "$launcher" in
+        *'/../'*|*'/..'|*'/./'*|*'/.'|*'//') fail "unsafe launcher path: $launcher" ;;
+    esac
+    case "$launcher" in /*/iris-vaapi-browser) ;; *) fail "unexpected launcher path: $launcher" ;; esac
+    case "$desktop_dir" in
+        ''|/*/applications) ;;
+        *) fail "unexpected desktop directory: $desktop_dir" ;;
+    esac
+else
+    fail 'manifest has neither a node rule path nor a launcher path'
+fi
 case "$backup" in
     *'/../'*|*'/..'|*'/./'*|*'/.'|*'//') fail "unsafe backup path: $backup" ;;
 esac
@@ -57,18 +78,38 @@ fi
 
 actual=$(sha256sum "$driver" | awk '{print $1}')
 [ "$actual" = "$expected" ] || fail "refusing to remove modified driver (expected $expected, got $actual)"
-rm -f "$driver" "$launcher"
-for desktop in "$desktop_dir"/*.desktop; do
-    [ -f "$desktop" ] || continue
-    case "$desktop" in
-        *chromium-iris-v4l2.desktop|*google-chrome-iris-v4l2.desktop|*chromium-iris-vulkan-webgpu.desktop|*google-chrome-iris-vulkan-webgpu.desktop) rm -f "$desktop" ;;
-    esac
-done
+# The alias is ours only while it points at our driver.
+if [ -n "$alias_path" ] && [ -L "$alias_path" ] \
+    && [ "$(readlink "$alias_path")" = v4l2_drv_video.so ]; then
+    rm -f "$alias_path"
+fi
+rm -f "$driver"
+if [ -n "$node_lib" ]; then
+    # Current layout: the diagnostics sit in <prefix>/bin and the node rule in
+    # <prefix>/lib/iris-vaapi, one directory each.
+    for helper in iris-device-check iris-verify iris-configure-clients; do
+        rm -f "$(dirname "$(dirname "$node_lib")")/bin/$helper" 2>/dev/null || true
+    done
+    rm -f "$node_lib"
+    rmdir "$(dirname "$node_lib")" 2>/dev/null || true
+else
+    # Legacy layout: everything sat beside the launcher.
+    rm -f "$launcher"
+    for helper in iris-device-check iris-verify iris-configure-clients; do
+        rm -f "$(dirname "$launcher")/$helper"
+    done
+    for desktop in "$desktop_dir"/*.desktop; do
+        [ -f "$desktop" ] || continue
+        case "$desktop" in
+            *chromium-iris-v4l2.desktop|*google-chrome-iris-v4l2.desktop|*chromium-iris-vulkan-webgpu.desktop|*google-chrome-iris-vulkan-webgpu.desktop) rm -f "$desktop" ;;
+        esac
+    done
+    rmdir "$desktop_dir" 2>/dev/null || true
+fi
 if [ -n "$backup" ] && [ -f "$backup" ]; then
     install -D -m 0755 "$backup" "$driver"
     rm -f "$backup"
 fi
 rm -f "$manifest"
-rmdir "$desktop_dir" 2>/dev/null || true
 rmdir "$(dirname "$manifest")/backup" "$(dirname "$manifest")" 2>/dev/null || true
 printf 'PASS system installation removed; previous driver restored when recorded\n'

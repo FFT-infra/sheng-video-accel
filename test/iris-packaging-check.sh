@@ -12,7 +12,7 @@
 # What it asserts:
 #   * every path scripts/install-system.sh installs appears in the spec %files
 #   * both manifests delegate to that script instead of open-coding a layout
-#   * the runtime dependency the launcher cannot start without is declared
+#   * the runtime dependency the node rule cannot work without is declared
 #   * the PKGBUILD parses as bash
 
 set -eu
@@ -43,43 +43,48 @@ done
 grep -Fq 'destdir$driver_dir/v4l2_drv_video.so' "$installer" \
     || fail 'install-system.sh no longer installs the driver where this check expects'
 # shellcheck disable=SC2016
-grep -Fq 'destdir$prefix/bin/iris-vaapi-browser' "$installer" \
-    || fail 'install-system.sh no longer installs the launcher where this check expects'
+grep -Fq 'destdir$prefix/lib/iris-vaapi/iris-node.sh' "$installer" \
+    || fail 'install-system.sh no longer installs the shared node rule where this check expects'
+# libva resolves the driver by DRM name when the variable is unset, so the
+# alias is a shipped file, not a convenience: both the installer and the spec
+# must carry it or clients such as mpv silently fall back to software.
 # shellcheck disable=SC2016
-grep -Fq 'destdir$prefix/share/applications' "$installer" \
-    || fail 'install-system.sh no longer installs desktop entries where this check expects'
+grep -Fq 'msm_drv_video.so' "$installer" \
+    || fail 'install-system.sh no longer installs the msm alias libva resolves by DRM name'
 
 expect_in_spec() {
     grep -Fq "$1" "$spec" || fail "spec %files does not list $1"
 }
 
 expect_in_spec '%{_libdir}/dri/v4l2_drv_video.so'
-expect_in_spec '%{_bindir}/iris-vaapi-browser'
+expect_in_spec '%{_libdir}/dri/msm_drv_video.so'
+expect_in_spec '%{_prefix}/lib/iris-vaapi/iris-node.sh'
 expect_in_spec '%{_datadir}/iris-vaapi/install-manifest.txt'
 
-# Every shipped desktop entry, derived from the data directory rather than a
-# hardcoded list: adding a fifth entry must fail here until it is packaged.
-entries=0
+# The diagnostics source the shared node rule. A package that ships the rule
+# without them leaves the documented `iris-verify` command missing, which is a
+# worse outcome than shipping neither: the README tells the reader to run it.
+for helper in iris-device-check iris-verify iris-configure-clients; do
+    grep -Fq "\$prefix/bin/$helper" "$installer" \
+        || fail "install-system.sh no longer installs $helper"
+    expect_in_spec "%{_bindir}/$helper"
+done
+
+# No desktop entry is shipped. The driver needs no wrapper: libva resolves it
+# through the msm_drv_video.so alias, and a client started from the desktop
+# uses its own profile. A desktop entry reappearing here means someone is
+# reintroducing a launcher, so fail loudly rather than silently packaging it.
 for desktop in "$root"/data/*.desktop; do
     [ -f "$desktop" ] || continue
-    entries=$((entries + 1))
-    name=${desktop##*/}
-    expect_in_spec "%{_datadir}/applications/$name"
-    grep -Fq 'TryExec=' "$desktop" \
-        || fail "$name has no TryExec, so it stays in the menu without its browser"
-    exec_line=$(sed -n 's/^Exec=iris-vaapi-browser --browser=\([a-z]*\).*/\1/p' "$desktop" | head -1)
-    tryexec=$(sed -n 's/^TryExec=//p' "$desktop" | head -1)
-    # TryExec must name a binary the target actually ships. Fedora and Debian
-    # install /usr/bin/chromium-browser and have no /usr/bin/chromium, so
-    # TryExec=chromium hides the entry on a system where Chromium is present.
-    # The Arch package rewrites it, because Arch ships the other name.
-    case "$exec_line:$tryexec" in
-        chromium:chromium-browser|chrome:google-chrome-stable) ;;
-        :*) ;;
-        *) fail "$name launches --browser=$exec_line but TryExec=$tryexec" ;;
-    esac
+    fail "unexpected desktop entry: ${desktop##*/}; the driver ships no launcher"
 done
-[ "$entries" -gt 0 ] || fail 'no desktop entries found under data/'
+# Nothing may ship the removed launcher either. The uninstaller is allowed to
+# name it: it has to clean up a manifest written before the removal, and that
+# branch is the only place the name may appear.
+if grep -rFq 'iris-vaapi-browser' "$root/data" "$root/packaging" \
+        || grep -Fq 'iris-vaapi-browser' "$root/scripts/install-system.sh"; then
+    fail 'the removed browser launcher is still shipped by data, packaging or the installer'
+fi
 
 # Both manifests must delegate rather than open-code the layout.
 grep -Fq 'scripts/install-system.sh' "$spec" \
@@ -105,9 +110,9 @@ grep -Fq 'IRIS_VA_DRIVER_DIR' "$spec" \
 grep -Fq 'IRIS_VA_DRIVER_DIR' "$pkgbuild" \
     || fail 'PKGBUILD does not pin the libva driver directory'
 
-# The launcher exits rather than guessing a node number when v4l2-ctl is
-# missing, so a package without v4l-utils installs a browser entry that cannot
-# start.
+# The node rule exits rather than guessing a node number when v4l2-ctl is
+# missing, so a package without v4l-utils installs diagnostics that cannot
+# run.
 grep -Eq '^Requires:[[:space:]]+v4l-utils' "$spec" \
     || fail 'spec does not require v4l-utils'
 grep -Fq 'v4l-utils' "$pkgbuild" \
@@ -123,4 +128,4 @@ if [ "$failures" -ne 0 ]; then
     printf 'FAIL packaging manifests: %d problem(s)\n' "$failures" >&2
     exit 1
 fi
-printf 'PASS packaging manifests cover %d desktop entries and one install path\n' "$entries"
+printf 'PASS packaging manifests cover the driver, the node rule and one install path\n'

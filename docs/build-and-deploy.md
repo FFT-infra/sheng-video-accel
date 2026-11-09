@@ -87,8 +87,7 @@ firmware diagnostics; always record which decoder path was used.
 
 The remote deployment above intentionally runs from the build tree. Once that
 artifact has passed the codec matrix and soak gates, install it into libva's
-configured system driver directory together with the process-scoped browser
-launcher and desktop entries:
+configured system driver directory together with the diagnostic commands:
 
 ```sh
 cd "$HOME/iris-vaapi-lab/src"
@@ -97,11 +96,11 @@ sudo ./scripts/install-system.sh build
 
 `install-system.sh` obtains `driverdir` from `pkg-config libva` (falling back
 to libva's `libdir/dri` only when the package omits `driverdir`) and runs
-`ldd -r` before copying the shared object. It installs the launcher under
-`/usr/local/bin` and desktop files under `/usr/local/share/applications` by
-default. `IRIS_INSTALL_PREFIX` changes only the launcher/data prefix; it does
-not redirect the VA driver away from libva's canonical driver directory.
-`DESTDIR` provides a non-root packaging/staging mode.
+`ldd -r` before copying the shared object. It installs the diagnostic commands
+under `/usr/local/bin` and the node rule they share under
+`/usr/local/lib/iris-vaapi` by default. `IRIS_INSTALL_PREFIX` changes only that
+prefix; it does not redirect the VA driver away from libva's canonical driver
+directory. `DESTDIR` provides a non-root packaging/staging mode.
 
 The helper records an install manifest at
 `/usr/local/share/iris-vaapi/install-manifest.txt` (or the selected prefix).
@@ -118,35 +117,45 @@ Fedora spec runs the distribution brp strip hooks before
 later implicit strip, strips explicitly, and runs the same refresh. This keeps
 the recorded artifact hash and size equal to the installed package payload.
 
-The launcher resolves `/dev/video*` on every start. It requires an exact
-`iris_driver` match and prefers the node whose card or sysfs name identifies it
-as the decoder, so the sibling Iris encoder cannot be selected merely because
-its number happens to sort first. An explicit `LIBVA_V4L2_VIDEO_PATH` remains
-available for a checked diagnostic override. `v4l2-ctl` from v4l-utils is
-therefore a runtime dependency of the desktop launcher.
+The node rule lives in one file, `scripts/lib/iris-node.sh`, installed as
+`<prefix>/lib/iris-vaapi/iris-node.sh`. It resolves `/dev/video*` on every
+call, requires an exact `iris_driver` match, and tells the decoder from the
+encoder by the card type, so the sibling Iris encoder cannot be selected
+merely because its number happens to sort first. An explicit
+`LIBVA_V4L2_VIDEO_PATH` remains available for a checked diagnostic override.
+`v4l2-ctl` from v4l-utils is therefore a runtime dependency of the
+diagnostics.
 
-Check the installed driver without a build-tree path override:
+Three commands are installed, and none of them carries a second copy of the
+node rule: `iris-device-check` and `iris-verify` both source that file, so a
+boot that renumbers the nodes changes nothing in them. `iris-device-check` is
+read-only and reports
+the device-tree node, the bound driver, the module hash, the firmware, each
+queue's coded formats, which optional kernel controls are present, and whether
+libva opens the driver with no environment set. `iris-verify` generates its own
+clip and checks that a decode and an encode each move the Iris interrupt
+counter, that the encoded stream decodes, and that mpv reaches the native V4L2
+path. `iris-configure-clients` writes `hwdec=vaapi` and the Firefox VA pref into
+the invoking user's home only.
+
+Check the installed driver with nothing set at all. This is the property the
+package ships: libva resolves the driver through the `msm_drv_video.so` alias,
+and the driver resolves its own node.
 
 ```sh
-node=$(iris-vaapi-browser --print-node)
-env -u LIBVA_DRIVERS_PATH \
-  LIBVA_DRIVER_NAME=v4l2 \
-  LIBVA_V4L2_VIDEO_PATH="$node" \
-  vainfo
+env -u LIBVA_DRIVERS_PATH -u LIBVA_DRIVER_NAME -u LIBVA_V4L2_VIDEO_PATH vainfo
 ```
 
-The desktop entry, `Google Chrome (Iris VA-API)`, uses Wayland and passes no video-decoder feature
-override at all:
-
-```text
---ozone-platform=wayland
-```
-
-The entry uses a profile below `${XDG_CONFIG_HOME:-$HOME/.config}/iris-vaapi-browser`; this
-isolation ensures a pre-existing ordinary browser process cannot absorb a new
-URL while silently ignoring the requested GPU flags. Set
-`IRIS_BROWSER_PROFILE_ROOT` only when a different durable profile location is
-needed.
+There is no launcher and no desktop entry. An earlier revision shipped both,
+and the launcher exported `LIBVA_DRIVER_NAME`, both node paths, and an isolated
+`--user-data-dir`. A desktop start then behaved differently from a terminal
+start, and the isolated profile meant a user who clicked the entry got a
+browser with no bookmarks and no login state. Chrome needs none of it: measured
+on the qualified target with `LIBVA_DRIVER_NAME` and both node overrides
+removed, `--type=gpu-process` maps `/usr/lib64/dri/v4l2_drv_video.so` and holds
+the decoder node while a clip plays. `test/iris-browser-acceptance.sh` launches
+the browser directly and samples the holders during playback, so the same
+claim is re-checked on every run.
 
 ### Browser acceptance gate
 
@@ -170,8 +179,9 @@ Also record decoded/dropped frame counts, confirm the Iris V4L2 context and
 OUTPUT/CAPTURE activity in a trace-enabled diagnostic run, and compare the
 device boot ID before and after. Small videos may fall below Chromium's
 hardware-decoder performance threshold, so a low-resolution
-`FFmpegVideoDecoder` result is not a release verdict. H.264, HEVC and VP9
-are the qualified VA profiles; AV1 is opt-in (see README). Validate Google
+`FFmpegVideoDecoder` result is not a release verdict. H.264, HEVC, VP9 and
+AV1 are the qualified VA profiles (each with its own caveat in the README).
+Validate Google
 Chrome; Fedora's Chromium decodes through its own native V4L2 stack and its
 result says nothing about this driver.
 
@@ -197,14 +207,13 @@ rpmbuild -ba packaging/fedora/libva-v4l2-iris.spec \
     --define "tracked_sha256 $(git ls-files -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
 ```
 
-Both declare `v4l-utils` as a hard runtime dependency. The launcher resolves
-the decoder node by driver name because the number moves between boots on this
-device, and without `v4l2-ctl` it exits instead of falling back to a fixed
-`/dev/videoN` that may be a camera.
+Both declare `v4l-utils` as a hard runtime dependency. The diagnostic commands
+resolve the decoder node by driver name because the number moves between boots
+on this device, and without `v4l2-ctl` they exit instead of falling back to a
+fixed `/dev/videoN` that may be a camera.
 
-Google Chrome is not a dependency. The desktop entry names the browser in
-`TryExec`, so on a system without Chrome the entry hides itself instead of
-appearing in the menu and failing on click.
+No browser is a dependency, and no browser is configured. The driver is useful
+to any VA-API client, and libva resolves it through the alias without help.
 
 Which browser benefits differs by distribution. On Fedora 44, Chromium
 151.0.7922.169 already decodes in hardware through Chromium's own native V4L2
@@ -215,7 +224,18 @@ the one that moves from `FFmpegVideoDecoder` to `VaapiVideoDecoder`.
 `test/iris-packaging-check.sh` runs in CI and fails when a shipped desktop
 entry is missing from the spec's `%files`, when a manifest stops delegating to
 `install-system.sh`, when `TryExec` disagrees with the browser the entry
-launches, or when `v4l-utils` is dropped.
+launches, when `v4l-utils` is dropped, or when one of the three diagnostics
+stops being installed beside the launcher.
+
+There is no Debian or Ubuntu package. Building on those distributions wants
+`libgbm-dev`, which is a Mesa package pinned to an exact `libgbm1`; installing
+it can downgrade a vendor-patched graphics stack on a device whose Mesa came
+from the vendor. The build needs only the headers, `gbm.pc` and the
+`libgbm.so` link-time symlink, and Meson treats GBM as optional
+(`meson.build:47-48`): without it the driver builds with the CPU copy engine
+and the GPU blit path in `iris/gpu_copy.cc` is not compiled in. That is a
+slower Copy policy, not a broken build, and it is not the configuration any
+record in `TEST-RESULTS.md` measured.
 
 For the Arch image projects, drop `packaging/arch/PKGBUILD` into the image
 repository's `pkgs/libva-v4l2-iris/` directory and add it to the package list.

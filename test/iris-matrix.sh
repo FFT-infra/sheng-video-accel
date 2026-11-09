@@ -56,6 +56,8 @@ run_va() {
         2>"$trace"
     if [ "$eos_mode" = allow-bounded-sync ]; then
         test/iris-eos-check.sh "$trace" "$frames" --allow-bounded-sync
+    elif [ "$eos_mode" = hidden-pictures ]; then
+        test/iris-eos-check.sh "$trace" "$frames" --hidden-pictures
     else
         test/iris-eos-check.sh "$trace" "$frames"
     fi
@@ -121,7 +123,10 @@ if has_format AV01; then
     else
         echo "SKIP av1 baseline-gstreamer-unavailable"
     fi
-    echo "SKIP av1 va=tile-payload-vs-stateful-obu-contract"
+    # The stream carries alt-ref pictures, which the driver submits and
+    # publishes but which the client displays through show_existing_frame, so
+    # the trace has more pictures than output frames.
+    run_va av1 "$root/test-av1.webm" "" hidden-pictures
 else
     echo "SKIP av1 device-format-unavailable"
 fi

@@ -90,8 +90,12 @@ void SlotPool::allocate_output(unsigned count)
 
 void SlotPool::release_capture()
 {
-    for (const auto& frame : capture_)
-        require(frame.use_count() == 1, "CAPTURE slot still held during release");
+    // A slot a client still holds is not a reason to wait: each Frame owns
+    // the DMA-BUF it was exported from, and vb2's dmabuf keeps a reference
+    // on the vb2 buffer, so REQBUFS(0) detaches the buffer while the pages
+    // stay alive for as long as the holder keeps the Frame. Verified on the
+    // target: REQBUFS(0) succeeds with an exported fd open and the old
+    // mapping reads back unchanged after the new pool is allocated.
     capture_.clear();
     device_.request_buffers(Queue::Capture, 0,
         capture_memory_ == CaptureMemory::Import ? V4L2_MEMORY_DMABUF : V4L2_MEMORY_MMAP);
@@ -156,6 +160,14 @@ uint64_t SlotPool::take_import_token(unsigned index)
     const uint64_t token = capture_[index]->import_token_;
     capture_[index]->import_token_ = 0;
     return token;
+}
+
+unsigned SlotPool::capture_queued_for(uint64_t token) const
+{
+    unsigned count = 0;
+    for (const auto& frame : capture_)
+        count += (frame->queued_ && frame->import_token_ == token) ? 1 : 0;
+    return count;
 }
 
 void SlotPool::queue_capture_scratch()

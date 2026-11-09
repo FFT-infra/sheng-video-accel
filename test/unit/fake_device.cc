@@ -21,6 +21,12 @@ std::string FakeDevice::joined_log() const
 
 FormatInfo FakeDevice::get_format(Queue queue)
 {
+    note(std::string("G_FMT ") + (queue == Queue::Output ? "OUTPUT" : "CAPTURE"));
+    return current_format(queue);
+}
+
+FormatInfo FakeDevice::current_format(Queue queue)
+{
     FormatInfo info;
     if (queue == Queue::Output) {
         info.pixelformat = V4L2_PIX_FMT_H264;
@@ -53,8 +59,11 @@ FormatInfo FakeDevice::set_format(Queue queue, const FormatInfo& request)
         return granted;
     }
     require(!capture_on_, "fake: S_FMT CAPTURE while streaming");
-    FormatInfo granted = get_format(Queue::Capture);
-    granted.pixelformat = request.pixelformat;
+    FormatInfo granted = current_format(Queue::Capture);
+    // The kernel substitutes a format it does not support with what is
+    // already there, so a P010 request against this NV12 node is granted
+    // NV12: the session must notice and stay on its G_FMT answer.
+    granted.pixelformat = request.pixelformat == V4L2_PIX_FMT_P010 ? V4L2_PIX_FMT_NV12 : request.pixelformat;
     return granted;
 }
 
@@ -208,6 +217,12 @@ void FakeDevice::queue_buffer_dmabuf(Queue queue, unsigned index, int dmabuf_fd,
         close(capture_fds_[index]);
     capture_fds_[index] = dup(dmabuf_fd);
     note("QBUF CAPTURE DMABUF " + std::to_string(index) + " fd=" + std::to_string(dmabuf_fd));
+    if (drc_last_pending_) {
+        drc_last_pending_ = false;
+        drc_last_sent_ = true;
+        emit_last(index);
+        return;
+    }
     if (last_pending_) {
         emit_last(index);
         return;
@@ -255,6 +270,7 @@ void FakeDevice::stream(Queue queue, bool on)
     capture_on_ = on;
     if (on) {
         drc_blocked_ = false;
+        drc_last_sent_ = false;
         stopped_ = false;
     } else {
         capture_queue_.clear();
@@ -270,6 +286,25 @@ Event FakeDevice::dequeue_event()
     if (source_change_pending_) {
         source_change_pending_ = false;
         note("EVENT SOURCE_CHANGE");
+        // A mid-stream source change is an implicit drain (dev-decoder.rst
+        // "Dynamic Resolution Change"): the kernel finishes the pictures from
+        // before the change and marks the boundary with LAST on a CAPTURE
+        // buffer, without any decoder STOP. The bring-up source change is not
+        // a drain and carries no LAST; the kernel models the two as
+        // IRIS_INST_SUB_FIRST_IPSC and IRIS_INST_SUB_DRC_LAST. The marker may
+        // be empty and belongs to no picture, so it borrows a free slot, or
+        // the next one queued when an import pool has none.
+        if (drc_change_ && !drc_last_sent_) {
+            if (!capture_queue_.empty()) {
+                const unsigned slot = capture_queue_.front();
+                capture_queue_.pop_front();
+                emit_last(slot);
+                drc_last_sent_ = true;
+            } else {
+                drc_last_pending_ = true;
+            }
+        }
+        drc_change_ = false;
         return Event::SourceChange;
     }
     return Event::None;
@@ -365,6 +400,7 @@ void FakeDevice::complete_one()
         config_.stride = pending_drc_->first;
         pending_drc_.reset();
         source_change_pending_ = true;
+        drc_change_ = true;
         output_queue_.push_front(au);
         --decoded_since_stream_;
         drc_blocked_ = true;
@@ -380,6 +416,22 @@ void FakeDevice::complete_one()
         marker.timestamp_us = 0;
         marker.bytesused = 0;
         capture_done_.push_back(marker);
+    }
+    if (timestamped_errors_ > 0 && !capture_queue_.empty()) {
+        // A kernel with packaging/kernel/0004-* keeps the firmware timestamp
+        // on an error completion, so the client can name the failed picture.
+        --timestamped_errors_;
+        const unsigned slot = capture_queue_.front();
+        capture_queue_.pop_front();
+        Dequeued corrupt;
+        corrupt.index = slot;
+        corrupt.flags = V4L2_BUF_FLAG_ERROR | timestamped_error_flags_;
+        corrupt.timestamp_us = au.timestamp;
+        corrupt.bytesused = 0;
+        capture_done_.push_back(corrupt);
+        output_done_.push_back(au.index);
+        output_done_flags_.push_back(0);
+        return;
     }
     if (config_.display_order_reorder && !stopped_) {
         // Hold this picture: display-order firmware withholds a decoded
@@ -403,6 +455,15 @@ void FakeDevice::complete_one()
         return;
     }
     require(!capture_queue_.empty(), "fake: no free CAPTURE slot for completion");
+    if (altref_superframe_ && capture_queue_.size() < 2) {
+        // The firmware will not return the invisible half until it has a slot
+        // for the visible one; the picture waits in the OUTPUT queue instead
+        // of completing. This is the ~500 ms stall a one-buffer Import window
+        // produced on the target, modelled rather than timed.
+        output_queue_.push_front(au);
+        --decoded_since_stream_;
+        return;
+    }
     unsigned slot = capture_queue_.front();
     if (misorder_ > 0 && capture_queue_.size() > 1) {
         // Model a firmware that does not fill CAPTURE in QBUF order.
@@ -410,6 +471,22 @@ void FakeDevice::complete_one()
         slot = capture_queue_[1];
         capture_queue_.erase(capture_queue_.begin() + 1);
     } else {
+        capture_queue_.pop_front();
+    }
+    if (altref_superframe_) {
+        // A VP9 alt-ref is one VA picture the firmware decodes as two: the
+        // invisible frame completes first with the ERROR flag, no
+        // picture-type bit and no payload, under the same token the visible
+        // one will carry. Only the second completion has pixels.
+        altref_superframe_ = false;
+        Dequeued invisible;
+        invisible.index = slot;
+        invisible.flags = V4L2_BUF_FLAG_ERROR;
+        invisible.timestamp_us = au.timestamp;
+        invisible.bytesused = 0;
+        capture_done_.push_back(invisible);
+        require(!capture_queue_.empty(), "fake: no free CAPTURE slot for the visible frame");
+        slot = capture_queue_.front();
         capture_queue_.pop_front();
     }
     Dequeued done;

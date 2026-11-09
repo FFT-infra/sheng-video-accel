@@ -21,6 +21,10 @@ namespace iris {
 
 enum class Queue { Output, Capture };
 
+// Iris exposes two M2M nodes with the same driver name: the decoder takes a
+// compressed OUTPUT format, the encoder produces a compressed CAPTURE one.
+enum class NodeRole { Decoder, Encoder };
+
 struct FormatInfo {
     uint32_t pixelformat = 0;
     unsigned width = 0;
@@ -64,6 +68,9 @@ public:
     virtual FormatInfo get_format(Queue queue) = 0;
     virtual FormatInfo set_format(Queue queue, const FormatInfo& request) = 0;
     virtual std::optional<Selection> get_compose(Queue queue) = 0;
+    // Encoder only: V4L2_SEL_TGT_CROP on the single-planar OUTPUT queue.
+    // This is what makes the coded size the visible size.
+    virtual void set_crop(unsigned left, unsigned top, unsigned width, unsigned height) = 0;
     virtual bool format_supported(Queue queue, uint32_t pixelformat) = 0;
 
     // Controls.
@@ -93,19 +100,27 @@ public:
 
     // Streaming and commands.
     virtual void stream(Queue queue, bool on) = 0;
+    // Encoder only. `num`/`den` are the frame rate in frames per second;
+    // V4L2 stores the inverse, a per-frame interval. CAPTURE sets the rate
+    // the firmware rates against; OUTPUT sets the operating rate, which only
+    // affects power and clocking.
+    virtual void set_frame_rate(Queue queue, unsigned num, unsigned den) = 0;
     virtual void subscribe(uint32_t event_type) = 0;
     virtual Event dequeue_event() = 0;
     // Returns false on EBUSY (retryable), true on success, throws otherwise.
     virtual bool decoder_command(uint32_t cmd) = 0;
+    virtual bool encoder_command(uint32_t cmd) = 0;
 
     // Wait for POLLIN/POLLPRI/POLLOUT activity; returns revents or 0 on timeout.
     virtual short poll(short events, int timeout_ms) = 0;
 };
 
-// Open the Iris decoder node. With an explicit path the node is verified to
-// be an iris_driver M2M decoder; otherwise /dev/video* is scanned for the
-// first node whose QUERYCAP driver is "iris_driver" and which enumerates a
-// compressed OUTPUT format. Cameras never match.
-std::unique_ptr<Device> open_device(const std::string& explicit_path);
+// Open an Iris codec node. With an explicit path the node is verified to be
+// an iris_driver M2M node of the requested role; otherwise /dev/video* is
+// scanned. The decoder is the node that enumerates a compressed OUTPUT
+// format, the encoder the one that enumerates a compressed CAPTURE format.
+// Cameras never match.
+std::unique_ptr<Device> open_device(
+    const std::string& explicit_path, NodeRole role = NodeRole::Decoder);
 
 } // namespace iris

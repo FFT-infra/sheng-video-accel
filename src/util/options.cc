@@ -35,6 +35,8 @@ Options Options::from_environment()
     Options options;
     if (const char* path = env("LIBVA_V4L2_VIDEO_PATH"))
         options.video_path = path;
+    if (const char* path = env("LIBVA_V4L2_ENCODER_PATH"))
+        options.encoder_path = path;
     options.trace = env("V4L2_VA_TRACE") != nullptr;
     if (auto timeout = env_long("V4L2_VA_SYNC_TIMEOUT_MS")) {
         options.sync_timeout_ms = static_cast<int>(std::clamp(*timeout, 50L, 60000L));
@@ -52,7 +54,6 @@ Options Options::from_environment()
     }
     if (const char* dump = env("V4L2_VA_DUMP"))
         options.dump_dir = dump;
-    options.experimental_profiles = env("V4L2_VA_EXPERIMENTAL_PROFILES") != nullptr;
     return options;
 }
 

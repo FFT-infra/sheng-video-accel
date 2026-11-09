@@ -53,7 +53,7 @@ mkdir -p "$dump"
 # The hardware result is checked elsewhere; this run exists to make the
 # driver emit its reconstruction, so its own output is discarded.
 LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH="$driver_path" LIBVA_V4L2_VIDEO_PATH="$device" \
-    V4L2_VA_EXPERIMENTAL_PROFILES=1 V4L2_VA_DUMP="$dump" \
+    V4L2_VA_DUMP="$dump" \
     ffmpeg -y -hide_banner -loglevel error -vaapi_device /dev/dri/renderD128 \
     -hwaccel vaapi -hwaccel_output_format vaapi -i "$source" -f null - \
     >"$root/driver.log" 2>&1 || true

@@ -123,9 +123,14 @@ void test_open_sequence()
     Target t;
     h.submit(t);
     CHECK(log_index(fake, "QBUF OUTPUT 0") < log_index(fake, "EVENT SOURCE_CHANGE"));
-    CHECK(log_index(fake, "EVENT SOURCE_CHANGE") < log_index(fake, "S_FMT CAPTURE"));
-    CHECK(log_index(fake, "S_FMT CAPTURE") < log_index(fake, "REQBUFS CAPTURE"));
+    CHECK(log_index(fake, "EVENT SOURCE_CHANGE") < log_index(fake, "G_FMT CAPTURE"));
+    CHECK(log_index(fake, "G_FMT CAPTURE") < log_index(fake, "REQBUFS CAPTURE"));
     CHECK(log_index(fake, "REQBUFS CAPTURE") < log_index(fake, "STREAMON CAPTURE"));
+    // The driver's own format is the one the firmware will decode at; the
+    // session must not second-guess it with an S_FMT when it already matches
+    // (docs/architecture.md §4: the DRC resume publishes the geometry the
+    // driver derived from the bitstream).
+    CHECK(!log_has(fake, "S_FMT CAPTURE"));
     CHECK(h.session->state() == SessionState::Streaming);
     // Pool: 16 surfaces + 4 headroom -> clamp to 32 minimum.
     CHECK(fake.capture_allocated() == 32);
@@ -268,6 +273,85 @@ void test_output_error_fails_target()
     CHECK_THROWS(h.session->wait(b), VA_STATUS_ERROR_DECODING_ERROR);
 }
 
+void test_timestamped_corrupt_completion_fails_target_at_once()
+{
+    // With packaging/kernel/0004-* an error completion keeps its timestamp,
+    // so the failed picture is named and its surface fails on the spot. The
+    // stock behavior — no token, wait for the drain — is covered by
+    // test_firmware_error_marker_is_never_published. A rejected picture
+    // carries a picture-type bit (the truncated HEVC in TEST-RESULTS came
+    // back as 0x4049, ERROR|KEYFRAME); that bit is what separates it from
+    // the invisible half of a VP9 alt-ref superframe.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    Target a;
+    h.submit(a);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(a.completed && !a.error);
+    h.fake->inject_timestamped_errors(1, V4L2_BUF_FLAG_KEYFRAME);
+    Target b;
+    h.submit(b);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(!b.pending && b.error);
+    CHECK(h.session->stats().errors == 1);
+    // The target is failed before any drain: a wait reports the decode error,
+    // not a timeout, and no STOP was needed to get there.
+    CHECK_THROWS(h.session->wait(b), VA_STATUS_ERROR_DECODING_ERROR);
+    CHECK(!log_has(*h.fake, "DECODER_CMD STOP"));
+}
+
+void test_timestamped_hidden_picture_is_published_not_failed()
+{
+    // An AV1 alt-ref is a decoded picture the stream never shows. It carries
+    // the ERROR flag, no picture-type bit and no payload. On a kernel with
+    // 0004 it also carries its timestamp, and it must still be published
+    // rather than failed.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    Target a;
+    h.submit(a);
+    h.fake->tick(1);
+    h.session->service();
+    h.fake->inject_timestamped_errors(1);
+    Target b;
+    b.hidden = true;
+    h.submit(b);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(b.completed && !b.error);
+    CHECK(h.session->stats().errors == 0);
+}
+
+void test_vp9_altref_superframe_is_one_picture()
+{
+    // A VP9 alt-ref access unit is one VA picture that the firmware decodes
+    // as two: an invisible frame that completes with the ERROR flag, no
+    // picture-type bit and no payload, then the visible frame under the same
+    // token. On a kernel with 0004 the invisible completion carries its
+    // timestamp, so it looks exactly like a named corrupt picture unless the
+    // shape says otherwise. It must not fail the target: the pixels arrive
+    // on the second completion, and dropping the target turns the real frame
+    // into a misplaced drop.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    Target a;
+    h.submit(a);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(a.completed && !a.error);
+    h.fake->inject_altref_superframe();
+    Target b;
+    b.completions = 2;
+    h.submit(b);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(b.completed && !b.error);
+    CHECK(h.session->stats().errors == 0);
+    CHECK(h.session->stats().drops == 0);
+}
+
 void test_eio_fails_session_and_all_pending()
 {
     Harness h;
@@ -384,22 +468,28 @@ void test_resolution_change_rebuilds_capture()
     CHECK(h.session->stats().reconfigures == 1);
     CHECK(h.session->width() == 1280 && h.session->height() == 720);
     const auto& fake = *h.fake;
-    // STOP -> LAST -> STREAMOFF CAPTURE -> REQBUFS 0 -> S_FMT -> REQBUFS -> STREAMON.
-    const size_t stop = log_index(fake, "DECODER_CMD STOP");
+    // SOURCE_CHANGE is the implicit drain, so the boundary LAST arrives with
+    // the event and no decoder STOP follows: STREAMOFF CAPTURE -> REQBUFS 0 ->
+    // S_FMT -> REQBUFS -> STREAMON. A STOP here would ask the firmware for a
+    // second drain it never finishes, which is what stranded a real AV1
+    // stream at its resolution change.
+    CHECK(!log_has(fake, "DECODER_CMD STOP"));
+    const size_t change = log_index(fake, "EVENT SOURCE_CHANGE");
     const size_t off = log_index(fake, "STREAMOFF CAPTURE");
-    CHECK(stop < off);
+    CHECK(change < off);
     CHECK(log_has(fake, "REQBUFS CAPTURE 0"));
     // OUTPUT was never stopped.
     CHECK(!log_has(fake, "STREAMOFF OUTPUT"));
     CHECK(h.session->state() == SessionState::Streaming);
 }
 
-void test_resolution_change_waits_for_held_frames()
+void test_resolution_change_keeps_held_frames()
 {
     // A Direct client still displaying an old-geometry frame must not lose
-    // the session: the change is deferred until it releases, submits are
-    // refused with SURFACE_BUSY meanwhile, and the new-resolution picture
-    // that triggered the change still decodes afterwards.
+    // the session and must not have to release it first: the change is
+    // usually triggered by that same client submitting the new-resolution
+    // picture, so waiting for a release would wait on the caller. vb2 orphans
+    // the old buffer, so the pool is rebuilt under the holder.
     Harness h;
     Target a;
     h.submit(a);
@@ -409,16 +499,14 @@ void test_resolution_change_waits_for_held_frames()
     h.submit(b);
     h.fake->tick(1); // firmware parses the new-resolution AU
     h.session->service(); // and the session sees SOURCE_CHANGE
-    CHECK(h.session->state() == SessionState::Reconfiguring);
-    CHECK(b.pending); // its OUTPUT is still queued: not lost
-    Target c;
-    CHECK_THROWS(h.submit(c), VA_STATUS_ERROR_SURFACE_BUSY);
-    CHECK(a.frame != nullptr); // the held frame survived untouched
-    h.session->release(a);
     CHECK(h.session->state() == SessionState::Streaming);
-    CHECK(h.session->width() == 1280);
+    CHECK(b.pending); // its OUTPUT is still queued: not lost
+    CHECK(a.frame != nullptr); // the held frame survived untouched
     h.session->wait(b);
     CHECK(b.completed && !b.error);
+    CHECK(h.session->width() == 1280);
+    h.session->release(a);
+    CHECK(h.session->state() == SessionState::Streaming);
 }
 
 // --- misc ------------------------------------------------------------------
@@ -513,8 +601,11 @@ void test_import_queues_client_buffer_per_picture()
     CHECK(h.session->capture_memory() == CaptureMemory::Import);
     CHECK(log_has(*h.fake, "REQBUFS CAPTURE 32 DMABUF"));
     CHECK(h.fake->capture_memory() == V4L2_MEMORY_DMABUF);
-    // The first picture's buffer went in before CAPTURE streamed.
-    CHECK(h.fake->joined_log().find("QBUF CAPTURE DMABUF 0 fd=") < h.fake->joined_log().find("STREAMON CAPTURE"));
+    // CAPTURE streams before the first picture's buffer goes in: the kernel
+    // only clears the DRC boundary sub-state in iris_process_streamon_output,
+    // and a CAPTURE QBUF that arrives first is completed as an empty LAST
+    // instead of being handed to the firmware.
+    CHECK(h.fake->joined_log().find("STREAMON CAPTURE") < h.fake->joined_log().find("QBUF CAPTURE DMABUF 0 fd="));
     h.session->wait(ta);
     CHECK(ta.completed && !ta.error && ta.frame == nullptr);
     CHECK(same_buffer(h.fake->capture_fd(0), a.fd));
@@ -660,6 +751,82 @@ void test_import_resolution_change_rebuilds_import_pool()
     CHECK(log_has(*h.fake, "REQBUFS CAPTURE 0 DMABUF"));
 }
 
+void test_import_altref_gets_a_buffer_per_completion()
+{
+    // The firmware decodes a VP9 alt-ref superframe as two pictures and does
+    // not return the invisible half before it has a slot for the visible
+    // one. An Import pool that lent the picture one buffer therefore stalled
+    // on every alt-ref (~500 ms measured on the target, TEST-RESULTS.md
+    // 2026-09-22). Both halves land in the same client buffer, so lending it
+    // twice keeps the firmware's choice empty while giving it the room it
+    // needs.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    const Layout layout = capture_layout_of({});
+    ClientBuffer a(layout), b(layout);
+    Target ta, tb;
+    ta.publish = tb.publish = Publish::Import;
+    ta.destination = a.stable.get();
+    tb.destination = b.stable.get();
+    h.submit(ta);
+    h.fake->tick(1);
+    h.session->wait(ta);
+    h.fake->inject_altref_superframe();
+    tb.completions = 2;
+    h.submit(tb);
+    // Two slots, both carrying the same client buffer, and nothing of the
+    // next picture.
+    CHECK(h.session->capture_queued() == 2);
+    CHECK(same_buffer(h.fake->capture_fd(0), b.fd));
+    CHECK(same_buffer(h.fake->capture_fd(1), b.fd));
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(tb.completed && !tb.error);
+    CHECK(h.session->stats().errors == 0);
+    CHECK(h.session->stats().misplaced == 0);
+    CHECK(h.session->capture_queued() == 0);
+}
+
+void test_import_altref_does_not_stall_the_next_picture()
+{
+    // With one buffer lent per picture, an alt-ref held the window: the next
+    // picture's buffer could not be queued until the first completion came
+    // back, and that completion needed the second half's slot. Nothing
+    // completes, so the session times out. Two buffers for the superframe
+    // and one picture at a time is what removes the deadlock.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    const Layout layout = capture_layout_of({});
+    ClientBuffer a(layout), b(layout), c(layout);
+    Target ta, tb, tc;
+    ta.publish = tb.publish = tc.publish = Publish::Import;
+    ta.destination = a.stable.get();
+    tb.destination = b.stable.get();
+    tc.destination = c.stable.get();
+    h.submit(tc);
+    h.fake->tick(1);
+    h.session->wait(tc);
+    h.fake->inject_altref_superframe();
+    ta.completions = 2;
+    h.submit(ta);
+    h.submit(tb);
+    // Still only the alt-ref's two buffers: the next picture waits its turn.
+    CHECK(h.session->capture_queued() == 2);
+    CHECK(same_buffer(h.fake->capture_fd(0), a.fd));
+    CHECK(same_buffer(h.fake->capture_fd(1), a.fd));
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(ta.completed && !ta.error);
+    // Its buffers came back, so the next picture's may go in.
+    CHECK(h.session->capture_queued() == 1);
+    CHECK(same_buffer(h.fake->capture_fd(0), b.fd) || same_buffer(h.fake->capture_fd(1), b.fd));
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(tb.completed && !tb.error);
+    CHECK(h.session->stats().misplaced == 0);
+}
+
+
 } // namespace
 
 int main()
@@ -678,13 +845,17 @@ int main()
         { "reuse of pending target invalidates old token", test_reuse_pending_target_invalidates_old_token },
         { "firmware error marker is never published", test_firmware_error_marker_is_never_published },
         { "output error fails target", test_output_error_fails_target },
+        { "timestamped corrupt completion fails target at once",
+            test_timestamped_corrupt_completion_fails_target_at_once },
+        { "timestamped hidden picture is published", test_timestamped_hidden_picture_is_published_not_failed },
+        { "VP9 alt-ref superframe is one picture", test_vp9_altref_superframe_is_one_picture },
         { "EIO fails session and all pending", test_eio_fails_session_and_all_pending },
         { "decode-order timeout is terminal", test_decode_order_timeout_is_terminal },
         { "display-order timeout drains then recovers", test_display_order_timeout_drains_then_recovers },
         { "START EBUSY is retried", test_start_ebusy_is_retried },
         { "finish drains and refuses submit", test_finish_drains_and_refuses_submit },
         { "resolution change rebuilds capture", test_resolution_change_rebuilds_capture },
-        { "resolution change waits for held frames", test_resolution_change_waits_for_held_frames },
+        { "resolution change keeps held frames", test_resolution_change_keeps_held_frames },
         { "AU larger than slot is rejected", test_au_larger_than_slot_is_rejected },
         { "visible rectangle prefers sane kernel compose", test_visible_rectangle_prefers_kernel_compose_when_sane },
         { "stable layout", test_stable_layout },
@@ -695,6 +866,8 @@ int main()
         { "import rejected on a layout mismatch", test_import_rejected_on_layout_mismatch },
         { "import drain lends a scratch buffer for LAST", test_import_drain_lends_scratch_for_last },
         { "import resolution change rebuilds the import pool", test_import_resolution_change_rebuilds_import_pool },
+        { "import alt-ref gets a buffer per completion", test_import_altref_gets_a_buffer_per_completion },
+        { "import alt-ref does not stall the next picture", test_import_altref_does_not_stall_the_next_picture },
     };
     int ran = 0;
     for (const auto& c : cases) {

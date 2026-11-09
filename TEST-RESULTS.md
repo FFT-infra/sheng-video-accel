@@ -106,13 +106,12 @@ and replacement endpoints without exposing private network addresses.
 - HEVC is advertised automatically when the node exposes stateful HEVC. The VA
   long format does not carry the original VPS/SPS/PPS, so the driver generates
   parameter sets from VA metadata; this path passes the strict 48-frame
-  content/EOS matrix and repeated cold-start runs on both SM8550 tablets. Set
-  `V4L2_VA_DISABLE_HEVC_STATEFUL=1` for firmware with a non-standard contract.
-- AV1 VA is deliberately disabled by default. FFmpeg's VA-API path supplies
-  tile payloads (the first byte is not an OBU header), while Iris stateful AV1
-  requires a complete temporal-unit OBU stream. The experimental translator
-  can be enabled with `V4L2_VA_ENABLE_AV1_STATEFUL=1`, but native V4L2 AV1 is
-  the only passing AV1 path until an OBU-preserving VA caller is available.
+  content/EOS matrix and repeated cold-start runs on both SM8550 tablets.
+- AV1 is advertised automatically when the node exposes stateful AV1. The
+  translator rebuilds complete temporal units from the VA tile payloads, so
+  the OBU requirement recorded here earlier is met by the driver and not by
+  the caller. `src/util/options.cc` no longer reads a switch for either codec;
+  the qualified AV1 record is the 2026-10-22 section below.
 
 ## Deployment note
 
@@ -1020,6 +1019,33 @@ needs either firmware/kernel support for returning hidden pictures (a
 `DISPLAY_DELAY`-style control for AV1) or a VA client contract that
 tolerates missing completions; neither is a driver change.
 
+### AV1 recheck on the encode branch (2026-10-22)
+
+Re-run against `3b91519` with the same build as the encode section
+(`v4l2_drv_video.so` SHA-256
+`bb4549260f2c6d7b021889d3222e386cfe19735ea61282d93cf97c9e577daed9`,
+FFmpeg 8.1.3, 320x240, 30 frames, `V4L2_VA_SYNC_TIMEOUT_MS=500`). The
+failure comes before the hidden-frame gap and is not specific to alt-ref
+streams:
+
+| Clip | Result |
+| --- | --- |
+| libaom default (`auto-alt-ref` on) | `Error processing packet in decoder: Input/output error`, no frames |
+| `-lag-in-frames 0 -auto-alt-ref 0` | same error at the first download, no frames |
+
+The trace pins it at picture one: `va end_picture … deferred` is followed
+by `va error where=getImage … surface has no decoded pixels`, and the
+translator releases that picture only when its successor arrives
+(`submit token=1`). The one-picture hold is not removable — the VA AV1
+picture buffer carries no `refresh_frame_flags`, and the slot a picture
+writes is only visible in the next picture's reference map. Separately,
+the one access unit that was submitted produced no CAPTURE before STOP
+(`drain complete … output_queued=0`), the firmware deferral recorded
+above.
+
+AV1 VA decode therefore fails on the first picture of every stream on
+this firmware, alt-ref or not. The conclusion is unchanged: opt-in only.
+
 ## Phase 6: trimmed tree, packaged, installed (2026-09-20)
 
 The tree now contains only what the rebuilt driver ships (commit `069a58c`
@@ -1107,8 +1133,9 @@ passes through the driver (RASL pictures after the opening CRA are refused
 by the translator, so the output starts where the reference does) while
 the native GStreamer path emitted one frame fewer. `DELTAQP_A_BRCM_4`,
 `INITQP_B_Main10_Sony_1` and `PMERGE_E_TI_3` complete every frame with no
-firmware error but differ in pixels; they are the residual and were not
-chased further in this phase.
+firmware error but were recorded here as differing in pixels; the recheck
+of 2026-10-22 shows that was a measurement artifact and all three match
+byte for byte (see "HEVC conformance recheck" below).
 
 The HEVC parameter-set unit test is registered again (it had been dropped
 from `test/meson.build` in Phase 3).
@@ -1298,3 +1325,3492 @@ Chrome's own dropped-frame counts in those 30 s windows were 2, 2, 1 and 0.
   0 misplaced, 0 decode errors, `VaapiVideoDecoder`, GPU process holding
   the node, boot unchanged. The Import path is now the shipped default
   where the evidence allows it.
+
+## Encode entrypoint: H.264 and HEVC (2026-10-22)
+
+Implementation commit `f63afe0` on `feat/encode-entrypoints`. Target:
+Fedora 44 ARM64 on SM8550 (`sheng`), kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`32b1c05f-5043-4799-acd2-d4b0ec6f0e10` unchanged through every run.
+Decoder and encoder nodes resolved by the `iris_driver` QUERYCAP name:
+`/dev/video0` (`Iris Decoder`) and `/dev/video1` (`Iris Encoder`). The
+driver under test was `build-encode/src/v4l2_drv_video.so`, SHA-256
+`bb4549260f2c6d7b021889d3222e386cfe19735ea61282d93cf97c9e577daed9`,
+selected with `LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH=<build>/src`.
+No installed package was involved in this section.
+
+`vainfo` lists `VAEntrypointEncSlice` next to `VAEntrypointVLD` for H.264
+Constrained Baseline, Main and High and for HEVC Main. VP9 and AV1 get no
+encode entrypoint: the encoder node's CAPTURE queue enumerates H264 and
+HEVC only (`iris_venc.c`, `iris_venc_formats_cap`) and its raw queue NV12
+and QC08C (`iris_venc_formats_out`), so there is no hardware path to
+advertise.
+
+| Run | Frames in/out | Bytes | Iris IRQ delta |
+| --- | ---: | ---: | ---: |
+| `h264_vaapi` 1920x1080, 4 Mbit/s VBR, GOP 60 | 300/300 | 9,918,858 | 7441 → 8049 (+608) |
+| `hevc_vaapi` 1920x1080, 4 Mbit/s VBR, GOP 60 | 300/300 | 9,966,042 | 8050 → 8660 (+610) |
+| `h264_vaapi` 1920x1080, CBR 4 Mbit/s, High, level 4.1 | 300/300 | 4,988,651 | — |
+| `h264_vaapi` 1280x720, 2 Mbit/s VBR, GOP 30 | 120/120 | 2,003,275 | — |
+| `hevc_vaapi` 1280x720, 2 Mbit/s VBR, GOP 30 | 120/120 | 2,005,117 | — |
+| `h264_vaapi` 640x360, 1 Mbit/s VBR, GOP 15 | 30/30 | 118,372 (last run of the loop below) | — |
+
+Every stream decodes with `ffmpeg -v error -i <out> -f null -` and reports
+the requested geometry, profile and level:
+
+- H.264 VBR: High, level 4.0, 1920x1080, 300 frames. Key frames at 0, 61,
+  122, 183, 244: the firmware counts the IDR inside `GOP_SIZE`, so
+  programming `intra_period` directly put them one frame late. The session
+  now programs `intra_period - 1`; the acceptance run below shows
+  0, 60, 120, 180, 240.
+- H.264 CBR with `-profile:v high -level 4.1`: High, level 4.1,
+  1920x1080, 300 frames. The byte count is 3.99 Mbit/s over the 10 s of
+  content, which is the requested CBR target.
+- HEVC VBR: Main, level 4.0, 1920x1080, 300 frames.
+- 720p: both codecs report 1280x720, 120 frames. The raw port was
+  aligned to 1280x736 and the crop kept the SPS at 720 lines.
+- 640x360: 640x360, 30 frames.
+
+The SPS VUI carries `num_units_in_tick=2097152`, `time_scale=125829120`
+(30 fps), which is what `S_PARM` on the CAPTURE queue produced. Raw
+H.264/HEVC demuxers report 25 fps because they do not read the VUI; the
+remux below shows the intended rate.
+
+Context lifetime: ten consecutive 720p `h264_vaapi` runs (create context,
+ten pictures, destroy) all exited 0 with no driver error in `dmesg`, and
+the last stream decodes clean.
+
+Remux with no extradata: `ffmpeg -framerate 30 -i enc.h264 -c copy
+enc.mp4` and the same for HEVC both produce MP4s whose `ffprobe` shows
+30 fps and non-zero extradata (46 and 127 bytes) built from the Annex-B
+parameter sets, and which decode without error.
+
+Negative results, as designed:
+
+- `-bf 2` is silently clamped by FFmpeg to no B frames; a client that
+  sends `ip_period > 1` gets `VA_STATUS_ERROR_INVALID_PARAMETER`.
+- `VAConfigAttribEncPackedHeaders` is `VA_ATTRIB_NOT_SUPPORTED`, so
+  FFmpeg warns "Driver does not support any packed headers (wanted
+  0xd)" once and continues with the firmware's own parameter sets.
+- A 16384x16384 source is rejected by `testsrc2` before the driver sees
+  it; the driver's own bound is the node's 8192.
+
+### Decode regression
+
+The encode work changes `vaDeriveImage` from a snapshot copy to a view
+over the surface's DMA-BUF, and changes node discovery. Both are
+decode-visible, so the decode gates ran again on the same build:
+
+| Gate | Result |
+| --- | --- |
+| `test/iris-matrix.sh` | H.264, HEVC and VP9 48/48 frames each, exact frame MD5 against the native V4L2 decoders; AV1 lane unchanged |
+| Chrome 152.0.7977.82, 20 s window, build-tree driver | H.264 `VaapiVideoDecoder`, platform=true, 599 frames, 4 dropped, GPU process holding the node; HEVC `VaapiVideoDecoder`, platform=true, 601 frames, 2 dropped |
+| Firefox 158.0, H.264 clip | VA session through the driver (`session open node=/dev/video0 codec=H264 1920x1088`, `submit`, `capture configure`), playback advanced to 13.7 s |
+| Chromium 152.0.7977.75 | `FFmpegVideoDecoder`, platform=false: the launcher's documented software fallback for Fedora Chromium ≥ 152, not a driver result |
+
+Firefox needed `LIBVA_V4L2_VIDEO_PATH` and `MOZ_DISABLE_RDD_SANDBOX=1`:
+with the RDD sandbox on, the driver's `/dev/video*` scan is denied in that
+process. That is a pre-existing sandbox boundary, not an encode change.
+
+**Correction (2026-10-24).** The sandbox is not what Firefox needs, and
+disabling it was never necessary. The driver globs `/dev/video*` only for a
+node whose path variable is unset: with `LIBVA_V4L2_VIDEO_PATH` and
+`LIBVA_V4L2_ENCODER_PATH` both set, `strace -f -e trace=openat` over
+`vainfo` shows exactly two opens, `/dev/video2` and `/dev/video3`, and no
+scan of the others. Only the decoder path was set in that old run, so the
+encoder probe had to glob, which a sandboxed process may be denied. The
+launcher now resolves both nodes and exports both paths
+(`scripts/iris-vaapi-browser`), so a client keeps the sandbox and still
+reaches the driver. Verified on the target: the launcher exports
+`LIBVA_V4L2_VIDEO_PATH=/dev/video2 LIBVA_V4L2_ENCODER_PATH=/dev/video3`,
+and under those two variables `vainfo` reports the same 12 entries
+(6 profiles x VLD and EncSlice) with two `openat` calls. Headless Firefox
+plays the clip without a VA session in either configuration, so this is a
+mechanism result from `strace` and `vainfo`, not a Firefox decode run.
+
+### What the traces showed
+
+- The SM8550 encoder firmware sends no frame info, so
+  `V4L2_BUF_FLAG_KEYFRAME` is always clear on a CAPTURE completion. The
+  `encode frame` record therefore carries no key flag; the IDR NAL in the
+  stream is the evidence.
+- FFmpeg renders the sequence parameter buffer with the IDR only. The
+  context retains that buffer, otherwise the second picture fails with
+  "no sequence parameters".
+- FFmpeg declares an aligned context (1920x1088) and feeds 1920x1080
+  frames. The encoder geometry therefore comes from the input surface,
+  with the context as the upper bound; a later surface of a different
+  size is rejected because the node has no `SOURCE_CHANGE`.
+
+### Piano acceptance: CQP, GOP cadence, decoded pixels (2026-10-22)
+
+The piano project's `scripts/verify-device-media.py` is the acceptance
+bar this driver has to clear: 300 frames of 1080p H.264 and HEVC through
+`h264_vaapi`/`hevc_vaapi` with no `-b:v` (FFmpeg selects CQP), MP4
+output, key frames at 0/60/120/180/240, and 300 decoded frames whose
+per-frame MD5 matches a software decode. The driver failed it twice
+before this run: `VA_RC_CQP` was not advertised, so the encoder would
+not open at all, and the IDRs landed at 61/122/... with `-g 60`.
+
+With CQP, the `intra_period - 1` GOP mapping, and the CAPTURE format
+re-set after the rate-control controls, on the same target:
+
+| Run | Result |
+| --- | --- |
+| `h264_vaapi`, 1920x1080, no bitrate, `-bf 0 -g 60`, 300 frames, MP4 | 17,138,094 bytes, Iris IRQ +610, key frames 0/60/120/180/240 |
+| `hevc_vaapi`, the same | 13,171,327 bytes, Iris IRQ +609, the same key frames |
+| `h264_v4l2m2m` decode of the H.264 file | 300 frames, every frame MD5 equal to the software decode, Iris IRQ +614 |
+| `h264_v4l2m2m` decode of the HEVC file | 300 frames, MD5 equal, Iris IRQ +840 |
+| `ffmpeg -hwaccel vaapi` (this driver) decode of the H.264 file | 300 frames, MD5 equal |
+
+Source `3b91519` plus the CQP/GOP change (uncommitted at the time of the
+run), driver `build-encode/src/v4l2_drv_video.so` SHA-256
+`5805975ab3338e4ebcefac6c126546bb0be015eb8c213be5fb983f3a53d28b33`,
+kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`32b1c05f-5043-4799-acd2-d4b0ec6f0e10` (unchanged).
+
+CQP honors the client QP: 60 frames of 1080p H.264 are 5,445,355 bytes
+at `-q:v 10`, 3,398,734 at the default and 244,736 at `-q:v 45`. FFmpeg
+still warns that no packed headers are advertised; MP4 muxing succeeds
+because the muxer derives `avcC`/`hvcC` from the Annex-B parameter sets
+in the stream, but the encoder offers no extradata at open time.
+
+Not covered: a per-picture IDR request (`-force_key_frames`, seeks). The
+running kernel has no `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`, so the
+periodic IDR is the only keyframe source.
+
+## Decode throughput and the build type (2026-10-22)
+
+A user-space cost measurement taken while investigating decode throughput.
+The clips are `/tmp/iris-enc/media/clip-{hevc,h264}.mp4`: 1920x1080, 900
+frames, decoded 300 frames each with `-hwaccel vaapi
+-hwaccel_output_format vaapi -f null`, so the frames stay on the VA surface
+and nothing is downloaded. Wall clock and CPU come from `-benchmark`; the
+native rows are `-c:v {hevc,h264}_v4l2m2m` timed with the shell.
+
+| Decoder | HEVC rtime / utime | H.264 rtime / utime |
+| --- | --- | --- |
+| This driver, `buildtype=debug` (`-O0`) | 6.569 s / 5.458 s | 1.132 s / 0.945 s |
+| This driver, `buildtype=debugoptimized` (`-O2`) | 0.453 s / 0.279 s | 0.515 s / 0.123 s |
+| Installed RPM driver (2026-09-02, `-O2`) | 0.607 s / 0.462 s | 0.514 s / 0.131 s |
+| `hevc_v4l2m2m` / `h264_v4l2m2m` | 0.624 s / 0.168 s | 0.673 s / 0.146 s |
+
+The same driver source at `-O0` is 14x slower on HEVC and 2.2x on H.264.
+On the whole 900-frame clip the optimised driver holds 778 fps on HEVC
+(1.156 s) and 637 fps on H.264 (1.414 s).
+Temporary timers inside `vaEndPicture` located the cost in
+`translator->translate` itself: 10.4 ms per HEVC frame at `-O0` against
+0.62 ms at `-O2`, with `submit` at 0.96 ms against 0.39 ms. The
+instrumentation was removed after the measurement.
+
+Meson's own default is `-O0`, so `meson setup build` as documented in the
+README produced an unoptimised driver. `meson.build` now sets
+`default_options: ['buildtype=debugoptimized']`. The installed RPM was
+built by rpmbuild's own flags and is optimised, so no browser result in
+this file changes; only source-tree builds were affected.
+
+Driver `build-def/src/v4l2_drv_video.so` SHA-256
+`9e2ecbafcd49dafcf17e23782b66bbf5d82e08d9ea8b8de5483d495aa4c256b8`,
+kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`32b1c05f-5043-4799-acd2-d4b0ec6f0e10`, decoder node resolved by
+`iris_driver` name as before.
+
+### 4K HEVC slice rewrite (2026-10-22)
+
+The 1080p throughput above hid a second problem. Synthetic 4K clips
+(testsrc2 3840x2160: H.264 from `libx264 -preset ultrafast -qp 20`,
+HEVC from `libx265 -preset ultrafast crf=22 keyint=60`) decoded 60
+frames bit-exactly through the VA path, with `hwdownload,format=nv12`
+and `format=nv12` on the reference decode so both sides hash the same
+layout:
+
+| Clip | VA frames matching software |
+| --- | --- |
+| 4K H.264, 60 frames | 60/60 |
+| 4K HEVC, 60 frames | 60/60 |
+
+Throughput was not. Ten copies of the HEVC clip concatenated (600
+frames, about 140 KB per slice) took 10.75 s, 9.06 s of it user CPU:
+56 fps against 233 fps for `hevc_v4l2m2m` on the same file.
+`HEVC::rewrite_slice` re-emits every slice because the original RPS
+cannot be reproduced by a generated SPS, and it did that one bit at a
+time through `BitWriter::bit` — 1.1 million calls per frame at that
+size.
+
+`BitReader::copy` now takes a whole-byte path when the reader position
+and the writer are both byte-aligned, through a new `BitWriter::append`;
+the reader also reserves the NAL size up front. The same 600 frames:
+
+| | rtime | utime | fps |
+| --- | --- | --- | --- |
+| Before | 10.750 s | 9.060 s | 56 |
+| After | 3.447 s | 2.581 s | 172 |
+| `hevc_v4l2m2m` | 2.572 s | 0.775 s | 233 |
+
+Timers inside `vaEndPicture` put `translate` at 0.15 ms per 4K frame
+with the clocks at their initial state and 1.5 ms after twenty seconds
+of decoding, against 14 ms before the change. That 0.15 -> 1.5 ms growth
+is the clock, not accumulation: the 2026-10-25 section below re-ran it
+with the core frequency held fixed and got a flat series. The part of the
+process CPU that remains beyond the driver is not FFmpeg's VA-API HEVC
+parsing alone; it tracks the bitstream size, which is the slice rewrite
+(same section).
+`test/hevc-parameter-sets-test.cc` now compares the fast path against a
+per-bit copy over 18 spans, aligned and unaligned, before the driver is
+allowed to use it.
+
+Driver `build-def/src/v4l2_drv_video.so` SHA-256
+`d824cd5624c085ce210fa14f882363afe5dd4c2be3448afbe1e918c71f8d65f3`,
+same kernel and boot ID as above.
+
+## Client coverage and encode scale-out (2026-10-22)
+
+Every run here used a staged install of the driver
+(`DESTDIR=… IRIS_VA_DRIVER_DIR=/usr/lib64/dri scripts/install-system.sh
+build-def`), which is also the only way the `msm_drv_video.so` alias exists.
+`LIBVA_DRIVER_NAME` was unset throughout, so libva had to resolve the driver
+by DRM name the way a client that knows nothing about this project does.
+Driver SHA-256 `d824cd5624c085ce210fa14f882363afe5dd4c2be3448afbe1e918c71f8d65f3`,
+kernel `7.2.6-sm8550-g42f3b40-iris1`, boot
+`32b1c05f-5043-4799-acd2-d4b0ec6f0e10`.
+
+### Clients that set no environment
+
+| Client | Command shape | Result |
+| --- | --- | --- |
+| FFmpeg | `-hwaccel vaapi -hwaccel_device /dev/dri/renderD128` | decodes; used for every earlier row |
+| Chrome 152 | `test/iris-browser-acceptance.sh --driver …/build-def/src/v4l2_drv_video.so` | H.264 600 frames / 2 dropped, HEVC 600 / 2, `VaapiVideoDecoder`, platform=true, GPU process holding the node |
+| mpv v0.41 | `--hwdec=vaapi --vo=gpu --gpu-context=wayland`, desktop session | `Using hardware decoding (vaapi)`, 60 frames, 65 capture tokens; libva opened `msm_drv_video.so` and found our init function |
+| VLC 3.0.24 | `cvlc --avcodec-hw=vaapi --vout=dummy`, desktop session | `Using Qualcomm Iris V4L2 stateful (libva-v4l2) for hardware decoding`, 60 frames, 61 capture tokens |
+| GStreamer 1.28.8 | `filesrc ! qtdemux ! h264parse ! vah264dec ! fakesink` | H.264 100 frames / 101 capture tokens, HEVC 100 / 102 |
+
+Two client-side gates are worth recording, because neither is visible from
+the driver:
+
+- GStreamer's VA plugin rejects any driver whose vendor string is not on its
+  allow-list (`_gst_va_display_filter_driver`, `gstvadisplay.c:186`), and the
+  `va` plugin then registers zero elements. `GST_VA_ALL_DRIVERS=1` overrides
+  it; with that set, `vah264dec`/`vah265dec` appear and decode through Iris.
+- GStreamer's VA **encoder** could not start while this driver answered
+  `VA_ATTRIB_NOT_SUPPORTED` for `VAConfigAttribEncPackedHeaders`:
+  `gst_va_display_get_packed_headers` fails, `_init_packed_headers` returns
+  FALSE, and `gst_va_base_enc_reset` reports "Error at reconfiguration
+  error" before any frame is submitted. The driver now answers
+  `VA_ENC_PACKED_HEADER_NONE` (zero) instead, which is the accurate answer —
+  the firmware writes SPS/PPS, so there is no packed header to accept, but
+  the attribute is known. GStreamer returns -1 only for
+  `VA_ATTRIB_NOT_SUPPORTED` (`gstvad.c:171-201`), so value zero passes and
+  the encoder proceeds with no packed headers requested.
+  **Correction:** an earlier revision of this file claimed Radxa's backend
+  answers `VA_ENC_PACKED_HEADER_NONE` and "fails the same check". That was
+  wrong. Zero is not the rejection value, and Radxa's backend passes this
+  check too.
+
+### MP4 without a remux
+
+The earlier note that MP4 output needs a remux was wrong. FFmpeg warns
+("No global header will be written") and then carries the parameter sets
+in-band, extracting them from the first packet: a 120-frame 1280x720 encode
+yields `extradata_size=43` for H.264 and `124` for HEVC, and both MP4 files
+decode cleanly with no remux. The CQP path (no `-b:v`) behaves the same.
+
+### Encode throughput, 4K, and two contexts at once
+
+300 frames of `testsrc2`, CBR 12 Mbps, `-g 60`, NV12 uploaded from system
+memory, `ffmpeg -benchmark`:
+
+| Codec | 1920x1080 | 3840x2160 |
+| --- | --- | --- |
+| H.264 High | 1.872 s, 160 fps | 3.057 s, 98 fps |
+| HEVC Main | 1.374 s, 218 fps | 2.816 s, 107 fps |
+
+Every output decodes with no errors, and the IDRs land at
+0/60/120/180/240 at both sizes. The 4K H.264 stream reports level 5.1 and
+HEVC level 5.0, which is the encoder's choice for that geometry, not a
+client request.
+
+Two encodes in parallel on one node (H.264 8 Mbps at 1080p and HEVC 8 Mbps
+at 1080p, 300 frames each) both exit 0, produce 19,933,115 and 19,914,057
+bytes, decode cleanly, and move the Iris IRQ counter by 1,154 during the
+pair. The session serialises each context internally; nothing in the two
+runs reported a timeout or a dropped picture.
+
+### HEVC conformance recheck: all three residuals are exact (2026-10-22)
+
+Phase 7 recorded `DELTAQP_A_BRCM_4`, `INITQP_B_Main10_Sony_1` and
+`PMERGE_E_TI_3` as decoding every frame without a firmware error but
+differing in pixels, and left them unchased. Rechecked on the same target
+with the current driver, they are exact.
+
+The earlier comparison hashed `framemd5` straight out of each decoder. A
+framemd5 is taken over the frame's planes at the decoder's linesize, so a
+padding or stride difference between the VA surface and libavcodec's
+frame changes the hash without changing a pixel: the streams report
+different hashes for every frame, while a contiguous NV12 dump of the
+whole stream is byte-identical. Normalising the software side with
+`-vf format=nv12` and the VA side with `hwdownload,format=nv12` removes
+the layout difference, and the hashes agree frame for frame:
+
+| Vector | Frames | Result |
+| --- | --- | --- |
+| `DELTAQP_A_BRCM_4` (Main, 1920x1088) | 96 | MD5 identical, `nv12` |
+| `PMERGE_E_TI_3` (Main, 416x240) | 8 | MD5 identical, `nv12` |
+| `INITQP_B_Main10_Sony_1` (Main 10, 416x240) | 90 | MD5 identical, `p010le` |
+
+`INITQP_B_Main10_Sony_1` also has to be downloaded as `p010le`: asking for
+`nv12` from a 10-bit surface fails outright, which is what the earlier
+"VA decode failed" line in this recheck first hit. No driver change was
+needed. Use normalised output when comparing hashes across decoders; a
+raw framemd5 compares frame layouts as much as pixels.
+
+### Encoder control surface, rechecked (2026-10-22)
+
+`v4l2-ctl -d /dev/video1 --list-ctrls` on the running module lists the GOP
+size, `video_bitrate_mode` (VBR/CBR), the frame-level RC switch, the
+sequence-header mode, the LTR controls and the H.264/HEVC profile, level and
+QP controls. It lists no `force_key_frame`, no RAP control and no
+`V4L2_CID_MPEG_VIDEO_FRAME_RATE`. That absence is a property of this kernel
+branch, not of the firmware: 7.3-rc4's `inst_fw_cap_sm8550_enc[]` lists
+`REQUEST_SYNC_FRAME` and `iris_ctrls.c` maps `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`
+onto it. The conclusion recorded here — that
+on-demand IDR therefore stays unimplemented — was wrong about what the
+absence rules out: the intra period is a GOP control the node does have,
+and the session uses it for one picture. See "On-demand IDR by moving the
+intra period" below. `intra_refresh_period` is still a different feature
+(periodic intra refresh, not an IDR request) and is not used.
+
+## Client requests the encoder cannot honour (2026-10-22)
+
+Source `956fca0` plus this change (uncommitted at the time of the run),
+driver `build/src/v4l2_drv_video.so` SHA-256
+`c2a57b2dc298fda39e79aa69c0a9e4daf1d6eb26d400de759fbbf1e6e95d4b50`
+(deployed from tracked-source SHA-256
+`16fb6107f377ee69e47426b11cd8e06a45ff8d516599899e315de00afa2e0c36`),
+kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`32b1c05f-5043-4799-acd2-d4b0ec6f0e10` (unchanged), build tree only, no
+installed package. Decoder and encoder nodes resolved by the `iris_driver`
+QUERYCAP name: `/dev/video0` (`Iris Decoder`), `/dev/video1`
+(`Iris Encoder`).
+
+Two classes of gap against the reference driver (radxa `libva-v4l2`
+1.0.0) closed in one change: a client's slice deblocking request was read
+by nobody, and the other VA picture/slice fields that the firmware cannot
+be told about were ignored silently.
+
+The kernel this target runs exposes **no** loop-filter control on either
+node: `v4l2-ctl -d /dev/video1 --list-ctrls | grep -ciE
+'loop_filter|lf_(tc|beta)'` is 0, and the same holds for the decoder node.
+The firmware there always filters with the default 0/0 offsets, so the
+driver forwards the request when those six controls exist and returns
+`VA_STATUS_ERROR_UNIMPLEMENTED` when they do not — with one exception,
+mode 2 (filtering off across slice boundaries only), which with one slice
+per picture produces the same stream as mode 0 and is therefore accepted.
+Mode 2 is not hypothetical: it is exactly what an HEVC client that leaves
+`slice_loop_filter_across_slices_enabled_flag` clear normalises to, and
+FFmpeg sends zeroed slice parameters, so HEVC encode on this target takes
+that branch. The trace records which one ran:
+
+```
+encode deblocking mode=0 alpha=0 beta=0 via=default t=25     (h264_vaapi)
+encode deblocking mode=2 alpha=0 beta=0 via=default t=21     (hevc_vaapi)
+```
+
+Acceptance re-run on this build, 300 frames each, `V4L2_VA_TRACE=1`:
+
+| Run (1920x1080, 30 fps) | Frames | Bytes | Iris IRQ delta | Key frames |
+| --- | ---: | ---: | ---: | --- |
+| `h264_vaapi`, no bitrate (CQP), `-bf 0 -g 60` | 300 | 17,135,872 | +609 | 0/60/120/180/240 |
+| `hevc_vaapi`, the same | 300 | 13,169,058 | +610 | 0/60/120/180/240 |
+| `h264_vaapi -b:v 4M` (VBR) | 300 | 9,915,972 | — | — |
+| `h264_vaapi -rc_mode CBR -maxrate 4M -profile:v high -level 4.1` | 300 | 4,987,971 | — | — |
+| `h264_vaapi` 1280x720 `-b:v 2M -g 30` | 120 | 1,994,401 | — | — |
+| `hevc_vaapi` 1280x720 `-b:v 2M -g 30` | 120 | 2,010,359 | — | — |
+
+Every output decodes with `ffmpeg -v error -i <out> -f null -`, and the
+two CQP files decode through this driver to 300 frames whose per-frame MD5
+matches a software decode exactly (`hwdownload,format=nv12` on the VA
+side, `format=nv12` on the software side). The CQP byte counts match the
+earlier record to four significant figures (17,138,094 and 13,171,327 on
+the pre-change build), which is what a change that only adds validation
+should look like.
+
+Profiles and the documented failure modes still behave:
+
+| Run (1280x720, 60 frames) | Result |
+| --- | --- |
+| `-profile:v constrained_baseline` | exits 0, 525,430 bytes, `ffprobe`: Constrained Baseline, level 3.1 |
+| `-profile:v main` | exits 0, 522,808 bytes |
+| `-bf 2` | exits 0, 523,190 bytes: FFmpeg clamps to no B frames before the driver sees it |
+| `-slices 2` | fails in FFmpeg with `Invalid argument` before the driver sees it; the driver's own rule is `VA_STATUS_ERROR_UNIMPLEMENTED` for more than one slice |
+| `-q:v 10` (CQP) | exits 0, 2,682,127 bytes for 60 frames |
+
+`test/encode-params-test.cc` covers the translator's side of the refusals
+(weighted prediction, scaling lists, chroma QP offsets, reference indexes,
+a CABAC initialisation index, two slices, HEVC tiles, wavefront and
+dependent slice segments). `test/unit/encode-session-test.cc` is new: a
+scripted encoder node with and without the loop-filter controls, which
+pins both halves of the deblocking promise — the three control writes with
+their HEVC menu mapping, and the refusal when the controls are absent, plus
+"changing deblocking mid-context needs a new context". `meson test` is
+16/16 and `sh test/run-static-checks.sh` passes.
+
+The refusal path is on the target as well, since no VA client there asks
+for non-default deblocking and FFmpeg cannot be made to.
+`test/iris-encode-control-probe.cc` (built, not registered as a meson
+test: it needs the node) drives `EncoderSession` against the real encoder
+node. Resolved by driver name, `/dev/video1`:
+
+```
+control h264_loop_filter_mode    absent
+control h264_loop_filter_alpha   absent
+control h264_loop_filter_beta    absent
+control hevc_loop_filter_mode    absent
+control hevc_lf_tc_offset_div2   absent
+control hevc_lf_beta_offset_div2 absent
+PASS h264: the kernel default deblocking request configures
+PASS hevc: mode 2 configures (the request FFmpeg's zeroed slice parameters normalise to)
+PASS h264: disabling deblocking is refused
+PASS h264: a deblocking offset is refused
+PASS hevc: disabling deblocking is refused
+PASS node=/dev/video1 loop_filter_controls=absent h264_off=0x14 h264_alpha=0x14 hevc_off=0x14
+```
+
+`0x14` is `VA_STATUS_ERROR_UNIMPLEMENTED`. The probe expects that status
+when the node reports the controls absent and success when it reports them
+present, so it is a gate on either kind of kernel, and it configures and
+tears down four real sessions on the way (STOP, drain, STREAMOFF).
+
+## Client-owned surfaces: DRM_PRIME_2 and PRIME_1 import (2026-10-22)
+
+Source `2cb3a7b`, driver `build/src/v4l2_drv_video.so` SHA-256
+`2f99c2a1d165aeb35fcdea04f2492d42cbf29659a49c3c21cdf6d8b5fc8e1101`
+(deployed from tracked-source SHA-256
+`9d7df611a09ee3f5fd464c5e6945bb68fbd777d936a98d84aaa50922c92442d3`,
+provenance `source_dirty=false`), kernel `7.2.6-sm8550-g42f3b40-iris1`,
+boot ID `32b1c05f-5043-4799-acd2-d4b0ec6f0e10` (unchanged), build tree
+only, no installed package. Nodes resolved by the `iris_driver` QUERYCAP
+name: `/dev/video0` (`Iris Decoder`), `/dev/video1` (`Iris Encoder`).
+
+`vaCreateSurfaces2` now takes the client's own DMA-BUF (DRM_PRIME_2
+descriptor or PRIME_1 buffer table) instead of refusing it. The surface is
+a view over that object in the CAPTURE layout, the fd is duplicated, and
+`persistent_export` is set, so the decode path is the Import policy already
+recorded above (2026-09-22) and the encode path is the ordinary input
+surface. Everything below is `LIBVA_DRIVER_NAME=v4l2` with
+`LIBVA_DRIVERS_PATH=<build>/src`.
+
+`prime-import` (host, no hardware) is the layout and refusal contract:
+the accepted composed-layer and two-layer forms for NV12 and P010, the
+accepted PRIME_1 table, and every refusal — foreign fourcc or size, two
+objects, a missing fd, a tiled modifier, zero layers, swapped luma/chroma
+layers, a pitch that is not the CAPTURE pitch, chroma at the wrong offset,
+luma not at offset 0, an object smaller than its planes, an allocation
+smaller than the descriptor claims, a tiled PRIME_1 table, two PRIME_1
+buffers. It also pins the one definition of the layout: `plane_layout()`
+and `stable_layout()` agree on stride and chroma offset at 1280x720,
+1920x1080 and 3840x2176, and the stable size is the plane bytes rounded to
+4 KiB.
+
+`test/iris-va-import-probe.cc` is the target half. It is a plain libva
+client: it allocates the client buffer the way a compositor on this
+platform does (MSM GEM, `stable_layout` size) or, with the `heap`
+argument, the way a client that sizes its own allocation does (system
+heap, exactly the plane bytes, no 4 KiB rounding). Both runs, 1280x720
+NV12:
+
+```
+PASS DRM_PRIME_2 import in the CAPTURE layout creates a surface
+PASS driver-allocated surface creates
+PASS the imported surface is a view of the client's bytes
+PASS H.264 encode config creates
+PASS encoding the imported surface gives the same bitstream
+PASS changed client bytes change the bitstream by the same amount
+payload normal=681554 import=681554 changed=687376 changed_import=687376
+PASS a client pitch the firmware does not write is refused
+PASS PRIME_1 import in the CAPTURE layout creates a surface
+```
+
+What each check establishes:
+
+- **View, not copy.** Bytes written through the client's fd (bracketed with
+  `DMA_BUF_IOCTL_SYNC`, chroma at the CAPTURE chroma offset) are what
+  `vaDeriveImage` + `vaMapBuffer` returns, without any upload call.
+- **The firmware reads the client's memory.** One intra-only CQP picture
+  (QP 26, `intra_period = 0`) is encoded from the imported surface and from
+  a driver-allocated one through a fresh context each, so both are the
+  first picture of their session and no rate-control or `frame_num` state
+  can differ. The two bitstreams are byte-identical (681,554 bytes). After
+  changing the pixels on both sides the two bitstreams are again identical
+  to each other (687,376 bytes) and different from the first pair.
+- **Refusal happens at creation.** A descriptor whose luma pitch is twice
+  the CAPTURE pitch returns `VA_STATUS_ERROR_INVALID_PARAMETER`; libva
+  prints the driver's message.
+
+The first measurement of this probe compared encodes inside one session and
+was wrong for a mundane reason worth recording: the second picture was a P
+frame predicting from the first, so a 554 KB IDR was followed by a 1.7 KB
+P frame and the comparison "different" measured GOP position, not memory.
+
+Regression on the same build: 120 frames each of
+`sintel-1080p30-h264-b3.mp4` and `sintel-1080p30-hevc-b3.mp4` decode
+through `-hwaccel vaapi -hwaccel_output_format vaapi` with no error, the
+H.264 trace ends `session finish submitted=132 completed=132 errors=0
+drops=0 timeouts=0 drains=1 misplaced=0`, a 30-frame `h264_vaapi` encode
+produces a 30-frame stream, and `iris-encode-control-probe` on
+`/dev/video1` reports the same six absent controls and `0x14` for the
+three non-default deblocking requests as the previous record.
+
+`meson test` is 17/17 ( `prime-import` added to the CI inventory) and
+`sh test/run-static-checks.sh` passes.
+
+## Encode timestamps across IDR pictures (2026-10-22)
+
+Source `92cf5e1`, driver `build/src/v4l2_drv_video.so` SHA-256
+`aefa2342228a4c4c084db8ef0b60afa5d30cfcbb1d45381a9fbe436750f5fc05`
+(deployed from tracked-source SHA-256
+`a42b2f4477c628e1fafff8e33ac98d332de61656570d515ee6ade4a2d94765d0`,
+provenance `source_dirty=false`), kernel
+`7.2.6-sm8550-g42f3b40-iris1`, module SHA-256
+`4e29b74df8c9475f1b4ba4de5dc6aa34d90cb224a935459d6b5168c4590c822a`,
+boot ID `32b1c05f-5043-4799-acd2-d4b0ec6f0e10` (unchanged), build tree
+only, no installed package. Nodes resolved by the `iris_driver` QUERYCAP
+name: `/dev/video0` (`Iris Decoder`), `/dev/video1` (`Iris Encoder`).
+
+The encoder wedged at the first GOP-boundary IDR on every stream whose
+rate was not 30 or 31 fps. `h264_vaapi` at 24 fps with `-g 60` stopped
+after picture 61 with `endPicture: encoder produced no access unit`; at
+24 fps with `-g 30`, after 31; at 24 fps with `-g 120`, after 121; 15, 25,
+29, 48 and 60 fps failed the same way, while 30 and 31 fps ran to 300
+frames. Size (640x360 too), codec (HEVC too) and rate control (CQP too)
+made no difference, and the failure reproduced on the committed baseline
+`2f99c2a1`.
+
+Cause, from the frame trace: FFmpeg sends `VAEncMiscParameterFrameRate`
+only with IDR pictures — its global parameters go out with IDR
+(`vaapi_encode.c`, `base_pic->type == FF_HW_PICTURE_TYPE_IDR`). The driver
+derived each picture's timestamp from that picture's own rate, so the
+sequence read `… 333333, 458333 (IDR), 400000 …` at 24 fps: forward on
+the IDR, backwards on the picture after it. The firmware stops returning
+access units once a timestamp goes backwards. A fixed 30 fps fallback
+applied to every non-IDR picture is what made exactly 30/31 fps and the
+intra-only (`-g 0`, `intra_period = 0`) case pass. Two levers ruled out
+the alternatives on the target: skipping `S_PARM` changed nothing, and any
+strictly rising timestamp sequence passed even with a 1 ms step.
+
+The session now fixes its rate at `configure()` (also the only point
+`S_PARM` can change) and advances one frame duration per picture.
+
+| Rate | GOP | Frames | IDRs | Encode | Decode |
+| --- | --- | --- | --- | --- | --- |
+| 24 | 60 | 300 | 5 | ok | ok |
+| 24 | 30 | 120 | 4 | ok | ok |
+| 25 | 50 | 150 | 3 | ok | ok |
+| 30 | 60 | 300 | 5 | ok | ok |
+| 60 | 60 | 240 | 4 | ok | ok |
+
+1920x1080 `testsrc2`, `-b:v 4M`, Annex-B, 12,448,657 bytes for the
+24 fps/300-frame case; every stream decodes with `ffmpeg -i … -f null -`
+and no error. Iris IRQ delta over the five runs: 2266. Earlier on the
+same tree: `sintel-1080p30-h264-b3.mp4` at 24 fps (~720 frames) encoded
+whole, and 24 fps HEVC and 24 fps CBR also ran to completion.
+
+`test/unit/encode-session-test.cc` submits FFmpeg's pattern — rate on
+picture 0 and on the IDR, nothing in between — and requires strictly
+rising timestamps; the old formula fails it (`FAIL: timestamps rise across
+an IDR that carries the frame rate`). `meson test` is 17/17 and
+`sh test/run-static-checks.sh` passes.
+
+## On-demand IDR by moving the intra period (2026-10-22)
+
+Source `9c29972`, driver `build/src/v4l2_drv_video.so` SHA-256
+`573fd238dbf72fbc0cea229cd517ec3b0d847cc1c159208375821607175be753`,
+kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`32b1c05f-5043-4799-acd2-d4b0ec6f0e10` (unchanged), build tree only, no
+installed package, `source_dirty=false`. 1280x720 at 24 fps, `-g 60`,
+`-b:v 4M`, `-force_key_frames` from FFmpeg, decoded with
+`ffmpeg -i … -f null -`.
+
+| Request | IDR positions in the stream | Frames | Result |
+| --- | --- | --- | --- |
+| none | 0, 60, 120 | 130 | ok |
+| `eq(n,24)` | 0, 24, 84 | 130 | ok |
+| `eq(n,10)+eq(n,40)` | 0, 10, 40, 100 | 130 | ok |
+| `gte(t,n_forced*1)` | 0, 24, 48, 72, 96, 120, 144, 168, 192, 216, 240, 264, 288 | 300 | ok |
+| `eq(n,60)` (the firmware's own boundary) | 0, 60, 120 | 130 | ok |
+
+Iris IRQ delta over the five runs: 1687. Every stream decodes without
+error.
+
+Three variants were measured and two of them are wrong, which is why the
+session looks the way it does:
+
+- **Restoring the period after the picture completes** puts the following
+  picture at the head of a fresh GOP, so `eq(n,24)` produced `0 24 25`
+  instead of `0 24`. The period has to be back before the picture is
+  queued.
+- **Skipping the lever at positions the firmware would make IDRs itself**
+  (first picture, GOP boundary) made the driver's idea of the schedule
+  drift from the firmware's: with a one-second request the stream came out
+  `0 24 48 72 96 144 168 …`, and the requests at 120 and 240 became
+  ordinary pictures — silently dropped keyframes, which is worse than an
+  extra control write.
+- **Never restoring the period** makes every following picture an IDR
+  (`0 24 25 26 … 299`).
+- Levering on *every* requested picture, including at the firmware's own
+  boundary, never drops one. The boundary case produces `0 60 120`: a
+  requested IDR there is already an IDR, so the request is satisfied, and
+  the next automatic boundary moves accordingly.
+
+The schedule therefore re-anchors on each requested IDR, the way x264 and
+libx265 do. `test/unit/encode-session-test.cc` pins the lever, the
+restore-before-queue ordering and the intra-only case; removing either
+rule fails it (`FAIL: the period is restored before the picture is
+queued`, `FAIL: a request at the firmware's own GOP boundary writes no
+lever`). `meson test` is 17/17 and `sh test/run-static-checks.sh` passes.
+
+## Segments cut at a requested IDR (2026-10-22)
+
+Source `90f867b`, driver SHA-256
+`d11df8030e61a231a21e0355476d5da3b96a448cdcd48e1d2c4309f6789aa4f6`
+(`source_dirty=false`), kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`32b1c05f-5043-4799-acd2-d4b0ec6f0e10`, build tree only, 1280x720 at
+24 fps, `-g 60 -force_key_frames expr:gte(t,n_forced*1)`, `-f segment
+-segment_time 1 -segment_format mpegts`.
+
+H.264 and HEVC both write 240 frames as 10 one-second segments; every
+segment starts on a keyframe and decodes with `ffmpeg -i … -f null -` and
+no error. Iris IRQ delta over both runs: 1633. The same build decodes 120
+frames each of `sintel-1080p30-h264-b3.mp4` and
+`sintel-1080p30-hevc-b3.mp4` through the VA path with no error.
+
+The first attempt at this produced six of ten H.264 segments and nine of
+ten HEVC segments that failed to decode, for two separate reasons:
+
+- **The levered IDR carried no SPS/PPS.** The firmware prefixes the
+  parameter sets to its own sync frames only, so a stream cut at a
+  requested IDR began with an IDR slice referencing sets the segment did
+  not contain (`non-existing PPS 0 referenced`). The session now keeps the
+  sets the last access unit carried and prefixes a requested IDR that has
+  none, which is what FFmpeg does with extradata before a keyframe.
+- **HEVC sets were classified with H.264 rules.** Types 32-34 were not
+  recognised as parameter sets at all, so HEVC segments still began with
+  `PPS id out of range`. `test/annexb-test.cc` covers both codecs now; it
+  also caught the type constants being declared `bool`, which made every
+  non-zero NAL type compare equal to SPS.
+
+`meson test` is 18/18 (`annexb` added to the CI inventory) and
+`sh test/run-static-checks.sh` passes.
+
+## Requested-IDR edge cases (2026-10-22)
+
+Source `7205500`, same driver SHA-256 as the segment record
+(`d11df803…`, `source_dirty=false`), same boot and kernel, 1280x720 at
+24 fps.
+
+| Request | Codec | IDR positions | Frames | Decode |
+| --- | --- | --- | --- | --- |
+| `eq(n,0)` | H.264 | 0 | 40 | ok |
+| `expr:1` (every picture) | H.264 | 0 … 59, all of them | 60 | ok |
+| `eq(n,59)` (the last picture) | H.264 | 0, 59 | 60 | ok |
+| `eq(n,24)` | HEVC | 0, 24 | 70 | ok |
+| `gte(t,n_forced*1)` | HEVC | 0, 24, 48, … 192 | 200 | ok |
+
+The nine one-second HEVC segments from the last row all start on a
+keyframe. Requesting every picture is not the failure mode the "never
+skip the lever" rule was worried about: it is the intended cost of a
+request per picture, and it produces an all-intra stream.
+
+## Regression sweep over the encode changes (2026-10-22)
+
+Source `227dfea`, driver SHA-256
+`d11df8030e61a231a21e0355476d5da3b96a448cdcd48e1d2c4309f6789aa4f6`
+(`source_dirty=false`), kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`32b1c05f-5043-4799-acd2-d4b0ec6f0e10`, build tree only.
+
+- `test/iris-matrix.sh`, 48 frames: H.264, HEVC and VP9 all `PASS` with
+  exact per-frame MD5 against the native V4L2 decoders, `submitted=48
+  capture=48 drops=0 timeouts=0 drain=1`. AV1 skips for the documented
+  OBU contract; MPEG-2/VP8 are not on this node.
+- `test/iris-browser-acceptance.sh --driver build/src/v4l2_drv_video.so`,
+  20 s of `sintel-1080p30-h264-b3.mp4`: `decoder=VaapiVideoDecoder
+  platform=True frames=480 dropped=0`, driver
+  `build-tree:d11df8030e61`, boot unchanged. A run without `--driver` also
+  passes, on the installed package `df16127ccecf`; that one is the
+  package's own record, not this tree's.
+
+The same request pattern ran ten more times in one session (five H.264,
+five HEVC, 120 frames each): every run exited 0, decoded cleanly and
+carried the same five IDRs, so the lever's per-picture control write does
+not drift the firmware's schedule across sessions.
+
+## AV1 through VA: qualified and advertised (2026-10-22)
+
+Source `52047fd`, driver SHA-256
+`763025cc9941e7bdaa3145912bb9c1ee6458ac7b2ee703f412b66fc1d13bf32d`
+(`source_dirty=false`, build tree only), kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`6534c7a2-f3f7-469a-8e29-a4f6ef516f89` (unchanged after every run below).
+
+### What changed since the 2026-09-22 verdict
+
+Three behaviors, all in the driver:
+
+- **The one-picture hold is explicit, not a failure.** VA's AV1 picture
+  buffer carries no `refresh_frame_flags`; the slots a picture refreshes are
+  only visible in the *next* picture's `ref_frame_map`. A shown key frame or
+  switch frame refreshes all eight by definition
+  (`av1_refreshes_all_slots`), so its bits are known at once; any other
+  picture is translated with the next AU and its `vaEndPicture` returns with
+  the surface still unsent. `vaSyncSurface`, `vaGetImage`, `vaDeriveImage`
+  and `vaExportSurfaceHandle` now wait for that release instead of reading a
+  surface with no pixels.
+- **Hidden pictures are published, not counted as errors.** The firmware
+  returns a `show_frame=0` picture with the ERROR flag, a zero timestamp, no
+  KEYFRAME/PFRAME/BFRAME bit and zero bytes used, although it wrote pixels.
+  The session attributes such a completion to the oldest pending target
+  whose `Target::hidden` is set (decode order) and publishes it; a following
+  non-intra picture after an end-of-stream release is refused with
+  `VA_STATUS_ERROR_OPERATION_FAILED` rather than decoded against nameless
+  slots.
+- **End of stream releases the hold.** When the stream ends with a picture
+  still held, the sync bound expires, the picture is submitted as final
+  (refreshing no slot) and the trace records
+  `va sync released the held picture surface=<n>`.
+
+The opt-in switch `V4L2_VA_EXPERIMENTAL_PROFILES` is gone. AV1Profile0 is
+advertised whenever the decoder node enumerates AV1 and NV12, the same rule
+the capability table now encodes (`production: supported`,
+`va_profiles: ["AV1Profile0"]`), and
+`test/iris-codec-matrix-check.sh` checks the `profile-qualified-*` block
+against the table in both directions.
+
+### Evidence
+
+`vainfo` on the build tree, no switch: `VAProfileAV1Profile0 :
+VAEntrypointVLD`.
+
+`test/iris-matrix.sh`, 48 frames, artifacts under
+`~/Lab/iris-vaapi-lab/artifacts/va-matrix`:
+
+| Codec | Result |
+| --- | --- |
+| AV1 | `PASS frames=48 submitted=50 capture=50 drain=1 timeouts=0 drops=0 noshow=23`, content `frame-md5` equal to software |
+| H.264, HEVC, VP9 | unchanged: `submitted=48 capture=48 drops=0 timeouts=0`, content `frame-md5` equal |
+
+Six clips, three runs each, every run's downloaded frames compared with the
+software decode of the same clip (`sweep.sh`, both arms `yuv420p`):
+
+| Clip | Stream shape | Runs |
+| --- | --- | --- |
+| `hw-av1-nolag.mp4` | IPPP, no alt-ref | 3/3 bit-exact |
+| `hw-av1-noaltref.mp4` | no alt-ref | 3/3 |
+| `hw-av1-lag.mp4` | alt-ref, 720p | 3/3 |
+| `allintra.mp4` | all-intra | 3/3 |
+| `n12.webm` | 12-bit source downconverted, alt-ref | 3/3 |
+| `lag720.webm` | 720p, alt-ref | 3/3 |
+
+`hw-av1-nolag.mp4`, 60 frames, with the sync bound cut to 100 ms: `submitted=60
+completed=60 errors=0 drops=0 timeouts=0`, downloaded frames bit-exact. A
+pipelined client never waits on the hold, so the bound is not part of normal
+operation.
+
+`test/av1-obu-roundtrip.sh`, no switch: `PASS rebuilt=18 source=32 all rebuilt
+frames bit-exact` against libdav1d.
+
+Chrome 152, `av1-browser.webm`, 25 s windows:
+
+| Run | Decoder | Platform | Frames / dropped | Node holder |
+| --- | --- | --- | --- | --- |
+| 1 | `VaapiVideoDecoder` | true | 748 / 15 | `--type=gpu-process` |
+| 2 | `VaapiVideoDecoder` | true | 747 / 4 | `--type=gpu-process` |
+
+The two drop counts differ on the same clip and build; the second run had
+the tablet to itself. Chrome pre-exports its surfaces, and AV1 Import is
+refused (the held picture's client buffer cannot be queued in lockstep), so
+Chrome publishes through the GPU copy engine.
+
+### Client contract
+
+A client that submits picture N, syncs its surface and only then submits
+picture N+1 cannot be served in one round trip: it waits for the sync bound
+and gets N released as final. FFmpeg and Chrome both keep at least one AU
+in flight, so neither hits it. This is invariant 17 in
+`docs/architecture.md`; the failure is a clear `OPERATION_FAILED`, never
+pixels from the wrong picture.
+
+## Pipelined encode: `vaSyncBuffer` and `-async_depth` (2026-10-22)
+
+The encoder used to complete one picture inside `vaEndPicture`. FFmpeg turns
+on its asynchronous path only when `vaSyncBuffer` exists
+(`libavcodec/vaapi_encode.c`, the `VA_STATUS_ERROR_UNIMPLEMENTED` probe with
+`VA_INVALID_ID`), so until now `-async_depth` did nothing and a second
+picture could not be in flight.
+
+`vaEndPicture` now submits and returns a ticket; the access unit is claimed
+by `vaSyncBuffer` on the coded buffer, by `vaSyncSurface` on the input
+surface, or by `vaMapBuffer` when the client does neither. The four encoder
+input slots are the pipeline depth, and a submit that finds them all in use
+completes the oldest picture itself instead of stalling with every CAPTURE
+slot unrearmed.
+
+### Build
+
+- Source `8241dbd` plus an uncommitted working tree, tracked-source
+  SHA-256 `710d465ed502a1cda9bc4a4acfbd5bc821c72c1945632e6f17f8a7d8631da8f5`
+  (the provenance manifest records `dirty=true`, which is accurate here).
+- Driver `build/src/v4l2_drv_video.so`, SHA-256
+  `fac86f3da4c47881f352e6c981a7e24311f638e166912ec58ccd6dc80282fc36`,
+  built from the build tree (`LIBVA_DRIVERS_PATH`), not the installed
+  package. The throughput table below was measured on the immediately
+  preceding build (`99c70568…`, identical sources except
+  `VAConfigAttribEncMaxRefFrames`); the final build was re-measured at
+  depths 1 and 4 and reproduced it (HEVC 3.211 s / 1.617 s, H.264 3.241 s /
+  1.657 s) and reproduced the byte-identical sync/async bitstream.
+- Kernel `7.2.6-sm8550-g42f3b40-iris1`, `qcom-iris.ko.zst` SHA-256
+  `4e29b74df8c9475f1b4ba4de5dc6aa34d90cb224a935459d6b5168c4590c822a`.
+- Boot ID `fd1b2389-f4f1-479e-a0aa-58464fc48a80`. Decoder `/dev/video0`,
+  encoder `/dev/video1` (both resolved by `iris_driver`).
+- FFmpeg 8.1.3.
+
+### Throughput
+
+`testsrc2` 1920x1080 at 30 fps, 600 frames, CBR 12 Mbit/s, `-g 60`, NV12
+uploaded from system memory, `ffmpeg -benchmark`, one run each:
+
+| `-async_depth` | HEVC rtime | H.264 rtime |
+| --- | ---: | ---: |
+| 1 | 3.159 s (190 fps) | 3.506 s (171 fps) |
+| 2 | 1.940 s (309 fps) | 2.101 s (286 fps) |
+| 4 | 1.605 s (374 fps) | 1.663 s (361 fps) |
+| 6 | 1.645 s (365 fps) | — |
+| 8 | 1.631 s (368 fps) | — |
+| 16 | 1.667 s (360 fps) | — |
+| 32 | 1.673 s (359 fps) | — |
+
+Depth 4 is the knee because that is how many input slots the session
+requests; deeper settings pipeline through the same four and gain nothing.
+Before this change the depth-4 numbers were what depth 1 measures now.
+
+### Correctness
+
+- `-async_depth 1` and `-async_depth 8` over the same 300 frames at CQP 24,
+  `-g 60`, produce byte-identical bitstreams (`051021fa44fc99be…`, `cmp`
+  clean). Pipelining changes scheduling, not coding decisions.
+- Every depth 4/8/16/32 stream reads back as 1920x1080, 600 frames, and
+  decodes with `ffmpeg -f null -` without an error.
+- On-demand IDR still cuts where it is asked under pipelining: 24 fps,
+  `-g 60 -force_key_frames expr:gte(t,n_forced*1) -async_depth 4 -f segment
+  -segment_time 1` yields 24 segments, each starting on a key frame.
+- The decode matrix is unchanged on the same build: H.264, HEVC, VP9 and AV1
+  all `PASS … content=frame-md5` with `timeouts=0 drops=0`, and AV1 still
+  reports `submitted=50 capture=50 noshow=23`.
+
+### Acceptance on the final build
+
+Same build (`fac86f3d…`), 1920x1080 `testsrc2`, `-async_depth 4`:
+
+| Case | Result |
+| --- | --- |
+| H.264 High, 300 frames, CQP 24, `-g 60` | 300 frames, 13122096 bytes, 5 key frames, decodes clean |
+| HEVC Main, 300 frames, CQP 24, `-g 60` | 300 frames, 14301743 bytes, 5 key frames, decodes clean |
+| HEVC 4K, 120 frames, CBR 20 Mbit/s | 3840x2160, 120 frames, decodes clean |
+| H.264 + HEVC in two processes at once | both complete |
+
+The HEVC acceptance run moved the `iris` IRQ line from 37318 to 37924
+(delta 606) on `/proc/interrupts` line 229, so the work is on the hardware
+encoder and not in a copy path.
+
+### Host tests
+
+`test/encode-session-test` gained two cases: three pictures in flight with
+every completion withheld (each ticket claims its own access unit, a later
+ticket waits through the middle one, and a zero timeout consumes nothing),
+and a picture still outstanding when the context is destroyed, which the
+drain resolves for its ticket rather than dropping.
+
+## Encoder `REQUEST_SYNC_FRAME` patch: applies and builds, not loaded (2026-10-22)
+
+The driver side of a direct IDR request is in the same uncommitted tree as
+the pipelined encode above: `configure()` writes
+`V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` once and records whether the node took
+it (`encode idr lever=sync-frame|intra-period`), a requested picture then
+writes that control and leaves the GOP alone, and a kernel without it keeps
+the intra-period lever and the parameter-set prefix from "On-demand IDR by
+moving the intra period". `test/encode-session-test` covers both shapes
+(`test_on_demand_idr_by_sync_frame` for the direct control,
+`test_on_demand_idr` for the GOP lever); `meson test` is 18/18 and
+`sh test/run-static-checks.sh` passes.
+
+`packaging/kernel/0003-media-iris-encoder-request-sync-frame.patch` is the
+kernel half: the encoder-only rebase of upstream
+`6f62dcefd249` (Wangao Wang) onto `sheng-7.2.6` (`42f3b40c702a`). It adds
+`REQUEST_SYNC_FRAME` to `enum platform_inst_fw_cap_type`, the
+`HFI_SYNC_FRAME_REQUEST_*` enum and `HFI_PROP_REQUEST_SYNC_FRAME
+(0x03000145)` to `iris_hfi_gen2_defines.h`, both directions of the
+control/capability map in `iris_ctrls.c`, `iris_set_req_sync_frame`, and one
+entry at the end of `inst_fw_cap_sm8550_enc` (`CAP_FLAG_INPUT_PORT |
+CAP_FLAG_DYNAMIC_ALLOWED`). The upstream commit also adds the control to the
+gen1 encoder table and patches `iris_hfi_gen1_command.c`; this branch has no
+gen1 encoder on the platform, so neither is carried.
+
+### What was checked, on the builder
+
+A pristine `42f3b40c702a` worktree, `git am` of 0001, 0002 and 0003 in order
+applies all three with no fuzz and no rejects. With the three applied, a
+module-only build (`make ARCH=arm64 LLVM=1 HOSTCC=gcc HOSTLD=ld
+KBUILD_MODPOST_WARN=1 KCFLAGS=-mbranch-protection=pac-ret+bti
+M=drivers/media/platform/qcom/iris modules`, clang 21.1.8, the host's
+`.config`) links `qcom-iris.ko`, `llvm-nm` lists `iris_set_req_sync_frame`,
+and `llvm-readelf -n` reports `aarch64 feature: BTI, PAC`. The module is
+2 216 bytes larger than the same tree built without 0003 (7 726 968 vs
+7 724 752), which is the control's table entry and setter. Counts on the
+patched tree: `cap_id = REQUEST_SYNC_FRAME` 1 in `iris_hfi_gen2.c` and 0
+elsewhere, `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` 2 in `iris_ctrls.c` (one
+per map direction) and 0 in `iris_venc.c`/`iris_vidc.c`, `cap_id =
+DEBLOCK_MODE_H264` still 1.
+
+The control is created from the capability table: `iris_ctrls_init()` walks
+`fw_caps[]`, calls `iris_get_v4l2_id()` and `v4l2_ctrl_new_std()`, and
+`V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` is a button
+(`v4l2-ctrls-defs.c`, `V4L2_CTRL_TYPE_BUTTON`, `EXECUTE_ON_WRITE`), so the
+core runs `s_ctrl` on every write rather than only on a value change. A
+button's value is always 0, so the driver's per-picture `S_CTRL(id, 0)` is
+the same write every time.
+
+### What is not evidence
+
+No module was installed and no boot was made: the tablet still runs
+`qcom-iris.ko.zst` `4e29b74d…` without this patch, and
+`v4l2-ctl -d <encoder> --list-ctrls` there still shows no
+`force_key_frame`. So the `sync-frame` path has unit coverage and a compiled
+kernel half, not a hardware run. Installing it means replacing the module
+and rebooting, which needs the target's owner; until then the driver's
+probe finds no control and takes the `intra-period` path, which is the one
+the records above measured.
+
+## `REQUEST_SYNC_FRAME` on the target: a direct IDR request (2026-10-22)
+
+The kernel half from the section above was built, installed and booted, and
+the driver-side probe now finds the control. This replaces the intra-period
+lever on the target: `-force_key_frames` reaches firmware as
+`HFI_PROP_REQUEST_SYNC_FRAME` instead of two `GOP_SIZE` writes, and the
+driver adds no parameter sets of its own.
+
+### Build and install
+
+- Source `e9a9a2f` (clean tree), tracked-source SHA-256
+  `d2efb19f27ce92bbda2c3eedfe57daffc130471670559c5da47ce0ba4c8bf6d0`.
+- Driver `build/src/v4l2_drv_video.so`, SHA-256
+  `8c2423e7f786a45dc2a10bc8c1c8d1e3bcfa2f610fe0a6cf42dcb87ec4d09823`,
+  deployed with `test/remote/deploy.sh` to the build tree
+  (`LIBVA_DRIVERS_PATH`), not the installed package.
+- Module built from `42f3b40c702a` + 0001 + 0002 + 0003, target
+  `/boot/config-7.2.6-sm8550-g42f3b40` (`CONFIG_LOCALVERSION=""`,
+  `LOCALVERSION_AUTO` off, so `localversion` carries
+  `-sm8550-g42f3b40-iris1`), `Module.symvers` derived from the running
+  kernel's `/proc/kallsyms` so `depends:` matches, no `KCFLAGS` override
+  because this kernel sets `CONFIG_ARM64_BTI` without
+  `CONFIG_ARM64_BTI_KERNEL`. `vermagic`
+  `7.2.6-sm8550-g42f3b40-iris1 SMP preempt mod_unload aarch64`, note
+  `aarch64 feature: PAC` (the stock module's note is the same), compressed
+  `qcom-iris.ko.zst` SHA-256
+  `802c40c0269fe007e0f2d3fb54ad4dfab8d3089d0fd465f3996130f4d2b0a853`.
+- Boot ID `8a7cc414-751d-44ec-8e20-fe89dd676ab6` (the stock module's boot
+  was `fd1b2389-…`). Decoder `/dev/video1`, encoder `/dev/video2` (resolved
+  by `iris_driver`; the numbers moved at this boot).
+- `v4l2-ctl -d /dev/video2 --list-ctrls` now lists
+  `force_key_frame 0x009909e5 (button) : value=0 flags=write-only,
+  execute-on-write`; the encoder reports 75 controls. `display_delay` is
+  still on the decoder and the six loop-filter controls on the encoder, so
+  0001 and 0002 survived the rebuild.
+
+### Lever in force
+
+`V4L2_VA_TRACE=1` on a 20-frame H.264 encode prints
+`encode idr lever=sync-frame` before `encode open`, so `configure()`
+probed the control and took the direct path.
+
+### Requested IDR positions
+
+1280x720 at 24 fps, `-g 60 -async_depth 4`, 130 frames, CQP 24,
+`ffprobe -show_entries frame=key_frame`:
+
+| Request | IDR positions | Frames | Decode |
+| --- | --- | --- | --- |
+| none | 0, 60, 120 | 130 | ok |
+| `expr:eq(n,24)` | 0, 24, 84 | 130 | ok |
+| `expr:eq(n,10)+eq(n,40)` | 0, 10, 40, 100 | 130 | ok |
+| `expr:eq(n,60)` (a firmware boundary) | 0, 60, 120 | 130 | ok |
+
+The positions and the re-anchoring match the intra-period record above
+exactly, which is the point: the lever changed, the schedule did not.
+
+### What the requested IDR carries
+
+The first access unit of `expr:eq(n,24)` is NAL types 7, 8, 5 (SPS, PPS,
+IDR slice): the firmware wrote the parameter sets itself, as it does for
+its own sync frames. The first unit of the second H.264 segment (cut at a
+requested IDR) is 9, 7, 8, 5 (AUD, SPS, PPS, IDR), and the segment's first
+frame is a key frame. The driver's prefix step finds the sets already in
+the access unit and adds nothing, so no duplicate SPS/PPS appears.
+
+### Segments
+
+24 fps, `-g 60 -force_key_frames expr:gte(t,n_forced*1) -async_depth 4
+-f segment -segment_time 1 -segment_format mpegts`, 240 frames: H.264 and
+HEVC each write 10 segments, every one decodes with `ffmpeg -f null -`,
+and every one starts on a key frame.
+
+### Pipelining and decode
+
+The same build, 1920x1080 HEVC 600 frames CBR 12 Mbit/s `-g 60`, three
+runs each: depth 1 3.597 / 3.631 / 3.134 s, depth 4 1.019 / 1.016 /
+1.004 s. The depth-1 and depth-4 bitstreams are byte-identical
+(`b437ff325d8f300c0d7373022f03be2a999eae5a4f48a52de4a575caf627e32d`),
+read back as 1920x1080 / 600 frames, and decode clean.
+
+The decode matrix on the new module is unchanged: H.264, VP9, HEVC and AV1
+all `PASS … content=frame-md5` with `timeouts=0 drops=0` (AV1
+`submitted=25 capture=25 noshow=8`).
+
+Iris IRQ delta over the IDR and segment runs: 1829.
+
+### Rollback
+
+`~/Lab/kernel-iris-syncframe/` on the target holds the stock module
+(`qcom-iris-stock.ko`, `8e8487ef…`, the decompressed file), the installed
+stock `.zst` (`4e29b74d…`), the new module, the target `Module.symvers` and
+`stock.sha256`. `rollback.sh` restores the stock `.zst` and re-runs
+`depmod`; a reboot is required either way.
+
+## AV1 film grain: refused at the VA layer, before hardware (2026-10-22)
+
+Source `97ebadd` plus the working-tree change that adds the timestamped-error
+branch, driver build tree only, kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`8a7cc414-751d-44ec-8e20-fe89dd676ab6`.
+
+### What was asked
+
+AV1 film grain synthesis is the one decode feature the translator still
+refuses. This run establishes where the refusal happens, and whether the
+firmware would honour the parameters if it were passed through.
+
+### The stream
+
+`ffmpeg -f lavfi -i testsrc2=size=1280x720:rate=30 -frames:v 60 -c:v
+libaom-av1 -cpu-used 8 -crf 40 -aom-params film-grain-test=8`, 275 694
+bytes, 60 frames. A software decode writes 60 frame MD5s
+(`av1-grain-roundtrip/grain-sw.md5`).
+
+### The refusal
+
+`ffmpeg -hwaccel vaapi … -vf hwdownload,format=nv12,format=yuv420p` fails
+with `endPicture: film grain parameters are not reconstructed`
+(`VA_STATUS_ERROR_UNSUPPORTED_BUFFERTYPE`, status 15). The trace shows the
+first picture submitted and `va end_picture ctx=6 surface=7 deferred`, then
+the second picture rejected at `endPicture`. No Iris session ever sees a
+picture with grain parameters, so this is the translator's check in
+`src/codec/av1_obu.cc` (`apply_grain`), not a firmware capability result.
+The hardware comparison file is empty (0 of 60 frames).
+
+### Why the check is there
+
+The driver rebuilds the AV1 frame header from VA decode parameters rather
+than forwarding the client's bitstream. `VAFilmGrainStructAV1` carries the
+synthesis parameters, so the header could be rebuilt with them, but the
+kernel would not act on them: `FILM_GRAIN` is a `CAP_FLAG_VOLATILE`
+capability whose value the kernel takes from the firmware's
+`HFI_PROP_AV1_FILM_GRAIN_PRESENT` reply (`iris_hfi_gen2_response.c`) and
+sends back at `streamon`. There is no V4L2 control that sets it from
+userspace, so the value is whatever the firmware reported — on this node, 0.
+Advertising grain support would promise a picture the firmware will not
+produce.
+
+### What is not evidence
+
+This run does not show the firmware failing to apply grain, because no
+stream with grain ever reached it. A negative firmware result needs the
+kernel-side control described in `docs/architecture.md` §1, and that is a
+separate change with its own hardware gate.
+
+### Artifacts
+
+`~/Lab/iris-vaapi-lab/artifacts/av1-grain-roundtrip/` on the target:
+`source.webm`, `grain-sw.md5` (60 frames), `grain-va.md5` (empty), and
+`grain-va.log` with the trace above.
+
+## Corrupt HEVC: the firmware's error buffer names nothing (2026-10-22)
+
+Same build and boot as the film-grain record above. The target runs the
+module built from 0001–0003, which does **not** carry the error-timestamp
+patch; this run is the evidence for adding it.
+
+### Provoking a corrupt frame
+
+Four attempts on `sintel-1080p30-hevc-b3.mp4` (720 frames, HEVC, 25 184 804
+bytes), all decoded with `-hwaccel vaapi -hwaccel_output_format vaapi`:
+
+| Damage | Result |
+| --- | --- |
+| 4 KiB flipped at 60 % of the file | 699/699 frames, `errors=0` |
+| 64 KiB zeroed at 60 % | 699/699, `errors=0` |
+| 40 slice payloads zeroed | 652/652, `errors=0` |
+| 40 slice headers overwritten | 652/652, `errors=0` |
+| stream cut mid-NAL at the 100th picture | 178/179, `errors=2` |
+
+The firmware conceals damage inside slice data and reports nothing, so only
+the truncation produced an error completion.
+
+### What the driver saw
+
+```
+submit token=179 bytes=381 output=0
+va destroy_context id=6 pending=2
+drain begin reason=finish pending=2
+capture token=178 index=13 flags=0x4021 publish=direct
+capture error index=4 flags=0x4049
+capture empty index=14 flags=0x104001 last=1
+drain lost token=179
+session finish submitted=179 completed=178 errors=2 drops=0 timeouts=0
+```
+
+`0x4049` is ERROR | KEYFRAME | PFRAME: the firmware flagged the picture, but
+the kernel zeroed the timestamp (`iris_buffer.c`, the ERROR branch of
+`iris_vb2_buffer_done()`), so the completion carried no token. The driver
+counted it as a marker and left the target pending; only the drain at end of
+stream failed it, as `drain lost`. A client that syncs that surface before
+submitting more input waits out the sync bound and gets `TIMEDOUT`, not
+`DECODING_ERROR`.
+
+### Fix and its coverage
+
+`packaging/kernel/0004-media-iris-preserve-timestamps-on-error-buffers.patch`
+(strongtz, Xilin Wu) copies `buf->timestamp` onto the error completion, and
+`Session::handle_capture_returns` now fails the matching target as soon as
+the completion is dequeued. `meson test` covers both shapes: a timestamped
+corrupt completion fails its surface without a drain, and a timestamped
+hidden AV1 picture is still published. On the old driver the first test
+reports `wrong status 38 (surface sync timeout)`.
+
+### What is not evidence
+
+The patch has **not been built or loaded on the target**. This record shows
+the failure mode it fixes, not the fixed behavior on hardware; that needs a
+module rebuild from all four patches and the truncation clip above.
+
+## Error-completion timestamps on the target (2026-10-22)
+
+The record above ("Corrupt HEVC: the firmware's error buffer names nothing")
+is the failure it fixes. This run closes it on hardware.
+
+### Build and install
+
+- Source `8dd655e` plus the test fix that follows it, kernel tree
+  `42f3b40c702a` with all four patches applied (`git apply`, no fuzz).
+- Built on the host against the target's `/boot/config-7.2.6-sm8550-g42f3b40`,
+  `localversion` = `-sm8550-g42f3b40-iris1`, `Module.symvers` derived from
+  `/proc/kallsyms`, `HOSTCC=gcc HOSTLD=ld`, no `KCFLAGS`.
+- `qcom-iris.ko` 8 896 688 bytes, SHA-256
+  `02723c5cd09f948a1f5b7888b3f4f821a06d2d194b49a23419a450f1daea79c3`;
+  compressed `qcom-iris.ko.zst` SHA-256
+  `9b16a40179a08e414d0f4bb38ea54f5bb12ada2b9ce176f0dc6b3b602e7bc83d`;
+  vermagic `7.2.6-sm8550-g42f3b40-iris1 SMP preempt mod_unload aarch64`,
+  note `aarch64 feature: PAC` (same as the stock module).
+- Installed with `~/Lab/kernel-iris-syncframe/install.sh`; the previous
+  module (0001–0003, `802c40c0…`) is kept as `qcom-iris.0003.ko.zst`.
+- Boot ID `40916c73-1560-484d-bd2e-82fed9bab285`. Decoder `/dev/video0`,
+  encoder `/dev/video1` at this boot.
+- All four patches are live: the decoder lists two `display_delay`
+  controls, the encoder lists the six loop-filter controls and
+  `force_key_frame`, and a 20-frame H.264 encode prints
+  `encode idr lever=sync-frame`.
+
+### The clip
+
+`trunc.hevc`: `sintel-1080p30-hevc-b3.mp4` converted to Annex-B and cut
+mid-NAL at the 100th picture (7 761 287 bytes). `midcorrupt.hevc`: the same
+cut followed by the stream resumed at the 13th CRA (17 748 348 bytes), so
+valid pictures follow the corrupt one.
+
+### Before and after, same clip
+
+| Driver / module | `trunc.hevc` | `midcorrupt.hevc` |
+| --- | --- | --- |
+| 0001–0003 module, driver `97ebadd` | `capture error index=4` (no token), then `drain lost token=179`; the surface waited for the drain | not run |
+| four-patch module, driver `8dd655e` | `capture token=179 … flags=0x4049 publish=error`; `errors=1` | `capture token=179 … flags=0x4049 publish=error` at `t=592`, `submit token=180` immediately after, `errors=1`, `completed=495` |
+
+The timestamp the kernel now keeps is what lets the session match the
+completion to its target: the failed surface is marked at dequeue instead
+of at the end-of-stream drain, and decoding continues with the pictures
+after it.
+
+### Regression sweep
+
+- `meson test -C build` on the target: 18/18.
+- Decode matrix: H.264, VP9, HEVC and AV1 all `PASS content=frame-md5`,
+  `timeouts=0 drops=0`; AV1 `submitted=50 capture=50 noshow=23`, which is
+  the hidden-picture path the new branch restructures.
+- The mid-stream run above submits and completes 495 of 496 pictures.
+
+### A test bug found on the way
+
+`test/encode-params-test.cc` passed `h264_sequence()` as a temporary into
+`h264_input()`, which stores a pointer. The host happened to read zeros
+from the dead object; the tablet read `bit_depth_luma_minus8 = 2` left by
+the previous case and aborted on "10-bit encode is not supported". The
+sequence and picture buffers are now locals in every affected case.
+
+### Rollback
+
+`rollback.sh` restores the stock module; `cp qcom-iris.0003.ko.zst` over
+the installed file restores the previous patched module. Both need a reboot.
+
+## Against libva-v4l2 (Radxa), on the same tablet (2026-10-22)
+
+libva-v4l2 (`radxa-pkg/libva-v4l2` 1.0.0, the Radxa sibling backend) publishes
+throughput for SC8280XP on a Radxa Dragon Q8B. Those numbers cannot be
+read against this tablet's: a different SoC, a different Iris generation
+and a different firmware build. The comparison below runs both drivers
+on sheng instead, in the same boot, through the same FFmpeg.
+
+### Setup
+
+- Source `972e285` (`feat/encode-entrypoints`), driver
+  `build-def/src/v4l2_drv_video.so` SHA-256
+  `f3b37e6ad91b76b5ba1b9ec20af055f9494594fec4207a6638313558a3239f24`,
+  built on the target with `buildtype=debugoptimized`.
+- libva-v4l2 at tag `v1.0.0` (`0e4ce1e`), built on the target with
+  `buildtype=release` and its default `-Dfastcv=disabled`; SHA-256
+  `798cfd62a91c51be733aa8f28b98b1289a30dd7b0cca4d1c84cda7b6efac7937`.
+  Its own release packages disable FastCV the same way, and sheng's CDSP
+  cannot open a FastRPC session, so neither side has the VPP.
+- FFmpeg 8.1.3, libva 2.23.0, kernel `7.2.6-sm8550-g42f3b40-iris1`, boot
+  `40916c73-1560-484d-bd2e-82fed9bab285`. Decoder `/dev/video0`, encoder
+  `/dev/video1`, both resolved by the `iris_driver` name.
+- Each driver was selected with `LIBVA_DRIVER_NAME=v4l2` and its own
+  `LIBVA_DRIVERS_PATH`; neither was installed. Three runs per cell, mean
+  reported, in both the decode and the encode tables. Every row moved
+  the Iris IRQ counter (583 to 1807 per run), so none of them fell back
+  to software.
+- Decode clips: `testsrc2` at 720p, 1080p and 4K, 600 or 300 frames,
+  H.264 from `libx264 -preset ultrafast -qp 20 -bf 0` and HEVC from
+  `libx265 -preset ultrafast -crf 22 keyint=60`, plus VP9
+  (`libvpx-vp9`) and AV1 (`libsvtav1`) at 1080p. The real-content rows
+  are the tracked Sintel re-encodes already listed above.
+
+### Decode, synthetic clips (frames/s, no download)
+
+| Clip | This driver | libva-v4l2 | libva-v4l2 vs this |
+| --- | ---: | ---: | ---: |
+| H.264 720p | 907 | 836 | -8% |
+| H.264 1080p | 760 | 681 | -10% |
+| HEVC 720p | 720 | 686 | -5% |
+| HEVC 1080p | 523 | 464 | -11% |
+| H.264 4K | 339 | 221 | -35% |
+| HEVC 4K | 201 | 120 | -40% |
+| VP9 1080p | 571 | 524 | -8% |
+| AV1 1080p | 692 | fails | — |
+
+The gap widens with frame size and has this driver ahead on both codecs,
+which is the opposite of what the HEVC slice rewrite would predict: both
+drivers re-emit HEVC slice headers there, and neither rewrites H.264
+slices (both copy them verbatim). The cause was not isolated. What the
+table supports is narrower than a mechanism: on this firmware this
+driver keeps more of a 4K stream's time off the CPU than libva-v4l2 does, and
+the difference shrinks to single digits at 1080p and below. The 4K HEVC
+runs are the noisiest cell (libva-v4l2 2.03 to 2.78 s, this driver 1.45 to
+1.59 s); even libva-v4l2's fastest run is slower than this driver's slowest.
+
+libva-v4l2 advertises no AV1 profile, so `-hwaccel vaapi` on the AV1 clip
+fails at `av1 @ … Failed setup for format vaapi` before a single picture
+is submitted (exit 69, IRQ delta 0).
+
+### Decode, real content with B-frames (frames/s)
+
+| Clip | This driver | libva-v4l2 | libva-v4l2 vs this |
+| --- | ---: | ---: | ---: |
+| H.264 High, 2 B-frames, 1080p24 | 311 | 311 | -0.0% |
+| HEVC Main, 2 B-frames, 1080p24 | 492 | 493 | -0.2% |
+| HEVC Main10, 1080p | 457 | 455 | +0.5% |
+| VP9 alt-ref, 1080p | 150 | 150 | +0.2% |
+
+On reordered, 10-bit and alt-ref content the two drivers are the same
+within run-to-run noise: what is left is firmware time, and neither
+driver's bookkeeping shows through. The synthetic-clip gap is therefore
+a cost on the path this driver takes and libva-v4l2 does not, not a general
+decode difference.
+
+Frame exactness was checked for the 1080p H.264 and HEVC clips by
+comparing a `framemd5` of `hwdownload,format=nv12` against the software
+decode. Both drivers MATCH on both codecs.
+
+### Encode, at settings that produce the same bitstream
+
+CQP removes rate control from the picture, so the two drivers can be
+compared on output rather than on a rate target they may pursue
+differently. At `-rc_mode CQP -q:v 24` and `-q:v 30`, 1080p, 300
+frames, the H.264 streams are **byte for byte identical** between the
+two drivers, and so is the `-q:v 24` HEVC stream and the same setting on
+the Sintel clip. Both sides therefore reach the firmware through the
+same encode contract; whatever differs below is not the coded core.
+
+Throughput at that setting, 300 frames, `-async_depth 1` and `4`, three
+runs per cell, mean:
+
+| Clip | This driver d=1 | libva-v4l2 d=1 | This driver d=4 | libva-v4l2 d=4 |
+| --- | ---: | ---: | ---: | ---: |
+| H.264 1080p | 235 fps | 196 fps | 439 fps | 424 fps |
+| HEVC 1080p | 249 fps | 208 fps | 453 fps | 423 fps |
+| H.264 4K | 85 fps | 74 fps | 116 fps | 110 fps |
+| HEVC 4K | 99 fps | 83 fps | 121 fps | 119 fps |
+
+This driver is ahead in every cell: 13 to 17% at depth 1, and 2 to 7% at
+depth 4, where the two converge because the firmware, not the driver, is
+the constraint. A single earlier run had libva-v4l2 10% ahead at depth 4 on
+1080p; the three-run repeats above do not reproduce it (libva-v4l2 0.65 to
+0.80 s against this driver's 0.53 to 0.78 s), so that reading was
+noise. Both drivers scale the same way, and this driver's own pipelining
+record (depth 1 to 4, 190 to 374 fps, byte-identical output) is above.
+
+### Encode, rate control: an open difference
+
+At a rate target the two drivers do not agree, and the gap is on
+libva-v4l2's side of the comparison:
+
+| Request | This driver | libva-v4l2 |
+| --- | ---: | ---: |
+| CQP `-q:v 24` | 3045 kbit/s | 3045 kbit/s (identical bytes) |
+| CBR 4 Mbit/s | 4034 kbit/s | 741 kbit/s |
+| CBR 24 Mbit/s | 21274 kbit/s | 880 kbit/s |
+| VBR 4 Mbit/s | 9780 kbit/s | 808 kbit/s |
+
+600 frames of `sintel-1080p30-h264-b3.mp4` at 30 fps; the kbit/s figure
+is bytes x 8 / 20 s. This driver tracks the request; libva-v4l2 does not move
+with it. The same 4 Mbit/s request on `testsrc2` gives 4034 against
+1854195 bytes over 20 s, i.e. the same shape.
+
+What was ruled out on libva-v4l2, each by rebuilding it and re-measuring:
+
+- **Its own values.** With `IRIS_VAAPI_DEBUG=1` it reports
+  `bitrate=4000000 peak=4000000 mode=2 (CBR)`, so the client's request
+  reaches it intact.
+- **The GOP control.** It writes `GOP_SIZE = INT_MAX` and requests
+  keyframes through VA instead. Replacing that with 59 left the output
+  at 741 kbit/s.
+- **The frame rate.** It derives the rate from VA's sequence parameters
+  (24/1 for this clip) rather than from the stream rate. Re-encoding the
+  source at 30 fps and feeding that changed it to 669 kbit/s, not to
+  4000.
+- **The header mode.** Adding `HEADER_MODE = JOINED_WITH_1ST_FRAME` to
+  this driver left this driver's output unchanged at 4034.
+- **QP bounds.** Pinning 1..51, and passing `-qmin/-qmax` through
+  FFmpeg, left both drivers unchanged.
+- **The control list.** A scratch copy of this driver with libva-v4l2's exact
+  control list (GOP `INT_MAX`, header mode, min/max QP) still produced
+  4039 kbit/s.
+
+So the difference is not in the control writes either driver makes, and
+the root cause was not isolated. It is recorded as an open item rather
+than attributed. The observation that stands: on this target, at these
+settings, this driver's rate control follows the client's request and
+libva-v4l2's does not. One shape is worth checking first in any follow-up:
+libva-v4l2's output at every target lands near 700 to 900 kbit/s, which is
+close to what a fixed QP near its default 20 would give on this content,
+so a firmware that ignores its rate-control property while honouring
+explicit QP would look exactly like this. That is a hypothesis, not a
+finding; it was not tested.
+
+### What this comparison does not show
+
+- It does not reproduce libva-v4l2's published SC8280XP numbers, and does not
+  claim to: the SoC, the Iris generation and the firmware differ.
+- It says nothing about Chrome, mpv, VLC or GStreamer. Those runs are in
+  the client-coverage section above and have no libva-v4l2 counterpart here.
+- The `-Dfastcv=disabled` build is libva-v4l2's own default and the only one
+  obtainable on this tablet, but it is not the configuration its README
+  describes when it lists FastCV VPP as a feature.
+- Three runs per cell throughout. The encode cells at depth 4 still
+  spread by up to 0.25 s run to run, so the 2 to 7% advantage there is
+  the shape of the result, not a precise figure; the rate-control gap
+  (5x) and the depth-1 encode gap (13 to 17%) are far outside that
+  spread.
+- The VP9 and AV1 rows are one clip each at one resolution. The VP9 row
+  shows the two drivers agree where both decode; the AV1 row shows only
+  that libva-v4l2 has no AV1 entrypoint on this node, not how an AV1
+  implementation of its own would compare.
+
+## AV1 Profile 0 at 10-bit, and the browser matrix beside libva-v4l2 (2026-10-22)
+
+Source `72873c8` plus the working-tree change that adds
+`p010_decode_profile()`, driver build tree only
+(`build-def/src/v4l2_drv_video.so`, sha256
+`00e60b69eafa2e80…` after the change, `f3b37e6ad91b…` before it), kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`40916c73-1560-484d-bd2e-82fed9bab285`, decoder `/dev/video0`, encoder
+`/dev/video1`. Chrome 152.0.7977.82. Neither driver is installed; each row
+selects its bytes with `LIBVA_DRIVERS_PATH`.
+
+### Why AV1 10-bit was missing
+
+The capability table said "10-bit and 12-bit (only AV1Profile0 is
+advertised)". That was not a hardware limit. The firmware decodes 10-bit
+AV1 on its own: a GStreamer `v4l2av1dec` run of the same clip negotiated
+`P010_10LE` and wrote 23 frames of 640x360 P010, with no `unsupported
+content` in dmesg. The kernel's 8-bit subscribe-params check
+(`iris_hfi_gen2_response.c`, `sub_depth != BIT_DEPTH_8`) does not fire,
+because `iris_hfi_gen2_set_bit_depth()` always sends `BIT_DEPTH_8` and the
+firmware derives the depth from the stream.
+
+The driver was the blocker, twice over:
+
+- `getConfigAttributes` offered `VA_RT_FORMAT_YUV420_10` only for
+  `HEVCMain10` and `VP9Profile2`. A client asks for 10-bit AV1 surfaces
+  through that attribute, so no client could create them.
+- `querySurfaceAttributes` listed `P010` under the same two profiles only.
+  FFmpeg picks its surface format from that list and logged
+  `Picked nv12 as best match for yuv420p10le`.
+
+With either one missing the failure is the same and looks like a firmware
+fault: `capture format rejected wanted=NV12 granted=P010`, then
+`decoder CAPTURE layout unsupported` at `endPicture`. The firmware had
+already chosen P010 from the bitstream and refuses NV12 afterwards, so
+the session cannot recover — the depth has to be right before the first
+access unit.
+
+### The change
+
+One predicate, `p010_decode_profile()`, now answers "does this profile
+decode into P010" for the config attributes, the surface attributes and
+the capability table. `AV1Profile0` is in it. `test/iris-codec-matrix-check.sh`
+asserts that the table's `capture_formats` and that predicate agree in
+both directions, so the next profile cannot drift from the document.
+
+### Frame MD5, 10-bit AV1
+
+`av1-640x360-10bit.mp4` (libsvtav1, 30 frames, `profile=Main`,
+`pix_fmt=yuv420p10le`), `hwdownload,format=p010le` against libdav1d:
+
+| Path | Frames | MD5 equal |
+| --- | --- | --- |
+| This driver, VA-API, P010 | 30 | 30/30 |
+
+### Browser acceptance, this driver versus libva-v4l2
+
+Same harness (`test/iris-browser-acceptance.sh`), same clips, 20 s window,
+build-tree driver on both sides. libva-v4l2 is the Radxa backend, 1.0.0
+built on the target (`/tmp/piano-bench/build`, sha256 `798cfd62a91c…`; the
+scratch directory keeps the name the run used).
+
+| Clip | This driver | libva-v4l2 |
+| --- | --- | --- |
+| H.264 High 1080p, B-frames | `VaapiVideoDecoder`, platform, 482 frames, 0 dropped | same, 481 frames, 0 dropped |
+| HEVC Main 1080p | `VaapiVideoDecoder`, platform, 483 frames, 0 dropped | same, 482 frames, 0 dropped |
+| HEVC Main10 1080p | `VaapiVideoDecoder`, platform, 482 frames, 0 dropped | video element error 4, no decoder, node never opened |
+| VP9 Profile 0 1080p | `VaapiVideoDecoder`, platform, 483 frames, 0 dropped | same, 482 frames, 0 dropped |
+| AV1 Main 1080p | `VaapiVideoDecoder`, platform, 599 frames, 0 dropped | `Dav1dVideoDecoder`, not platform, node never opened |
+| AV1 Main 10-bit 640x360 | `VaapiVideoDecoder`, platform, 593 frames, 0 dropped | `Dav1dVideoDecoder`, not platform, node never opened |
+
+Every row that passed also shows a Chrome GPU process holding the resolved
+Iris node (`--type=gpu-process` in `iris-node-holders.txt`), and a boot ID
+unchanged across the run. The AV1 rows on libva-v4l2 fall back to software
+because libva-v4l2's `vainfo` lists no `VAProfileAV1Profile0`; the HEVC Main10
+row is a harder failure, the element itself errors and nothing is decoded.
+Both were re-run once to confirm.
+
+### What this does not show
+
+The 10-bit AV1 clip is 640x360 and 30 frames. It proves the depth
+plumbing, not throughput; a 1080p 10-bit AV1 run is not in this record.
+Chrome's P010 surfaces were confirmed from the driver trace
+(`fourcc=P010` for every `va create_surfaces` on that row), not from a
+pixel comparison against software output, which Chrome does not expose.
+
+### Film grain stays refused, and it is a kernel limit
+
+A 1280x720 60-frame AV1 stream encoded with `-aom-params film-grain-test=8`
+is still rejected at `endPicture` (`film grain parameters are not
+reconstructed`). The refusal is correct: `FILM_GRAIN` is a
+`CAP_FLAG_VOLATILE` capability, its value comes from the firmware's
+`HFI_PROP_AV1_FILM_GRAIN_PRESENT` reply, and `v4l2-ctl -l` on the decoder
+lists no film-grain control at all — nothing in the V4L2 surface lets
+userspace turn it on. Passing the parameters through would advertise a
+picture the firmware will not produce. The firmware-path probe agrees in
+the weakest possible way: GStreamer's `v4l2av1dec` on the same stream
+wrote 44 frames out of 60 and no dmesg line, so the firmware drops
+pictures on that stream rather than synthesising grain.
+
+### Artifacts
+
+On the target: `~/iris-vaapi-lab/artifacts/browser-acceptance/` (one
+directory per row above, each with `summary.json`, `cdp.json`,
+`browser.log` and `iris-node-holders.txt`),
+`/tmp/iris-bench/lab*/artifacts/browser-acceptance/` for the rows that
+were run under a scratch lab root, `/tmp/iris-bench/av110-va.md5` and
+`av110-sw.md5` for the frame MD5s, and
+`~/iris-vaapi-lab/media/10bit/av1-640x360-10bit.mp4` for the clip.
+
+## VP9 conformance through the driver, first full suite (2026-10-22)
+
+Same build and boot as the section above. `FFmpeg-VP9-VAAPI` over the whole
+`VP9-TEST-VECTORS` corpus, one vector at a time, 20 s per vector:
+
+| Total | Passed | Fail | Crash | Timeout |
+| ---: | ---: | ---: | ---: | ---: |
+| 305 | 175 | 36 | 67 | 27 |
+
+Every non-pass falls into one of five families, and the driver trace
+explains three of them:
+
+- **64 × `vp90-2-02` tiny dimensions, below the advertised 96x96.** FFmpeg
+  refuses before any VA call: `Hardware does not support image size 8x8
+  (constraints: width 96-8192 height 96-8192)`. The bounds come from the
+  kernel's CAPTURE enumeration, so these vectors cannot reach this driver on
+  this SoC. Checked on 08x08 and 66x66.
+- **36 × `vp90-2-14` dynamic resize with frame-parallel tiles, content
+  mismatch.** The frames decode (the trace shows two sessions, 432x240 then
+  896x480, and every submitted picture completes) but the MD5s differ from
+  `libvpx-vp9`. Not classified further here.
+- **24 × `vp90-2-21` timeouts** at the 20 s bound, and **3 more** in the
+  `05`/`18`/`22` vectors.
+- **`vp90-2-10-show-existing-frame`** and **`vp90-2-16-intra-only`** crash;
+  the first is the case the translator refuses by design
+  (`show_existing_frame` must reuse the VA surface).
+- **`vp91-2-04-yuv444`** crashes; 4:4:4 is outside the advertised profiles.
+
+This is a driver-path number, not comparable one-for-one with the
+firmware-path `GStreamer-*-V4L2` table above (235/305): the Fluster FFmpeg
+wrapper decodes through a different client stack. It is the first full run
+of this suite through the driver and replaces the three-vector probe that
+was recorded earlier.
+
+Artifact: `/tmp/iris-bench/vp9-va.md` on the target (per-vector marks), plus
+`vp9res-va.md5` / `vp9res-sw.md5` for the resize vector above.
+
+## Chrome's decode path, measured inside the browser (2026-10-23)
+
+The Import policy was qualified with a probe and the browser runs counted
+frames; neither said which publish policy a browser decode actually took.
+This run answers that from the driver's own trace. Source commit `821c9f2`,
+build `build-def`, driver sha256 `33fff189…`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot `90008d1c-4049…` (the target rebooted
+since the previous section), Chrome 152.0.7977.82, 20 s window per clip,
+`IRIS_ACCEPTANCE_ENV="V4L2_VA_TRACE=1"`.
+
+| Clip | Per-capture policy | Frames | Dropped |
+| --- | --- | ---: | ---: |
+| H.264 High 1080p, B=3 | `publish=import` ×678 | 481 | 0 |
+| HEVC Main 1080p | `publish=import` ×676 | 481 | 2 |
+| HEVC Main10 1080p | `publish=import` ×678 | 480 | 0 |
+| VP9 P0 1080p | `publish=copy-gpu` ×671 | 481 | 0 |
+| AV1 Main 1080p | `publish=copy-gpu` ×853, `publish=drop` ×13 | 593 | 0 |
+
+What this settles:
+
+- **Chrome does not import its own buffers.** Every surface is created with
+  `imported=0 fd=-1` (22 of them), and the driver exports each stable buffer
+  once (`persistent=1`) for `vaExportSurfaceHandle`. The import decision is
+  therefore made by this driver about its own memory, not by a client
+  handing over a DMA-BUF. That is the same arrangement §3.3 describes as
+  Chrome pre-exporting its pool, now confirmed from the browser rather than
+  from the FFmpeg path.
+- **H.264, HEVC and HEVC 10-bit are zero-copy in Chrome.** Every capture is
+  attributed to an imported buffer, the CAPTURE queue carries a DMABUF fd
+  (`import token=1 index=0 fd=94 …`), and no copy operation appears in the
+  trace.
+- **VP9 and AV1 are not**, exactly as the capability table says: VP9 by the
+  alt-ref 1:2 rule, AV1 by the hidden-picture rule.
+- The 13 AV1 drops are the hidden pictures, one per alt-ref interval
+  (tokens 61, 123, 185, 247, flags `0x4011`), not errors. The session
+  attributes them by decode order and publishes no pixels for them.
+
+One number is not clean: the HEVC 8-bit window dropped 2 frames where the
+same clip measured 0 earlier. The build and the boot both changed, so this
+is recorded as observed rather than attributed.
+
+Artifacts: `/tmp/iris-bench/lab-import/{h264,sintel-1080p30-hevc-b3,
+sintel-1080p30-hevc10,sintel-1080p30-vp9,hw-av1}/` on the target
+(`browser.log`, `cdp.json`, `summary.json`).
+
+## Browser playback on real sites, and an alt-ref regression it caught (2026-10-23)
+
+The install gate ran with the build-tree driver only; the browser matrix after
+the install covered local clips. This run adds the missing client: plain
+`google-chrome` (no environment, resolving the driver through the
+`msm_drv_video.so` alias) playing YouTube and Bilibili, with the driver trace
+on.
+
+### Install
+
+`install-system.sh build-def` over the 2026-09-22 package (`1d15de2`,
+`df16127c…`). Manifest: source `166eb01`, artifact `33fff189…`, the previous
+driver kept at `/usr/local/share/iris-vaapi/backup/`. `vainfo` with no
+environment lists `VAProfileAV1Profile0` through the alias. Kernel
+`7.2.6-sm8550-g42f3b40-iris1` with all four patches, boot
+`90008d1c-4049…`.
+
+| Site | Codec, size | Decoder | Frames / dropped | Per-frame policy |
+| --- | --- | --- | --- | --- |
+| YouTube `aqz-KE-bpKQ` | AV1 854x480 | `VaapiVideoDecoder`, platform | 600 / 0 | `copy-gpu` ×806 |
+| Bilibili `BV1GJ411x7h7` | HEVC Main 640x360 | `VaapiVideoDecoder`, platform | 500 / 0 | `import` ×832 |
+
+### The VP9 regression
+
+The four-video YouTube sweep hit a VP9 clip (`LXb3EKWsInQ`, adaptive, mostly
+854x480) where every session logged dozens of
+`capture token=… flags=0x4041 publish=error` lines, each followed by a
+same-token `publish=drop`: 50 errors / 50 drops per session, reproduced. The
+same clip through the previous install (build `df16127c…`, which predates
+`8dd655e`) shows none: 1080 `copy-gpu`, one drop.
+
+The mechanism: a VP9 alt-ref access unit is one VA picture the firmware
+decodes as two completions under one token — the invisible frame first
+(ERROR, no picture-type bit, no payload), the visible frame immediately
+after. `8dd655e` fails a timestamped error completion at once; on the 0004
+module the invisible completion carries its timestamp, so every alt-ref
+failed its target and the real frame behind it was dropped as unnamed. The
+session unit test now scripts this two-completion shape
+(`test_vp9_altref_superframe_is_one_picture`), and the fix keeps a
+completion that has no picture-type bit and no payload pending until the
+next one publishes it. A real corrupt picture carries a picture-type bit
+(the truncated HEVC here came back `0x4049`, ERROR|KEYFRAME) and still fails
+at once; that shape is asserted by the existing corrupt test, now fed with
+`V4L2_BUF_FLAG_KEYFRAME`.
+
+After the fix (`66a6a98`, installed): the same VP9 clip logs
+`publish=invisible` ×118 and zero errors; the decode matrix passes
+unchanged (VP9 `48/48` frame-MD5). Committed as `97dde61`.
+
+### Where the fix was verified
+
+| Run | Driver | VP9 854x480, `LXb3EKWsInQ` |
+| --- | --- | --- |
+| before | `build 2b860ea8` (= `821c9f2`) | 26 drops in Chrome, 8 token-less errors |
+| before | installed `df16127c…` (pre-`8dd655e`) | 1080 `copy-gpu`, 1 drop, Chrome 600/0 |
+| after | installed `66a6a98` | 118 `publish=invisible`, 0 errors, Chrome 995/6 |
+
+### The AV1 observation, still open
+
+One `yt-music` run served an AV1 1280x720 rendition whose session logged 136
+`publish=error` completions (`0x4051` PFRAME|ERROR ×129, `0x4049` ×7), in
+consecutive-token pairs, while Chrome reported 501 frames / 0 dropped. Three
+later runs at 854x480 and 1080p show zero errors, and the pre-fix tree at
+854x480 shows the same class as 8 token-less `0x4041` errors. The video
+plays; nothing is attributed to the fix. It is recorded as an open
+rendition-dependent observation, not a conclusion.
+
+Scratch artifacts: `~/Lab/Bridge/tmp/iris-bench/` on the target
+(`site/ab-*/browser.log` per run, `vp9alt/` for the local alt-ref probes,
+`olddrv/` for the previous driver).
+
+## AV1 loop restoration: the frame header carried the wrong unit (2026-10-23)
+
+The open AV1 observation above had a cause, and it was the driver's OBU
+writer, not the firmware or the rendition.
+
+### What the failure looked like
+
+`yt-720.webm` (AV1 1280x720, 5326 frames, 4 tiles, 128x128 superblocks,
+loop restoration enabled) through `av1_vaapi` died on its third key frame.
+The session logged `capture token=18 flags=0x4049 publish=error` and then a
+cascade of `0x4051 publish=error` / `publish=drop`; FFmpeg exited with an
+I/O error after 24 of 213 submitted pictures. The same file decoded
+correctly with the in-kernel `v4l2av1dec`, so the file and the node were
+both fine.
+
+### How it was pinned to one bit
+
+- `V4L2_VA_DUMP` wrote every rebuilt access unit; the failing one (16808
+  bytes) failed on its own in both `aomdec` ("Failed to decode tile data")
+  and libdav1d, so it did not depend on the frames before it.
+- A hybrid stream (rebuilt units up to the key frame, then the source's own
+  key frame) decoded; the reverse did not. The defect is inside the
+  rebuilt key access unit.
+- The four tile payloads were byte-identical to the source
+  (`[5224, 4686, 4089, 2766]`), so the tiles and the tile-size prefixes
+  were not the problem.
+- `ffmpeg -bsf:v trace_headers` on the source and rebuilt key access units
+  produced the same fields everywhere except two, both of them expected and
+  legal (`use_superres` present because our sequence header enables it,
+  `tile_size_bytes_minus_1` = 3 instead of 1). One real difference remained:
+  `lr_unit_shift`, source 1, rebuilt 2.
+- Clearing that single bit in the dumped access unit made `aomdec` accept
+  it.
+
+### The defect
+
+`lr_unit_shift` is coded as `read_increment()`: unary ones from the range
+minimum, a zero ends it, and `range_max` ends it without a zero
+(`libavcodec/cbs_av1.c`, `cbs_av1_write_increment`; spec 5.9.20). With
+64x64 superblocks the range is 0..2; with 128x128 superblocks it is 1..2.
+The writer emitted `lr_unit_shift != 0` as one bit in both branches, so
+VA's resolved 1 became a coded 2 in 128x128 streams. The decoder then ran
+restoration over a 128-pixel unit where the encoder had used 64, and the
+tile data it read did not match what it expected.
+
+The 64x64 branch had a second bug of the same kind: it wrote
+`lr_unit_shift ? 1 : 0` twice, so 1 and 2 were indistinguishable there too.
+
+### Verification
+
+The first run used the build tree (`build-def`) only; the records below are
+from that driver and were then repeated against the installed package (see
+"Install" at the end of this section). Source `98167ea`, driver
+`build-def/src/v4l2_drv_video.so` SHA-256
+`0913ddec2eebe3dd6a0da054e524a225f60dc67ec046454e3ef21abaaaeb0ded`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot
+`90670102-4d45-4b5b-935d-a3dbe97de028`. Node resolved by the `iris_driver`
+QUERYCAP name: `/dev/video17` (`Iris Decoder`), encoder `/dev/video18`.
+Everything below ran through `-hwaccel vaapi` with `hwdownload,format=nv12`
+and was compared frame by frame to a software decode of the same file
+(`format=nv12`, so stride cannot account for a difference).
+
+| Clip | Before | After |
+| --- | --- | --- |
+| `yt-720.webm` AV1 1280x720 | stops at token 18, 24/213 pictures, FFmpeg exit 251 | `submitted=5448 completed=5448 errors=0 drops=0`, 5326/5326 frames MD5-identical |
+| `yt-1080.mp4` AV1 1920x1080 | not re-run (same writer path) | `submitted=5471 completed=5471 errors=0 drops=0`, 5326/5326 frames MD5-identical |
+| `test/av1-obu-roundtrip.sh` default source | 18/32 bit-exact | 18/32 bit-exact, unchanged |
+| `test/av1-obu-roundtrip.sh` on 120 frames of `yt-720.webm` | — | 72 rebuilt / 120 source, all bit-exact |
+
+The last row is the roundtrip test pointed at the real multi-tile stream
+(`IRIS_AV1_ROUNDTRIP_SOURCE`), which the 320x180 default source cannot
+reach: it uses 64x64 superblocks and has restoration disabled.
+
+`test/av1-obu-test.cc` (new) walks the rebuilt header back in spec order
+and fails on three checks if the writer reverts to a boolean coding.
+
+Chrome was re-run on the same clip with the build-tree driver
+(`test/iris-browser-acceptance.sh`, `V4L2_VA_TRACE=1`): `VaapiVideoDecoder`,
+platform true, 501 frames / 0 dropped, `submitted=716 completed=716
+errors=0 drops=0`, all `publish=copy-gpu`, GPU process holding
+`/dev/video17`.
+
+### Install and the installed-package recheck
+
+`install-system.sh build-def` over the 2026-09-22 package. Manifest: source
+`ab19b8a`, artifact `0913ddec…`, the previous driver kept at
+`/usr/local/share/iris-vaapi/backup/`. The installed
+`/usr/lib64/dri/v4l2_drv_video.so` is byte-identical to the build-tree one,
+and `LIBVA_DRIVER_NAME`/`LIBVA_DRIVERS_PATH` were unset for the recheck, so
+libva resolved the driver through `msm_drv_video.so` the way a client that
+knows nothing about this project does.
+
+| Clip, installed driver | Session | Frames |
+| --- | --- | --- |
+| `yt-720.webm` | `submitted=5448 completed=5448 errors=0 drops=0` | 5326/5326 MD5-identical |
+| `yt-1080.mp4` | `exit 0` | 5326/5326 MD5-identical |
+
+GStreamer's `vaav1dec` is not evidence for this codec yet: its element syncs
+each surface as it goes, which releases the held picture and makes the next
+`vaEndPicture` fail with "AV1 stream continued after a picture was released
+at download time". The FFmpeg and Chrome paths do not do that. Not a
+regression from this change: the same pipeline against the backed-up
+previous driver (`66a6a98…`) logs the same 30 refusals, so it is a property
+of the held-picture contract and this client, not of the header fix. It
+belongs in the record as a client that does not decode AV1 through this
+driver.
+
+Artifacts: `~/Lab/Bridge/tmp/iris-bench/av1-720/` on the target
+(`hw-all.md5`, `sw-nv12.md5`, `hw1080.md5`, `sw1080.md5`, `rt-real/`,
+`browser-av1/`), and
+`~/Lab/Bridge/tmp/av1-hdr/` on the builder (the dumped access units, the
+`trace_headers` diffs, and the one-bit patch that proved the field).
+
+## AV1 and H.264 resolution change inside one VA context (2026-10-23)
+
+A concatenated stream that switches from 1280x720 to 854x480 mid-file
+decoded its first segment and then stalled: every 854x480 access unit was
+accepted by the driver, none produced a picture, and the session ended on
+`sync timeout token=43 ... action=fail` followed by `session failed: no LAST
+after STOP`. The same file decoded fully in the in-kernel `v4l2av1dec`
+(GStreamer, 80/80 frames), so the file, the node and the firmware were all
+capable of it.
+
+### What the trace showed
+
+`V4L2_VA_TRACE=1` on the failing run:
+
+```
+event source-change state=1
+session reconfigure 1280x720 ->
+drc drain begin pending=2
+capture token=43 index=5 flags=0x104041 publish=invisible
+drc drain complete last=1
+capture configure 896x480 ... visible=854x480
+session reconfigure -> 854x480
+submit token=44 ...            (six 854x480 access units, all returned clean)
+output return index=0 flags=0x4001 token=44
+sync timeout token=43 pending=6 queued=32 held=0 action=fail
+```
+
+The OUTPUT returns carried no error, so the firmware had consumed the new
+segment and chosen not to decode it. Kernel `dynamic_debug` on
+`iris_inst_change_state` / `iris_inst_change_sub_state` showed an identical
+state machine to GStreamer's on the same file (`0x22` -> `0x66` -> CAPTURE
+STREAMOFF -> STREAMON -> `0`), so the DRC steps themselves were right.
+
+### The defect
+
+`configure_capture()` issued `S_FMT(CAPTURE, <GEOMETRY FROM G_FMT>)` on every
+bring-up, including the one that follows a mid-stream `SOURCE_CHANGE`.
+`iris_vdec_s_fmt` (CAPTURE branch) rewrites `inst->fmt_dst` and `inst->crop`
+from that request, replacing the coded size, stride and crop
+`iris_hfi_gen2_handle_src_change` had just derived from the bitstream. The
+resume then hands the firmware the client's rectangle instead of the
+stream's. GStreamer's strace shows the contract: it never calls `S_FMT` on
+CAPTURE at all, only `G_FMT` then `REQBUFS`.
+
+The fix reads `G_FMT` and issues `S_FMT` only when the driver's answer is not
+the pixel format the client needs (a P010 surface against an NV12 default).
+
+### Why it looked like an AV1 defect
+
+Only the AV1 clip reached it here, and not because AV1 is special: FFmpeg
+recreates its VA context at every coded-size change, so a mid-file switch in
+most streams never reaches the in-context path at all. H.264 was tried as a
+control and turned out not to be one — the H.264 run created two contexts
+(`va create_context` ×2, `reconfigures=0`) and therefore tested context
+teardown, not this defect. The AV1 run stayed in one context
+(`va create_context` ×1), which is why it was the one that stalled. What
+separated "AV1 writer" from "session ordering" was the dump: the rebuilt
+access units decoded cleanly in software (0 errors), so the bytes were
+right and the ordering was not.
+
+### Verification
+
+Source `99dcf30`, driver `build-def/src/v4l2_drv_video.so` SHA-256
+`f155e2f51ec28cb70459f3f5460c5cbdd94ed791e60db902de094c916e103566`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot
+`ebe7a2b2-9ae2-4725-ad33-be856e6ec7a1`. Node resolved by the `iris_driver`
+QUERYCAP name: `/dev/video2` (`Iris Decoder`). Everything below used the
+build tree (`LIBVA_DRIVERS_PATH=build-def/src`) through `-hwaccel vaapi`
+with `hwdownload,format=nv12`, compared frame by frame to a software decode
+of the same file.
+
+| Run | Before `99dcf30` | After `99dcf30` |
+| --- | --- | --- |
+| `resize-av1.mkv` (40x 720p + 40x 854x480, AV1) | 40/80 frames, `submitted=49 completed=42 timeouts=1` then `session failed`; FFmpeg exit 251 | **not fixed.** 1 of 3 runs: 80/80 frames, `submitted=84 completed=84 errors=0 drops=0 timeouts=0 drains=2`, MD5-identical to software. The other 2: the same 40/80 stall and exit 251 |
+| `resize-h264.mkv` (same geometry switch, H.264) | exit 0, 80 frames, two contexts | exit 0, 80 frames; not a control for this defect (see above) |
+| `test/iris-matrix.sh` (48 frames per codec) | PASS | PASS: h264, vp9, hevc, av1 all `content=frame-md5` |
+| `test/iris-dynamic-resolution.sh` (6 switches) | PASS | PASS: native baseline, VA single-process and fresh-context runs all frame-exact |
+
+The AV1 run leaves the in-context path visible in its own counters:
+`session reconfigure 1280x720 ->` at the boundary and `session reconfigure ->
+854x480` when the pool is rebuilt, with both segments decoded by the same VA
+context (`contexts=1`).
+
+### Correction (same day): the defect is not fixed, it is probabilistic
+
+The first version of this section claimed the run above proved the fix. It
+did not: one hardware run was treated as a result. Eight further runs from
+the same committed build and the same driver binary
+(`f155e2f5…`, unchanged) split as follows.
+
+| Runs | Result |
+| --- | --- |
+| 3 of 11 | 80/80 frames, exit 0 |
+| 8 of 11 | 40/80 frames, `sync timeout token=43`, `session failed: no LAST after STOP`, exit 251 |
+
+What separates them, from `V4L2_VA_TRACE=1` plus an OUTPUT-dequeue probe
+(`PROBE out index=… token=…`) and `dynamic_debug` on `iris_state.c`:
+
+- The kernel sub-state machine is identical in both
+  (`0x22` -> `0x66` -> CAPTURE `STREAMOFF` -> `STREAMON` -> `0`), so the DRC
+  steps this driver issues are right. GStreamer `v4l2av1dec` on the same
+  file, same node, same kernel decodes 80/80 in 5 consecutive runs, and an
+  ioctl-level strace of its DRC window shows the same order: no `S_FMT` on
+  CAPTURE, `G_FMT` only, drain to the boundary `LAST`, `STREAMOFF`,
+  `REQBUFS(0)`, `REQBUFS(5)`, `STREAMON`.
+- The boundary access unit (token 43, the first 854x480 key frame) completes
+  exactly once, as `flags=0x104041` (`ERROR|LAST`, no picture-type bit, no
+  payload). In a run that works the *same* token completes twice: that
+  marker first, then `0x4009` (KEYFRAME, real pixels) after the rebuilt pool
+  is streaming.
+- In the failing runs the OUTPUT slot that carried token 43 returns before
+  the resume, and a later access unit takes the same slot; in the working
+  runs it stays owned by the firmware until after `STREAMON`. Same binary,
+  same file, same node, different interleaving.
+- The failing runs also see one extra empty `LAST` (`0x104001`, token 0) on
+  the rebuilt pool immediately after `STREAMON`, which sets
+  `q->last_buffer_dequeued` in vb2 and turns every later CAPTURE `DQBUF`
+  into `EPIPE`. The firmware answered the resume by declaring the queue
+  finished.
+
+None of that is addressable from this driver: it consumes the boundary
+access unit, it decides whether to decode it a second time, and it decides
+whether the resumed CAPTURE queue is finished. Only FFmpeg's own context
+recreation path (`contexts=2`, which H.264 already takes and which every
+FFmpeg build does at a coded-size change) avoids it entirely.
+
+So the `S_FMT` change stays — it is a contract requirement
+(`docs/architecture.md` §4) and without it the working runs would decode the
+new segment at a geometry the stream never named — but in-context AV1 DRC
+stays **unqualified**. `data/iris-codec-capabilities.json` and
+`docs/architecture.md` carry that, and the target-side evidence is
+`~/Lab/Bridge/tmp/iris-bench/av1-720/` (`out-a.log` success, `out-b.log`
+failure, `gst.strace`, `flag-a.log`, `dd-c.dmesg`).
+
+### The installed package, no environment overrides (2026-10-24)
+
+The same commit installed with `scripts/install-system.sh build-def`
+(`source_commit=434be71`, `source_dirty=0`,
+`artifact_sha256=f155e2f5…`), then run with `LIBVA_DRIVER_NAME`,
+`LIBVA_DRIVERS_PATH` and `V4L2_VA_TRACE` all absent from the environment:
+
+```
+libva info: Trying to open /usr/lib64/dri/msm_drv_video.so
+vainfo: Driver version: Qualcomm Iris V4L2 stateful (libva-v4l2)
+      VAProfileH264Main : VAEntrypointVLD
+      VAProfileH264Main : VAEntrypointEncSlice
+session open node=/dev/video2 mode=decode-order codec=AV01 854x480 au=7077888 output=4
+session finish submitted=42 completed=42 errors=0 drops=0 timeouts=0 drains=1 misplaced=0
+```
+
+Kernel `7.2.6-sm8550-g42f3b40-iris1`, boot
+`ebe7a2b2-9ae2-4725-ad33-be856e6ec7a1`, `/dev/video2` `iris_driver` /
+`Iris Decoder`, `/dev/video3` `iris_driver` / `Iris Encoder`. This is the
+installed package, not a `DESTDIR` staging run and not a build-tree
+override.
+
+Artifacts on the target: `~/Lab/Bridge/tmp/iris-bench/av1-720/`
+(`resize-av1.mkv`, `resize-h264.mkv`, `hw.md5`, `sw.md5`, `hwmd5.log`).
+
+## Correction (2026-10-24): the in-context DRC defect is in this driver
+
+The section above concluded that the intermittent AV1 resolution-change stall
+was "not addressable from this driver" because the firmware decides whether
+to decode the boundary access unit a second time. That conclusion was wrong.
+The empty `LAST` (`0x104001`) on the rebuilt pool is not the firmware
+declaring the queue finished — it is the kernel completing a `CAPTURE` `QBUF`
+on the client's behalf, and the driver controls when that `QBUF` happens.
+
+`iris_vb2_buf_queue` (`iris_vb2.c:313-328`) has a branch that fires when a
+`CAPTURE` buffer arrives while the instance still carries the DRC boundary
+sub-state (`IRIS_INST_SUB_DRC | IRIS_INST_SUB_DRC_LAST`): it does not hand
+the buffer to the firmware, it completes it on the spot with
+`V4L2_BUF_FLAG_LAST`, payload 0, and calls `v4l2_m2m_mark_stopped`. vb2 then
+sets `q->last_buffer_dequeued` (`videobuf2-v4l2.c:853-856`), and every later
+`DQBUF` returns `-EPIPE` (`videobuf2-core.c:2011`). The kernel clears that
+sub-state in exactly one place — `iris_process_streamon_output`
+(`iris_common.c:100-155`) — which is the `CAPTURE` `STREAMON` ioctl.
+
+`enter_streaming()` used to call `pool_.requeue_capture()` first and
+`device_->stream(Queue::Capture, true)` second, so the 32 pool `QBUF`s
+arrived before the sub-state was cleared. Why only two runs in three failed
+rather than all of them: the boundary access unit also completes once as
+`ERROR|LAST` (`0x104041`), and that completion takes the error path in
+`iris_vb2_buffer_done` (`iris_buffer.c:771-778`) which returns before it
+reaches the `V4L2_BUF_FLAG_LAST` test that would set
+`inst->last_buffer_dequeued`. The two orders therefore differ only by a few
+microseconds of interleaving, which is why `strace` made the run pass (it
+slows every ioctl) and why the kernel sub-state log looked identical in both
+outcomes (`0x16` -> `0x42` -> `0`).
+
+The fix reverses the two calls: `STREAMON` first, then the pool, for both
+Mmap and Import memories. `test/unit/session-test.cc` had asserted the old
+order ("the first picture's buffer went in before CAPTURE streamed") and now
+pins the new one.
+
+Framemd5 oracle, `resize-av1.mkv` (80 frames, one VA context, one
+1280x720 -> 854x480 change), `V4L2_VA_TRACE=1`, build tree
+`~/Lab/qualcomm-iris-vaapi/build-def/src`:
+
+| Build | Runs | 80/80 frames, exit 0 |
+| --- | --- | --- |
+| before (`7f5936e`) | 6 | 2 |
+| after (`c4e957d`) | 44 | 44 |
+
+The 44 are 6 + 10 + 16 + 12 across four sessions. In a passing run the
+boundary token completes as `0x4009` (KEYFRAME, real pixels) after the
+rebuilt pool streams, and the extra `0x104001` no longer appears; the single
+`0x104001` that remains in a passing log is the terminal EOS drain
+(`index=10`).
+
+Regression checks on the same build:
+
+- `test/iris-matrix.sh`: PASS h264, hevc, vp9, av1, all `content=frame-md5`,
+  48 frames each, `timeouts=0 drops=0`.
+- `test/iris-dynamic-resolution.sh`: PASS h264, `switches=100`,
+  `contexts=101`, byte-identical native output and exact MD5 across every
+  change.
+- `sh test/run-static-checks.sh` PASS; `meson test -C build-def`
+  19/19 OK, 0 Fail.
+
+Installed package, no environment overrides (`scripts/install-system.sh
+build-def`): `source_commit=ff3269f`, `source_dirty=0`,
+`artifact_sha256=ea7030b6…`, installed driver sha256 identical. Eight runs
+with `LIBVA_DRIVER_NAME`/`LIBVA_DRIVERS_PATH` unset through `env -u`: 8 of 8
+gave 80/80 frames, exit 0, `token=43` completing as `0x4009` after
+`capture configure 896x480`. The only `0x104001` in those logs is the
+terminal EOS drain at `index=10`.
+
+Both fixes together, installed as a package: `source_commit=3cfaa7e`,
+`source_dirty=0`, `artifact_sha256=cb9053e0…`, installed driver sha256 equal
+to the build tree. Direct path (no overrides) 8 of 8 runs give 80/80 frames,
+each byte-identical to the software reference; Copy path
+(`V4L2_VA_PUBLISH=copy`) 6 of 6, likewise byte-identical. `meson test -C
+build-def` 19/19 OK.
+
+The A/B sweep that confirmed the ordering fix also surfaced a second defect on
+the Copy publish path, which the default Direct path never reaches. Forcing
+`V4L2_VA_PUBLISH=copy` made the same file fail at the first post-change
+picture with `gpu copy: invalid buffer layout`. `GpuBlitter::copy` built both
+the source and destination views from `to.width`/`to.height`, the destination
+surface's layout, while `from` is the new-resolution frame; a client surface
+still at the old geometry then asks for a source rectangle the source buffer
+never had (`gpu_copy.cc:132`). FFmpeg's download path reuses its surface pool
+across a resolution change, so this is reachable, and it is reachable in
+production: the capability table marks only H.264 and HEVC Import-qualified,
+so a pre-exporting client decoding AV1 publishes through Copy.
+
+`copy_pixels()` already intersects the client's rectangle with the buffer's
+for the CPU path; `copy()` now does the same — each view is built from its own
+layout, and the copy covers `min(from, to)` in each dimension. Same harness,
+`V4L2_VA_PUBLISH=copy`, `resize-av1.mkv`:
+
+| Build | Runs | Frames | Against software |
+| --- | --- | --- | --- |
+| before (`ff3269f`) | 3 | 40 of 80, `invalid buffer layout` | n/a |
+| after (`378c113`) | 6 | 80 of 80 | byte-identical, every frame |
+
+A file without a resolution change is unaffected: `h720.mkv` gives 40 of 40
+frames on both builds, byte-identical to each other. That output differs from
+the software decode of the same file, which is a property of the GPU copy's
+colour conversion and not of this change; it is the same on both builds.
+
+Artifacts: `~/Lab/Bridge/tmp/iris-bench/av1-720/` — `f-*.log` and `v-*.log`
+passing, `n-*.log`/`q-*.log` the before/after pair with the kernel trace,
+`cp-*.log` the Copy path after the fix, `pub-copy-*.log` before it.
+
+## Codec conformance: Fluster on the installed package (2026-10-24)
+
+Fluster 0.8.0 (`pip install --user fluster-conformance`), run against the
+installed driver with no `LIBVA_DRIVER_NAME` or `LIBVA_DRIVERS_PATH`. Fluster
+reports the backend it found on its own:
+
+```
+"VA-API": "Qualcomm Iris V4L2 stateful (libva-v4l2) (runtime 1.23)"
+"V4L2 M2M": "Iris Decoder (/dev/video2)"
+```
+
+The FFmpeg VA-API wrapper inherits the environment, so the numbers below are
+this driver's, not the firmware's through a different client. Source commit
+`434be71`, driver SHA-256 `f155e2f5…`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot `ebe7a2b2-…`.
+
+| Suite | Decoder | Passed | Total | Profile split |
+| --- | --- | ---: | ---: | --- |
+| `JVT-AVC_V1` | `FFmpeg-H.264-VAAPI` | 72 | 135 | Constrained Baseline 33/33, Main 39/89, Baseline 0/7, Extended 0/6 |
+| `JCT-VC-HEVC_V1` | `FFmpeg-H.265-VAAPI` | 141 | 147 | Main 131/135, Main 10 9/11, Main Still Picture 1/1 |
+
+Neither number is a driver defect count. Every failure was classified by
+running each vector directly and reading the kernel's own message
+(`~/Lab/Bridge/tmp/fluster/h264-failures.csv`, and the same method for HEVC):
+
+H.264, 63 failures:
+
+| Count | Cause |
+| ---: | --- |
+| 49 | Kernel refuses the stream: `unsupported content, bit depth: 80008, pic_struct = N`, then `state changed from 2 to 5`. All 49 carry `frame_mbs_only_flag = 0` in their SPS (verified with `-bsf:v trace_headers`): the firmware has no field/MBAFF decoding. The driver surfaces the kernel's refusal as an error, which is correct. |
+| 7 | Baseline profile, 6 Extended: neither is advertised in `data/iris-codec-capabilities.json`, so FFmpeg never reaches the hardware path. Expected. |
+| 6 | Baseline/Extended vectors whose decoded pixels differ from the reference, on a profile this driver does not advertise. |
+| 1 | `FM2_SVA_C` could not be probed (no readable elementary stream in the vector directory). |
+
+The 33/33 Constrained Baseline result and the 39 passing Main vectors are
+frame-coded streams, which is the shape the firmware supports.
+
+HEVC, 6 failures:
+
+| Count | Vector | Cause |
+| ---: | --- | --- |
+| 2 | `PICSIZE_A/B_Bossen_1` | 8440 wide, above the node's 8192 limit (`iris_ctrls.c`). |
+| 2 | `WPP_D_ericsson_MAIN_2`, `_MAIN10_2` | 64x240, below the 96 minimum. |
+| 1 | `VPSSPSPPS_A_MainConcept_1` | The vector switches 352x288 -> 1280x720 in one stream. FFmpeg recreates the VA context (`session open` x2) and both paths decode 2 frames, but the reference MD5 differs; it is the same in-context resolution-change family as the AV1 stall above, not a pixel defect. |
+| 1 | `TSUNEQBD_A_MAIN10_Technicolor_2` | `Skipping invalid undecodable NALU` in FFmpeg's own parser before the hardware is reached. |
+
+## Power: saturated decode, software versus this driver (2026-10-24)
+
+Method: battery gauge `voltage_now x |current_now|` at 1 Hz, screen off
+(backlight 0, idle 1.4 W), arms interleaved A/B per round so background drift
+cancels, first 4 s of each window discarded as the ramp transient, 10 s pre-
+and post-baseline. The workload re-decodes the clip back to back so the window
+is always full; a paced `-re` run leaves the device mostly idle and buries the
+difference in gauge noise (measured: a 30 s paced run gave 218 +/- 62 mW for
+the VA arm and 124 +/- 32 mW for software, which does not resolve).
+
+| Workload | VA-API | Software | Difference |
+| --- | ---: | ---: | ---: |
+| 1280x720, unpaced, n=4 | +1861 +/- 64 mW | +5149 +/- 429 mW | **-3289 mW** |
+| 1920x1080, unpaced, n=4 | +2089 +/- 158 mW | +6177 +/- 761 mW | **-4087 mW** |
+
+CPU cost of the same two decodes (`-benchmark`, whole clip, no pacing):
+720p VA `utime=0.302s stime=0.183s`, software `utime=2.202s stime=0.146s`;
+1080p VA `utime=0.487s stime=0.192s`, software `utime=4.020s stime=0.180s`.
+
+Interpretation: at saturation the decoder offload is worth about 3.3 W at
+720p and 4.1 W at 1080p on this tablet. That is the cost of doing the work on
+the CPU, not a claim about a browser session: a browser that plays at 30 fps
+spends most of the time idle and the saving is smaller and noisier, which is
+why the paced numbers above cannot resolve it. The gauge measures the whole
+device; there is no per-block telemetry on this SoC.
+
+## Stable-buffer allocation chain (2026-10-24)
+
+The chain in §3.4 — MSM GEM cached-coherent, MSM GEM write-combined, system
+DMA heap — had no test. The last rung is only reached when the first two are
+refused, and no ordinary run refuses them, so `test/iris-alloc-chain.sh` runs
+`test/iris-alloc-probe` under `test/alloc-fault.so`, an `LD_PRELOAD` shim
+that returns `EINVAL` (or `ENOMEM`) from the MSM GEM allocations it is told
+to refuse and logs every attempt.
+
+Run on the target, kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`ebe7a2b2-9ae2-4725-ad33-be856e6ec7a1`, source `3cfaa7e` plus the
+working-tree change, build tree `build-alloc` (probe
+`1c71e250dba9…`, shim `0baefc4243…`), render node `/dev/dri/renderD128`
+resolved from the display's DRM render fd. Four modes, each a fresh process:
+
+| Mode | Injected | Resulting origin | Attempts logged |
+| --- | --- | --- | --- |
+| `no-fault` | nothing | MSM cached-coherent | — |
+| `coherent` | coherent → EINVAL | MSM write-combined | `coherent-einval wc-ok` |
+| `both` | coherent and WC → EINVAL | system DMA heap | `coherent-einval wc-einval` |
+| `coherent-enomem` | coherent → ENOMEM | system DMA heap | `coherent-enomem` |
+
+`coherent-enomem` is the one that pins a correctness rule rather than a
+memory preference: `msm_alloc.c` masks only `EINVAL` and `EOPNOTSUPP`, so a
+real failure must not be retried write-combined. The log shows no `wc` attempt
+at all in that mode.
+
+Every mode also asserted that the buffer covers the CAPTURE layout and that a
+pattern written to its chroma plane reads back unchanged across a
+`DMA_BUF_IOCTL_SYNC` pair, so a fallback rung is real memory and not just a
+successfully returned fd.
+
+Two negative controls, both refused with exit 2 rather than reported as a
+pass: an injected mode with no shim loaded, and an injected mode with the shim
+loaded but `IRIS_TEST_ALLOC_FAULT` unset. Without them a pass could come from
+the fast path happening to work.
+
+This is not a Meson test: every rung but the last needs an MSM render node,
+and a host without one cannot run any of it. `meson test` (19/19) and
+`run-static-checks.sh` are unchanged by the addition.
+
+## Encode input fence (2026-10-24)
+
+`src/iris/encode.cc` queued a surface's DMA-BUF to OUTPUT with no fence
+wait. The kernel attaches nothing of its own to a dmabuf QBUF, so a client
+that renders into the surface and only flushes was encoded from whatever the
+buffer held before its GPU write landed. Every other path already waits —
+`session.cc` before an Import capture buffer is handed to the firmware,
+`publish.cc` and `gpu_copy.cc` before a copy — and the encoder was the one
+that did not. `submit()` now waits on `POLLOUT` (read *and* write fences,
+`dma_resv_usage_rw(true)`) before the session lock, bounded at 2 s, and
+traces `encode input fence` when the wait reached 20 ms.
+
+`test/iris-encode-fence-probe` measures the result rather than the call.
+Three NV12 stable buffers share a chroma plane and differ in luma: `current`
+(the picture to encode), `stale` (the one it replaces), and `staged`, which
+starts as a CPU copy of `stale`. On a live session the GPU rewrites `stale`
+over `staged` 512 times — same content, so the destination's bytes say
+nothing about progress but the queue stays busy — and then blits `current`
+into it. `staged`'s memory therefore reads `stale` before the blits land and
+`current` after them, which is exactly the question the wait decides.
+
+Run on the target, kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`ebe7a2b2-9ae2-4725-ad33-be856e6ec7a1`, source `7173756` plus the
+working-tree change (copied to the target's `~/Lab/qualcomm-iris-vaapi`,
+whose checkout is at `3cfaa7e` and was not otherwise updated), build tree
+`build-alloc` (probe `1413ac6f9ad4…`), encoder node `/dev/video3`
+("Iris Encoder") and render node `/dev/dri/renderD128`, both resolved by
+name.
+
+| Run | Fence at submit | Fence after submit | Staged access unit | Verdict |
+| --- | --- | --- | --- | --- |
+| with the wait, 3 runs | pending | signaled | 169245 bytes, equal to `current` | PASS |
+| wait removed, 3 runs | pending | pending | 160574 bytes, equal to `stale` | FAIL |
+
+The negative control is the whole point of the probe: with the wait removed
+the firmware encoded the picture as the buffer held it *before* the blit, and
+the byte counts name which one it read. The first version of this probe
+blitted `current` over `staged` directly and passed both ways — a single
+blit drained before the submit was queued, so the comparison could not fail.
+A probe that cannot fail is not evidence.
+
+The two reference pictures are encoded from their own configured sessions,
+so no picture predicts from another and equal pixels must give equal bytes.
+The blit runs inside the same function that then submits, after
+`configure()` has returned, so the V4L2 setup cannot absorb the window.
+
+Also on this boot: `ffmpeg` `h264_vaapi` and `hevc_vaapi` at 1920x1080,
+120 frames each, both decode clean (`-f null -`) and read back 120 frames at
+1920x1080; `iris-va-import-probe` passes all twelve of its checks including
+the equal-bitstream comparison from an imported surface; a 60-frame run with
+`V4L2_VA_TRACE=1` emitted no `encode input fence` record, i.e. a swscale
+upload leaves no pending fence and the wait costs nothing on that path.
+
+Throughput, because a wait on the submit path could plausibly cost some. The
+recorded pipelining setting (§ "Pipelined encode", `testsrc2` 1920x1080,
+600 frames, CBR 12 Mbit/s, `-g 60`) measured 202 fps at `-async_depth 1` and
+370 fps at 4 on this build, against the 190 and 374 recorded for `9bd3dbd`.
+An interleaved A/B on one binary (`IRIS_TEST_NO_FENCE_WAIT` removing only the
+wait, wait and no-wait alternating, three rounds each) came out inside the
+run-to-run spread:
+
+| Round | wait d=1 | no wait d=1 | wait d=4 | no wait d=4 |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 3.713 s | 3.923 s | 1.901 s | 1.930 s |
+| 2 | 4.174 s | 3.950 s | 1.880 s | 1.894 s |
+| 3 | 3.976 s | 3.810 s | 1.892 s | 1.898 s |
+
+The wait is a `poll()` that returns immediately when no fence is pending, and
+a swscale upload leaves none, so this is what it should cost. The installed
+package (`libva-v4l2-iris-0.1.0-1.fc44`) measured 4.131 s and 1.898 s on the
+same two depths, so the build tree is not the reason for any difference.
+
+Not a Meson test: it needs the encoder node and a hardware GPU renderer, and
+its verdict is a pair of access units. `meson test` (19/19 on the target and
+on the builder) and `run-static-checks.sh` are unchanged.
+
+## Encode fidelity against the source (2026-10-24)
+
+The encode gates proved that a stream decodes and that a decode through this
+driver matches a decode through the native decoder. Neither says the pixels
+are the source's: an encoder that emitted flat grey would pass both.
+`test/iris-encode-quality.sh` measures structural similarity against the
+source instead, per codec, and refuses to trust the encoder.
+
+Run on the target, kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`ebe7a2b2-9ae2-4725-ad33-be856e6ec7a1`, build tree `build-alloc` (this
+commit's working tree), encoder node `/dev/video3` resolved by
+`iris_driver` name and Card type, render node `/dev/dri/renderD128`,
+`testsrc2` 1920x1080 120 frames.
+
+| Check | H.264 | HEVC |
+| --- | --- | --- |
+| Iris IRQ delta | +240 | +240 (`iris` line in `/proc/interrupts`) |
+| frames decoded | 120 / 120 | 120 / 120 |
+| platform decode vs software decode | byte for byte | byte for byte |
+| SSIM against the source, mean | 0.998596 | 0.996808 |
+| SSIM against the source, worst frame | 0.9985 | 0.9963 |
+| blank-stream control | 0.000034 | 0.000034 |
+
+The blank-stream control is what makes the floor meaningful: a black frame
+sequence scores three orders of magnitude below the 0.90 floor, so a pass
+cannot come from the check happening not to look. The worst-frame number is
+used, not the mean, because one shattered frame is one broken picture handed
+back to the client.
+
+The IRQ counter is matched on the line's name (`iris`, `qcom-iris`, `venus`
+or `vcodec`) rather than a column position: the name differs between kernel
+branches, and a gate reading the wrong line would report zero and fail a run
+that worked.
+
+A first version of the script named the HEVC output `.h264`. FFmpeg picks the
+muxer from the extension, the H.264 raw muxer rejects HEVC at header write,
+and the process then died with SIGSEGV rather than an error — the gate
+reported `the encode failed`, which is true but names the wrong layer. Each
+stream now carries its own codec's extension, and the failure is FFmpeg's own
+message.
+
+Not a Meson test: it needs the encoder node, a render node and FFmpeg. It is
+in the hardware suite, not in `meson test` (19/19, unchanged).
+
+## Descriptor accounting across the surface lifecycle (2026-10-24)
+
+The driver duplicates a client's DMA-BUF on import, allocates a stable buffer
+for a surface it must export, and holds both V4L2 nodes. One descriptor left
+behind per surface is invisible in a short run and fatal in a long one:
+Chrome keeps a pool of surfaces for hours, and at the process limit every new
+surface fails.
+
+`test/iris-fd-leak-probe` counts `/proc/self/fd` rather than keeping a ledger
+the driver would agree with. Each cycle initializes once, then imports a
+client DMA-BUF, derives an image, exports a handle, and tears the surface
+down. Run on the same target and boot:
+
+```
+open fds per cycle: 10 10 10 10 10 10 10 10
+steady state 10..10 over 7 cycles
+after vaTerminate: 6 fds
+  fd 2 -> pipe:…
+  fd 3 -> /dev/dri/renderD128
+descriptors that are not the render node or a standard stream: 0
+```
+
+The count is flat across eight cycles, and after `vaTerminate` the only
+descriptors left are the render node the probe opened itself and the standard
+streams — so the driver released everything it opened, including the import
+duplicates and the export handles.
+
+The negative control is required for this to mean anything: with
+`IRIS_TEST_FD_LEAK=1` the probe leaks one DMA-BUF per cycle on purpose and
+must fail. It does — the count climbs 10, 11, 12 … 18 and the run reports
+`FAIL fd-leak cycles=8 steady=18`, with the leaked descriptors printed as
+`/dmabuf:`. A probe whose accounting was broken would report a flat line in
+both configurations.
+
+Not a Meson test: it needs libva's DRM display and the built driver.
+
+## CI: the inventory check failed on the meson version (2026-10-24)
+
+PR #1's CI had never run: every push waited for maintainer approval because
+the pull request is cross-repository (head in `FFT-infra`, base in
+`phxinyang`). The first approved run failed in 1 minute 13 seconds, before a
+single test ran: `missing Meson test: session`.
+
+The runner installs the distro's meson 1.3.2, which prints a bare test name.
+A developer's meson 1.11 prints `<project>:<name>`. The check grepped for
+`":${required}$"`, which only matches the second form, so every job failed on
+the first required name regardless of the code.
+
+Reproduced on the builder with meson 1.3.2 in a venv (`--list` prints
+`session`, `annexb`, …) and re-run the check loop against that output: the
+old pattern finds nothing, the new pattern `"(^|:)${required}$"` finds all 14
+required tests and still rejects `session-nonexistent`. The workflow now also
+prints `meson --version`, so a future log names the version that ran.
+
+The fix landed as `ci: accept both meson test listing formats` and the next
+push went green on the fork, all twelve steps
+(`40080541955`, 41 s): configure, build, the inventory check, static checks,
+19/19 Meson tests, no undefined symbols, and provenance for
+`0b8ed1551b74…` / `6907a881…`.
+
+What stays red is the check on the pull request itself, and that is a
+permissions fact rather than a code one. `phxinyang/qualcomm-iris-vaapi`
+answers the fork-run API with `Must have admin rights to Repository` (HTTP
+403) for the only credential this workspace holds, which belongs to the fork
+owner. GitHub reports `action_required` and starts no job, so the PR shows no
+result at all. The same commit is fully exercised by the fork's `push` run;
+the two differ in the repository that records the check, not in the steps that
+run. The settings that would end it need the base repository's owner: either
+approve the run on the PR page, or change Settings → Actions → General → Fork
+pull request workflows to require approval only from first-time contributors,
+after which a push from this fork runs without a click.
+
+## The launcher exports both nodes, and Chrome still decodes (2026-10-24)
+
+`scripts/iris-vaapi-browser` now resolves the encoder node and exports
+`LIBVA_V4L2_ENCODER_PATH` beside `LIBVA_V4L2_VIDEO_PATH`. That changes the
+environment of every browser it starts, so it needs a browser run, not a
+`sh -n`.
+
+`test/iris-browser-acceptance.sh` with the build-tree driver on the same
+target and boot:
+
+```
+PASS browser=Chrome/152.0.7977.82 decoder=VaapiVideoDecoder platform=True
+     frames=600 dropped=0 holders=--type=gpu-process
+     driver=build-tree:de253601b3ed boot_unchanged=True
+```
+
+Same decoder, platform flag set, 600 frames over a 20 s window with no
+drops, and the GPU process holding the node. The launch path the launcher
+controls is the one that changed; the decode path is unchanged.
+
+The suite's new encode gate also ran from `test/iris-hardware-suite.sh`:
+`iris-matrix`, `iris-structure-matrix` and `iris-encode-quality` all pass.
+Before this the encode gate was reachable only by hand.
+
+## The installed package, encode included, with no environment overrides (2026-10-24)
+
+Every encode result in this file before this section came from a build tree
+with `LIBVA_DRIVERS_PATH` set. The installed RPM was 80 commits behind
+(`source_commit=1d15de26…`, 2026-09-22) and carried no encode support, so no
+run had answered the question a user actually asks: after `dnf install`, with
+nothing in the environment, does encode work?
+
+### The artifact
+
+| Fact | Value |
+| --- | --- |
+| Source commit | `0b8ed1551b74317d154b50e306efb3efbd77ec06` (branch `feat/encode-entrypoints`, `source_dirty=false`) |
+| tracked-source SHA-256 | `6907a88135811e395d32ceede638a6447ed624d8611054e9e126c7849d03f007` |
+| RPM | `libva-v4l2-iris-0.1.0-1.fc44.aarch64.rpm`, SHA-256 `e8b551d9af063e6d69f2b447e9f1bb156c301fd1120227d1ede89d579324299c` |
+| Installed driver | `/usr/lib64/dri/v4l2_drv_video.so`, SHA-256 `b2f8151d3980339ccfb477801395e951d17af04845e0e6abeea86c83b4632efe`, 399920 bytes |
+| Kernel | `7.2.6-sm8550-g42f3b40-iris1`, `qcom-iris.ko.zst` `9b16a40179a08e…` |
+| Boot ID | `ebe7a2b2-9ae2-4725-ad33-be856e6ec7a1`, unchanged through every run below |
+| Nodes | decoder `/dev/video2`, encoder `/dev/video3`, both resolved by `iris_driver` QUERYCAP name plus Card type; render `/dev/dri/renderD128` |
+| Chrome | 152.0.7977.82, through the packaged launcher and desktop entry |
+
+`rpm -V libva-v4l2-iris` is clean. The driver the RPM installed is not the
+driver that was there before: `artifact_sha256` in
+`/usr/share/iris-vaapi/install-manifest.txt` equals the file on disk, that
+file is 399920 bytes, and the previous installed driver was 8961024. The old
+file was a local `scripts/install-system.sh` build with symbols and the new one
+is the RPM's stripped payload; they shared only the name. The previous driver
+is backed up at `~/Lab/Bridge/tmp/rollback-driver-20261024T090903Z/` with its
+SHA-256 recorded, and `install-system.sh`'s own copy is at
+`/usr/local/share/iris-vaapi/backup/v4l2_drv_video.so`, same hash.
+
+One thing the RPM does not clean up: the ownership rule in
+`scripts/uninstall-system.sh` refuses to remove a file that belongs to an RPM,
+so the 2026-10-24 09:22 `install-system.sh` install left
+`/usr/local/bin/iris-vaapi-browser` and
+`/usr/local/share/applications/google-chrome-iris-v4l2.desktop` in place
+beside the RPM's copies. `/usr/local/bin` precedes `/usr/bin` on this user's
+`PATH`, and `/usr/local/share` precedes `/usr/share` in `XDG_DATA_DIRS`, so a
+desktop launch from the icon used the **old** launcher. Pointing both at a
+script that prints the environment shows the difference:
+
+```
+/usr/bin/iris-vaapi-browser        LIBVA_V4L2_ENCODER_PATH=/dev/video3
+/usr/local/bin/iris-vaapi-browser  LIBVA_V4L2_ENCODER_PATH=<unset>
+```
+
+The encode path is unaffected — FFmpeg never goes through the launcher — and
+the acceptance run below invokes the packaged launcher explicitly. A browser
+started from the icon, though, would have the encoder node unnamed, which is
+the one thing the launcher change was for. The residue is left in place
+rather than deleted: it is the user's file, and removing it is a separate
+authorized action.
+
+### Runtime, no overrides
+
+`LIBVA_DRIVER_NAME`, `LIBVA_DRIVERS_PATH`, `LIBVA_V4L2_VIDEO_PATH`,
+`LIBVA_V4L2_ENCODER_PATH` and `V4L2_VA_*` were checked absent from the
+environment first (`env | grep -E '^(LIBVA|V4L2_VA|GST_VA)'` matched
+nothing). libva then resolved the driver through the packaged
+`msm_drv_video.so` alias on its own:
+
+```
+libva info: Trying to open /usr/lib64/dri/msm_drv_video.so
+libva info: Found init function __vaDriverInit_1_23
+libva info: va_openDriver() returns 0
+```
+
+`vainfo` reports `VLD` for every decode profile and `VAEntrypointEncSlice`
+for `H264ConstrainedBaseline`, `H264Main`, `H264High` and `HEVCMain`. That is
+the first time encode entrypoints came from an installed package on this
+device.
+
+| Check | H.264 | HEVC |
+| --- | --- | --- |
+| `ffmpeg -vaapi_device` 300 frames 1080p, `-b:v 4M -g 60` | exit 0, 9915972 bytes | exit 0, 9968504 bytes |
+| Iris IRQ delta, both in one window | +1150 for the pair | |
+| decodes with no error | yes | yes |
+| frames / profile / level / geometry | 300, High, 4.0, 1920x1080 | 300, Main, 4.0, 1920x1080 |
+| fidelity gate SSIM against the source | mean 0.998596, worst 0.9985 | mean 0.996808, worst 0.9963 |
+| blank-stream control | 0.000034 | 0.000034 |
+
+The two FFmpeg warnings are the documented ones and not failures:
+`Driver does not support any packed headers (wanted 0xd)`, and for HEVC
+`Driver does not advertise encoder features, using guessed defaults`. The
+fidelity gate ran with `LIBVA_DRIVERS_PATH=/usr/lib64/dri` and produced the
+same numbers as the build-tree run recorded above — as it must, since it is
+the same source — which also confirms the gate now measures the driver it is
+told to measure.
+
+### The rest of the gates, from the installed package
+
+All run with `LIBVA_DRIVERS_PATH=/usr/lib64/dri`:
+
+| Gate | Result |
+| --- | --- |
+| `iris-matrix` | H.264, VP9, HEVC, AV1 all `content=frame-md5`; 48 frames each, 1 drain, 0 timeouts, 0 drops; AV1 `noshow=23` as recorded |
+| `iris-structure-matrix` | all-I, IP-g12, B=2, B=4 pass |
+| `iris-zero-copy-suite` | `direct=24` |
+| `iris-encode-quality` | H.264 and HEVC pass, numbers above |
+| `iris-browser-acceptance`, packaged launcher, no `--driver` | `decoder=VaapiVideoDecoder platform=True frames=902 dropped=0 holders=--type=gpu-process driver=installed:b2f8151d3980` |
+| `iris-hardware-suite` | `iris-matrix`, `iris-structure-matrix`, `iris-encode-quality`, and native GStreamer h264/vp9/hevc/av1 all PASS |
+
+The matrix trace reports `publish=direct` for all 48 H.264 and all 48 HEVC
+completions. FFmpeg exports surfaces only after their decode, so Direct is
+the expected policy; the Import path is exercised by Chrome, which the
+acceptance run above does with the GPU process holding the node.
+
+`iris-browser-acceptance.sh` launches `../scripts/iris-vaapi-browser` from the
+checkout it runs in, so testing the packaged launcher needs that path to be
+the packaged file. Run from a tree whose `scripts/iris-vaapi-browser` is a
+symlink to `/usr/bin/iris-vaapi-browser`, with no `--driver` and no
+environment set, Chrome reports `VaapiVideoDecoder`, platform true, 902
+frames in 30 s, zero drops, `driver=installed:b2f8151d3980`, and the GPU
+process holds `/dev/video2`. That is the packaging path end to end: the RPM's
+launcher found both nodes, and the RPM's driver decoded through libva's
+`msm_drv_video.so` alias.
+
+### The one failure, and why it is not this driver
+
+`test/iris-hardware-suite.sh` reported `FAIL v4l2-compliance rc=1`:
+`Total for iris_driver device /dev/video2: 48, Succeeded: 41, Failed: 7`. The
+seven are the kernel's, not the driver's — `v4l2-compliance` talks to the
+node through ioctls and links neither libva nor this `.so` (`ldd` shows no
+`libva` or `libdrm`). The classes:
+
+- `missing bus_info prefix ('plat:aa00000.video-codec:dec')`, twice, on
+  `VIDIOC_QUERYCAP`. Both Iris nodes report `plat:aa00000.video-codec:dec`
+  and `plat:aa00000.video-codec:enc`. The v4l2 core fills `bus_info` with
+  `platform:` when the driver leaves it empty, so the driver writes this
+  string itself; Venus writes the same `plat:%s:dec` form
+  (`drivers/media/platform/qcom/venus/vdec.c`). v4l2-compliance's allow-list
+  contains `platform:` and not `plat:`.
+- `!colorspace` on `VIDIOC_G_FMT`, `TRY_FMT` and `S_FMT` — the Iris formats
+  report no `colorspace`, `ycbcr_enc` or `quantization` for the compressed
+  OUTPUT formats.
+- `min_number_of_capture_buffers` present in `--list-ctrls` but absent from
+  the control class `v4l2-compliance` classifies it under.
+- `q2.reqbufs(node2, 1) != EBUSY` on `REQBUFS`.
+
+This file records 47/48 for `v4l2-compliance` in August 2026, with only the
+control-class failure. That run used kernel `7.2.0-sm8550`; this one uses
+`7.2.6-sm8550-g42f3b40-iris1`, which is the kernel with the project's four
+patches applied. The extra failures are the QUERYCAP `bus_info`, the
+colorspace trio and the `REQBUFS` one. None of the four patches touches
+`bus_info`, colorspace or `REQBUFS` (`grep bus_info packaging/kernel/*.patch`
+matches nothing), so the difference belongs to the 7.2.6 base or to the
+patches applying over it; the August rows are kept as recorded rather than
+overwritten. The point of this section is that the current target fails them
+and the userspace gates all pass while it does.
+
+`v4l2-compliance` is not a gate on the driver in any case: the suite fails
+the run because a strict external check failed, and a maintainer reading the
+summary should treat that line as a kernel-interface report, not as a
+regression in `src/`.
+
+### One defect the run found in the test tree
+
+`test/iris-encode-quality.sh` set `LIBVA_DRIVERS_PATH=$root/build-local/src`
+in the encode command, ignoring the caller. On this target that directory
+does not exist, so the gate could only ever have measured an installed
+driver, and `iris-hardware-suite.sh` passing `LIBVA_DRIVERS_PATH` to it
+silently did nothing. It now reads `LIBVA_DRIVERS_PATH` (default
+`build/src`) and fails with a clear message when that directory holds no
+`v4l2_drv_video.so`; the negative control above confirms the failure path.
+
+## Encoder picture contract and packed headers: code and host gates only (2026-10-24)
+
+Two changes in the encode path, neither of them hardware-verified yet. The
+tablet was at 2% and discharging with no charger connected, so every run
+below is on the builder and none of them touches the codec.
+
+### What changed
+
+The encoder had been accepting picture parameters it could not honour and
+producing a stream that quietly used something else. Three of those are now
+refused or promoted:
+
+- A non-IDR I picture, and an HEVC CRA, become an IDR request. FFmpeg
+  submits this shape when `-idr_interval` is above zero —
+  `vaapi_encode_h264.c` sets `slice_type = 7` with `idr_pic_flag = 0`
+  (`:436-439`, `:548`) and the HEVC path uses `HEVC_NAL_CRA_NUT`
+  (`:485-489`) — so this was not a Sunshine-only edge case. Iris has only
+  `FORCE_KEY_FRAME`, which emits an IDR; the alternative was the firmware
+  coding the picture as a P and misordering the stream. The interval
+  defaults to 0, so a plain `-g` run never reaches the path; the section
+  below records the run that does.
+- An inter picture must name the previous picture's reconstruction surface
+  in `RefPicList0[0]` / `ref_pic_list0[0]`. The session keeps
+  `last_reconstruction_` and compares. The firmware has no reference
+  management, so a reference to anything else is a picture coded against
+  pixels nobody can name.
+- A stream must start on an intra picture, a picture with
+  `reference_pic_flag` clear is refused, one full-picture slice is the only
+  layout accepted, B slices are refused, and an HEVC `coding_type` that
+  disagrees with the slice type is `VA_STATUS_ERROR_INVALID_PARAMETER`.
+
+`VAConfigAttribEncPackedHeaders` now answers `VA_ENC_PACKED_HEADER_NONE`
+(zero) instead of `VA_ATTRIB_NOT_SUPPORTED`, and
+`VAConfigAttribEncMaxSlices` answers 1. The first is what stopped
+GStreamer's `vah264enc`/`vah265enc` before the first frame: its
+`gst_va_display_get_packed_headers` returns -1 only for
+`VA_ATTRIB_NOT_SUPPORTED`, so zero passes. An earlier section of this file
+claimed Radxa's backend answered NONE and "fails the same check"; that was
+wrong, and it is corrected in place.
+
+### What was verified, and where
+
+On the builder, `eea58f3` plus this working tree:
+
+```
+sh test/run-static-checks.sh   PASS static checks
+meson test -C build-local      Ok: 19, Fail: 0
+git diff --check               clean
+```
+
+`test/encode-params-test.cc` gained `test_reference_and_slice_shape()` (15
+assertions: P reports its reference, intra reports none, a missing or
+long-term reference is refused, a partial slice, an offset slice, a B slice,
+an IDR paired with a P slice, a non-reference picture and an HEVC
+`coding_type` mismatch are all refused). `test/encode-session-test.cc` now
+builds a real 12-picture chain with the intra pictures at 0 and 10, because
+a session that accepts a broken chain would pass a test that only ever
+submitted one picture.
+
+`test/iris-browser-launcher-check.sh` exercises the new
+`--print-encoder` mode against a fake browser, including a display with no
+encoder node, which must print nothing and exit zero.
+
+### What is not evidence
+
+- No encode was run on the target with this tree. The promoted-IDR path, the
+  reference check and the GStreamer encoder all need a hardware run before
+  any of them is claimed. The relevant gate is
+  `test/iris-encode-quality.sh`, plus `vah264enc`/`vah265enc` for the packed
+  header change.
+- The stock-kernel intra-period lever is unchanged and still needs its own
+  run for a promoted request, not only for `idr_pic_flag`.
+
+### Scripts added to the install
+
+`iris-device-check`, `iris-verify` and `iris-configure-clients` are installed
+next to the launcher by `scripts/install-system.sh`, and both packages'
+file lists carry them (`test/iris-packaging-check.sh` enforces the three-way
+agreement). `iris-device-check` and `iris-verify` resolve both nodes through
+`iris-vaapi-browser --print-node` / `--print-encoder`, so a boot that
+renumbers `/dev/video*` changes nothing in them; `test/run-static-checks.sh`
+asserts neither carries a node literal and both use the launcher.
+
+A `DESTDIR` staging run of `install-system.sh` on the builder produced the
+expected payload (driver, alias, launcher, three diagnostics, desktop entry,
+manifest), and both diagnostics were executed from that staged tree. On the
+builder they correctly report no Iris codec and exit 1. That is a staging
+run, not an installation, and it says nothing about the scripts' behaviour
+on hardware.
+
+## GStreamer encode, promoted IDR, and the double claim (2026-10-24)
+
+The section above recorded code and host gates only. This one is the hardware
+run that was missing, and it found a defect the host gates could not.
+
+| Fact | Value |
+| --- | --- |
+| Source | `eea58f3` plus the working tree; `source_dirty=true` (uncommitted) |
+| tracked-source SHA-256 | `6528305b2d98a96eceafcae6819734a56d4f1faf0eab7e9cde9244c387622fd3` |
+| Driver | build tree `build/src/v4l2_drv_video.so`, SHA-256 `69fb872cf04a89d7ce38ce8f64008e42452a5b70d4a73eba6348db3fcff08197` |
+| Kernel | `7.2.6-sm8550-g42f3b40-iris1`, `qcom-iris.ko.zst` `9b16a40179a08e41…` |
+| Boot ID | `36ef0142-1f34-418f-9704-56e2e0ceae41` |
+| Nodes | decoder `/dev/video17`, encoder `/dev/video18`, resolved by `iris_driver` QUERYCAP name; render `/dev/dri/renderD128` |
+| Clients | FFmpeg 8.1.3, GStreamer 1.28.8 |
+| Runtime | build tree through `LIBVA_DRIVERS_PATH`, not the installed package |
+
+### The defect this run found: two claims on one completion
+
+`VAConfigAttribEncPackedHeaders` answering `VA_ENC_PACKED_HEADER_NONE` got
+`vah264enc` past its open check, and the pipeline then failed at the first
+frame:
+
+```
+gst_video_encoder_allocate_output_buffer: assertion 'size > 0' failed
+vabaseenc gstvabaseenc.c:431: Failed to allocate output buffer, size 0
+```
+
+`vah264enc` claims a picture twice: `va_sync_surface` on the input surface
+inside `gst_va_base_enc_map_coded_buffer`, then `va_map_buffer` on the coded
+buffer. `vaSyncSurface` claimed the ticket and discarded the bytes; the
+`vaMapBuffer` that followed found nothing outstanding and handed back an
+empty segment, so the access unit GStreamer had already paid for measured
+zero bytes. FFmpeg never hit it because it syncs the coded buffer, not the
+surface.
+
+The fix makes the claim one operation: `claim_coded()` stores the access unit
+on the buffer the client named, and `vaSyncSurface`, `vaSyncBuffer` and
+`vaMapBuffer` all funnel through it. Whichever arrives first keeps the bytes;
+the others find them. `Context::EncSubmitted` now carries the coded buffer id
+so `vaSyncSurface` knows where to put the result. An empty result from
+`wait_timeout` means another thread already claimed it, and it no longer
+overwrites the payload with nothing.
+
+### GStreamer encode, H.264 and HEVC
+
+```
+gst-launch-1.0 -e videotestsrc num-buffers=90 ! video/x-raw,format=NV12,width=1280,height=720,framerate=30/1 \
+    ! vah264enc bitrate=4000 ! h264parse ! filesink location=out-gst.h264
+```
+
+| Codec | Result | Stream |
+| --- | --- | --- |
+| H.264 | `rc=0`, 90 pictures submitted, `encode drain result=complete` | 1487150 bytes, High, level 3.1, 1280x720, 90 frames, decodes clean |
+| HEVC | `rc=0`, 90 pictures, drain complete | 1487896 bytes, Main, 1280x720, 90 frames, decodes clean |
+
+`GST_VA_ALL_DRIVERS=1` was set; that is GStreamer's own vendor allow-list
+gate, not this driver's, and it is documented in the README.
+
+### The promoted IDR, on hardware
+
+FFmpeg only emits a non-IDR I picture when asked to. `-idr_interval` defaults
+to 0, so every GOP boundary is an IDR
+(`hw_base_encode.c:718`, `gop_per_idr = idr_interval + 1`), and
+`FF_HW_FLAG_NON_IDR_KEY_PICTURES` is what makes a larger interval possible.
+The earlier note that FFmpeg "does submit these" was true only of that flag;
+without it the promotion path never runs.
+
+`-g 60 -idr_interval 2`, 250 frames, 1280x720 at 24 fps, H.264:
+
+| Frame | `idr=` | `promoted=` | Why |
+| --- | --- | --- | --- |
+| 0 | 1 | 0 | the client's first picture |
+| 60 | 1 | 1 | non-IDR I picture, rewritten to an IDR |
+| 120 | 1 | 1 | the same |
+| 180 | 1 | 0 | FFmpeg's own IDR: `idr_counter` reached `gop_per_idr` |
+| 240 | 1 | 1 | the same as 60 and 120 |
+
+Key frames land at 0, 60, 120, 180, 240 and the stream decodes clean. The
+`promoted=` field was added for this record: `idr=1` alone cannot distinguish
+a request that was honoured from one that was rewritten, and the two produce
+the same bitstream.
+
+The same run with the default `-idr_interval 0` and
+`-force_key_frames "expr:eq(n,24)+eq(n,40)"` put IDRs at 0, 24, 40, 100 with
+`promoted=0` on every one, which matches the re-anchoring schedule recorded in
+"REQUEST_SYNC_FRAME on the target" above.
+
+### Regression: decode did not move
+
+`vaSyncSurface` changed, so every decode gate ran again on the same build:
+
+| Gate | Result |
+| --- | --- |
+| `test/iris-matrix.sh` | H.264, VP9, HEVC, AV1 each 48/48 frames, exact frame MD5 against the native V4L2 decoders; AV1 `submitted=50 capture=50 noshow=23` |
+| `test/iris-structure-matrix.sh` | all-i, ip-g12, b2-g48, b4-g48 all PASS |
+| `test/iris-zero-copy-suite.sh` | `direct=24`, every completion Direct with no copy engine |
+| `test/iris-encode-quality.sh` | H.264 IRQ +244, SSIM mean 0.998596 / worst 0.9985; HEVC IRQ +248, mean 0.996808 / worst 0.9963; blank-stream control 0.000034 |
+
+### `iris-verify` and `iris-device-check`, on the target
+
+`scripts/iris-verify.sh` passed every check: libva opened the driver with no
+environment set, 12 profiles, encode entrypoint advertised, decode moved the
+Iris IRQ by 102, H.264 encode by 124, HEVC by 121, both streams decoded, and
+mpv reported hardware decode on the native V4L2 path.
+
+`scripts/iris-device-check.sh` reported the facts this record needed, and two
+of its own assumptions were wrong on the first run:
+
+- It looked for `vpu35*.mbn`. This target's device tree asks for
+  `qcom/sm8550/sheng/vpu30_4v.mbn`, which is present at 2306664 bytes. It now
+  reads `firmware-name` from the codec's `of_node` and reports whether that
+  exact file exists.
+- It probed `hevc_loop_filter_mode`. The control is `hevc_loop_filter`; the
+  six loop-filter controls are now listed from `--list-ctrls` rather than
+  matched against guessed names.
+
+The check also confirms `iommu_group_type=DMA` for `aa00000.video-codec`,
+which is the shared address space the GPU blit path depends on.
+
+Committed as `e15c2fe`. As with the Import section above, the deployed tree
+matched that commit under `src/` except for one comment, which the commit
+rewrote to carry these numbers.
+
+### Power
+
+The tablet was at 6% and charging when the run started, 10% by the end, at
+about 2.0 A. No soak or media-generation pass was attempted; the two-hour
+concurrency soak still needs a charged pack.
+
+## VP9 Import: one picture, one buffer per completion (2026-10-24)
+
+The one-buffer Import window was a unit mistake. A VP9 alt-ref access unit is
+one VA picture the translator turns into a superframe, and the firmware
+decodes that as two pictures. It does not return the invisible half before it
+has a slot for the visible one, so a one-buffer window deadlocks on every
+alt-ref (the ~500 ms measured 2026-09-22). Widening the window to two
+different pictures removed the stall and gave the firmware a choice:
+153/609 and 159/599 misplaced.
+
+The rule the firmware needs is *one picture's memory, in enough copies for
+its completions*. That is what the session does now.
+
+### What changed
+
+- `AccessUnit::completions` (`src/codec/translator.h`): the translator says
+  how many CAPTURE completions an access unit produces. VP9 sets 2 for an
+  invisible frame, because it appends the `show_existing_frame` header that
+  makes the firmware decode a second picture; every other translator leaves
+  the default 1.
+- `Target::completions` carries it into the session (`src/va/picture.cc`).
+- `ImportEntry` gained `completions` and `lent`. `queue_import_next()`
+  queues the client buffer once per completion in a single pass, and the
+  entry stays at the head of the backlog until its token is answered, so no
+  other picture's buffer is ever queued behind it. `kImportWindow` is gone;
+  the pool counts how many slots carry the current token
+  (`SlotPool::capture_queued_for`).
+- The DMA-BUF fence is waited for once per picture, not once per queued
+  buffer: every half of a superframe lands in the same client buffer.
+- Trace: `import token=… lent=<n>/<n>` (`docs/architecture.md` §8).
+
+### Host gates
+
+`test/unit/fake_device.cc` now models the requirement rather than only the
+shape: a superframe whose second slot is missing stays in the OUTPUT queue
+instead of completing, which is the stall, modelled rather than timed.
+
+| Case | Assertion |
+| --- | --- |
+| `import alt-ref gets a buffer per completion` | two CAPTURE slots, both carrying the client's buffer, then one completion, no error, `misplaced=0` |
+| `import alt-ref does not stall the next picture` | the next picture's buffer goes in as soon as the superframe's slots come back |
+
+Both fail when `completions` is set back to 1 (checked by temporarily editing
+the test), so they measure the fix and not the harness.
+
+`test/iris-eos-check.sh` counted only `publish=direct|copy-gpu|copy-cpu` as
+a capture, so a fully successful Import run reported `capture=0` and failed
+the matrix. `publish=import` is counted now, with a self-test case. That
+defect predates this change; it surfaced because the matrix was finally run
+with `V4L2_VA_PUBLISH=import`.
+
+### On the target
+
+Source commit `eea58f3`, driver `2ffb82cf…` built from the deploy tree,
+kernel `7.2.6-sm8550-g42f3b40-iris1`, boot `36ef0142-…`, decoder
+`/dev/video17`. VP9 is not qualified for Import in the capability table, so
+`V4L2_VA_PUBLISH=import` cannot reach it. The measurement used a scratch
+copy of the deploy tree with one extra line in `driver.cc` qualifying
+`V4L2_PIX_FMT_VP9` (`~/Lab/Bridge/tmp/vp9-import-probe` on the target, not
+committed); everything else is the tree above.
+
+Clip: 1280x720, 480 frames, `libvpx-vp9` two-pass with `-lag-in-frames 25
+-auto-alt-ref 1`, which the header parse confirms carries 35 invisible
+frames and 4 keys. A one-pass encode at any `-cpu-used` carries none, which
+is why the earlier probe clips showed no alt-refs.
+
+| Run | Result |
+| --- | --- |
+| FFmpeg, `V4L2_VA_PUBLISH=import`, 4 runs | `submitted=515 completed=515 errors=0 drops=0 timeouts=0 misplaced=0`, `framemd5` identical to the software decode every time |
+| Chrome 152, forced Import, 20 s | `submitted=718 completed=177 errors=47 drops=541 misplaced=0`; 3 `publish=invisible`, 50 `lent=2/2`, no fence wait over 20 ms; Chrome reported `VaapiVideoDecoder`, platform=true, 480 frames / 0 dropped |
+| Chrome 152, forced Copy, 20 s | `submitted=709 completed=708 errors=0 drops=1 misplaced=0`; 708 `publish=copy-gpu`, 49 `publish=invisible` |
+| Chrome 152, pre-fix variant (`completions = 1`), 20 s | `submitted=315 completed=1 errors=138 drops=240 misplaced=74`; acceptance failed, no Iris node holder at the end |
+
+The pre-fix row reproduces the recorded failure and shows the fix is
+load-bearing: the stall is gone and `misplaced` is 0 everywhere.
+
+### Why VP9 Import still is not qualified
+
+Chrome releases the surface of a VP9 picture before that picture completes
+far more often than it does for H.264. In the forced-Import run 564 of 768
+import queueings carried `abandoned=1` and 541 completions were dropped as
+released; the H.264 Import control in the same session shape had 2 abandoned
+and 4 drops out of 670. All 47 error completions are the invisible halves of
+released alt-refs (`flags=0x4040`, token present, target already released),
+not decode errors.
+
+The consequence is visible in the counts: 177 pictures completed where the
+Copy run completed 708 for the same clip and window. Chrome reported 480
+frames and 0 dropped in both, so its own counters do not distinguish
+"displayed the decoded picture" from "re-presented the last good one", which
+is exactly the silent degradation this project refuses to accept as a pass.
+
+So the session-side defect the design named is fixed and the capability
+table's stated blocker is gone, but the Chrome path is not clean. VP9 stays
+`publish_import: fallback`; a target run has to show `misplaced=0`, no
+drops beyond the Copy baseline, and `completed` within a few pictures of
+`submitted` before that changes.
+
+Artifacts: `~/Lab/Bridge/tmp/vp9probe/` on the target (`trace720-*.log`,
+`acc2/`, `acc-copy2/`, `acc-prefix/`, `acc-h264/`).
+
+### Regression on the final tree
+
+After the use-after-pop fix in the backlog drain path (`entry` is a reference
+into `import_backlog_`, so the fd is saved before `pop_front()`), the tree
+was redeployed and every target gate re-run. Driver `4c87ab1b…`.
+
+| Gate | Result |
+| --- | --- |
+| `test/iris-matrix.sh`, `V4L2_VA_PUBLISH=import` | H.264, VP9, HEVC 48/48 exact frame MD5; AV1 `submitted=50 capture=50 noshow=23`; `import=48` each for H.264 and HEVC, `misplaced=0`, 0 errors, 0 drops |
+| `test/iris-structure-matrix.sh` | all-i, ip-g12, b2-g48, b4-g48 all PASS |
+| `test/iris-zero-copy-suite.sh` | `direct=24` |
+| `test/iris-hardware-suite.sh` | `iris-matrix`, `iris-structure-matrix`, `iris-encode-quality`, all four GStreamer codecs PASS; `FAIL v4l2-compliance rc=1` is the same 7 kernel-interface failures analysed above (41/48, `bus_info` prefix, colorspace, control class, `REQBUFS`), unchanged |
+
+VP9 Import is still not qualified, for the Chrome reason recorded above;
+this row only shows the restructure did not move anything that was passing.
+
+### Second pass: a reboot, one more fix, and the canonical-tree browser run
+
+The target rebooted mid-session (`boot_id b7f2e336-4502-4b46-966c-770f18a47c8d`,
+kernel unchanged, `7.2.6-sm8550-g42f3b40-iris1`). Before redeploying, one more
+defect in the new code: `ImportEntry::lent` counts slots *in the current
+CAPTURE pool*, and a resolution change tears that pool down and rebuilds it.
+An entry carried across the change would keep saying "already lent" for
+buffers the firmware never received, and its picture would never be queued.
+`enter_streaming()` now clears `lent` on every backlog entry, which is the
+only place a pool is created.
+
+Driver `bd1b0015…`, same source commit, battery 51% and **discharging** —
+so no long run was attempted; the two-hour soak is still outstanding.
+
+| Gate | Result |
+| --- | --- |
+| `test/iris-dynamic-resolution.sh`, `V4L2_VA_PUBLISH=import` | H.264 100 transitions, 101 contexts, every segment `capture=2 drops=0`, PASS |
+| `test/iris-matrix.sh`, default `auto` | H.264, VP9, HEVC 48/48 exact frame MD5; AV1 `50/50 noshow=23` |
+| `test/iris-matrix.sh`, `V4L2_VA_PUBLISH=import` | same, 48/48 each |
+| Chrome 152, H.264 720p, default `auto` on the canonical tree | `VaapiVideoDecoder`, platform=true, 479 frames / 0 dropped, GPU process held the node, `import=653 drops=4 errors=0`, every queueing `lent=1/1` |
+| `iris-import-probe` (§9 association gate) | 100/120 misplaced at `max_in_flight=6` — the recorded "several buffers to choose from" failure, unchanged by this work and the reason the session keeps one picture's buffers only |
+
+The Chrome row is the one that was missing: earlier VP9 browser numbers came
+from a scratch tree with VP9 patched into `import_formats`. This run uses the
+deployed tree and the shipped policy, and it is the H.264 Import control that
+the VP9 comparison above needs.
+
+Committed as `e6af9ef`. The tree the runs used carried this code and nothing
+else that differs: every file under `src/` was byte-identical to the commit
+apart from one comment in `driver.cc`, which is where the VP9 numbers above
+now live.
+
+## VP9 corpus re-run, and what the 4K decode cost is (2026-10-25)
+
+Two questions carried over: whether the DRC ordering fix (`enter_streaming()`
+issues CAPTURE STREAMON before the pool QBUF, recorded above) lifted any VP9
+family, and whether the `translate` cost growth recorded in the 2026-10-22
+4K section is real accumulation.
+
+Driver `bd1b0015…`, kernel `7.2.6-sm8550-g42f3b40-iris1`, source tree
+`~/Lab/iris-vaapi-lab/src` built from `feat/encode-entrypoints`. Two boots
+were used because the tablet reset itself mid-run; the corpus result is the
+same on both (see the reboot note at the end). Node `/dev/video17` on the
+first boot, `/dev/video0` on the second; the node is resolved by the
+`Iris Decoder` QUERYCAP name in every command, never by number.
+
+### The corpus, three decoders
+
+`fluster run -ts VP9-TEST-VECTORS`, `-j 4 -t 30`, per-vector CSV
+(`~/Lab/Bridge/tmp/vp9-fl/run/vp9-{sw,va,va2}.csv`). The software arm is the
+same FFmpeg build decoding with libvpx, which is what the corpus reference
+MD5s come from, so it is the control that tells a driver defect from a
+corpus/reference mismatch:
+
+| Arm | Success | Fail | Error | Timeout |
+| --- | ---: | ---: | ---: | ---: |
+| `FFmpeg-VP9` (libvpx, software) | 242 | 63 | 0 | 0 |
+| `FFmpeg-VP9-VAAPI` | 176 | 36 | 66 | 27 |
+
+The FFmpeg VA-API wrapper in this Fluster version does not pass
+`-hwaccel_output_format vaapi` and has no `hw_download` mapping for VAAPI
+(`decoders/ffmpeg.py`), so `format=pix_fmts=yuv420p` filters back to system
+memory and FFmpeg downloads each frame. The arm still decodes through this
+driver, but it is not the pixel oracle `test/iris-matrix.sh` is; every claim
+below was re-checked directly against libvpx.
+
+Against the 2026-10-22 run (175/305) the pass count moved by one vector, and
+one family changed:
+
+- **`vp90-2-10-show-existing-frame` now passes** (2/2). It crashed before.
+  `src/codec/vp9.cc` refuses `show_existing_frame` by design
+  (`VA_STATUS_ERROR_UNIMPLEMENTED`) because VA's VP9 header has no
+  `frame_to_show`; this vector reaches the driver only through FFmpeg's own
+  `show_existing_frame` handling, which re-feeds the referenced frame instead
+  of a header the translator has to accept.
+- **`vp90-2-14` is unchanged at 36 Fail.** The DRC ordering fix did not move
+  it, and it is not a driver defect. The vectors decode 18 frames through
+  the driver and 18 through libvpx; `vp90-2-14-resize-fp-tiles-1-2`,
+  `-10frames-fp-tiles-4-8` and `-fp-tiles-1-16` are **pixel-identical to
+  libvpx frame for frame**, and `-fp-tiles-16-1` differs on 3 of 18 frames
+  (0.07-0.20 % of each frame, confined to luma columns 3389-3596 of a
+  4096-wide picture, chroma exact, maximum delta 255 on frames 0 and 2). The
+  software arm fails the same 36 vectors: the corpus reference MD5s predate
+  the libvpx version on this machine. Recorded as a corpus/reference
+  mismatch, not a decode defect.
+- **`vp90-2-21` (24) and `vp90-2-05`/`-18`/`-22` (3) time out, and the
+  native V4L2 decoder stalls on the same streams.** The `320x180` and
+  `640x480` 2-21 vectors and the `vp90-2-16-intra-only` vector, each bounded
+  at 25 s, one decoder at a time:
+
+  | Vector | `FFmpeg-VP9-VAAPI` | `vp9_v4l2m2m` | `libvpx-vp9` |
+  | --- | --- | --- | --- |
+  | `2-21-resize_inter_320x180_5_1-2` | killed at 28 s | killed at 28 s | 177 ms |
+  | `2-21-resize_inter_640x480_7_3-4` | killed at 28 s | killed at 28 s | 189 ms |
+  | `2-16-intra-only` | fails in 15.3 s | 207 ms | 178 ms |
+
+  The 2-21 family drives `resize_inter`: the first 10 frames are 1920x1080
+  and complete (`submitted=10 completed=10`), then the stream switches to
+  960x540 in the same context. Every 2-21 vector is a mid-stream geometry
+  change that keeps the context, so it is the in-context resize path, and the
+  native decoder hangs on it too. That makes it a firmware/kernel-path limit
+  rather than this driver's session logic.
+- **`vp90-2-16-intra-only` is the one family where this driver fails and the
+  native decoder does not.** FFmpeg's own parse of the vector yields a
+  117 963-byte key frame followed by frames of 25 801, 1, 1, 1, 21 400 and
+  10 293 bytes, and the first frame's header bytes are
+  `84 c9 30 68 40 20 2b …`. Through the driver the first picture is
+  submitted with `bytes=30306 seq_start=0`, the kernel raises no
+  SOURCE_CHANGE, and `endPicture` returns `no SOURCE_CHANGE after the first
+  access unit`; it then retries the same 5 s wait for each following frame.
+  The native decoder returns 7 frames in 207 ms. One family, one vector, not
+  yet root-caused; the trace is `~/Lab/Bridge/tmp/dec-perf/p16i.trace` on the
+  target.
+- **64 × `vp90-2-02` and `vp91-2-04-yuv444` are the advertised-capability
+  boundary**: every 2-02 vector is 8x8 through 66x66, below the node's
+  96x96 minimum, and FFmpeg refuses them before any VA call. The 130x132 and
+  1920x1080 vectors of the same family decode (10 and 217 frames). Profile 1
+  4:4:4 is outside the advertised Profile 0/2.
+
+Re-running the whole corpus on the second boot produced a per-vector
+identical result: 176 / 66 / 36 / 27, zero vectors differing.
+
+### The 4K decode cost is bitstream size, not accumulation
+
+Every straight A/B on this tablet is confounded by the SoC clocking during
+the run, and the earlier "0.15 ms cold, 1.5 ms after twenty seconds" reading
+was taken without a control for that. Method: `/proc/<pid>/stat`
+utime+stime sampled against FFmpeg's own `-progress frame=N` every 0.25-0.5 s
+inside one process, no `V4L2_VA_TRACE` (one `fprintf` per record is a large
+part of the 4K cost), no `showinfo` (a full frame copy per frame on both
+arms). Clips are `testsrc2` 3840x2160 HEVC from `libx265 -preset ultrafast`,
+1200 frames.
+
+| Check | VA arm | `hevc_v4l2m2m` |
+| --- | --- | --- |
+| First 3 windows / last 3, one 1200-frame run, three repeats | 1437→1995, 1570→2354, 1468→2180 µs/frame | flat |
+| Same, 12 000 frames (10 copies concatenated) | 4171→4538, 4270→4440, 4175→4481 µs/frame | flat |
+| Whole-run CPU, 1080p | 947 / 994 / 901 | 618 / 656 / 612 |
+| Whole-run CPU, 4K | 3810 / 3469 / 3918 | 1369 / 1377 / 1471 |
+| Whole-run CPU, 4K at 1/30 the bitrate (`-crf 40`) | 927 / 714 / 829 | 505 / 442 / 538 |
+
+The growth inside one run is the clock. Three controls, each of which would
+have shown accumulation and none of which did:
+
+- A warm second run starts as cold as the first (1437/1570/1468 µs first
+  window against 1995/2354/2180 last window), so nothing carries across
+  processes, and a 10x longer run has the same tail as a short one
+  (4171-4270 against 1995-2354 is the same population).
+- The native arm is flat in the same run (`probe18.sh`: 1456/1402/1429 first
+  window, 1404/1478/1405 last, three repeats) while the VA arm rises
+  (3034→4469), and interleaved 400- and 1200-frame runs give VA 1.53-1.85 and
+  native 0.70-0.96 as the last/first ratio (`probe19.sh`).
+- Pacing the client with `-re` removes it: 1.85 and 1.56 unpaced against 1.00
+  and 1.08 paced (`probe21.sh`).
+
+A timer inside `vaEndPicture` then measured `translate` alone and reproduced
+the rise: about 700-860 µs per call over the first 100-300 pictures, 2100-2400
+µs by picture 1200, resetting at the start of every new process. Thread CPU
+time grows with it (777 → 1953 µs), so the thread is on the core for longer,
+not merely descheduled. It is not cache or DRAM pressure: a pure-CPU loop over
+the same `BitReader`/`append_escaped_nal` path is flat over 20 s both warm
+(0.566 → 0.564 ms) and against 77.6 MB of cold DRAM (0.583 → 0.584 ms)
+(`naldrift.cc`, `naldrift2.cc`), and it is flat with a 4K VA decode running
+alongside on other cores (1.186 → 1.157 ms), which rules out memory-bandwidth
+contention with the firmware's own writes.
+
+What settled it was pinning and clocking. Pinned to cpu7 the run still grows
+(608 → 956 µs) while cpu7 falls from its 2957 MHz boost to 1248 MHz; pinned to
+the little core at a flat 2.0 GHz it does not (1341 → 1349 µs). Holding cpu7 at
+1708.8 MHz through `userspace` + `scaling_setspeed` makes the series dead flat
+across two runs, 1034/1032/1032/1031/1033 µs and 921/905/964/980/994 µs, and
+the absolute values cross-check: 1034 µs at 1708.8 MHz predicts 598 µs at
+2956.8 MHz, where 615 µs was measured. The work is constant per picture and
+only the frequency moves. The mechanism behind the trajectory is ordinary
+DVFS: an unpaced 4K decode drives the VPU hard, which pushes the big cluster's
+clock down, and the more so the deeper FFmpeg's read-ahead keeps the queue.
+That is why `-re` removes the growth and why a pinned little core, already at
+its ceiling, shows none. A 10x longer run reads as a higher tail for the same
+reason: the clocks have longer to settle low.
+
+RSS is flat at 260 MB from 2 s to the end of a 1200-frame run and the fd count
+returns to its starting value, so no container accumulates either.
+
+What does scale is the bitstream. At 4K the delta against the native decoder
+is 2.3-2.4 ms/frame on a 140 KB/frame clip and 0.29-0.39 ms/frame on a
+4.8 KB/frame clip of the same geometry and frame count: about 0.27 ms of
+fixed per-picture cost plus 15 µs per kilobyte. The bitrate scaling is the
+point, because fixed bookkeeping would not move with it. How much of that
+per-kilobyte cost is the translator was then bounded directly: on one
+203 532-byte slice NAL, `BitReader`'s emulation-prevention scan costs
+0.190 ms, the whole-byte copy 0.007 ms, and `append_escaped_nal` 0.516 ms,
+0.713 ms in all, or about 0.5 ms for a 140 KB frame. At a fixed 1.7 GHz the
+measured cost of `translate` on the 140 KB clip is 1.03 ms, so the remaining
+0.5 ms is the parameter sets, the reference collection and the call itself.
+The rest of the whole-run delta is FFmpeg's VA-API-side parsing, which fills
+the `VASliceParameterBufferHEVC` the native wrapper never builds; this run
+bounded the driver's share but did not separate the two.
+
+### A kernel defect found on the way, and a tablet reset
+
+The tablet reset itself twice while this was running.
+
+- 01:41:48, `NULL pointer dereference` in `iris_check_session_supported+0x38`,
+  called from `iris_vb2_start_streaming+0x70`, `Comm: dec0:0:vp9` — the
+  native `vp9_v4l2m2m` client, not this driver. The address is 0 and the
+  call is STREAMON, so the session pointer the driver dereferences was not
+  there. The tablet came back on the same kernel and boot configuration.
+- 02:43, during a Fluster run of `FFmpeg-VP9-V4L2m2m`: `received system error
+  of type 0x5000003`, then `session error 0x1000006: unknown` and
+  `0x4000004: invalid operation for current state` from several concurrent
+  clients, then `WARNING` at `videobuf2-core.c:1821` in `vb2_start_streaming`
+  for `dec0:0:vp9_v4l2` processes. The `FFmpeg-VP9-VAAPI` arm of the same
+  suite run in parallel had no kernel message.
+
+Both crashes are in the module's own session bookkeeping under concurrent
+VP9 clients, on a code path the native decoder drives and this driver does
+not. They are recorded here because a reset mid-run invalidates any
+measurement in flight, and because `panic_on_oops` is 0 on this boot, so the
+first one did not panic — the tablet reset for another reason. Neither is
+this driver's code, and neither is fixed here.
+
+Artifacts on the target: `~/Lab/Bridge/tmp/vp9-fl/run/` (CSV and JSON for
+every arm), `~/Lab/Bridge/tmp/dec-perf/` (probes `probe8.sh` through
+`probe23.sh`, raw window CSVs `p10-*`/`p15-*`/`p17-*`, `nalscan.cc`,
+`naldrift.cc`/`naldrift2.cc`, `patch_timer_cpu.py`/`patch_timer_freq.py` and
+the scratch tree `timer/src` they patch, the trace `p16i.trace`, and the raw
+YUV pair `sw.yuv`/`va.yuv` for the `16-1` vector). The frequency-pinning
+probe, `probe23.sh`, restores the `schedutil` governor on exit.
+
+## The browser launcher is gone, and Chrome does not need it (2026-10-25)
+
+`scripts/iris-vaapi-browser` and the `Google Chrome (Iris VA-API)` desktop
+entry are removed. The launcher existed to resolve the decoder node and export
+`LIBVA_DRIVER_NAME` / `LIBVA_V4L2_VIDEO_PATH`, and its comment justified that
+with a claim nobody had measured: that a sandboxed Chrome process may be denied
+the driver's `/dev/video*` glob. That claim is false here, and it was the only
+reason for the wrapper.
+
+### The measurement that justified the removal
+
+The acceptance script was rewritten to launch the browser directly and to drop
+`LIBVA_DRIVER_NAME`, `LIBVA_V4L2_VIDEO_PATH` and
+`LIBVA_V4L2_ENCODER_PATH` from the environment, so libva has to resolve the
+driver through the `msm_drv_video.so` alias the way an ordinary desktop start
+does. Three runs, installed driver
+`/usr/lib64/dri/v4l2_drv_video.so` SHA-256 `b2f8151d3980…`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot `23a37146-fa9a-4038-af0c-b6d33aa625d9`,
+decoder node `/dev/video0`:
+
+| Run | Decoder | Platform | Window | Dropped | Node holder | Driver mapped in that process |
+| --- | --- | --- | ---: | ---: | --- | --- |
+| direct-no-env, 15 s | `VaapiVideoDecoder` | true | 450 | 0 | `--type=gpu-process` | live sample below |
+| after-removal-r2, 15 s | `VaapiVideoDecoder` | true | 449 | 0 | `--type=gpu-process` | `/usr/lib64/dri/v4l2_drv_video.so` |
+| after-removal-r3, 20 s | `VaapiVideoDecoder` | true | 598 | 0 | `--type=gpu-process` | `/usr/lib64/dri/v4l2_drv_video.so` |
+
+The first row's mapping was taken by a separate live sampler, because the
+script at that point still sampled after playback stopped and recorded
+`driver_mapped_in_gpu_process: null` on a run that had in fact decoded in
+hardware. That was a defect in the gate, not in the driver: a GPU process
+closes the node and unmaps the driver when playback ends. The script now
+samples every second while the window is open, and the third column above is
+what that sampling reports.
+
+A sandboxed `--type=gpu-process` both maps this driver and holds the decoder
+node with no `LIBVA_*` variable set. That is the whole claim the launcher was
+making, and it holds without the launcher.
+
+### What replaced it
+
+The node rule is now one file, `scripts/lib/iris-node.sh`, installed as
+`<prefix>/lib/iris-vaapi/iris-node.sh` and sourced by both `iris-device-check`
+and `iris-verify`. It is the same rule the launcher held: an exact
+`iris_driver` match, decoder and encoder told apart by card type, and a refusal
+to guess a node number. `test/iris-node-check.sh` exercises it through two
+seams (`IRIS_NODE_SEARCH_ROOT`, `IRIS_NODE_IS_CHAR`) that exist because an
+unprivileged build host cannot `mknod`; 13 cases cover resolution, all three
+refusal paths, the two overrides and the "a regular file is not a node" case,
+and both diagnostics are asserted to source the rule and to name no node
+number. `test/iris-browser-launcher-check.sh` is gone with the launcher; the
+cases that mattered moved rather than being dropped.
+
+Fedora Chromium's compatibility branch went with the launcher. It had no
+recorded evidence behind it: the only line in this file was that Chromium
+152.0.7977.75 selects `FFmpegVideoDecoder`, which is the fallback the branch
+caused, not a measurement of the GMU fault it claimed to prevent.
+
+### On the target, installed layout
+
+A `DESTDIR` staging install of the new layout, then the uninstaller:
+
+```
+PASS installed VA driver: …/usr/lib64/dri/v4l2_drv_video.so
+PASS installed driver alias: …/usr/lib64/dri/msm_drv_video.so
+PASS installed node rule: …/usr/local/lib/iris-vaapi/iris-node.sh
+PASS installed diagnostics: …/usr/local/bin/iris-device-check …/iris-verify …/iris-configure-clients
+```
+
+`iris-device-check` and `iris-verify` run from the installed `bin` directory
+with the rule in `lib/iris-vaapi` and find both nodes (`/dev/video0` Iris
+Decoder, `/dev/video1` Iris Encoder). `iris-verify` from the staging tree:
+
+```
+PASS libva opens the driver: Qualcomm Iris V4L2 stateful (libva-v4l2)
+PASS driver advertises 12 profiles
+PASS encode entrypoint advertised
+PASS decode ran on the hardware (Iris IRQ +114)
+PASS h264 encode ran on the hardware (Iris IRQ +128)
+PASS h264 stream decodes (60 frames)
+PASS hevc encode ran on the hardware (Iris IRQ +124)
+PASS hevc stream decodes (60 frames)
+PASS native V4L2 M2M decode through mpv (independent of this driver)
+```
+
+The uninstaller removed every installed file and left nothing behind. A
+`DESTDIR` staging run is not an installation; no live system install was made
+this round, and the installed RPM on the target is still the 2026-10-24 build
+whose provenance is recorded above.
+
+Host gates on this tree: `sh test/run-static-checks.sh` PASS,
+`meson test -C build-local --print-errorlogs` 19/19 OK, `git diff --check`
+clean.
+
+### The real installation, 0.1.0-2 and 0.1.0-3
+
+A live install, not a staging run. Two packages were built the same evening
+and only the second is fit to keep; the first is recorded because it reached
+the target and because what was wrong with it is the kind of defect a hash
+cannot show.
+
+**0.1.0-2 was assembled by overlaying an untracked working tree.** Its tarball
+was HEAD's `src/` plus this change set copied over it. That produced a working
+driver, and `src/` was verified byte-identical to HEAD first, so the
+uncommitted encode work was correctly excluded. But the diagnostics
+(`iris-device-check.sh`, `iris-verify.sh`, `iris-configure-clients.sh`) and
+the node rule were **not tracked by git at all**, while the installer, the
+Fedora spec and the PKGBUILD all referenced them. Two consequences: a clean
+`git archive` of HEAD carried no installer input and would have failed to
+build, and the package recorded `source_dirty=0` against a commit that did not
+contain those files. The provenance field was wrong.
+
+0.1.0-3 fixes the cause rather than the symptom: the scripts are tracked, and
+the package is built from a clean `git archive` of the commit it names, with
+no overlay.
+
+| Fact | Value |
+| --- | --- |
+| RPM | `libva-v4l2-iris-0.1.0-3.fc44.aarch64.rpm`, Release 3 |
+| Source commit recorded | `7ea57da71283085256dbb5c7b535c76635e4e4f8`, `source_dirty=0`, a clean archive that contains every shipped file |
+| Installed driver | `/usr/lib64/dri/v4l2_drv_video.so`, SHA-256 `93c98565fc3373…`, 399920 bytes |
+| Kernel | `7.2.6-sm8550-g42f3b40-iris1` |
+| Boot ID | `23a37146-fa9a-4038-af0c-b6d33aa625d9` |
+| `rpm -V libva-v4l2-iris` | clean after the upgrade |
+| Installed files | `iris-device-check`, `iris-verify`, `iris-configure-clients` in `/usr/bin`, `iris-node.sh` in `/usr/lib/iris-vaapi`, both driver files, the manifest. No launcher, no desktop entry. |
+
+The driver hash differs from the 2026-10-24 package (`b2f8151d…`) even though
+`src/` is unchanged, and that is not a code difference: `meson.build` embeds
+the RPM's own identity as `{"type":"rpm","name":…,"version":"0.1.0-2.fc44",…}`
+in the binary, so a Release bump necessarily changes the hash. Normalizing
+that one metadata string makes the two payloads byte-identical — `cmp` reports
+0 differing bytes. Recording this because the hash is the field a reader uses
+to tell one build from another, and here it does not mean what it looks like.
+
+Two pieces of `/usr/local` residue from the 2026-10-24 morning install were
+removed after the upgrade, neither RPM-owned and neither referenced by the new
+package: `/usr/local/bin/iris-vaapi-browser`,
+`/usr/local/share/applications/google-chrome-iris-v4l2.desktop`,
+`/usr/local/share/iris-vaapi` (old manifest and driver backup), and an older
+`/usr/bin/iris-vaapi-browser.bak` from 2026-09-20. The new uninstaller refuses
+to touch a driver owned by the package manager, which is why the residue was
+removed by hand rather than by running it.
+
+Installed package, no `LIBVA_*` variable set:
+
+```
+PASS libva opens the driver: Qualcomm Iris V4L2 stateful (libva-v4l2)
+PASS driver advertises 12 profiles
+PASS encode entrypoint advertised
+PASS decode ran on the hardware (Iris IRQ +124)
+PASS h264 encode ran on the hardware (Iris IRQ +122)
+PASS h264 stream decodes (60 frames)
+PASS hevc encode ran on the hardware (Iris IRQ +119)
+PASS hevc stream decodes (60 frames)
+PASS native V4L2 M2M decode through mpv (independent of this driver)
+```
+
+Browser acceptance against the installed package, 20 s window:
+
+```
+PASS browser=Chrome/152.0.7977.82 decoder=VaapiVideoDecoder platform=True
+     frames=599 dropped=2 holders=--type=gpu-process
+     driver=installed:93c98565fc33 boot_unchanged=True
+```
+
+with `driver_mapped_in_gpu_process=/usr/lib64/dri/v4l2_drv_video.so`, sampled
+during playback. That closes the loop: the package a user installs decodes in
+Chrome with no launcher, no desktop entry, no flags and no environment.
+
+## Distribution check and deferred hardware runs (2026-11-10)
+
+Host-side work on `feat/encode-entrypoints`, no product-code changes. The four
+Iris patches, both READMEs' known-limits text and the downstream kernel spec
+were brought into agreement; the static check that binds them is new.
+
+| Check | Result |
+| --- | --- |
+| `rpmspec -P kernel-sm8550/kernel-sm8550.spec` | expands; Source6-9 pin `5a0fcb58461deeb8b6392f07cb42b2804accbe9e`, Release `8.sheng.iris1.fc44` |
+| `spectool -g -R` (downstream spec) | all nine sources fetched; the four patch URLs returned 200 |
+| `rpmbuild -bp --nodebuginfo --nodeps` | `%prep` verified all four recorded sha256 values, then applied 0001-0004 at `--fuzz=0`; 0004 at the recorded −3-line offset; `Tag 7.2.6-mac commit: 42f3b40`, `.lkv_suffix=-sm8550-g42f3b40-iris1` |
+| Applied tree | `HFI_PROP_DECODE_ORDER_OUTPUT` defined; `DISPLAY_DELAY_ENABLE`/`DISPLAY_DELAY`/`REQUEST_SYNC_FRAME` in `enum platform_inst_fw_cap_type` (not the flags enum); `DEBLOCK_MODE_H264` once; `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` handled twice in `iris_ctrls.c`; error-branch `vb2->timestamp = buf->timestamp` present |
+| `test/iris-kernel-patch-check.sh` | passes with the downstream spec present, skips the cross-repo half without it, fails on a tampered `IRIS_PATCHn_SHA256` and on a URL pin that no longer names the tag commit |
+
+`rpmbuild -ba` was not run: ten BuildRequires (bindgen, ccache, clippy,
+net-tools, opencsd-devel, python3-pyyaml, rust-src, rustfmt,
+systemd-boot-unsigned, systemd-ukify) are absent on this host, the workflow
+allows 30–90 minutes for the aarch64 kernel build, and the host volume had
+2.1 GB free. `%prep` is the stage that checks this repository's payload; the
+unbuilt half is the RPM's own compile. The 266 MB source tarball and the
+prepped BUILD tree were removed afterwards.
+
+Target probes over ssh `sheng`, read-only, boot `20dcd8af-…`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`:
+
+- encoder `/dev/video1` lists `force_key_frame` and all six loop-filter
+  controls, so the loaded module still carries 0002+0003.
+- `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` is probed once in
+  `EncodeSession::configure()`; there is no environment override that selects
+  the intra-period lever. The stock-kernel promoted-IDR run therefore needs a
+  module without 0003 and a reboot. It was not attempted: that changes the
+  installed system and the tablet was discharging.
+- The two-hour concurrency soak was not run either. Battery was 26 % and
+  `Discharging` at −2.195 A at the start of this session and 23 % by the end.
+  The soak guards boot ID and an 85 °C ceiling but does not check the pack.
+  A charged supply is the prerequisite; the 2026-09-21 full-length soak
+  (`dual-h264` and `mixed`, 172800 frames per context) remains the record for
+  the earlier tree.
+
+## Sibling backends: the 2026-09-22 deep read, closed (2026-11-10)
+
+Source-only research against the public GitHub API and raw trees; no build,
+no target access. It closes the item left open when four 2026-09-22 subagents
+were killed by a billing error. Repo state checked 2026-11-10 UTC:
+
+| Repo | HEAD | Last commit | Verdict |
+| --- | --- | --- | --- |
+| `CFM880/iris-vaapi` | `9852479` | 2026-10-23 | gen1 Iris (SM8150/nabu), decode-only |
+| `radxa-pkg/qcom-va-driver` | `0980a1d` | 2026-10-28 | same HFI gen2 / `iris_driver` name |
+| `snowf14k3/venus-vaapi-driver` | `37e1030` | 2026-10-07 | older `qcom-venus` stack |
+
+`radxa-pkg/libva-v4l2` and `strongtz/libva-v4l2` both 301-redirect to
+`radxa-pkg/qcom-va-driver` (repo id 1360998480, renamed 2026-10-26, tag
+`v1.1.1`). The old URLs in our credits were stale and now name the current
+repository with the rename recorded.
+
+Findings that changed this tree:
+
+- **Chrome 153 HEVC seek regression is resolved upstream in Chrome 156.**
+  CFM880's `docs/chromium-bug-m153-hevc-seek.md` was updated 2026-10-23 to
+  `Status: resolved`: Chrome `156.0.8078.47`, 4K HEVC 8-bit, no workaround
+  flags, `stale_repeats = 0/445`. It also warns that a launcher wrapper
+  injecting `--disable-features=ExtendedVideoBitstreamValidation` makes an A/B
+  look fixed. Both READMEs now say 153 needs the flag or 152, 156+ needs
+  neither. The Chromium issue page itself was not fetched.
+- **Upstream now carries five kernel patches, not three.** `patches/` holds
+  0001 decode-order, 0002 larger CAPTURE pools, 0003 deblocking, 0004
+  error-buffer timestamps (2026-10-21) and 0005 recycle non-display decoder
+  buffers for AV1 (2026-10-26). Our four still map to 0001+0002 / 0003 /
+  upstream `6f62dcefd249` / 0004; patch bodies were not diffed.
+
+Findings that did not change this tree:
+
+- CFM880's `99-qcom-iris-dmaheap.rules` (`MODE="0666"` on
+  `/dev/dma_heap/system`) fixes Chrome black video caused by memfd fallback on
+  gen1. Our Import path takes a client-exported DMA-BUF and the Chrome 152
+  acceptance on this target passes 599 frames with no drops, so the udev rule
+  was not added. Their line "`vainfo` succeeding does not prove the
+  presentation path works" is already stronger in our gate, which requires a
+  media surface reporting `VaapiVideoDecoder` with frame and drop evidence.
+  Their `VPU_DIRECT_CAPTURE=1` queues the whole client pool into CAPTURE with
+  permanent slot/surface association, a different ownership model from our
+  one-picture-in-flight Import; their in-place VP9 resize uses a gen1 firmware
+  quirk. Neither is transferable.
+- Radxa's `src/vp9.cpp` answers the invisible alt-ref with a synthetic VP9
+  superframe showing the refreshed slot, and refuses `show_existing`. A
+  genuinely different answer to the same alt-ref problem; our translator
+  appends a `show_existing_frame` header instead and qualifies FFmpeg at
+  515/515 with `misplaced=0`. `src/decoder.cpp` has no Import path
+  (CAPTURE is MMAP + EXPBUF; imported client surfaces are copied into) and
+  refuses in-context DRC at line 389, which this tree qualifies. Nothing to
+  adopt.
+- `snowf14k3/venus-vaapi-driver` is plain C on the `qcom-venus` stack: no
+  kernel patches, no decode-order control, no Import, CPU row-copy of every
+  frame into MSM GEM surfaces. Its env-gated experimental HEVC and
+  `ENUM_FMT`-derived capabilities are already covered by our evidence-before-
+  capability rule. Leaving it unmentioned was correct.
+
+Not verified: no runtime or hardware behaviour, no patch-body diff, no read of
+CFM880's companion `nabu-iris` module, and the pre-rename `strongtz` history
+could not be separated from the shared renamed history.
+
+## Docs, cross-repo check and fork rename (2026-11-10)
+
+Host-side work on `feat/encode-entrypoints`. No product code, capability,
+profile or publish policy changed; `data/iris-codec-capabilities.json`,
+`packaging/kernel/000[1-4]-*.patch` and `SHA256SUMS` are byte-identical to
+`HEAD` (four `sha256sum -c` OK). The four patch files and their hashes are
+hash-pinned by the downstream spec and the `iris-kernel-patches-v1` tag, so
+this batch does not touch them and creates no new tag: the tag still resolves
+to `5a0fcb58461deeb8b6392f07cb42b2804accbe9e` and the four
+`%global IRIS_PATCHn_SHA256` values are unchanged.
+
+Three small fixes to `test/iris-kernel-patch-check.sh`'s cross-repo half
+(added earlier in this working tree):
+
+- The final PASS message was an AND-list as the last command of the `if`
+  branch. It does not abort under this host's `/bin/sh` (bash), but it is
+  fragile on dash-based CI or if the trailing lines move; it is now a plain
+  `if ... then printf ... fi`.
+- The stale experimental clone
+  `~/Lab/Bridge/tmp/sheng-fedora-packages/...` was a second fallback
+  candidate. It pins `8dd655e…` with `phxinyang/` URLs and produced four
+  false URL-pin failures. Only the explicit `IRIS_DOWNSTREAM_SPEC` override
+  and the sibling `../sheng-fedora-packages` checkout remain.
+- A spec with zero `Source6-9` lines now fails instead of silently passing.
+  `packaging/kernel/README.md` documents the same resolution rules.
+
+Verification of that check, fixtures under `~/Lab/Bridge/tmp/iris-check-fixtures`:
+
+| Fixture | Exit | Result |
+| --- | --- | --- |
+| canonical spec, `IRIS_DOWNSTREAM_SPEC` set | 0 | both PASS lines |
+| `IRIS_PATCH1_SHA256` zeroed | 1 | one hash-mismatch FAIL |
+| four URLs pinned to `8dd655e…` | 1 | four URL-pin FAILs |
+| `Source6-9` lines deleted | 1 | `downstream spec has no Source6-9 patch URLs` |
+| no override, no sibling (CI shape) | 0 | `NOTE ... skipped`, cross-repo half skipped |
+
+`docs/architecture.md` §8 gained the missing `publish=invisible` record,
+matching `src/iris/session.cc` and the five `publish=invisible` counts in
+this file; no consumer parses it, so no other file moved. `sh -n`,
+`sh test/run-static-checks.sh`, `meson test -C build-local` (20/20) and
+`git diff --check` are green.
+
+Fork rename: `FFT-infra/qualcomm-iris-vaapi` → `FFT-infra/sheng-video-accel`
+(GitHub repo name and description only; the base repo
+`phxinyang/qualcomm-iris-vaapi` is not renamed). New description:
+
+> Video acceleration for sheng (Xiaomi Pad 6S Pro / SM8550) on ARM64 Linux:
+> libva VA-API backend for the Qualcomm Iris V4L2 decoder and encoder, four
+> qcom-iris kernel patches, and Fedora/Arch packages. Hardware decode/encode
+> in Chrome/Firefox/Electron, zero-copy H.264/HEVC decode. Qualified on this
+> one tablet; shared by all its VA-API clients.
+
+Both READMEs' titles and lead paragraphs now name `sheng` / Xiaomi Pad 6S Pro
+(SM8550) and state the single qualified target and the device-only evidence
+boundary; they make no cross-SoC claim. Package identities
+(`meson.build` `project('libva-v4l2')`, `libva-v4l2-iris`,
+`qualcomm-iris-vaapi/system-install-v1`) and the packaging `URL:`/`url=` are
+untouched. GitHub redirects old-name raw URLs (verified with the
+`strongtz/libva-v4l2` → `radxa-pkg/qcom-va-driver` precedent), and the check
+validates only the `/5a0fcb5…/packaging/kernel/` commit segment, so no
+re-tag or re-hash was needed.
+
+The downstream spec repo `sheng-fedora-packages` (separate checkout, local
+commit `3b202951de801dce2e94a46ebabfb130295b928a`, **not pushed**) changes only
+the four `Source6-9` URL owner/repo substrings to `FFT-infra/sheng-video-accel`;
+the commit pin, the four hashes, `Release` and all `%changelog` entries stay
+verbatim. `rpmspec -P` expands, the positive kernel-patch check still passes
+against the edited spec, and `git diff --check` is clean.
+
+PR #1 remains `state=OPEN`, `isDraft=true`, `mergeable=MERGEABLE`,
+`mergeStateStatus=CLEAN`, head `FFT-infra:feat/encode-entrypoints`. Its
+`pull_request` CI runs still need base-repo admin approval (cross-repo fork
+PR `action_required`); the permissions fact is recorded in the section
+"CI: the inventory check failed on the meson version (2026-10-24)" and is not
+changed here. Fork `push` runs are green.
+
+The short-window, low-power browser acceptance for this date is recorded in
+the following commit.
+
+## Short-window browser acceptance — blocked (2026-11-10)
+
+The low-power gate failed at execution time, so the run was skipped. A
+read-only ssh probe of `sheng` reported
+`STATUS=Discharging CAPACITY=100 CURRENT_NOW=-1798000` from
+`/sys/class/power_supply/qcom-battmgr-bat`, boot
+`20dcd8af-e763-4142-9ae7-85f7f3ac0ed7`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`. Charge level is high, but the pack is on
+battery and draining at ~1.8 A; the locked precondition for this batch was
+"only short-window, low-power, check battery first", with the earlier
+two-hour soak explicitly deferred on the same charged-supply prerequisite.
+An earlier read-only probe in this session had shown `Charging 82%`; the
+state changed before the run, which is why the gate is re-checked rather
+than assumed.
+
+No browser was launched, no `LIBVA_*` override was set, no kernel module was
+swapped, and the tablet was not rebooted. This section is a blocked-run
+record, not hardware evidence: it makes no decode, frame or drop claim and
+does not qualify any codec, profile or publish policy. The installed driver
+(`/usr/lib64/dri/v4l2_drv_video.so`, with the `msm_drv_video.so` alias) and
+the 1080p H.264 clip on the target are unchanged. The 2026-09-21 full-length
+soak (`dual-h264` and `mixed`, 172800 frames per context) remains the
+standing concurrency record, and the 2026-10-24 Chrome 152 acceptance runs
+remain the standing browser-decode record. No rerun is attempted in this
+batch; a charged supply is the prerequisite for a later short window.

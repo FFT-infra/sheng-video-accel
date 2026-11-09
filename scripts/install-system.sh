@@ -1,8 +1,8 @@
 #!/bin/sh
 
 # Install the built VA driver into libva's configured system driver directory,
-# then install the browser wrapper and desktop entries under /usr/local by
-# default. Run as root, or set DESTDIR for an unprivileged packaging test.
+# then install the diagnostic commands under /usr/local by default. Run as
+# root, or set DESTDIR for an unprivileged packaging test.
 
 set -eu
 
@@ -115,12 +115,24 @@ if [ -z "$destdir" ] && [ -f "$destdir$driver_dir/v4l2_drv_video.so" ]; then
 fi
 
 install -D -m 0755 "$artifact" "$destdir$driver_dir/v4l2_drv_video.so"
-install -D -m 0755 "$root/scripts/iris-vaapi-browser" \
-    "$destdir$prefix/bin/iris-vaapi-browser"
-for desktop in "$root"/data/*.desktop; do
-    install -D -m 0644 "$desktop" \
-        "$destdir$prefix/share/applications/${desktop##*/}"
-done
+# libva resolves the driver by DRM driver name when LIBVA_DRIVER_NAME is unset,
+# and this SoC reports DRIVER=msm_dpu, so it looks for msm_drv_video.so. This
+# alias is what lets mpv, VLC, GStreamer, Chrome and anything else work
+# without an environment variable or a wrapper.
+alias_path=$destdir$driver_dir/msm_drv_video.so
+if [ -e "$alias_path" ] && [ ! -L "$alias_path" ]; then
+    fail "$alias_path exists and is not a symlink; refusing to replace it"
+fi
+ln -sfn v4l2_drv_video.so "$alias_path"
+# The node rule is one shared file, installed where both commands look for it.
+install -D -m 0644 "$root/scripts/lib/iris-node.sh" \
+    "$destdir$prefix/lib/iris-vaapi/iris-node.sh"
+install -D -m 0755 "$root/scripts/iris-device-check.sh" \
+    "$destdir$prefix/bin/iris-device-check"
+install -D -m 0755 "$root/scripts/iris-verify.sh" \
+    "$destdir$prefix/bin/iris-verify"
+install -D -m 0755 "$root/scripts/iris-configure-clients.sh" \
+    "$destdir$prefix/bin/iris-configure-clients"
 
 mkdir -p "$manifest_dir"
 manifest_new=$manifest.new.$$
@@ -134,16 +146,17 @@ manifest_new=$manifest.new.$$
     # which rpmbuild's check-buildroot rejects outright and which would point
     # uninstall-system.sh at a path that does not exist on the installed
     # system. Consumers prepend their own DESTDIR.
-    printf 'driver_path=%s\nlauncher_path=%s\ndesktop_dir=%s\n' "$driver_dir/v4l2_drv_video.so" "$prefix/bin/iris-vaapi-browser" "$prefix/share/applications"
+    printf 'driver_path=%s\nnode_lib_path=%s\n' "$driver_dir/v4l2_drv_video.so" "$prefix/lib/iris-vaapi/iris-node.sh"
+    printf 'driver_alias_path=%s\n' "$driver_dir/msm_drv_video.so"
     printf 'previous_driver_backup=%s\nprevious_driver_sha256=%s\n' "${backup#"$destdir"}" "$previous_sha256"
 } >"$manifest_new"
 mv -f "$manifest_new" "$manifest"
 
-if [ -z "$destdir" ] && command -v update-desktop-database >/dev/null 2>&1; then
-    update-desktop-database "$prefix/share/applications"
-fi
-
 printf 'PASS installed VA driver: %s\n' "$destdir$driver_dir/v4l2_drv_video.so"
-printf 'PASS installed browser launcher: %s\n' "$destdir$prefix/bin/iris-vaapi-browser"
-printf 'PASS installed desktop entries: %s\n' "$destdir$prefix/share/applications"
+printf 'PASS installed driver alias: %s\n' "$alias_path"
+printf 'PASS installed node rule: %s\n' "$destdir$prefix/lib/iris-vaapi/iris-node.sh"
+printf 'PASS installed diagnostics: %s %s %s\n' \
+    "$destdir$prefix/bin/iris-device-check" \
+    "$destdir$prefix/bin/iris-verify" \
+    "$destdir$prefix/bin/iris-configure-clients"
 printf 'PASS install manifest: %s\n' "$manifest"

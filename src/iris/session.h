@@ -56,6 +56,14 @@ struct Target {
     FrameRef frame; // Direct: the held CAPTURE slot
     bool completed = false;
     bool error = false;
+    // The picture is decoded but never displayed (AV1 show_frame=0). The
+    // node returns it without pixels, and that is not a decode failure.
+    bool hidden = false;
+    // How many CAPTURE completions this picture produces. A VP9 alt-ref
+    // superframe is one VA picture the firmware decodes as two, and it wants
+    // a buffer for each half before it returns the first, so an Import pool
+    // queues this target's client buffer once per completion.
+    unsigned completions = 1;
     Publish publish = Publish::Direct;
     StableBuffer* destination = nullptr; // Copy / Import: where pixels go
     unsigned width = 0, height = 0;
@@ -150,7 +158,7 @@ private:
     void handle_events();
     void handle_output_returns();
     bool handle_capture_returns(); // returns true when LAST was seen
-    void publish(Target& target, FrameRef frame, const Dequeued& completion);
+    void publish(Target& target, FrameRef frame, const Dequeued& completion, const char* event = nullptr);
     // Import pools: hand the firmware the next client buffer from the
     // backlog when none is in flight. The firmware picks any queued buffer
     // for the picture it finishes, so it is never given more than one to
@@ -163,6 +171,10 @@ private:
     void drain(const char* reason, bool wait_output);
     void restart();
     void reconfigure();
+    // Wait for the LAST the kernel marks on the implicit drain a SOURCE_CHANGE
+    // already performed. Issuing a decoder STOP here would ask the firmware
+    // for a second drain it will not complete.
+    void await_drc_last();
     // Completes a deferred resolution change once no CAPTURE frame is held.
     void continue_reconfigure();
     void fail_unrecoverable_tokens();
@@ -197,9 +209,20 @@ private:
     // released target, because its picture was already submitted to the
     // OUTPUT queue and must still be given a buffer — a hole in the buffer
     // sequence shifts every later picture into a neighbour's buffer.
+    //
+    // `completions` is how many CAPTURE completions the picture produces and
+    // `lent` how many of its buffers are already with the firmware. A VP9
+    // alt-ref access unit is one VA picture the firmware decodes as two, and
+    // it wants a buffer for each half before it returns the first, so the
+    // entry is lent twice before the window moves on. The entry leaves the
+    // backlog when it has nothing left to lend and its token has been
+    // answered, which for a superframe is the second completion — never the
+    // first.
     struct ImportEntry {
         uint64_t token = 0;
         int fd = -1;
+        unsigned completions = 1;
+        unsigned lent = 0;
     };
     std::deque<ImportEntry> import_backlog_;
     void clear_import_backlog();

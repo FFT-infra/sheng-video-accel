@@ -7,8 +7,10 @@ under `src/`.
 
 ## Hard rules
 
-- Find the decoder node by its `iris_driver` QUERYCAP name at runtime. No
-  `/dev/videoN` literal anywhere in code, launcher or packaging.
+- Find the decoder and encoder nodes by their `iris_driver` QUERYCAP name at
+  runtime. They are told apart by which queue carries the compressed format:
+  OUTPUT for the decoder, CAPTURE for the encoder. No `/dev/videoN` literal
+  anywhere in code, launcher or packaging.
 - One source of truth per fact, updated in the same commit as the change:
   codec capability and publish-policy qualification live in
   `data/iris-codec-capabilities.json`; the environment surface lives in

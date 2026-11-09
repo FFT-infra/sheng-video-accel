@@ -87,6 +87,23 @@ if [ "$run_matrices" = 1 ]; then
     else
         warn "iris-structure-matrix-script-missing"
     fi
+    # Encode fidelity against the source. Skipped, not failed, on a host or
+    # SoC without an encoder node: the encoder is a second iris_driver node
+    # and a display without one still decodes.
+    if [ -x test/iris-encode-quality.sh ]; then
+        if iris_resolve_encoder >/dev/null 2>&1; then
+            set +e
+            LIBVA_DRIVERS_PATH="$driver_path" IRIS_ENCODE_QUALITY_DIR="$root/encode-quality" \
+                ./test/iris-encode-quality.sh >"$root/iris-encode-quality.log" 2>&1
+            rc=$?
+            set -e
+            [ "$rc" -eq 0 ] && pass "iris-encode-quality" || fail "iris-encode-quality rc=$rc log=$root/iris-encode-quality.log"
+        else
+            warn "iris-encode-quality-no-encoder-node"
+        fi
+    else
+        warn "iris-encode-quality-script-missing"
+    fi
 else
     warn "repository-matrices-disabled"
 fi

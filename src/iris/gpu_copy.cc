@@ -11,6 +11,7 @@
 
 #include "../util/error.h"
 
+#include <algorithm>
 #include <climits>
 #include <condition_variable>
 #include <cstring>
@@ -79,11 +80,26 @@ public:
             "gpu copy: format mismatch", VA_STATUS_ERROR_INVALID_IMAGE_FORMAT);
         wait_dma_buf(source.fd(), false, 5000);
         wait_dma_buf(destination.fd(), true, 5000);
-        View& src = view(source_views_, source.id(), source.fd(), from, source.length(), to.width, to.height);
+        // Each view describes its own buffer, and the copy covers what both
+        // can hold. copy_pixels() already intersects the client's image
+        // rectangle with the buffer's for the CPU path; a client surface can
+        // still carry the pre-change geometry when the first picture of a
+        // new coded size arrives (FFmpeg's download path reuses its surface
+        // pool across a resolution change), so the GPU path has to do the
+        // same or it asks for a source rectangle the source does not have.
+        View& src = view(source_views_, source.id(), source.fd(), from, source.length(), from.width, from.height);
         View& dst = view(dest_views_, destination.id(), destination.fd(), to, destination.size(), to.width, to.height);
-        for (unsigned plane = 0; plane < 2; ++plane)
+        const unsigned width = std::min(from.width, to.width);
+        const unsigned height = std::min(from.height, to.height);
+        for (unsigned plane = 0; plane < 2; ++plane) {
+            const unsigned bytes = from.fourcc == VA_FOURCC_P010 ? 2 : 1;
+            const uint64_t row_bytes = static_cast<uint64_t>(plane ? ((width + 1) & ~1u) : width) * bytes;
+            const unsigned columns = static_cast<unsigned>((row_bytes + 3) / 4);
+            const unsigned rows = plane ? (height + 1) / 2 : height;
             glCopyImageSubData(src.textures[plane], GL_TEXTURE_2D, 0, 0, 0, 0, dst.textures[plane], GL_TEXTURE_2D, 0, 0,
-                0, 0, static_cast<GLsizei>(src.columns[plane]), static_cast<GLsizei>(src.rows[plane]), 1);
+                0, 0, static_cast<GLsizei>(std::min(columns, src.columns[plane])),
+                static_cast<GLsizei>(std::min(rows, src.rows[plane])), 1);
+        }
         // The consumer of a persistent export may sample it without any
         // further VA call; the copy must be complete when this returns.
         glFinish();

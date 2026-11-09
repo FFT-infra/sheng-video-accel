@@ -195,6 +195,58 @@ void check_scaling_lists()
 
 } // namespace
 
+namespace {
+
+// BitReader::copy takes a whole-byte path when both sides are aligned. The
+// slice rewrite depends on it for 4K payloads, so check it bit-for-bit
+// against a copy that never leaves the per-bit loop.
+void check_bitreader_copy()
+{
+    std::vector<uint8_t> nal(300);
+    for (size_t i = 0; i < nal.size(); ++i)
+        nal[i] = static_cast<uint8_t>(i * 37 + 1);
+    nal[40] = 0;
+    nal[41] = 0;
+    nal[42] = 3;
+    nal[43] = 7;
+
+    BitReader probe(nal.data(), nal.size(), 0);
+    const size_t total = probe.size_bits();
+    const size_t begins[] = { 0, 8, 3 };
+    const size_t ends[] = { total, 400, 1234 };
+    unsigned cases = 0;
+    for (size_t begin : begins) {
+        for (size_t end : ends) {
+            for (bool misaligned : { false, true }) {
+                BitWriter fast;
+                BitWriter slow;
+                if (misaligned) {
+                    fast.bit(1);
+                    slow.bit(1);
+                }
+                BitReader r(nal.data(), nal.size(), 0);
+                r.seek(begin);
+                r.copy(fast, end);
+
+                BitReader s(nal.data(), nal.size(), 0);
+                s.seek(begin);
+                while (s.position() < end)
+                    slow.bit(s.bit());
+
+                if (r.position() != s.position() || fast.data() != slow.data()) {
+                    std::cerr << "FAIL BitReader::copy differs at begin=" << begin
+                              << " end=" << end << " misaligned=" << misaligned << '\n';
+                    std::exit(1);
+                }
+                ++cases;
+            }
+        }
+    }
+    std::cout << "PASS BitReader::copy: " << cases << " aligned and unaligned spans\n";
+}
+
+} // namespace
+
 int main()
 {
     try {
@@ -226,6 +278,7 @@ int main()
         std::cout << "PASS HEVC SPS transform-depth round trip: 16 combinations\n";
         check_scaling_lists();
         std::cout << "PASS HEVC scaling lists: 20 matrices, 992 coefficients and 8 DC values\n";
+        check_bitreader_copy();
     } catch (const std::exception& error) {
         std::cerr << "FAIL " << error.what() << '\n';
         return 1;

@@ -3,6 +3,7 @@
 #include "alloc.h"
 
 #include "../util/error.h"
+#include "../util/prime.h"
 
 #include <atomic>
 #include <cerrno>
@@ -55,30 +56,20 @@ uint8_t* StableBuffer::map()
 
 Layout stable_layout(uint32_t fourcc, unsigned width, unsigned height)
 {
-    // The Iris CAPTURE layout (iris_buffer.c, iris_yuv_buffer_size_nv12 /
-    // _p010): luma pitch aligned to 128 (256 for P010), luma scanlines to
-    // 32, chroma pitch equal to luma, chroma scanlines to 16, chroma
-    // directly after the luma plane, total rounded up to 4 KiB. A stable
+    // The Iris CAPTURE layout, with the total rounded up to 4 KiB. A stable
     // buffer with this layout can be queued into CAPTURE as the client's
     // own memory (Import publish); it also satisfies freedreno's linear
     // import rules for the GPU copy.
-    const bool p010 = fourcc == VA_FOURCC_P010;
-    const unsigned bytes_per_sample = p010 ? 2 : 1;
-    const unsigned pitch_alignment = p010 ? 256 : 128;
-    const unsigned luma_rows = (height + 31) & ~31u;
-    const unsigned chroma_rows = (((height + 1) / 2) + 15) & ~15u;
+    const PlaneLayout planes = plane_layout(fourcc, width, height);
     Layout layout;
     layout.fourcc = fourcc;
     layout.width = width;
     layout.height = height;
-    layout.stride = ((width * bytes_per_sample) + pitch_alignment - 1) & ~(pitch_alignment - 1);
-    layout.storage_height = luma_rows;
+    layout.stride = planes.stride;
+    layout.storage_height = planes.storage_height;
     layout.data_offset = 0;
-    const uint64_t total = ((static_cast<uint64_t>(layout.stride) * luma_rows
-                                + static_cast<uint64_t>(layout.stride) * chroma_rows)
-                               + 4095)
-        & ~static_cast<uint64_t>(4095);
-    require(width && height && total <= 0xffffffffu, "stable buffer geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
+    const uint64_t total = (static_cast<uint64_t>(planes.size) + 4095) & ~static_cast<uint64_t>(4095);
+    require(total <= 0xffffffffu, "stable buffer geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
     layout.size = static_cast<unsigned>(total);
     return layout;
 }

@@ -52,6 +52,22 @@ public:
     void inject_output_errors(unsigned count) { output_errors_ = count; }
     // Emit N firmware error markers (ERROR flag, timestamp 0) on CAPTURE.
     void inject_error_markers(unsigned count) { error_markers_ = count; }
+    // Emit N corrupt completions that keep their timestamp, as a kernel with
+    // packaging/kernel/0004-* does. An optional picture-type flag lets a test
+    // model the AV1 hidden (show_frame=0) shape.
+    void inject_timestamped_errors(unsigned count, uint32_t extra_flags = 0)
+    {
+        timestamped_errors_ = count;
+        timestamped_error_flags_ = extra_flags;
+    }
+    // Model a VP9 alt-ref superframe: the next picture completes twice under
+    // one token, first as an ERROR completion with no picture-type bit and no
+    // payload, then normally. The firmware does this for the invisible frame
+    // the translator packed a show_existing_frame into. It does not return
+    // the invisible half before it has a slot for the visible one, so with
+    // fewer than two CAPTURE slots queued the picture simply waits — the
+    // stall a one-buffer Import window produced on the target.
+    void inject_altref_superframe() { altref_superframe_ = true; }
     // Return EBUSY from START this many times.
     void inject_start_busy(unsigned count) { start_busy_ = count; }
     // After the next AU, announce a new resolution.
@@ -94,8 +110,16 @@ public:
     std::string path() const override { return "/dev/fake-iris"; }
     int fd() const override { return -1; }
     FormatInfo get_format(Queue queue) override;
+    // What the driver would report, without logging the query.
+    FormatInfo current_format(Queue queue);
     FormatInfo set_format(Queue queue, const FormatInfo& request) override;
     std::optional<Selection> get_compose(Queue queue) override;
+    void set_crop(unsigned left, unsigned top, unsigned width, unsigned height) override
+    {
+        note("s_crop " + std::to_string(left) + " " + std::to_string(top) + " " + std::to_string(width) + " "
+            + std::to_string(height));
+        crop_ = Selection { left, top, width, height };
+    }
     bool format_supported(Queue, uint32_t) override { return true; }
     std::optional<int32_t> get_control(uint32_t id) override;
     bool set_control(uint32_t id, int32_t value) override;
@@ -111,9 +135,16 @@ public:
         unsigned bytesused, uint64_t timestamp_us, uint32_t flags) override;
     std::optional<Dequeued> dequeue_buffer(Queue queue) override;
     void stream(Queue queue, bool on) override;
+    void set_frame_rate(Queue queue, unsigned num, unsigned den) override
+    {
+        note("s_parm " + std::to_string(num) + "/" + std::to_string(den));
+        frame_rate_ = { num, den };
+        (void)queue;
+    }
     void subscribe(uint32_t) override { }
     Event dequeue_event() override;
     bool decoder_command(uint32_t cmd) override;
+    bool encoder_command(uint32_t) override { return true; }
     short poll(short events, int timeout_ms) override;
 
 private:
@@ -127,6 +158,8 @@ private:
     FakeConfig config_;
     std::vector<std::string> log_;
     std::map<uint32_t, int32_t> controls_;
+    Selection crop_;
+    std::pair<unsigned, unsigned> frame_rate_ { 0, 0 };
     bool output_on_ = false, capture_on_ = false;
     bool source_change_pending_ = false;
     bool output_format_set_ = false;
@@ -142,6 +175,9 @@ private:
     bool stalled_ = false;
     bool drc_blocked_ = false; // new-resolution AU waits for CAPTURE restart
     unsigned output_errors_ = 0, error_markers_ = 0, start_busy_ = 0;
+    unsigned timestamped_errors_ = 0;
+    uint32_t timestamped_error_flags_ = 0;
+    bool altref_superframe_ = false;
     std::optional<std::pair<unsigned, unsigned>> pending_drc_;
     bool capture_eio_ = false;
     bool auto_tick_ = true;
@@ -153,6 +189,14 @@ private:
     // STOP finished with no CAPTURE slot for LAST: the next queued slot
     // returns LAST at once (iris_vb2_buf_queue does the same).
     bool last_pending_ = false;
+    // The SOURCE_CHANGE boundary LAST is emitted once per change, on the
+    // event itself rather than on STOP.
+    bool drc_last_sent_ = false;
+    // Import pool: no slot was free when the event was dequeued, so the next
+    // buffer queued to CAPTURE carries the boundary LAST.
+    bool drc_last_pending_ = false;
+    // The queued source change is a mid-stream one, so it ends with LAST.
+    bool drc_change_ = false;
     void emit_last(unsigned slot);
 };
 

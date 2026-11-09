@@ -30,21 +30,32 @@ jobs:
       # Refuse an empty/partial green run. In particular, the executable
       # state-machine model is the behavioural test for queue ownership and
       # drain transitions; source-grep guards alone are not sufficient.
+      # Meson prints each test as `<project>:<name>` from 1.5 on and as a bare
+      # `<name>` before that, and the runner's distro package is older than a
+      # developer's. Match both forms so the check cannot pass or fail on the
+      # meson version alone.
       - name: Verify test inventory
         run: |
+          meson --version
           meson test -C build --list | tee build/meson-tests.txt
           test -s build/meson-tests.txt
           for required in \
             session \
+            annexb \
             hevc-parameter-sets \
+            av1-obu \
+            encode-params \
+            encode-session \
+            prime-import \
             static-checks \
             iris-source-invariants \
             iris-env-doc-check \
             iris-eos-check-self-test \
             iris-deploy-path-check \
             iris-setup-path-check \
+            iris-kernel-patch-check \
             provenance-self-test; do
-            grep -Eq ":${required}$" build/meson-tests.txt || {
+            grep -Eq "(^|:)${required}$" build/meson-tests.txt || {
               echo "missing Meson test: $required" >&2
               exit 1
             }

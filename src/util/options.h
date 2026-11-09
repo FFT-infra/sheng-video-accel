@@ -17,6 +17,8 @@ enum class PublishOverride { Auto, Copy, Direct, Import };
 struct Options {
     // Decoder node override; when empty the node is found by QUERYCAP name.
     std::string video_path;
+    // Encoder node override, same rule.
+    std::string encoder_path;
     bool trace = false;
     // Bounded vaSyncSurface wait. The first frame of a cold session may take
     // firmware bring-up time and gets cold_start_timeout_ms unless the user
@@ -28,9 +30,6 @@ struct Options {
     PublishOverride publish = PublishOverride::Auto;
     // Directory to write each submitted access unit into; empty disables.
     std::string dump_dir;
-    // Advertise VP9 and AV1 before their hardware gate has passed
-    // (docs/architecture.md §9, Phase 5). Never set by the launcher.
-    bool experimental_profiles = false;
 
     static Options from_environment();
 };

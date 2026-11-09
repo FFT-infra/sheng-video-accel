@@ -14,7 +14,7 @@
 
 namespace iris {
 
-enum class MemoryOrigin { MsmCoherent, MsmWriteCombined, DmaHeap };
+enum class MemoryOrigin { MsmCoherent, MsmWriteCombined, DmaHeap, Imported };
 
 class StableBuffer {
 public:

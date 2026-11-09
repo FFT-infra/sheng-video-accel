@@ -7,8 +7,10 @@
 #include "driver.h"
 
 #include "../util/error.h"
+#include "../util/prime.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 
 extern "C" {
@@ -41,18 +43,20 @@ uint32_t fourcc_for(uint32_t rt_format)
 // the owner is gone); holding it by value keeps it alive for the wait.
 VAStatus wait_for(DriverData& d, std::shared_ptr<iris::Session> session, const std::shared_ptr<Surface>& s)
 {
-    if (!s->rendering()) {
-        iris::require(!s->failed, "surface decode failed", VA_STATUS_ERROR_DECODING_ERROR);
-        return VA_STATUS_SUCCESS;
-    }
+    iris::require(!s->failed, "surface decode failed", VA_STATUS_ERROR_DECODING_ERROR);
     if (!session) {
         // The owner was destroyed between our two reads. destroyContext
         // drains before it drops the context, so the target is settled now.
         iris::require(!s->rendering(), "rendering surface has no live session", VA_STATUS_ERROR_INVALID_SURFACE);
-        iris::require(!s->failed, "surface decode failed", VA_STATUS_ERROR_DECODING_ERROR);
+        iris::require(!s->target.error, "surface decode failed", VA_STATUS_ERROR_DECODING_ERROR);
         return VA_STATUS_SUCCESS;
     }
     try {
+        // Ask the session even when the target has stopped rendering. A
+        // completion another call pumped may have marked it failed, and that
+        // failure lives in the target, not in Surface::failed; returning here
+        // on `rendering()` alone reported SUCCESS for a surface the firmware
+        // rejected.
         session->wait(s->target);
     } catch (const iris::Error& error) {
         s->failed = true;
@@ -68,6 +72,85 @@ std::shared_ptr<iris::Session> session_of(DriverData& d, const Surface& s)
     return owner ? owner->session : nullptr;
 }
 
+// AV1 holds a picture back until the following picture's reference map says
+// which slots it refreshed (codec/av1.cc). A client that asks for the held
+// surface before that is waiting on the stream, not on a broken frame:
+//
+// - a shown key frame refreshes every slot by definition, so its bits are
+//   already determined and it is submitted now;
+// - otherwise this waits for the next picture to release it;
+// - at end of stream no picture follows. After the sync timeout the held
+//   picture is decoded as the last one (refreshing nothing), which is what
+//   the stream's tail needs, rather than failing the final frame.
+VAStatus wait_for_release(DriverData& d, const std::shared_ptr<Surface>& s, const std::shared_ptr<Context>& owner,
+    VASurfaceID id)
+{
+    {
+        std::lock_guard<std::recursive_mutex> lock(d.mutex);
+        if (!s->unsent)
+            return VA_STATUS_SUCCESS;
+    }
+    if (!owner || !owner->translator) {
+        // destroyContext releases the held picture before it drops the
+        // context, so nothing can be left deferred without one.
+        std::lock_guard<std::recursive_mutex> lock(d.mutex);
+        iris::require(!s->unsent, "deferred surface has no live context", VA_STATUS_ERROR_INVALID_SURFACE);
+        return VA_STATUS_SUCCESS;
+    }
+    bool known = false;
+    {
+        std::lock_guard<std::mutex> translate(owner->translate_mutex);
+        known = owner->translator->held_surface() == id && owner->translator->held_flags_known();
+    }
+    if (known && release_held_picture(d, *owner))
+        return VA_STATUS_SUCCESS;
+    bool still_unsent = false;
+    {
+        std::unique_lock<std::recursive_mutex> lock(d.mutex);
+        const auto deadline = std::chrono::steady_clock::now()
+            + std::chrono::milliseconds(d.options.sync_timeout_ms);
+        while (s->unsent && d.released.wait_until(lock, deadline) != std::cv_status::timeout) {
+        }
+        still_unsent = s->unsent;
+    }
+    if (!still_unsent)
+        return VA_STATUS_SUCCESS;
+    d.trace("va sync released the held picture surface=%u", id);
+    iris::require(release_held_picture(d, *owner), "deferred picture could not be released",
+        VA_STATUS_ERROR_OPERATION_FAILED);
+    return VA_STATUS_SUCCESS;
+}
+
+// The buffer's real length. DMA-BUF llseek reports it on the Iris kernel, so
+// a descriptor cannot claim more memory than the object holds; 0 means the
+// kernel did not say and the import cannot cross-check.
+uint64_t allocation_size(int fd)
+{
+    const off_t length = lseek(fd, 0, SEEK_END);
+    return length > 0 ? static_cast<uint64_t>(length) : 0;
+}
+
+// The surface becomes a view over the client's memory: a StableBuffer whose
+// fd never changes, marked persistent so the existing Import/Copy policy
+// applies unchanged (architecture §3.3). The fd is duplicated here, so the
+// client may close its own at any time.
+std::unique_ptr<iris::StableBuffer> import_stable(int fd, uint64_t allocation, const iris::PlaneLayout& planes,
+    uint32_t fourcc, unsigned width, unsigned height)
+{
+    const int copy = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+    iris::require(copy >= 0, "duplicate the imported DMA-BUF", VA_STATUS_ERROR_ALLOCATION_FAILED);
+    iris::Layout layout;
+    layout.fourcc = fourcc;
+    layout.width = width;
+    layout.height = height;
+    layout.stride = planes.stride;
+    layout.storage_height = planes.storage_height;
+    layout.data_offset = 0;
+    layout.size = planes.size;
+    const unsigned size = allocation >= planes.size ? static_cast<unsigned>(allocation) : planes.size;
+    return std::make_unique<iris::StableBuffer>(copy, size, iris::MemoryOrigin::Imported, layout);
+}
+
 } // namespace
 
 VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, unsigned height, VASurfaceID* ids,
@@ -80,7 +163,7 @@ VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, 
             VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
         const uint32_t fourcc = fourcc_for(format);
         unsigned memory_type = VA_SURFACE_ATTRIB_MEM_TYPE_VA;
-        const VASurfaceAttribExternalBuffers* external = nullptr;
+        const void* external = nullptr;
         for (unsigned i = 0; i < attribute_count; ++i) {
             const auto& attribute = attributes[i];
             if (!(attribute.flags & VA_SURFACE_ATTRIB_SETTABLE))
@@ -95,7 +178,9 @@ VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, 
                 memory_type = static_cast<unsigned>(attribute.value.value.i);
                 break;
             case VASurfaceAttribExternalBufferDescriptor:
-                external = static_cast<const VASurfaceAttribExternalBuffers*>(attribute.value.value.p);
+                iris::require(attribute.value.type == VAGenericValueTypePointer && attribute.value.value.p,
+                    "null external buffer descriptor", VA_STATUS_ERROR_INVALID_PARAMETER);
+                external = attribute.value.value.p;
                 break;
             case VASurfaceAttribUsageHint:
                 break;
@@ -103,11 +188,42 @@ VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, 
                 throw iris::Error(VA_STATUS_ERROR_ATTR_NOT_SUPPORTED, "unsupported surface attribute");
             }
         }
-        // Client-provided memory (DRM_PRIME_2 import) is the research track
-        // of architecture §3.5; refuse it explicitly so the client falls back
-        // to driver-allocated surfaces instead of decoding into nothing.
-        iris::require(memory_type == VA_SURFACE_ATTRIB_MEM_TYPE_VA && external == nullptr,
-            "external surface memory is not supported", VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE);
+        // Client memory (architecture §3.3): the surface is created as a view
+        // over one linear DMA-BUF in the CAPTURE layout, and every later
+        // decode goes through the Import policy — driver-allocated surfaces
+        // are the other case.
+        std::unique_ptr<iris::StableBuffer> imported;
+        int import_fd = -1;
+        if (memory_type == VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2) {
+            iris::require(external != nullptr, "DRM_PRIME_2 import needs a surface descriptor",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
+            iris::require(count == 1, "DRM_PRIME_2 import creates one surface per descriptor",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
+            const auto& descriptor = *static_cast<const VADRMPRIMESurfaceDescriptor*>(external);
+            // Do not probe a descriptor whose object count is wrong:
+            // objects[0] would be whatever the client left there, possibly an
+            // unrelated open fd whose shared file offset allocation_size()
+            // would move before the descriptor is refused.
+            const int fd = descriptor.num_objects == 1 ? descriptor.objects[0].fd : -1;
+            const uint64_t allocation = fd >= 0 ? allocation_size(fd) : 0;
+            imported = import_stable(fd, allocation,
+                iris::validate_prime2(descriptor, width, height, fourcc, allocation), fourcc, width, height);
+        } else if (memory_type == VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME) {
+            iris::require(external != nullptr, "DRM_PRIME import needs a buffer table",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
+            iris::require(count == 1, "DRM_PRIME import creates one surface per buffer",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
+            const auto& buffers = *static_cast<const VASurfaceAttribExternalBuffers*>(external);
+            const int fd = buffers.num_buffers == 1 && buffers.buffers ? static_cast<int>(buffers.buffers[0]) : -1;
+            const uint64_t allocation = fd >= 0 ? allocation_size(fd) : 0;
+            imported = import_stable(fd, allocation,
+                iris::validate_prime1(buffers, width, height, fourcc, allocation), fourcc, width, height);
+        } else {
+            iris::require(memory_type == VA_SURFACE_ATTRIB_MEM_TYPE_VA && external == nullptr,
+                "unsupported surface memory type", VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE);
+        }
+        if (imported)
+            import_fd = imported->fd();
 
         std::lock_guard<std::recursive_mutex> lock(d.mutex);
         for (unsigned i = 0; i < count; ++i) {
@@ -115,11 +231,15 @@ VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, 
             s->width = width;
             s->height = height;
             s->fourcc = fourcc;
+            if (imported) {
+                s->stable = std::move(imported);
+                s->persistent_export = true;
+            }
             ids[i] = d.next_id++;
             d.surfaces[ids[i]] = s;
         }
-        d.trace("va create_surfaces count=%u %ux%u fourcc=%.4s", count, width, height,
-            reinterpret_cast<const char*>(&fourcc));
+        d.trace("va create_surfaces count=%u %ux%u fourcc=%.4s imported=%d fd=%d", count, width, height,
+            reinterpret_cast<const char*>(&fourcc), import_fd >= 0 ? 1 : 0, import_fd);
         return VA_STATUS_SUCCESS;
     });
 }
@@ -171,12 +291,74 @@ VAStatus syncSurface(VADriverContextP ctx, VASurfaceID id)
         auto& d = data(ctx);
         std::shared_ptr<Surface> s;
         std::shared_ptr<iris::Session> session;
+        std::shared_ptr<Context> owner;
+        std::optional<Context::EncSubmitted> encoded;
         {
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
             s = surface(d, id);
             session = session_of(d, *s);
+            owner = owner_of(d, *s);
+            // An encode context has no decode session: vaSyncSurface means
+            // "the picture this surface was input to is done", which is the
+            // access unit's completion.
+            if (owner && owner->encoding()) {
+                auto it = owner->enc_submitted.find(id);
+                if (it != owner->enc_submitted.end())
+                    encoded = it->second;
+            }
         }
+        if (encoded) {
+            // Claim it into the coded buffer the client named, not into a
+            // local. The access unit is the client's, and GStreamer's encoder
+            // syncs the surface and then maps the coded buffer; throwing the
+            // bytes away here left that map with nothing to return.
+            if (encoded->session && encoded->coded != VA_INVALID_ID) {
+                std::shared_ptr<Buffer> coded;
+                {
+                    std::lock_guard<std::recursive_mutex> lock(d.mutex);
+                    auto it = d.buffers.find(encoded->coded);
+                    if (it != d.buffers.end())
+                        coded = it->second;
+                }
+                if (coded)
+                    return claim_coded(d, coded, VA_TIMEOUT_INFINITE);
+            }
+            if (encoded->session)
+                encoded->session->wait(encoded->ticket);
+            return VA_STATUS_SUCCESS;
+        }
+        const VAStatus release = wait_for_release(d, s, owner, id);
+        if (release != VA_STATUS_SUCCESS)
+            return release;
         return wait_for(d, std::move(session), s);
+    });
+}
+
+VAStatus syncBuffer(VADriverContextP ctx, VABufferID id, uint64_t timeout_ns)
+{
+    return guarded(ctx, "syncBuffer", [&] {
+        auto& d = data(ctx);
+        // FFmpeg's capability probe: vaSyncBuffer(display, VA_INVALID_ID, 0)
+        // only asks whether this entry point exists (vaapi_encode.c). Answer
+        // that, not "invalid buffer", or every FFmpeg encode falls back to
+        // synchronous mode.
+        if (id == VA_INVALID_ID)
+            return VA_STATUS_SUCCESS;
+        std::shared_ptr<Buffer> b;
+        {
+            std::lock_guard<std::recursive_mutex> lock(d.mutex);
+            b = buffer(d, id);
+            // Only a coded buffer has a completion behind it. Anything else
+            // is already settled when vaEndPicture returns, which is what a
+            // success here means.
+            if (b->type != VAEncCodedBufferType)
+                return VA_STATUS_SUCCESS;
+        }
+        // The same claim vaMapBuffer makes, and the same one vaSyncSurface
+        // makes on the input surface: whichever of the three arrives first
+        // stores the access unit, and the others find it instead of getting a
+        // second, empty answer. GStreamer's encoder calls two of them.
+        return claim_coded(d, b, timeout_ns);
     });
 }
 
@@ -194,7 +376,10 @@ VAStatus querySurfaceStatus(VADriverContextP ctx, VASurfaceID id, VASurfaceStatu
         // A client that polls instead of syncing still drives completions.
         if (s->rendering() && session)
             session->service();
-        *status = s->rendering() ? VASurfaceRendering : VASurfaceReady;
+        // A deferred picture has not been submitted yet; report it the same
+        // way, so a polling client keeps polling instead of downloading
+        // pixels that are still coming.
+        *status = (s->rendering() || s->unsent) ? VASurfaceRendering : VASurfaceReady;
         return VA_STATUS_SUCCESS;
     });
 }
@@ -220,13 +405,17 @@ VAStatus querySurfaceAttributes(VADriverContextP ctx, VAConfigID config, VASurfa
     // the profile can decode into rather than the one the config defaulted to.
     add(VASurfaceAttribPixelFormat, VA_FOURCC_NV12, VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
     const VAProfile profile = it->second.profile;
-    if (d.capabilities.p010 && (profile == VAProfileHEVCMain10 || profile == VAProfileVP9Profile2))
+    // The encoder's raw port is NV12 only; P010 is a decode-only format here.
+    const bool encoding = it->second.entrypoint == VAEntrypointEncSlice;
+    if (!encoding && d.capabilities.p010 && p010_decode_profile(profile))
         add(VASurfaceAttribPixelFormat, VA_FOURCC_P010, VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
     add(VASurfaceAttribMinWidth, static_cast<int>(d.capabilities.min_width), VA_SURFACE_ATTRIB_GETTABLE);
     add(VASurfaceAttribMaxWidth, static_cast<int>(d.capabilities.max_width), VA_SURFACE_ATTRIB_GETTABLE);
     add(VASurfaceAttribMinHeight, static_cast<int>(d.capabilities.min_height), VA_SURFACE_ATTRIB_GETTABLE);
     add(VASurfaceAttribMaxHeight, static_cast<int>(d.capabilities.max_height), VA_SURFACE_ATTRIB_GETTABLE);
-    add(VASurfaceAttribMemoryType, VA_SURFACE_ATTRIB_MEM_TYPE_VA, VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
+    add(VASurfaceAttribMemoryType,
+        VA_SURFACE_ATTRIB_MEM_TYPE_VA | VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME | VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+        VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
     if (attributes)
         std::copy_n(list, std::min(n, *count), attributes);
     *count = n;
@@ -242,14 +431,22 @@ VAStatus exportSurfaceHandle(VADriverContextP ctx, VASurfaceID id, uint32_t mem_
             VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE);
         std::shared_ptr<Surface> s;
         std::shared_ptr<iris::Session> session;
+        std::shared_ptr<Context> owner;
         {
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
             s = surface(d, id);
             session = session_of(d, *s);
+            owner = owner_of(d, *s);
         }
         // The client wants pixels: finish the picture first.
-        if (s->rendering())
-            wait_for(d, std::move(session), s);
+        const VAStatus release = wait_for_release(d, s, owner, id);
+        if (release != VA_STATUS_SUCCESS)
+            return release;
+        // The client wants pixels: finish the picture first. Asking even when
+        // the target has stopped rendering is what catches a picture the
+        // firmware already failed; exporting it would hand out a buffer that
+        // was never filled.
+        wait_for(d, std::move(session), s);
 
         int fd = -1;
         iris::Layout layout;

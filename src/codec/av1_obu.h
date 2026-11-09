@@ -56,6 +56,13 @@ struct AV1TileEntry {
     uint32_t size;
 };
 
+// Tells a picture that refreshes all eight reference slots by definition (a
+// shown key frame or a switch frame) apart from one whose refresh_frame_flags
+// the frame header has to carry. Those pictures need no successor to be
+// submitted, because their slots are not a choice. The caller's reference
+// bookkeeping must agree with this: the writer omits the field for them.
+bool av1_refreshes_all_slots(const VADecPictureParameterBufferAV1& picture);
+
 // Derive the fixed sequence parameters from the first frame of a sequence.
 AV1SequenceState av1_sequence_state(const VADecPictureParameterBufferAV1& picture);
 

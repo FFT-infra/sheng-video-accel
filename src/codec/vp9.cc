@@ -65,6 +65,7 @@ public:
         out.bytes.assign(data, data + size);
         out.deferred = false;
         out.sequence_start = frame_type == 0;
+        out.completions = 1;
         if (show_frame)
             return;
 
@@ -99,6 +100,11 @@ public:
             for (unsigned i = 0; i < magnitude; ++i)
                 out.bytes.push_back(static_cast<uint8_t>(n >> (8 * i)));
         out.bytes.push_back(marker_byte);
+        // The firmware decodes the superframe as two pictures: the invisible
+        // frame it suppresses, then the show_existing_frame header's copy.
+        // Two completions under one token, and the Import policy has to know
+        // before it decides how many buffers to lend this picture.
+        out.completions = 2;
     }
 
     bool flush(AccessUnit&) override { return false; }

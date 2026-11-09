@@ -2,12 +2,16 @@
 
 # Browser hardware-decode acceptance for one clip on the Iris target.
 #
-# Launches the installed (or build-tree) VA driver through the project
-# launcher, plays CLIP in an isolated profile, and reports the evidence the
-# release gate requires: the decoder Chrome itself selected, the platform
-# flag, frame/drop counts over a window, and an independent check that a
-# Chrome process holds the Iris decoder node. "The video played" is not a
-# result; software decode plays too.
+# Launches the browser directly, with no wrapper and no LIBVA_* variable, and
+# reports the evidence the release gate requires: the decoder Chrome itself
+# selected, the platform flag, frame/drop counts over a window, and an
+# independent check that a Chrome process holds the Iris decoder node. "The
+# video played" is not a result; software decode plays too.
+#
+# The direct launch is deliberate. libva resolves this driver through the
+# msm_drv_video.so alias, so a client that sets nothing still reaches it; the
+# project used to ship a launcher that exported the node path, and this
+# script is what proves the launcher is not needed.
 #
 # Usage:
 #   test/iris-browser-acceptance.sh --clip PATH [--browser chrome|chromium]
@@ -59,8 +63,6 @@ clip=$(CDPATH='' cd -- "$(dirname -- "$clip")" && pwd)/$(basename -- "$clip")
 [ -n "$out" ] || out=$(iris_artifact_dir browser-acceptance)/$label-$(date +%Y%m%d-%H%M%S)
 mkdir -p "$out"
 
-launcher=$here/../scripts/iris-vaapi-browser
-[ -x "$launcher" ] || fail "launcher missing: $launcher"
 page=$here/playback.html
 [ -f "$page" ] || fail "playback page missing: $page"
 cdp=$here/remote/cdp.py
@@ -95,37 +97,81 @@ chrome_args="--remote-debugging-port=$port --remote-allow-origins=* --kiosk
     --no-default-browser-check --disable-background-networking
     --disable-component-update --no-pings --disable-sync"
 
-# The launcher deliberately unsets LIBVA_DRIVERS_PATH so desktop starts cannot
-# pick up a stale build tree. For a development run against a build-tree
-# driver, interpose a wrapper as the browser binary that re-exports the path
-# after the launcher has resolved everything else.
-browser_bin_env=''
+case "$browser" in
+    chrome) real_browser=$(command -v google-chrome-stable || command -v google-chrome) ;;
+    chromium) real_browser=$(command -v chromium || command -v chromium-browser) ;;
+    *) fail "unsupported browser family: $browser" ;;
+esac
+[ -n "$real_browser" ] || fail "no $browser binary on PATH"
+
+# A build-tree run is a development override and is recorded as one. It is the
+# only case that sets LIBVA_DRIVERS_PATH; the installed path must reach the
+# driver through libva's own resolution, which is the property being tested.
+driver_env=''
 if [ "$driver_source" = build-tree ]; then
-    case "$browser" in
-        chrome) real_browser=$(command -v google-chrome-stable || command -v google-chrome) ;;
-        chromium) real_browser=$(command -v chromium || command -v chromium-browser) ;;
-        *) fail "unsupported browser family: $browser" ;;
-    esac
-    [ -n "$real_browser" ] || fail "no $browser binary on PATH"
-    wrapper=$out/browser-wrapper.sh
-    printf '#!/bin/sh\nexport LIBVA_DRIVERS_PATH=%s\nexec %s "$@"\n' "$driver_dir" "$real_browser" >"$wrapper"
-    chmod +x "$wrapper"
-    browser_bin_env="IRIS_BROWSER_BIN=$wrapper"
+    driver_env="LIBVA_DRIVERS_PATH=$driver_dir"
 fi
 
 # Keep every experiment switch out of the environment: this is the default
-# path the package ships. Diagnostics may be enabled by the caller through
+# path the package ships. LIBVA_DRIVER_NAME and both node overrides are
+# dropped so the run cannot inherit them from the session and silently pass
+# for the wrong reason. Diagnostics may be enabled by the caller through
 # IRIS_ACCEPTANCE_ENV="V4L2_VA_TRACE=1", which is passed through verbatim.
 # shellcheck disable=SC2086
 env -u V4L2_VA_ZERO_COPY -u V4L2_VA_ZERO_COPY_CONTRACT -u V4L2_VA_BATCH_SIZE \
     -u V4L2_VA_COPY_SURFACES -u V4L2_VA_CAPTURE_SCHEDULED \
-    $browser_bin_env \
+    -u LIBVA_DRIVER_NAME -u LIBVA_V4L2_VIDEO_PATH -u LIBVA_V4L2_ENCODER_PATH \
+    $driver_env \
     ${IRIS_ACCEPTANCE_ENV:-} \
-    IRIS_BROWSER_PROFILE_ROOT=$profile_root \
-    "$launcher" --browser="$browser" -- $chrome_args about:blank \
+    "$real_browser" --user-data-dir="$profile_root" \
+    --ozone-platform=wayland $chrome_args about:blank \
     >"$out/browser.log" 2>&1 &
 browser_pid=$!
 trap 'kill "$browser_pid" 2>/dev/null || true; wait "$browser_pid" 2>/dev/null || true' EXIT
+
+# Independent of the browser's self-report: which Chrome process holds the
+# Iris node, and which one mapped the driver. Software decode never opens the
+# node. Compare the full symlink target so /dev/video1 cannot be mistaken for
+# /dev/video11.
+#
+# This has to sample while the decode is in flight. Sampling after playback
+# stops finds a GPU process that has already closed the node and unmapped the
+# driver, which is how an earlier revision of this script recorded
+# driver_mapped_in_gpu_process=null on a hardware run.
+: >"$out/iris-node-holders.txt"
+mapped_file=$out/driver-mapped.txt
+: >"$mapped_file"
+sampler_pid=''
+sample() {
+    for pid in $(pgrep -f -- "--user-data-dir=$profile_root" 2>/dev/null || true); do
+        [ -d "/proc/$pid" ] || continue
+        type=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -o -- '--type=[a-z-]*' | head -1)
+        for fd in "/proc/$pid/fd"/*; do
+            [ -e "$fd" ] || continue
+            [ "$(readlink "$fd" 2>/dev/null || true)" = "$node" ] || continue
+            printf '%s %s\n' "$pid" "$type" >>"$out/iris-node-holders.txt"
+            break
+        done
+        m=$(grep -o '[^ ]*v4l2_drv_video\.so' "/proc/$pid/maps" 2>/dev/null | sort -u | head -1)
+        # An if, not `[ -n ] && printf`: the empty case must not be the
+        # function's exit status, or `set -e` kills the sampler on the first
+        # second before playback has mapped anything.
+        if [ -n "$m" ]; then
+            printf '%s %s\n' "$pid" "$m" >>"$mapped_file"
+        fi
+    done
+    return 0
+}
+# One sample a second for the length of the window, in the background.
+(
+    n=0
+    while [ "$n" -lt "$((seconds + 10))" ]; do
+        sample || true
+        n=$((n + 1))
+        sleep 1
+    done
+) &
+sampler_pid=$!
 
 rc=0
 python3 "$cdp" --port "$port" run \
@@ -134,26 +180,13 @@ python3 "$cdp" --port "$port" run \
     --measure-seconds "$seconds" \
     --out "$out/cdp.json" >"$out/cdp.log" 2>&1 || rc=$?
 
-# Independent of the browser's self-report: which Chrome process holds the
-# Iris node. Software decode never opens it. Compare the full symlink target
-# so /dev/video1 cannot be mistaken for /dev/video11.
-: >"$out/iris-node-holders.txt"
-for pid in $(pgrep -f -- "--user-data-dir=$profile_root" 2>/dev/null || true); do
-    for fd in "/proc/$pid/fd"/*; do
-        [ -e "$fd" ] || continue
-        [ "$(readlink "$fd" 2>/dev/null || true)" = "$node" ] || continue
-        printf '%s %s\n' "$pid" \
-            "$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -o -- '--type=[a-z-]*' | head -1)" \
-            >>"$out/iris-node-holders.txt"
-        break
-    done
-done
-# Which driver did the GPU process actually map?
+kill "$sampler_pid" 2>/dev/null || true
+wait "$sampler_pid" 2>/dev/null || true
+# Collapse the per-second samples into one record each, deduplicated.
+sort -u "$out/iris-node-holders.txt" -o "$out/iris-node-holders.txt"
+sort -u "$mapped_file" -o "$mapped_file"
 mapped=''
-for pid in $(pgrep -f -- "--user-data-dir=$profile_root.*--type=gpu-process" 2>/dev/null || true); do
-    mapped=$(grep -o '[^ ]*v4l2_drv_video\.so' "/proc/$pid/maps" 2>/dev/null | sort -u | head -1)
-    [ -n "$mapped" ] && break
-done
+[ -s "$mapped_file" ] && mapped=$(awk '{print $2; exit}' "$mapped_file")
 
 kill "$browser_pid" 2>/dev/null || true
 wait "$browser_pid" 2>/dev/null || true

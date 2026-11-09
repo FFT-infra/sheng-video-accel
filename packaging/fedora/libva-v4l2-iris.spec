@@ -1,11 +1,9 @@
 # Fedora package for the Qualcomm Iris VA-API backend.
 #
 # The spec installs through scripts/install-system.sh rather than plain
-# `meson install`. Both paths exist in this tree and they disagree: meson puts
-# the launcher and desktop entries under the configured prefix, while the
-# helper additionally resolves libva's canonical driverdir. On the qualified
-# target that divergence left desktop entries in two directories at once, one
-# of them stale. One install path is the point.
+# `meson install`. Both paths exist in this tree and they disagree: meson uses
+# the configured prefix, while the helper additionally resolves libva's
+# canonical driverdir. One install path is the point.
 #
 # Building from a git checkout:
 #
@@ -29,8 +27,8 @@
 
 Name:           libva-v4l2-iris
 Version:        0.1.0
-Release:        1%{?dist}
-Summary:        VA-API backend for the Qualcomm Iris V4L2 stateful decoder
+Release:        3%{?dist}
+Summary:        VA-API backend for the Qualcomm Iris V4L2 stateful decoder and encoder
 
 # The backend carries both licences; see COPYING, COPYING.LGPL and COPYING.MIT.
 License:        MIT AND LGPL-2.1-or-later
@@ -50,28 +48,25 @@ BuildRequires:  pkgconfig(egl)
 BuildRequires:  pkgconfig(glesv2)
 BuildRequires:  pkgconfig(gbm)
 
-# The launcher resolves the decoder node by driver name with v4l2-ctl, because
-# the node number is not stable across boots on this device. Without v4l-utils
-# it refuses to start rather than guessing /dev/video0, which may be a camera.
+# The diagnostic commands resolve the decoder node by driver name with
+# v4l2-ctl, because the node number is not stable across boots on this device.
+# Without v4l-utils they refuse to guess /dev/video0, which may be a camera.
+# No browser is required: the driver is useful to any VA-API client.
 Requires:       v4l-utils
 
-# Neither browser is required: the driver is useful to any VA-API client, and
-# the desktop entries hide themselves through TryExec when the browser they
-# name is absent.
-Suggests:       chromium
-
 %description
-A libVA backend that drives the Qualcomm Iris V4L2 stateful decoder, so
-VA-API clients such as Chromium and Google Chrome can decode H.264 and HEVC
-in hardware instead of falling back to a CPU decoder.
+A libVA backend that drives the Qualcomm Iris V4L2 stateful decoder and
+encoder, so VA-API clients such as Chromium, Google Chrome and FFmpeg can
+decode and encode H.264 and HEVC in hardware instead of falling back to a
+CPU codec.
 
-The package installs the driver into libva's driver directory, a browser
-launcher that resolves the Iris decoder node at runtime, and desktop entries
-for the VA-only and the separate Vulkan/WebGPU experiment profiles.
+The package installs the driver into libva's driver directory together with
+a read-only device report and a one-command hardware check. Clients need no
+wrapper and no environment variable: libva resolves the driver through the
+msm_drv_video.so alias.
 
-VA VP9 is deliberately withdrawn on the qualified target and VA AV1 is not
-advertised; see data/iris-codec-capabilities.json for the machine-readable
-support boundary.
+VA advertises H.264, HEVC, VP9 and AV1 decode, and H.264/HEVC encode; see
+data/iris-codec-capabilities.json for the machine-readable support boundary.
 
 %prep
 %autosetup -n %{forgename}-%{version}
@@ -114,12 +109,30 @@ sh scripts/refresh-install-manifest.sh \
 %license COPYING COPYING.LGPL COPYING.MIT
 %doc README.md README.zh-CN.md AUTHORS CREDITS
 %{_libdir}/dri/v4l2_drv_video.so
-%{_bindir}/iris-vaapi-browser
-%{_datadir}/applications/google-chrome-iris-v4l2.desktop
+# libva falls back to the DRM driver name when LIBVA_DRIVER_NAME is unset, and
+# this SoC reports DRIVER=msm_dpu. The alias keeps clients that do not set the
+# variable (mpv, VLC, GStreamer) on this driver instead of software.
+%{_libdir}/dri/msm_drv_video.so
+# Read-only device report, one-command hardware check, and the opt-in mpv /
+# Firefox configuration. The first two source one shared node-resolution file.
+%{_bindir}/iris-device-check
+%{_bindir}/iris-verify
+%{_bindir}/iris-configure-clients
+%{_prefix}/lib/iris-vaapi/iris-node.sh
 %dir %{_datadir}/iris-vaapi
 %{_datadir}/iris-vaapi/install-manifest.txt
 
 %changelog
+* Sun Oct 25 2026 Iris VA-API maintainers - 0.1.0-3
+- Ship the scripts the package already referenced but did not carry: a clean
+  checkout built no installer input at all.
+
+* Sun Oct 25 2026 Iris VA-API maintainers - 0.1.0-2
+- Drop the browser launcher and desktop entry: libva resolves the driver
+  through the msm_drv_video.so alias, so a client needs neither.
+- Replace the launcher's node queries with one shared iris-node.sh sourced by
+  iris-device-check and iris-verify.
+
 * Wed Sep 02 2026 Iris VA-API maintainers - 0.1.0-1
-- First packaged snapshot: driver, launcher, desktop entries and the install
-  provenance manifest in one artifact.
+- First packaged snapshot: driver, diagnostics and the install provenance
+  manifest in one artifact.

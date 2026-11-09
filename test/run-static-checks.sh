@@ -34,24 +34,32 @@ for script in "$test_dir"/*.sh "$test_dir"/remote/*.sh "$root"/scripts/*.sh; do
     run "syntax $(basename "$script")" sh -n "$script"
 done
 
-echo "== browser launcher invariants"
-launcher="$root/scripts/iris-vaapi-browser"
-run browser-launcher-syntax sh -n "$launcher"
-run browser-launcher-unsets-build-path grep -Fq 'unset LIBVA_DRIVERS_PATH' "$launcher"
-run browser-launcher-dynamic-node grep -Fq 'iris_driver' "$launcher"
-run browser-launcher-no-fixed-node sh -c '! grep -Eq "/dev/video[0-9]+" "$1"' sh "$launcher"
-
-# The Chrome exec must carry no video-decoder feature override: on Chrome
-# 151 forcing AcceleratedVideoDecodeLinuxZeroCopyGL off made the pipeline
-# build VaapiVideoDecoder, hit the ImageProcessor path and fall back to
-# software. Read code, not comments. The Fedora-Chromium compatibility
-# branch is the one deliberate exception and names its own feature list.
-launcher_code=$(grep -v '^[[:space:]]*#' "$launcher" | grep -v 'chromium_compat_args=')
-run browser-launcher-no-video-feature-override sh -c \
-    '! printf "%s\n" "$1" | grep -Fq AcceleratedVideoDecode' sh "$launcher_code"
-run browser-launcher-execs-browser sh -c \
-    'printf "%s\n" "$1" | grep -Fq "exec \"\$browser\""' sh "$launcher_code"
-run iris-browser-launcher-check sh "$test_dir/iris-browser-launcher-check.sh" "$root"
+echo "== node resolution invariants"
+node_lib="$root/scripts/lib/iris-node.sh"
+run node-lib-syntax sh -n "$node_lib"
+run node-lib-dynamic-node grep -Fq 'iris_driver' "$node_lib"
+run node-lib-no-fixed-node sh -c '! grep -Eq "/dev/video[0-9]+" "$1"' sh "$node_lib"
+run node-lib-refuses-guess grep -Fq 'refusing a fixed-node fallback' "$node_lib"
+# The rule is one file. Both diagnostics must source it rather than carrying
+# a second copy, and neither may name a node by number.
+for helper in "$root"/scripts/iris-device-check.sh "$root"/scripts/iris-verify.sh; do
+    run "no-fixed-node $(basename "$helper")" sh -c \
+        '! grep -Eq "/dev/video[0-9]+" "$1"' sh "$helper"
+    run "sources-node-rule $(basename "$helper")" grep -Fq 'iris-node.sh' "$helper"
+done
+# The browser launcher and its desktop entry are gone: the driver needs no
+# wrapper, because libva resolves it through the msm_drv_video.so alias and a
+# client keeps its own profile. Reintroducing either must fail here.
+run no-browser-launcher sh -c '! test -e "$1"' sh "$root/scripts/iris-vaapi-browser"
+run no-desktop-entry sh -c '! ls "$1"/*.desktop >/dev/null 2>&1' sh "$root/data"
+# Chrome must not be given a video-decoder feature override anywhere we ship:
+# on Chrome 151 forcing AcceleratedVideoDecodeLinuxZeroCopyGL off made the
+# pipeline build VaapiVideoDecoder, hit the ImageProcessor path and fall back
+# to software. With no launcher there is no place for one to hide, so assert
+# it across the whole shipped tree.
+run no-video-feature-override sh -c \
+    '! grep -rFq -- "AcceleratedVideoDecode" "$1/scripts" "$1/data"' sh "$root"
+run iris-node-check sh "$test_dir/iris-node-check.sh" "$root"
 
 echo "== source invariants"
 run iris-source-invariants sh "$test_dir/iris-source-invariants.sh" "$root"
@@ -61,6 +69,7 @@ run iris-experiment-guard-self-test sh "$test_dir/iris-experiment-guard-self-tes
 run iris-eos-check-self-test sh "$test_dir/iris-eos-check-self-test.sh" "$root"
 run iris-setup-path-check sh "$test_dir/iris-setup-path-check.sh" "$root"
 run iris-packaging-check sh "$test_dir/iris-packaging-check.sh" "$root"
+run iris-kernel-patch-check sh "$test_dir/iris-kernel-patch-check.sh" "$root"
 run iris-install-manifest-check sh "$test_dir/iris-install-manifest-check.sh" "$root"
 run provenance-python-syntax python3 -c \
     'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' \

@@ -121,6 +121,12 @@ public:
     // Import pool: the token slot `index` was queued for (0 for scratch or
     // idle); clears it.
     uint64_t take_import_token(unsigned index);
+    // Import pool: how many CAPTURE slots are queued for `token` right now.
+    // A picture whose access unit the firmware decodes as several (a VP9
+    // alt-ref) needs a slot for each of them, and this is how the session
+    // tells "the firmware holds only this picture's buffers" from "it holds
+    // someone else's too".
+    unsigned capture_queued_for(uint64_t token) const;
     // Import pool: queue a driver-owned scratch buffer so the firmware has
     // somewhere to put LAST. Allocated once, from the system DMA heap.
     void queue_capture_scratch();
