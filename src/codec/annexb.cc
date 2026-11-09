@@ -88,12 +88,15 @@ std::vector<uint8_t> prepend_parameter_sets(
     out.insert(out.end(), access_unit.begin(), access_unit.end());
 
     // Remember what this access unit carried, in order, so a later one can
-    // reuse it.
+    // reuse it. Only a set that has both SPS and PPS can stand in for the
+    // previous one: an access unit carrying an SEI or an AUD but no
+    // parameter sets would otherwise replace the cache with something a later
+    // forced IDR cannot be decoded from.
     std::vector<NalUnit> carried;
     for (const NalUnit& unit : units)
         if (is_parameter_set(unit.type, codec))
             carried.push_back(unit);
-    if (!carried.empty())
+    if (carries_parameter_set(carried, codec))
         last = std::move(carried);
     return out;
 }

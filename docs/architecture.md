@@ -663,11 +663,13 @@ below the first needs an MSM render node.
     picture could only name it, and it will not be there.
 23. An encode slice covers the whole picture and is the only one. The
     translator requires `macroblock_address` / `slice_segment_address` at
-    zero, `num_macroblocks` at the sequence's macroblock count /
-    `num_ctu_in_slice` at the CTU grid, I or P slice type only, and an IDR
-    paired with an I slice. An HEVC `coding_type` that disagrees with the
-    slice type is `VA_STATUS_ERROR_INVALID_PARAMETER`. The firmware decides
-    the slice layout, so a partial slice would code a partial frame.
+    zero, an H.264 `num_macroblocks` equal to the sequence's macroblock
+    count, an HEVC `num_ctu_in_slice` that is non-zero, I or P slice type
+    only, and an IDR paired with an I slice. The HEVC count is not compared
+    with the CTU grid: clients send a nominal value and the firmware decides
+    the slice layout, so a count that does not cover the grid is accepted
+    and coded as the whole picture. An HEVC `coding_type` that disagrees
+    with the slice type is `VA_STATUS_ERROR_INVALID_PARAMETER`.
 
 ## 11. How work is divided
 
