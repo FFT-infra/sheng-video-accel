@@ -91,6 +91,9 @@ Session::~Session()
         target->error = true;
     }
     pending_.clear();
+    // A session destroyed without finish() still owns one duplicated client
+    // fd per unresolved Import entry.
+    clear_import_backlog();
     if (dump_)
         std::fclose(static_cast<FILE*>(dump_));
 }
@@ -319,17 +322,14 @@ void Session::queue_import_next()
     }
     if (entry.lent >= entry.completions)
         return; // fully lent; the firmware still holds one of them
-    if (entry.fd < 0) {
-        // No client buffer for this picture: nothing to queue, now or later.
-        import_backlog_.pop_front();
-        queue_import_next();
-        return;
-    }
     auto it = pending_.find(entry.token);
     Target* target = it == pending_.end() ? nullptr : it->second;
     if (target && (target->publish == Publish::Direct || !target->destination)) {
         // The client never gave this picture a buffer; nothing to decode
-        // into. (An Import session requires every surface exported.)
+        // into. (An Import session requires every surface exported.) This
+        // check has to come before the fd test below: a Direct target is
+        // exactly the one whose fd is -1, and popping the entry silently
+        // left its target pending forever.
         const int fd = entry.fd;
         import_backlog_.pop_front();
         if (fd >= 0)
@@ -339,6 +339,13 @@ void Session::queue_import_next()
         target->error = true;
         ++stats_.errors;
         trace_("import token=%llu failed: no client buffer", static_cast<unsigned long long>(entry.token));
+        queue_import_next();
+        return;
+    }
+    if (entry.fd < 0) {
+        // No client buffer and no target left to fail: the surface was
+        // released or destroyed. Nothing to queue, now or later.
+        import_backlog_.pop_front();
         queue_import_next();
         return;
     }
@@ -628,6 +635,29 @@ bool Session::handle_capture_returns()
                 // through to the failure below.
                 trace_("capture token=%llu index=%u flags=%#x publish=invisible",
                     static_cast<unsigned long long>(returned->timestamp_us), returned->index, returned->flags);
+                continue;
+            }
+            // An error completion that landed in another picture's buffer is
+            // the same misplacement the payload path refuses: the timestamp
+            // names the picture the firmware was coding, the slot names the
+            // buffer that was written. Failing only the timestamp's surface
+            // left the buffer's owner pending and kept the misplaced count
+            // at zero.
+            if (pool_.capture_memory() == CaptureMemory::Import && slot_token != returned->timestamp_us) {
+                target.pending = false;
+                target.error = true;
+                ++stats_.errors;
+                ++stats_.misplaced;
+                pending_.erase(it);
+                if (auto owner = pending_.find(slot_token); owner != pending_.end()) {
+                    owner->second->pending = false;
+                    owner->second->error = true;
+                    ++stats_.errors;
+                    pending_.erase(owner);
+                }
+                trace_("capture error token=%llu index=%u flags=%#x publish=misplaced slot_token=%llu",
+                    static_cast<unsigned long long>(returned->timestamp_us), returned->index, returned->flags,
+                    static_cast<unsigned long long>(slot_token));
                 continue;
             }
             pending_.erase(it);
@@ -1008,6 +1038,9 @@ void Session::finish()
     } catch (const Error&) {
         // fail() already ran.
     }
+    // An entry the drain never resolved still holds a duplicate of the
+    // client's fd. Nothing retires it after this point, so close it here.
+    clear_import_backlog();
     state_ = state_ == SessionState::Failed ? SessionState::Failed : SessionState::Finished;
     trace_("session finish submitted=%llu completed=%llu errors=%llu drops=%llu timeouts=%llu drains=%llu "
            "misplaced=%llu",

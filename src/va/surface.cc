@@ -43,18 +43,20 @@ uint32_t fourcc_for(uint32_t rt_format)
 // the owner is gone); holding it by value keeps it alive for the wait.
 VAStatus wait_for(DriverData& d, std::shared_ptr<iris::Session> session, const std::shared_ptr<Surface>& s)
 {
-    if (!s->rendering()) {
-        iris::require(!s->failed, "surface decode failed", VA_STATUS_ERROR_DECODING_ERROR);
-        return VA_STATUS_SUCCESS;
-    }
+    iris::require(!s->failed, "surface decode failed", VA_STATUS_ERROR_DECODING_ERROR);
     if (!session) {
         // The owner was destroyed between our two reads. destroyContext
         // drains before it drops the context, so the target is settled now.
         iris::require(!s->rendering(), "rendering surface has no live session", VA_STATUS_ERROR_INVALID_SURFACE);
-        iris::require(!s->failed, "surface decode failed", VA_STATUS_ERROR_DECODING_ERROR);
+        iris::require(!s->target.error, "surface decode failed", VA_STATUS_ERROR_DECODING_ERROR);
         return VA_STATUS_SUCCESS;
     }
     try {
+        // Ask the session even when the target has stopped rendering. A
+        // completion another call pumped may have marked it failed, and that
+        // failure lives in the target, not in Surface::failed; returning here
+        // on `rendering()` alone reported SUCCESS for a surface the firmware
+        // rejected.
         session->wait(s->target);
     } catch (const iris::Error& error) {
         s->failed = true;
@@ -198,7 +200,11 @@ VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, 
             iris::require(count == 1, "DRM_PRIME_2 import creates one surface per descriptor",
                 VA_STATUS_ERROR_INVALID_PARAMETER);
             const auto& descriptor = *static_cast<const VADRMPRIMESurfaceDescriptor*>(external);
-            const int fd = descriptor.objects[0].fd;
+            // Do not probe a descriptor whose object count is wrong:
+            // objects[0] would be whatever the client left there, possibly an
+            // unrelated open fd whose shared file offset allocation_size()
+            // would move before the descriptor is refused.
+            const int fd = descriptor.num_objects == 1 ? descriptor.objects[0].fd : -1;
             const uint64_t allocation = fd >= 0 ? allocation_size(fd) : 0;
             imported = import_stable(fd, allocation,
                 iris::validate_prime2(descriptor, width, height, fourcc, allocation), fourcc, width, height);
@@ -436,8 +442,11 @@ VAStatus exportSurfaceHandle(VADriverContextP ctx, VASurfaceID id, uint32_t mem_
         const VAStatus release = wait_for_release(d, s, owner, id);
         if (release != VA_STATUS_SUCCESS)
             return release;
-        if (s->rendering())
-            wait_for(d, std::move(session), s);
+        // The client wants pixels: finish the picture first. Asking even when
+        // the target has stopped rendering is what catches a picture the
+        // firmware already failed; exporting it would hand out a buffer that
+        // was never filled.
+        wait_for(d, std::move(session), s);
 
         int fd = -1;
         iris::Layout layout;

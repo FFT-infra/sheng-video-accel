@@ -224,10 +224,17 @@ VAStatus acquireBufferHandle(VADriverContextP ctx, VABufferID id, VABufferInfo* 
         if (!s.target.completed)
             s.persistent_export = true;
     }
-    b.acquired_fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
-    if (b.acquired_fd < 0)
-        return VA_STATUS_ERROR_OPERATION_FAILED;
-    ++s.acquired_handles;
+    // A second vaAcquireBufferHandle for the same buffer hands back the
+    // handle the first one made. Duplicating again would leak the old fd and
+    // leave the surface's count one higher than the releases can settle, so
+    // vaDestroySurfaces would report SURFACE_BUSY for the rest of the
+    // process.
+    if (b.acquired_fd < 0) {
+        b.acquired_fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+        if (b.acquired_fd < 0)
+            return VA_STATUS_ERROR_OPERATION_FAILED;
+        ++s.acquired_handles;
+    }
     *info = {};
     info->handle = static_cast<uintptr_t>(b.acquired_fd);
     info->type = b.type;

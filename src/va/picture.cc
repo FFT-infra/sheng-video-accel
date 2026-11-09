@@ -282,6 +282,19 @@ VAStatus beginPicture(VADriverContextP ctx, VAContextID id, VASurfaceID surface_
             iris::require(c->current == VA_INVALID_ID, "picture already in progress", VA_STATUS_ERROR_OPERATION_FAILED);
             iris::require(s->fourcc == VA_FOURCC_NV12 || s->fourcc == VA_FOURCC_P010, "surface format",
                 VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+            // An encode-only refusal is checked before the context takes
+            // ownership of the surface. Setting c->current first would leave
+            // it set after a rejected call, and every later vaBeginPicture on
+            // this context would fail with "picture already in progress".
+            if (c->encoding()) {
+                iris::require(s->fourcc == VA_FOURCC_NV12, "encode input must be NV12",
+                    VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+                // Equal is the common case, but FFmpeg declares an aligned
+                // context (1920x1088) and feeds 1920x1080 frames. A larger
+                // surface is a different picture size, which has no path.
+                iris::require(s->width <= c->width && s->height <= c->height,
+                    "encode surface exceeds the context", VA_STATUS_ERROR_INVALID_SURFACE);
+            }
             // A surface may move between contexts (FFmpeg's pool); it just
             // becomes the new context's target. A pending picture on another
             // context is released there first.
@@ -292,13 +305,6 @@ VAStatus beginPicture(VADriverContextP ctx, VAContextID id, VASurfaceID surface_
             s->owner = id;
             c->current = surface_id;
             if (c->encoding()) {
-                iris::require(s->fourcc == VA_FOURCC_NV12, "encode input must be NV12",
-                    VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
-                // Equal is the common case, but FFmpeg declares an aligned
-                // context (1920x1088) and feeds 1920x1080 frames. A larger
-                // surface is a different picture size, which has no path.
-                iris::require(s->width <= c->width && s->height <= c->height,
-                    "encode surface exceeds the context", VA_STATUS_ERROR_INVALID_SURFACE);
                 // Per-picture state; the sequence parameters survive, since
                 // a client may render them with the IDR only.
                 c->enc_picture.picture = nullptr;
