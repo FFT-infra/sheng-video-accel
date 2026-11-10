@@ -39,6 +39,12 @@ for script in "$test_dir"/*.sh "$test_dir"/remote/*.sh "$root"/scripts/*.sh; do
     run "syntax $(basename "$script")" sh -n "$script"
 done
 
+echo "== python syntax"
+for script in "$test_dir"/*.py "$test_dir"/remote/*.py; do
+    [ -f "$script" ] || continue
+    run "syntax $(basename "$script")" python3 -m py_compile "$script"
+done
+
 echo "== node resolution invariants"
 node_lib="$root/scripts/lib/iris-node.sh"
 run node-lib-syntax sh -n "$node_lib"

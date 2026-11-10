@@ -418,7 +418,10 @@ renaming one requires updating its consumer in the same commit. Every
 record ends with ` t=<ms>` since the first record of the process. A record
 is one atomic write under a process-wide mutex: two separate writes let a
 concurrent context splice `publish=invisibleva end_picture` into the log,
-which loses a vocabulary entry and fails the clip checker.
+which loses a vocabulary entry and fails the clip checker. The body is sized
+from `vsnprintf`'s return value, not a fixed buffer: a long
+`import rejected: <why>` record must keep its trailing fields intact.
+`test/trace-test.cc` covers concurrent writers and a record over 1024 bytes.
 
 ```
 session open node=<path> mode=decode-order|display-order codec=<fourcc> <w>x<h> au=<n> output=<n>

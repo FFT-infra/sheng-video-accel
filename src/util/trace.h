@@ -6,6 +6,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <mutex>
+#include <vector>
 
 namespace iris {
 
@@ -24,21 +25,29 @@ public:
     {
         if (!enabled_)
             return;
-        char body[1024];
         va_list args;
         va_start(args, format);
-        int length = std::vsnprintf(body, sizeof(body), format, args);
-        va_end(args);
-        if (length < 0)
+        va_list sized;
+        va_copy(sized, args);
+        int length = std::vsnprintf(nullptr, 0, format, sized);
+        va_end(sized);
+        if (length < 0) {
+            va_end(args);
             return;
+        }
+        // Size the record from the formatted length. A fixed buffer silently
+        // truncated long `import rejected: <why>` records and lost the tail
+        // of a trace vocabulary entry.
+        std::vector<char> body(static_cast<size_t>(length) + 1);
+        std::vsnprintf(body.data(), body.size(), format, args);
+        va_end(args);
         // One record is one write. Two fprintf() calls here let a concurrent
         // context splice its own record between the body and the timestamp,
         // which makes the checker see `publish=invisibleva end_picture` and
         // silently loses a trace vocabulary entry.
         std::lock_guard<std::mutex> lock(output_mutex());
-        std::fprintf(stderr, "%.*s t=%lld\n", static_cast<int>(sizeof(body) - 1) < length
-                ? static_cast<int>(sizeof(body) - 1) : length,
-            body, static_cast<long long>(now_ms()));
+        std::fprintf(stderr, "%.*s t=%lld\n", length, body.data(),
+            static_cast<long long>(now_ms()));
     }
 
 private:

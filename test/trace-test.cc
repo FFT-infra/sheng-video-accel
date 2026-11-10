@@ -46,6 +46,14 @@ int main()
                 trace("capture token=%d index=%d flags=%#x publish=invisible", w * records + i, i, 0x4040);
         });
     }
+    // A fixed 1024-byte body truncated long records; the free-text
+    // `import rejected: <why>` record must survive with its tail intact.
+    const std::string padding(1200, 'x');
+    threads.emplace_back([&padding] {
+        iris::Trace trace(true);
+        trace("import rejected: %s (client stride=%u chroma=%u size=%u; capture stride=%u chroma=%u size=%u)",
+            padding.c_str(), 1280u, 942080u, 1413120u, 896u, 430080u, 647168u);
+    });
     for (auto& thread : threads)
         thread.join();
     std::fflush(stderr);
@@ -56,20 +64,28 @@ int main()
     FILE* file = std::fopen(path, "r");
     if (!file)
         return fail("fopen");
-    char line[512];
+    char line[2048];
     int count = 0;
+    int long_records = 0;
     while (std::fgets(line, sizeof(line), file)) {
         ++count;
         const std::string text(line);
+        if (text.find('\n') == std::string::npos)
+            return fail("unterminated trace record");
+        if (text.find("import rejected: ") != std::string::npos) {
+            ++long_records;
+            if (text.find("capture stride=896 chroma=430080 size=647168) t=") == std::string::npos)
+                return fail("long trace record lost its tail");
+            continue;
+        }
         if (text.find("publish=invisibleva") != std::string::npos
             || text.find("capture token=") == std::string::npos
-            || text.find("publish=invisible t=") == std::string::npos
-            || text.find('\n') == std::string::npos)
+            || text.find("publish=invisible t=") == std::string::npos)
             return fail("interleaved or truncated trace record");
     }
     std::fclose(file);
     std::remove(path);
-    if (count != writers * records)
+    if (count != writers * records + 1 || long_records != 1)
         return fail("record count");
     std::fprintf(stderr, "PASS %d concurrent trace records are intact\n", count);
     return 0;
