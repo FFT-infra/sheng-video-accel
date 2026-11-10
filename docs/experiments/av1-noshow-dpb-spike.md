@@ -1,9 +1,12 @@
 # Experiment: AV1 internal DPB slot translation (host spike, 2026-11-10)
 
 Branch: `exp/av1-noshow-dpb`, from `origin/main` `65686a2`.
-Status: **host prototype plus one guarded native V4L2 completion probe on
-`sheng`**. Nothing deployed, no kernel module change, no capability claim;
-the shipped `src/va/` path is still the qualified held-picture translator.
+Status: **host prototype, one guarded native V4L2 completion probe, and one
+guarded real VA-API session on `sheng` using a build-tree override**. Nothing
+deployed or installed, no kernel module change, no capability claim; the
+shipped `src/va/` path is still the qualified held-picture translator. The VA
+session proved bit-exact rebuilt OBUs but also exposed a surface-lifetime
+failure, so `make_av1_dpb()` remains unselected.
 
 ## Question
 
@@ -350,28 +353,107 @@ not been re-derived on the target**. It proves the completion shape, not that
 `make_av1_dpb()` can be selected safely. A reset or a thermal breach would
 have made this a failed experiment; neither happened.
 
+## Real VA session on the target (2026-11-10, build-tree override only)
+
+The DPB translator was finally run through a real VA-API client (FFmpeg
+`vaapi` hwaccel) on `sheng`, using a **clean full-source sync** of commit
+`6191d13` into `~/Lab/Bridge/tmp/av1-dpb-target/`. The old
+`~/Lab/iris-vaapi-lab/src` tree was not used: its `src/codec/av1.cc` turned
+out to be a different, older internal-DPB implementation that expects kernel
+0005, so a mixed tree would have invalidated every result. A local-only,
+uncommitted patch to `src/va/picture.cc` selects `make_av1_dpb()` and adds the
+`av1_dpb.h` include; that patch exists only in the target scratch tree, not in
+the branch. `LIBVA_DRIVERS_PATH` points at a freshly built
+`build-dpb/src/v4l2_drv_video.so`; `meson test -C build-dpb` was 24/24 before
+the run. Nothing was installed, no module was changed or loaded, no reboot.
+
+For a control, the same clean tree was built a second time with
+`make_av1()` selected (`build-baseline/src/v4l2_drv_video.so`, SHA-256
+`2a7a6e8a…`, no `av1_dpb.cc` symbols). Both runs used the **same fixed clip**
+`~/Lab/Bridge/tmp/av1-dpb-fixed.webm` (SHA-256 `9ecd7d59…`, 48-frame
+320x180 `testsrc2`/libaom-av1 with `-lag-in-frames 12`), resolved the decoder
+by `iris_driver` QUERYCAP, and ran under
+`scripts/iris-experiment-guard.sh`. Both guards returned `status=complete`,
+boot ID `7a26df99-f7ac-4148-9c80-135ba3adc661` unchanged, hottest zone
+56.6 C at start and 59.9 C after, no reset and no thermal breach. Source
+commit, build/installed driver hashes, node, decoder name, module and patch
+set are in each run's `provenance.txt`.
+
+| | DPB (`make_av1_dpb`) | baseline (`make_av1`) |
+| --- | --- | --- |
+| VA submitted | 49 | 49 |
+| completed | 47 | 47 |
+| errors | **2** | 0 |
+| drops | 2 | 2 |
+| timeouts | 0 | 0 |
+| misplaced | 0 | 0 |
+| rebuilt OBU frames decoded by libdav1d | 45 | 45 |
+| source frames decoded by libdav1d | 48 | 48 |
+| framemd5 diff | 3 source-only frames | 3 source-only frames |
+
+**Positive result.** The rebuilt OBU stream is bit-exact against the software
+decode in both runs, with the identical three-frame difference. Those three
+are `show_existing_frame` pictures, which VA never routes to the decoder;
+`test/av1-obu-roundtrip.sh` documents that this count differs by design. The
+DPB translator therefore reconstructs decodable AV1 from real FFmpeg-supplied
+VA parameters. The trace also confirms that a real install temporal unit
+produces two completions under one token and that the session's
+`completions = 2` path consumes the first as `publish=invisible` and publishes
+the second (`publish=direct`), on hardware, with no kernel 0005.
+
+**Negative result, and the current blocker.** DPB adds two `capture error
+index=… flags=0x4041 token=N publish=drop` events (tokens 11 and 25), each
+followed by a normal completion for the same token also reported as
+`publish=drop`. Both tokens immediately follow an install temporal unit
+(tokens 10 and 24). The cause is visible in `src/va/picture.cc:328`:
+`vaBeginPicture` unconditionally calls `c->session->release(s->target)` when a
+surface is reused. With no held picture the pipeline runs one picture ahead
+of the shipped translator, so a surface is recycled while its token is still
+in `pending_`; `Session::release_locked()` erases the token and both
+completions become drops. The shipped held-picture path is slow enough that
+this reuse does not happen. Baseline has `errors=0`, so this is specific to
+the no-hold path, not a firmware or clip artifact.
+
+This is exactly why `make_av1_dpb()` is still unselected. The remaining work
+is not cosmetic: a no-hold translator must keep every submitted picture's
+target alive until all of its completions return, which in MMAP/Direct needs a
+release or surface-lifetime change on the VA side. On Import the equivalent
+constraint is the documented one-buffer-in-flight / no-skipped-picture rule.
+No capability claim, README change or `TEST-RESULTS.md` entry follows from
+this run; a `DESTDIR` staging run would not be an installation either.
+
+Artifacts: `~/Lab/Bridge/tmp/av1-dpb-va/` and
+`~/Lab/Bridge/tmp/av1-baseline-va/` (guard state, command stdout/stderr
+trace, `dump/iris-session-*.bin`, `provenance.txt`, framemd5 files).
+
 ## Stop / next gate
 
 Before selecting this translator in `src/va/picture.cc`:
 
-- Give the DPB translator a pixel oracle that feeds real encoder-derived VA
-  parameters through `make_av1_dpb()` and compares the rebuilt OBUs to a
-  software decode. The `av1-dpb` test now proves the reference-slot semantics
-  and the two frames' `refresh_frame_flags` differ, but it still feeds
-  constructed VA structs and fake tile bytes, not encoder pixels.
+- **Fix the surface-lifetime bug the real VA session exposed.** Tokens 11 and
+  25 were erased from `pending_` by `vaBeginPicture`'s unconditional
+  `release()` before both their completions returned. A no-hold translator
+  must keep a submitted target alive until all of its declared completions
+  arrive; a surface reused for a new picture needs its own target state, not
+  the pending one. Re-run the fixed-clip DPB/baseline pair and require
+  `errors=0` and `drops` equal to baseline before going further.
 - Handle the remaining prototype gaps: client `show_frame=0` pictures,
   resolution changes, EOS and sequence restart through the internal DPB. The
   sequence-header reset is covered; the rest are not.
 - Remove `wait_for_release()` and the bounded-sync tail in
-  `src/va/surface.cc`; the DPB translator holds no picture.
+  `src/va/surface.cc`; the DPB translator holds no picture, so they are dead
+  code, not the cause of the two drops.
 - Re-derive the Import invariant on the target: one client buffer in flight,
-  no skipped picture, misplaced completions fail both surfaces.
+  no skipped picture, misplaced completions fail both surfaces. The run above
+  used MMAP/Direct `publish=direct` only.
 
-The completion-shape question is answered by the guarded probe above, and the
-Radxa-order bugs found in the audit are fixed on the host. The remaining items
-are prerequisites for **selecting** the translator, not for deciding whether
-kernel 0005 is needed. 0005/0006 remain unbuilt and unloaded; a reset or a
-thermal breach is a failed experiment per `AGENTS.md`.
+The pixel-oracle gap is closed by the real VA session: the rebuilt OBU stream
+decodes bit-exact in both DPB and baseline. The completion-shape question is
+answered by the guarded probe, and the Radxa-order bugs are fixed on the host.
+What remains is the surface-lifetime failure, which is a prerequisite for
+**selecting** the translator, not for deciding whether kernel 0005 is needed.
+0005/0006 remain unbuilt and unloaded; a reset or a thermal breach is a
+failed experiment per `AGENTS.md`.
 
 ## Environment note
 
