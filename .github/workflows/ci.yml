@@ -46,6 +46,7 @@ jobs:
             av1-obu \
             av1-translator \
             av1-install-tu \
+            av1-dpb \
             encode-params \
             encode-session \
             prime-import \

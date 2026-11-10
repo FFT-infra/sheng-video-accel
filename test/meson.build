@@ -152,6 +152,16 @@ av1_install_tu_test = executable(
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('av1-install-tu', av1_install_tu_test)
 
+# The experimental internal-DPB AV1 translator: no held picture, eight-slot
+# accounting, and a two-completion install unit when the DPB is full. Not
+# selected by make_av1(); this is the host prototype for the Firefox AV1 path.
+av1_dpb_test = executable(
+  'av1-dpb-test',
+  'av1-dpb-test.cc',
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+test('av1-dpb', av1_dpb_test)
+
 # VA encode parameters -> V4L2 controls, both codecs, no hardware.
 encode_params_test = executable(
   'encode-params-test',
