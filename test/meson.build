@@ -131,6 +131,16 @@ av1_obu_test = executable(
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('av1-obu', av1_obu_test)
 
+# Held-picture release at EOS: the AV1 translator submits a tail without a
+# successor, and refuses a stream that continues after guessed refresh flags.
+# No hardware; this is the contract destroyContext relies on.
+av1_translator_test = executable(
+  'av1-translator-test',
+  'av1-translator-test.cc',
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+test('av1-translator', av1_translator_test)
+
 # VA encode parameters -> V4L2 controls, both codecs, no hardware.
 encode_params_test = executable(
   'encode-params-test',
@@ -167,6 +177,8 @@ test('iris-codec-matrix-check', find_program('iris-codec-matrix-check.sh'),
 test('iris-experiment-guard-self-test', find_program('iris-experiment-guard-self-test.sh'),
      args: [meson.project_source_root()])
 test('iris-eos-check-self-test', find_program('iris-eos-check-self-test.sh'),
+     args: [meson.project_source_root()])
+test('iris-clip-trace-check-self-test', find_program('iris-clip-trace-check-self-test.sh'),
      args: [meson.project_source_root()])
 test('iris-deploy-path-check', find_program('iris-deploy-path-check.sh'),
      args: [meson.project_source_root()])

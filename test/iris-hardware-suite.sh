@@ -217,5 +217,24 @@ else
     warn "fluster-skipped"
 fi
 
+# Real AV1 clips are a separate gate from the 48-frame synthetic matrix: a
+# translator rewrite once passed the matrix and decoded 33 of 120 real frames.
+# Opt in with IRIS_REAL_CLIP_DIR, which holds the clips and software framemd5
+# baselines; the gate never generates its own oracle.
+real_clip_dir=${IRIS_REAL_CLIP_DIR:-}
+here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+if [ -n "$real_clip_dir" ] && [ -x "$here/iris-real-clip-gate.sh" ]; then
+    set +e
+    LIBVA_V4L2_VIDEO_PATH="$device" IRIS_REAL_CLIP_DIR="$real_clip_dir" \
+        IRIS_REAL_CLIP_OUT="$root/real-clip-gate" sh "$here/iris-real-clip-gate.sh" \
+        >"$root/iris-real-clip-gate.log" 2>&1
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] && pass "iris-real-clip-gate" \
+        || fail "iris-real-clip-gate rc=$rc log=$root/iris-real-clip-gate.log"
+else
+    warn "iris-real-clip-gate-skipped set IRIS_REAL_CLIP_DIR"
+fi
+
 printf 'SUMMARY failures=%s warnings=%s root=%s\n' "$failures" "$warns" "$root"
 [ "$failures" -eq 0 ]
