@@ -221,12 +221,29 @@ would still be needed if the firmware recycles the buffer internally and
 returns only one completion, or if its NOSHOW completion carries no usable
 timestamp and would be counted as an error.
 
+## Real-clip oracle (2026-11-10, commit `defa6a8`)
+
+`test/av1-dpb-oracle.sh` (invoked by `run-static-checks.sh`) generates a
+20-frame `testsrc2` clip with libaom-av1 lookahead, locates the temporal unit
+that contains two `OBU_FRAME`s, and asserts the first frame has `show_frame=0`
+and the second `show_frame=1`. libdav1d decodes the whole source into 20
+distinct frame hashes. This is an independent oracle: the VA driver never
+generated the clip.
+
+A single temporal unit from the middle of an inter-frame stream cannot be
+decoded standalone (its frame header depends on earlier reference state), so
+the oracle decodes the whole stream rather than the isolated unit. That also
+means the DPB translator itself still lacks a pixel-level oracle; the test
+proves the container shape is real AV1, not that this translator emits decodable
+pixels for arbitrary VA parameters.
+
 ## Stop / next gate
 
 Before selecting this translator in `src/va/picture.cc`:
 
-- Add a real-clip libdav1d pixel oracle for the DPB path (the current DPB test
-  uses constructed VA parameters, not encoded pixels).
+- Give the DPB translator a pixel oracle that feeds real encoder-derived VA
+  parameters through `make_av1_dpb()` and compares the rebuilt OBUs to a
+  software decode.
 - Remove `wait_for_release()` and the bounded-sync tail in
   `src/va/surface.cc`; the DPB translator holds no picture.
 - Re-derive the Import invariant on the target: one client buffer in flight,
@@ -234,8 +251,13 @@ Before selecting this translator in `src/va/picture.cc`:
 
 Then a guarded target probe answers whether the 0001-0004 module returns the
 NOSHOW completion to userspace with the shape the host test models
-(`scripts/iris-experiment-guard.sh -- ...`). A reset or a thermal breach is a
-failed experiment per `AGENTS.md`.
+(`scripts/iris-experiment-guard.sh -- ...`). **No such probe has been run and
+kernel 0005 has not been loaded in this experiment.** The target was re-read
+before this work: boot `7a26df99-f7ac-4148-9c80-135ba3adc661`, `Charging` at
+52% with USB online, but the hottest thermal zone was 90.7 C, above the
+guard's 85 C default (`scripts/iris-experiment-guard.sh:64`), so a guarded run
+would be refused before starting. A reset or a thermal breach is a failed
+experiment per `AGENTS.md`.
 
 Only after those are done does the target probe answer whether the 0001-0004
 module returns that NOSHOW completion to userspace
