@@ -84,6 +84,11 @@ public:
         // completion is the first of two under this token, so the target must
         // NOT be marked hidden: session.cc consumes that completion as the
         // VP9 alt-ref "invisible" shape.
+        // A client show_frame=0 picture has no pixels to publish. An install
+        // unit is different: its first completion is the internal hidden
+        // frame, but its visible half is the shown frame. Marking that target
+        // hidden would make the session publish the hidden completion and
+        // then also consume the install half as invisible, under one token.
         out.hidden = params.pic_info_fields.bits.show_frame == 0;
         out.released_surface = VA_INVALID_ID;
         out.completions = 1;
@@ -133,6 +138,7 @@ public:
             require(built, reject ? reject : "AV1 install temporal unit rejected",
                 VA_STATUS_ERROR_UNSUPPORTED_BUFFERTYPE);
             out.completions = 2;
+            out.hidden = false;
             remember(picture.surface_id, shown_refresh, params);
             av1_update_reference_gm(references_, shown, shown_refresh);
             pending_ = shown_refresh ? Pending {}

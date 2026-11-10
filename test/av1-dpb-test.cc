@@ -356,6 +356,46 @@ void test_client_hidden_frame()
     check(!out.bytes.empty(), "hidden reference still permits the next frame");
 }
 
+// A client show_frame=0 picture can also be the shown half of an install
+// unit. Its target must not stay hidden: the session would publish the
+// internal hidden completion and then consume the same token's install half
+// as invisible, giving one picture two conflicting publications.
+void test_hidden_install_target_is_not_hidden()
+{
+    auto t = iris::codec::make_av1_dpb(VAProfileAV1Profile0);
+    iris::codec::AccessUnit out;
+    auto key = params(100, true, 0);
+    for (unsigned i = 0; i < kSlots; ++i)
+        key.ref_frame_map[i] = VA_INVALID_SURFACE;
+    translate(key, *t, out);
+
+    for (unsigned frame = 2; frame <= 8; ++frame) {
+        auto p = params(100 + frame - 1, false, frame - 1);
+        for (unsigned i = 0; i < kSlots; ++i)
+            p.ref_frame_map[i] = i < frame - 1 ? static_cast<VASurfaceID>(100 + i)
+                : VA_INVALID_SURFACE;
+        for (unsigned i = 0; i < 7; ++i)
+            p.ref_frame_idx[i] = 0;
+        translate(p, *t, out);
+    }
+    auto full = params(108, false, 8);
+    for (unsigned i = 0; i < kSlots; ++i)
+        full.ref_frame_map[i] = 100 + i;
+    translate(full, *t, out);
+
+    auto hidden = params(109, false, 9);
+    hidden.pic_info_fields.bits.show_frame = 0;
+    for (unsigned i = 0; i < kSlots; ++i)
+        hidden.ref_frame_map[i] = 100 + i;
+    hidden.ref_frame_map[1] = VA_INVALID_SURFACE;
+    hidden.ref_frame_map[7] = 108;
+    for (unsigned i = 0; i < 7; ++i)
+        hidden.ref_frame_idx[i] = 7;
+    translate(hidden, *t, out);
+    check(out.completions == 2, "hidden install unit declares two completions");
+    check(!out.hidden, "hidden install target is not marked hidden");
+}
+
 // A new sequence header must clear internal slot identities: a VA surface id
 // from the old sequence is not a reference in the new one.
 void test_sequence_restart_clears_slots()
@@ -422,6 +462,7 @@ int main()
         test_slot_exhaustion_and_install();
         test_install_resolves_references_to_pending_surface();
         test_client_hidden_frame();
+        test_hidden_install_target_is_not_hidden();
         test_sequence_restart_clears_slots();
         test_flush_has_no_tail();
     } catch (const std::exception& e) {
