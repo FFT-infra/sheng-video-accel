@@ -160,9 +160,9 @@ av1_install_tu_test = executable(
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('av1-install-tu', av1_install_tu_test)
 
-# The experimental internal-DPB AV1 translator: no held picture, eight-slot
-# accounting, and a two-completion install unit when the DPB is full. Not
-# selected by make_av1(); this is the host prototype for the Firefox AV1 path.
+# The default internal-DPB AV1 translator: no held picture, eight-slot
+# accounting, and a two-completion install unit when the DPB is full. Host
+# coverage for the hidden install path that Firefox 158 needs.
 av1_dpb_test = executable(
   'av1-dpb-test',
   'av1-dpb-test.cc',
