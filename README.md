@@ -63,14 +63,14 @@ The driver selects buffer publishing policies dynamically:
 
 - **Direct**: Application exports an allocated surface after decode. Zero-copy.
 - **Import**: Application allocates and passes DMA-BUFs before decode. Zero-copy when running on decode-order patched kernels.
-- **Copy**: Firmware decodes to driver-owned slots; frames are blitted via GPU into application buffers. Used on stock kernels and for VP9/AV1.
+- **Copy**: Firmware decodes to driver-owned slots; frames are blitted via GPU into application buffers. Used on stock kernels, for VP9, and for the second half of an in-context AV1 resolution change. AV1 uses the Import policy on decode-order patched kernels (qualified 2026-11-10, see TEST-RESULTS.md).
 
 Imported DMA-BUF surfaces must match native CAPTURE layout (single linear object, 128-byte aligned pitch). Other configurations return `VA_STATUS_ERROR_INVALID_PARAMETER`.
 
 ## Known Limits
 
 - **VP9 zero-copy**: Requires the copy path due to client-side surface lifecycle constraints during multi-picture access unit completions.
-- **AV1 decoding**: Holds one picture buffer internally. Interactive pipelines syncing per-picture wait for the sync bound at the end of the stream.
+- **AV1 decoding**: The translator holds one picture until the next access unit names the DPB slots it refreshed; interactive pipelines syncing per-picture wait for the sync bound at the end of the stream. AV1 zero-copy Import is qualified on decode-order kernels.
 - **Stock kernel fallback**: On kernels without display-delay or sync-frame controls, decode degrades to GPU copy and requested IDRs are handled via intra-period repositioning.
 - **Encode features**: Single full-picture slice only. Multi-slice, tiles, B-frames, and ROI return `VA_STATUS_ERROR_UNIMPLEMENTED`.
 - **Packed headers**: Extradata emission reports `VA_ENC_PACKED_HEADER_NONE`. Parameter sets are carried in-band.

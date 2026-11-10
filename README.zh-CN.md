@@ -15,7 +15,7 @@
 | H.264 | Constrained Baseline, Main, High | Import（零拷贝） | 逐帧 MD5 一致，Fluster 72/135 |
 | HEVC | Main, Main 10 | Import（零拷贝） | 逐帧 MD5 一致，Fluster 141/147 |
 | VP9 | Profile 0, Profile 2 | Copy（GPU 复制） | 逐帧 MD5 一致 |
-| AV1 | Profile 0 | Copy（GPU 复制） | 逐帧 MD5 一致 |
+| AV1 | Profile 0 | Import（零拷贝，解码顺序内核） | 逐帧 MD5 一致，2026-11-10 实机验证 |
 
 硬件解码的判定标准：Chrome 媒体控制台明确报告 `VaapiVideoDecoder`，启用平台解码器标识，并在 30 秒测试窗口内零丢帧。
 
@@ -63,14 +63,14 @@ cd packaging/arch && makepkg -si
 
 - **Direct**：客户端在解码后直接导出驱动分配的表面，实现零拷贝。
 - **Import**：客户端在解码前传入预分配的 DMA-BUF 缓冲区，在应用了解码顺序补丁的内核上实现零拷贝。
-- **Copy**：固件解码至驱动内部缓冲槽位，再由 GPU 复制至客户端表面。用于未打补丁的原版内核及 VP9/AV1 格式。
+- **Copy**：固件解码至驱动内部缓冲槽位，再由 GPU 复制至客户端表面。用于未打补丁的原版内核、VP9，以及同一 VA 上下文内 AV1 分辨率切换后的后半段。AV1 在应用了解码顺序补丁的内核上走 Import 零拷贝路径（2026-11-10 实机验证，见 TEST-RESULTS.md）。
 
 导入的 DMA-BUF 表面必须严格符合 CAPTURE 布局规范（单线性对象，128 字节对齐跨度）。不符合规范的表面直接返回 `VA_STATUS_ERROR_INVALID_PARAMETER`。
 
 ## 已知限制
 
 - **VP9 零拷贝**：由于客户端在多帧合成包（alt-ref）完成过程中的表面生命周期管理限制，当前强制走 GPU 拷贝路径。
-- **AV1 解码缓冲**：驱动内部需持有一帧缓冲区用于参考帧追踪。同步等待单帧完成的交互式流水线会在码流结束时触发同步超时边界。
+- **AV1 解码缓冲**：translator 需持有一帧，直到下一个 access unit 的参考帧表指出它刷新了哪些 DPB 槽位；同步等待单帧完成的交互式流水线会在码流结束时触发同步超时边界。AV1 零拷贝 Import 已在解码顺序内核上验证。
 - **原版内核降级**：在缺少显示延迟控制或强制关键帧控制的内核上，解码降级为 GPU 拷贝，关键帧请求通过临时改动 intra period 实现。
 - **编码高级特性**：仅支持单图单切片结构。多切片、分块（Tiles）、B 帧及 ROI 配置直接返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。
 - **封装头信息**：头信息声明为 `VA_ENC_PACKED_HEADER_NONE`，参数集随码流带内传输。

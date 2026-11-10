@@ -141,17 +141,22 @@ Capabilities probe_capabilities(const iris::Options& options)
         caps.import_formats.insert(V4L2_PIX_FMT_H264);
     if (caps.output_formats.count(V4L2_PIX_FMT_HEVC) && caps.nv12)
         caps.import_formats.insert(V4L2_PIX_FMT_HEVC);
+    if (caps.output_formats.count(V4L2_PIX_FMT_AV1) && caps.nv12)
+        caps.import_formats.insert(V4L2_PIX_FMT_AV1);
     // import-qualified-end
-    // VP9 and AV1 are deliberately absent. VP9: the session-side blocker is
+    // VP9 is absent from default qualification: the session-side blocker is
     // gone — lending one picture one buffer per completion ran clean on the
     // target (FFmpeg 515/515, misplaced=0, framemd5 equal to the software
     // decode) — but Chrome releases a VP9 surface before its picture
     // completes far more often than it does for H.264: 564 of 768 queueings
     // carried abandoned=1 and 541 completions were dropped, against 2 and 4
     // for the H.264 control. VP9 qualifies once that path is clean, not
-    // before. AV1: the translator holds a picture until the successor
-    // arrives, so the client's buffer for it cannot be queued in lockstep
-    // (TEST-RESULTS.md, 2026-09-22, 2026-10-22 and 2026-10-24).
+    // before. AV1 keeps the held-picture translator: a picture is emitted
+    // once its successor names the DPB slots it refreshed, so Import queues
+    // each client buffer in the same lockstep as H.264/HEVC. Qualified by the
+    // 2026-11-10 matrix and real-clip runs in TEST-RESULTS.md (48/48 four-
+    // codec matrix, 120/120 AV1 and 80/80 DRC exact framemd5 under Import;
+    // the DRC clip switches to copy-gpu for its second half).
 
     // The encoder is a second iris_driver node. Its absence is not fatal:
     // the display still decodes, and no encode entrypoint is advertised.

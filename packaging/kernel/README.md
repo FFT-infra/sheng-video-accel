@@ -1,8 +1,13 @@
 # Iris Kernel Module Patches
 
-This directory provides six rebased kernel patches targeting the `qcom-iris` driver on `ianchb/sm8550-mainline` (branch `sheng-7.2.6`, commit `42f3b40c702a`).
+This directory provides four qualified kernel patches (0001-0004) plus two
+experimental, unvalidated ones (0005-0006), targeting the `qcom-iris` driver on
+`ianchb/sm8550-mainline` (branch `sheng-7.2.6`, commit `42f3b40c702a`).
 
-These patches are optional supporting assets for hardware validation. The driver detects missing kernel controls at runtime and degrades gracefully on stock kernels.
+Only 0001-0004 make up the module the driver's decode results in
+TEST-RESULTS.md are qualified on, including the 2026-11-10 AV1 zero-copy
+Import run. The driver detects missing kernel controls at runtime and degrades
+gracefully on stock kernels.
 
 ## Patch Summary
 
@@ -12,8 +17,8 @@ These patches are optional supporting assets for hardware validation. The driver
 | `0002-media-iris-deblocking-filter-controls.patch` | Radxa / `qcom-va-driver` | Exposes H.264 and HEVC loop-filter controls (`HFI_PROP_DEBLOCKING_MODE`) | Allows forwarding of client slice deblocking requests |
 | `0003-media-iris-encoder-request-sync-frame.patch` | Qualcomm (Wangao Wang) | Implements `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` (`HFI_PROP_REQUEST_SYNC_FRAME`) | Enables direct hardware sync-frame requests |
 | `0004-media-iris-preserve-timestamps-on-error-buffers.patch` | Radxa / `qcom-va-driver` | Preserves buffer timestamp on `V4L2_BUF_FLAG_ERROR` completions | Allows immediate failure attribution for corrupted frames |
-| `0005-media-iris-recycle-decoder-buffers-for-non-display-pictures.patch` | Radxa / `qcom-va-driver` | Recycles non-display (NOSHOW) decoder buffers internally | Eliminates fake error completions on AV1 hidden reference frames |
-| `0006-media-iris-discard-unmatched-timestamp-metadata.patch` | yzddmr6 / `linux-sm8750-piano` | Discards unmatched timestamp metadata instead of borrowing | Prevents timestamp ring overflow from injecting spurious LAST bits |
+| `0005-media-iris-recycle-decoder-buffers-for-non-display-pictures.patch` | Radxa / `qcom-va-driver` | Recycles non-display (NOSHOW) decoder buffers internally | **Experimental, not validated with this driver.** Requeues NOSHOW CAPTURE buffers in the kernel instead of completing them to userspace; this driver's AV1 path consumes those completions by decode order to publish hidden reference frames, so loading 0005 with the current userspace loses the frames. Qualifying it needs its own translator/session rewrite plus hardware runs. |
+| `0006-media-iris-discard-unmatched-timestamp-metadata.patch` | yzddmr6 / `linux-sm8750-piano` | Discards unmatched timestamp metadata instead of borrowing | **Experimental, not validated.** Has not been built or loaded on the target. |
 
 ## Verification & Integrity
 
@@ -31,7 +36,9 @@ To build and install the modified module on the target device:
 ```sh
 git clone --depth 1 -b sheng-7.2.6 https://github.com/ianchb/sm8550-mainline linux
 cd linux
-git am ../0001-*.patch ../0002-*.patch ../0003-*.patch ../0004-*.patch ../0005-*.patch ../0006-*.patch
+# Apply only the four qualified patches. 0005/0006 are experimental and
+# change the NOSHOW/timestamp completion contract this userspace expects.
+git am ../0001-*.patch ../0002-*.patch ../0003-*.patch ../0004-*.patch
 
 cp /boot/config-$(uname -r) .config
 echo "-sm8550-g42f3b40-iris1" > localversion

@@ -161,8 +161,8 @@
         "12-bit",
         "large-scale tile (10-bit only)"
       ],
-      "publish_import": "fallback",
-      "sync_note": "VA carries no refresh_frame_flags, so the translator holds each picture until the next access unit's reference map names its slots. The firmware also returns a hidden (show_frame=0) picture without pixels; the session attributes it by decode order and publishes it anyway. A client that syncs a held surface before submitting the next picture waits for the sync bound, and at end of stream that bound expires and the picture is released as final",
+      "publish_import": "qualified",
+      "sync_note": "The translator holds each picture until the next access unit's reference map names the DPB slots it refreshed; the firmware returns hidden (show_frame=0) pictures without pixels and the session attributes them by decode order. Import queues one client DMA-BUF per picture in the same lockstep as H.264/HEVC. Qualified 2026-11-10 on the 0001-0004 module: four-codec matrix 48/48 exact under V4L2_VA_PUBLISH=import, real 1280x720 AV1 clip 120/120 exact framemd5 with 120 publish=import and 0 errors/drops, and the 1280x720->854x480 in-context DRC clip 80/80 exact framemd5 with 84 completions (42 import, 42 copy-gpu after the DRC switch). TEST-RESULTS.md records the runs",
       "resolution_note": "A resolution change inside one VA context is supported: CAPTURE must be streaming before the rebuilt pool is queued, because the kernel clears its DRC boundary sub-state (DRC | DRC_LAST) only in iris_process_streamon_output and completes an earlier CAPTURE QBUF as an empty LAST, after which vb2 returns -EPIPE for every later DQBUF. enter_streaming() streams first for both Mmap and Import memories. Framemd5 on 2026-10-24: 2 of 6 runs passed before the change, 44 of 44 after; the boundary access unit returns a second time as 0x4009 (KEYFRAME, real pixels). TEST-RESULTS.md records the run",
       "encode": {
         "production": "absent",
