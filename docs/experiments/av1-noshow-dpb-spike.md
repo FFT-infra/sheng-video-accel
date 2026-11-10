@@ -1,14 +1,19 @@
 # Experiment: AV1 internal DPB slot translation (host spike, 2026-11-10)
 
 Branch: `exp/av1-noshow-dpb`, from `origin/main` `65686a2`.
-Status: **the branch now selects `make_av1_dpb()` by default**. The host
-prototype, guarded native V4L2 completion probe and guarded real VA-API
-sessions below established bit-exact rebuilt OBUs, the real two-completion
-install unit and the false-accounting fix. Host coverage for client hidden
-pictures, sequence restart and EOS is now in `test/av1-dpb-test.cc`, and the
-held-picture wait chain is removed from `src/va/`. What remains is the
-installed-package hardware gate and a browser client that syncs each surface;
-no Firefox AV1 hardware claim is made from this document. No kernel module was
+Status: **shipped as the default in PR #4**. The host prototype, guarded
+native V4L2 completion probe and guarded real VA-API sessions below
+established bit-exact rebuilt OBUs, the real two-completion install unit and
+the false-accounting fix. The held-picture wait chain is removed from
+`src/va/`; `Target::invisible` attributes both NOSHOW halves of an install
+unit, and a NOSHOW LAST marker at a DRC boundary is invisible rather than a
+decode error. On 2026-11-11 the installed package passed the guarded
+four-codec Import matrix, the 120-frame AV1 clip and the in-context DRC clip
+with exact framemd5; Firefox 158 local AV1 and live YouTube/Bilibili AV1,
+plus Chrome 156 live pages, report the selected hardware decoder with
+frame/drop windows. `TEST-RESULTS.md` records the source commit, driver hash,
+node, boot ID and counts. Chromium 152 still selects a software AV1 decoder
+for a local file, so no per-client claim is made for it. No kernel module was
 changed or loaded during the spike; 0005 is not needed for completion
 accounting.
 

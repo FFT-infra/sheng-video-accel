@@ -5120,3 +5120,90 @@ boundary alongside the existing `vaDestroyContext` / no-flush-entry-point
 notes. A per-client AV1 fix needs either an explicit VA-API flush entry point
 or a client that does not block the next access unit on the current surface;
 both are outside a driver-only change.
+
+## Internal-DPB AV1 installed-package and browser gates (2026-11-11)
+
+This run qualifies the default internal eight-slot DPB translator as the
+installed package, replacing the held-picture path whose Firefox 158 AV1
+failure is recorded in the section above. Target: `sheng`, boot
+`7a26df99-f7ac-4148-9c80-135ba3adc661` throughout, kernel
+`7.2.6-sm8550-g42f3b40-iris1` with the 0001-0004 module (no kernel change or
+reload in this run). The decoder resolved by `iris_driver` QUERYCAP to
+`/dev/video17`, `Iris Decoder`. The installed package is
+`/usr/lib64/dri/v4l2_drv_video.so` SHA-256
+`e97a861f8b66aa3297c22a438fa5ac6620e0c347ed147c6398deb220c29b0478`,
+`source_commit=a34d348f2354041433d7476abb621cc435218ae6`,
+`source_dirty=0`,
+`tracked_source_sha256=bfd9ccf12b796f8a83fe53b49f2d5b5ae1f611bd8974bf129d1bd610cd18da57`.
+The build came from a clean tree containing only the 154 tracked files of that
+commit; no build-tree `LIBVA_DRIVERS_PATH` override was used for the gates.
+Rollback snapshot:
+`~/Lab/Bridge/tmp/rollback-3-20261110T182904Z/v4l2_drv_video.so` (previous
+installed SHA-256
+`84a329258baf6b2fdf2e1da8f1038b35a35b3e159637238daf55982da1daeb43`), plus the
+installer's own `/usr/local/share/iris-vaapi/backup/v4l2_drv_video.so`.
+
+Host and target build gates: `sh test/run-static-checks.sh` rc=0,
+`meson test -C build-local --print-errorlogs` 25/25,
+`git diff --check` rc=0; the target's clean-tree build also ran 25/25 and
+`ldd -r` reported no undefined symbols. The new `trace` test exercises 1600
+concurrent records after the fix for interleaved trace lines.
+
+Installed-package hardware gates, each under
+`scripts/iris-experiment-guard.sh` with `IRIS_EXPERIMENT_DIR` under
+`~/Lab/Bridge/tmp` and `V4L2_VA_PUBLISH=import`. Artifacts:
+`~/Lab/Bridge/tmp/gates5-20261110T182908Z/`. All three guards ended
+`status=complete`, no reset or thermal breach (battery 74->73%, peak zone
+37000 millic, boot ID unchanged).
+
+| Gate | Result |
+| --- | --- |
+| Four-codec matrix, 48 frames, Import | H.264/HEVC/VP9/AV1 framemd5 EXACT; AV1 `submitted=48 capture=48 drain=1 timeouts=0 drops=0 noshow=23` |
+| Real 1280x720 AV1 clip | 120/120 frames, `submitted=120 completed=120 import=120 copy=0 invisible=42`, framemd5 EXACT |
+| 1280x720 -> 854x480 in-context DRC clip | 80/80 frames, `submitted=84 completed=84 import=42 copy=42 invisible=63`, framemd5 EXACT, recorded `import rejected: client layout differs from the CAPTURE layout` |
+
+The DRC run on the clean `e5c8fae` install exposed one trace-writer defect,
+not a decode failure: `publish=invisibleva end_picture` spliced two records,
+so the checker counted 62 instead of 63 while framemd5 was already EXACT.
+`a34d348` makes each record one atomic `fprintf` under a process-wide mutex;
+the rerun above counts 63 and passes. Completion accounting for the same
+branch is from `e5c8fae`: `Target::invisible` consumes the first NOSHOW half
+of a two-completion install unit so the second half publishes the client
+picture even when both halves are NOSHOW, and a NOSHOW LAST marker at a DRC
+boundary is invisible rather than a decode error.
+
+Browser evidence uses the installed package with no `LIBVA_*`, publish or node
+override. The local relay on 127.0.0.1:8899 provides the system resolver path
+for live sites; `WAYLAND_DISPLAY=wayland-1`, `XDG_RUNTIME_DIR=/run/user/1000`.
+Chrome is `156.0.8078.79`, Firefox `158.0.1`, Chromium `152.0.7977.75`. A
+browser decode counts as hardware only where a media surface reports the
+selected decoder with a frame/drop window.
+
+| Browser / page | Codec | Frame/drop window | Decoder evidence | Driver trace |
+| --- | --- | --- | --- | --- |
+| Firefox local 1280x720 AV1 clip | AV1 | 243 / 3 | `VA-API FFmpeg init successful`, `IsHardwareAccelerated=true` | 272 `publish=direct`, 84 `publish=invisible`, `va init node=/dev/video17`, no errors |
+| Firefox live YouTube | AV1 / VP9 1920x1080 | 114 decoded at second sample (first sample had no video element) | `av1`, `VA-API FFmpeg init successful` | 129 `publish=direct`, 98 `publish=invisible`, no decode error |
+| Firefox live Bilibili | AV1 640x360 | 251 / 0 | `av1`, `VA-API FFmpeg init successful` | 447 `publish=direct`, 201 `publish=invisible`, no decode error |
+| Firefox live YouTube, `media.av1.enabled=false` (control) | VP9 1920x1080 | 251 / 0 | `vp9`, `VA-API FFmpeg init successful` | 488 `publish=direct`, 42 `publish=invisible`, no decode error |
+| Chrome local 1280x720 AV1 clip | AV1 | 287 / 0 | `VaapiVideoDecoder`, `kIsPlatformVideoDecoder=true`, GPU process holds `/dev/video17` | driver `installed:e97a861f8b66...`; see `~/Lab/Bridge/tmp/browser-clean-final/chrome-local` |
+| Chrome live YouTube | AV1 1920x1080 | 251 / 0 | `VaapiVideoDecoder`, `kIsPlatformVideoDecoder=true`, GPU process holds `/dev/video17` | 662 `publish=import`, 496 `publish=invisible`, `session finish submitted=442 completed=442 errors=0 drops=0 timeouts=0 drains=1 misplaced=0`; 4 `publish=drop` are released-surface completions after a decoder switch |
+| Chrome live Bilibili | AV1 640x360 | 251 / 0 | `VaapiVideoDecoder`, `kIsPlatformVideoDecoder=true`, GPU process holds `/dev/video17` | 750 `publish=import`, 342 `publish=invisible`, 3 `publish=drop` from released surfaces |
+| Chromium local AV1 (control) | AV1 | 288 / 0 | `Dav1dVideoDecoder`, `kIsPlatformVideoDecoder=false` | software decoder; Chromium 152 does not select VA-API for this local file |
+
+The earlier Firefox AV1 failure is resolved: the same client that stalled at
+2 decoded frames now decodes 243 frames in a 10-second window with hardware
+decoder evidence and no held-picture error. Firefox local AV1 shows 3 dropped
+frames in the window; the live-page windows report 0. Firefox's own
+`MOZ_LOG` and the driver trace both name the hardware decoder, and a live
+`/proc` fd scan during local playback found a Firefox content process holding
+`/dev/video17` while `publish=direct` ran. Chromium 152's software AV1 choice
+is a browser-side decoder selection, so no per-client AV1 claim is made for
+it; the Firefox, Chrome and FFmpeg evidence above is the qualification.
+
+Artifacts: `~/Lab/Bridge/tmp/gates5-20261110T182908Z/`,
+`~/Lab/Bridge/tmp/ff-final-20261110/ff-av1-clean-1/`,
+`ff-av1-clean-2/`, `ff-av1-clean-3/`, `ff-clean-youtube/`,
+`ff-clean-bilibili/`, `ff-clean-youtube-noav1/`,
+`~/Lab/Bridge/tmp/site-final-20261110/final-clean-chrome-youtube/`,
+`final-clean-chrome-bilibili/`,
+`~/Lab/Bridge/tmp/browser-clean-final/`.

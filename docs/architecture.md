@@ -415,7 +415,10 @@ Hardware checkers (`iris-eos-check.sh`, `iris-ending-check.sh`,
 `iris-context-retirement-check.sh`, `iris-zero-copy-suite.sh`,
 `iris-concurrency-soak.sh`) parse trace lines. These records are an API;
 renaming one requires updating its consumer in the same commit. Every
-record ends with ` t=<ms>` since the first record of the process.
+record ends with ` t=<ms>` since the first record of the process. A record
+is one atomic write under a process-wide mutex: two separate writes let a
+concurrent context splice `publish=invisibleva end_picture` into the log,
+which loses a vocabulary entry and fails the clip checker.
 
 ```
 session open node=<path> mode=decode-order|display-order codec=<fourcc> <w>x<h> au=<n> output=<n>
@@ -431,7 +434,8 @@ capture noshow token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu
                                                                       one, else by decode order)
 capture token=<n> index=<i> flags=<hex> publish=drop                 (released target; not published)
 capture token=<n> index=<i> flags=<hex> publish=error                (firmware error; not published)
-capture token=<n> index=<i> flags=<hex> publish=invisible            (VP9 alt-ref or AV1 hidden install: first of two completions under one token, ERROR with no picture-type bit and no payload; keep the target pending for the visible frame. A released target leaves this completion orphaned; it is still invisible, not a decode error, and its visible half is the one drop)
+capture token=<n> index=<i> flags=<hex> publish=invisible            (VP9 alt-ref or AV1 hidden install: first of two completions under one token, ERROR with no picture-type bit and no payload; Target::invisible counts it so the second NOSHOW half still publishes the client picture. A released target leaves this completion orphaned; it is still invisible, not a decode error, and its visible half is the one drop)
+capture index=<i> flags=<hex> publish=invisible                     (unnamed NOSHOW LAST marker at a DRC boundary; no picture of its own)
 capture token=<n> index=<i> flags=<hex> publish=misplaced slot_token=<n>
                                                                      (Import: buffer was queued for
                                                                       another token; both surfaces fail)
@@ -621,10 +625,15 @@ below the first needs an MSM render node.
     slot numbers, so no successor is needed to name refreshed slots. When all
     eight slots are still referenced, the previous uncommitted picture is
     replayed as a hidden NOSHOW frame in the same temporal unit before the
-    shown frame; `AccessUnit::completions = 2` and the invisible half consumes
-    one Import buffer without publishing pixels. A client `show_frame=0`
-    picture is submitted immediately with no client pixels to publish. A new
-    key frame clears internal slot identities and starts a fresh sequence;
+    shown frame; `AccessUnit::completions = 2` and both completions carry one
+    token. The first NOSHOW half is invisible and consumes one Import buffer
+    without publishing pixels; `Target::invisible` counts it so the second
+    half is always the client picture, including when that picture's own
+    `show_frame=0` makes both halves NOSHOW. A NOSHOW LAST marker at a DRC
+    boundary names no picture and is consumed as invisible. A client
+    `show_frame=0` picture is submitted immediately with no client pixels to
+    publish. A new key frame clears internal slot identities and starts a
+    fresh sequence;
     EOS has no held tail to guess or release. `vaSyncSurface`, `vaGetImage`,
     `vaDeriveImage` and `vaExportSurfaceHandle` wait for the picture's own
     completion, never for a later access unit.

@@ -15,7 +15,7 @@
 | H.264 | Constrained Baseline, Main, High | Import（零拷贝） | 逐帧 MD5 一致，Fluster 72/135 |
 | HEVC | Main, Main 10 | Import（零拷贝） | 逐帧 MD5 一致，Fluster 141/147 |
 | VP9 | Profile 0, Profile 2 | Copy（GPU 复制） | 逐帧 MD5 一致 |
-| AV1 | Profile 0 | Import（零拷贝，解码顺序内核） | 逐帧 MD5 一致，2026-11-10 实机验证 |
+| AV1 | Profile 0 | Import（零拷贝，解码顺序内核） | 逐帧 MD5 一致，2026-11-11 安装包与浏览器实机验证 |
 
 硬件解码的判定标准：Chrome 媒体控制台明确报告 `VaapiVideoDecoder`，启用平台解码器标识，并在 30 秒测试窗口内零丢帧。
 
@@ -63,14 +63,14 @@ cd packaging/arch && makepkg -si
 
 - **Direct**：客户端在解码后直接导出驱动分配的表面，实现零拷贝。
 - **Import**：客户端在解码前传入预分配的 DMA-BUF 缓冲区，在应用了解码顺序补丁的内核上实现零拷贝。
-- **Copy**：固件解码至驱动内部缓冲槽位，再由 GPU 复制至客户端表面。用于未打补丁的原版内核、VP9，以及同一 VA 上下文内 AV1 分辨率切换后的后半段。AV1 在应用了解码顺序补丁的内核上走 Import 零拷贝路径（2026-11-10 实机验证，见 TEST-RESULTS.md）。
+- **Copy**：固件解码至驱动内部缓冲槽位，再由 GPU 复制至客户端表面。用于未打补丁的原版内核、VP9，以及同一 VA 上下文内 AV1 分辨率切换后的后半段。AV1 在应用了解码顺序补丁的内核上走 Import 零拷贝路径（2026-11-11 安装包实机验证，见 TEST-RESULTS.md）。
 
 导入的 DMA-BUF 表面必须严格符合 CAPTURE 布局规范（单线性对象，128 字节对齐跨度）。不符合规范的表面直接返回 `VA_STATUS_ERROR_INVALID_PARAMETER`。
 
 ## 已知限制
 
 - **VP9 零拷贝**：由于客户端在多帧合成包（alt-ref）完成过程中的表面生命周期管理限制，当前强制走 GPU 拷贝路径。
-- **AV1 解码**：默认 translator 自己维护八槽 DPB，在 `vaEndPicture` 直接提交当前帧，逐帧同步 surface 的客户端不用等后续 access unit。八个槽位都被占用时，上一帧会以隐藏 NOSHOW 帧的形式重放进同一个 temporal unit；第一个完成事件不可见，只借用一个 Import buffer，不发布像素。客户端提交 `show_frame=0` 的帧会立即送进解码器且没有像素可发布，新的关键帧会清空内部槽位，EOS 没有待猜测的尾部帧。Firefox AV1 硬解暂不宣称可用，需要媒体表面给出选中解码器及帧数、丢帧证据；Firefox 的 H.264、HEVC、VP9 硬解和禁用 AV1 的 live 页面证据仍然有效。AV1 零拷贝 Import 在解码顺序内核上通过的是旧 held-picture 路径；默认内部 DPB 路径只有在自己的安装包矩阵、真实 clip 和 EOS 门禁通过后保留 Import。同一 VA 上下文内分辨率切换后，如果客户端继续按旧 CAPTURE 几何导出 surface，新几何无法通过 Import 投递：驱动会记录布局不匹配并改用 GPU 拷贝发布这些帧。
+- **AV1 解码**：默认 translator 自己维护八槽 DPB，在 `vaEndPicture` 直接提交当前帧，逐帧同步 surface 的客户端不用等后续 access unit。八个槽位都被占用时，上一帧会以隐藏 NOSHOW 帧的形式重放进同一个 temporal unit；第一个完成事件不可见，只借用一个 Import buffer，不发布像素，`Target::invisible` 保证第二个 NOSHOW 完成事件仍归到客户端这一帧。客户端提交 `show_frame=0` 的帧会立即送进解码器且没有像素可发布，新的关键帧会清空内部槽位，EOS 没有待猜测的尾部帧。2026-11-11 安装包通过了四 codec Import 矩阵、120 帧 AV1 clip 和上下文内 DRC clip，逐帧 MD5 一致；Firefox 158 本地 AV1 与 YouTube、B 站在线 AV1，Chrome 156 在线页面均给出选中硬解器及帧数、丢帧证据。Chromium 152 对本地文件仍选择软件 AV1 解码器，不对它宣称硬解。同一 VA 上下文内分辨率切换后，如果客户端继续按旧 CAPTURE 几何导出 surface，新几何无法通过 Import 投递：驱动会记录布局不匹配并改用 GPU 拷贝发布这些帧。运行记录见 TEST-RESULTS.md。
 - **原版内核降级**：在缺少显示延迟控制或强制关键帧控制的内核上，解码降级为 GPU 拷贝，关键帧请求通过临时改动 intra period 实现。
 - **编码高级特性**：仅支持单图单切片结构。多切片、分块（Tiles）、B 帧及 ROI 配置直接返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。
 - **封装头信息**：头信息声明为 `VA_ENC_PACKED_HEADER_NONE`，参数集随码流带内传输。
