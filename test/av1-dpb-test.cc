@@ -158,6 +158,36 @@ void translate(const VADecPictureParameterBufferAV1& p,
     t.translate(picture, out);
 }
 
+// FFmpeg may send one contiguous VASliceDataBufferType and two
+// VASliceParameterBufferType entries. The OBU writer counts tile payloads
+// against tile_cols * tile_rows, so the parameters define the tile entries.
+void test_split_tile_parameters()
+{
+    auto t = iris::codec::make_av1_dpb(VAProfileAV1Profile0);
+    iris::codec::AccessUnit out;
+    auto key = params(10, true, 0);
+    for (unsigned i = 0; i < kSlots; ++i)
+        key.ref_frame_map[i] = VA_INVALID_SURFACE;
+    key.frame_width_minus1 = 255; // two 64x64 superblock columns
+    key.tile_cols = 2;
+    key.tile_rows = 1;
+
+    const uint8_t tile[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    VASliceParameterBufferAV1 first = {};
+    first.slice_data_offset = 0;
+    first.slice_data_size = 4;
+    VASliceParameterBufferAV1 second = {};
+    second.slice_data_offset = 4;
+    second.slice_data_size = 4;
+    iris::codec::Picture picture;
+    picture.parameters = &key;
+    picture.slice_parameters = { &first, &second };
+    picture.slice_data = { { tile, sizeof(tile) } };
+    picture.surface_id = key.current_frame;
+    t->translate(picture, out);
+    check(!out.bytes.empty(), "split tile parameters produce a temporal unit");
+}
+
 // Every vaEndPicture must produce a unit immediately: no hold, no deferred.
 void test_no_hold()
 {
@@ -387,6 +417,7 @@ void test_flush_has_no_tail()
 int main()
 {
     try {
+        test_split_tile_parameters();
         test_no_hold();
         test_slot_exhaustion_and_install();
         test_install_resolves_references_to_pending_surface();

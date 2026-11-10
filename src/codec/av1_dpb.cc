@@ -166,13 +166,18 @@ private:
     static void collect_tiles(const Picture& picture, std::vector<uint8_t>& data,
         std::vector<AV1TileEntry>& tiles)
     {
-        for (const auto& [raw, size] : picture.slice_data) {
-            const uint32_t offset = static_cast<uint32_t>(data.size());
+        // VASliceDataBufferType may arrive as one contiguous buffer while
+        // VASliceParameterBufferType carries one entry per tile. The OBU
+        // writer checks tiles.size() against tile_cols * tile_rows, so the
+        // slice parameters, not the data buffers, define tile boundaries.
+        for (const auto& [raw, size] : picture.slice_data)
             data.insert(data.end(), raw, raw + size);
-            tiles.push_back({ offset, static_cast<uint32_t>(size) });
+        for (const void* raw : picture.slice_parameters) {
+            const auto* slice = static_cast<const VASliceParameterBufferAV1*>(raw);
+            tiles.push_back({ slice->slice_data_offset, slice->slice_data_size });
         }
         if (tiles.empty())
-            tiles.push_back({ 0, 0 });
+            tiles.push_back({ 0, static_cast<uint32_t>(data.size()) });
     }
 
     bool pending_referenced(const VADecPictureParameterBufferAV1& params) const

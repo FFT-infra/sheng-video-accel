@@ -83,7 +83,10 @@ run_clip() {
 }
 
 if [ "$clip_set" = all ] || [ "$clip_set" = plain ]; then
-    run_clip av1-720 av1-720.webm 120 120 0 0 || failures=$((failures + 1))
+    # The internal-DPB translator replays 42 uncommitted pictures as hidden
+    # install frames. Each contributes a second, invisible completion under
+    # the same token; the 120 visible publications remain Import.
+    run_clip av1-720 av1-720.webm 120 120 0 42 || failures=$((failures + 1))
 fi
 if [ "$clip_set" = all ] || [ "$clip_set" = drc ]; then
     # The DRC clip's client keeps exporting surfaces at 1280x720 while the
