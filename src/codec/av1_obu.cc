@@ -639,8 +639,19 @@ bool av1_build_frame_obu(std::vector<uint8_t>& payload,
         *reject_reason = "only AV1 profile 0 is supported";
         return false;
     }
+    // VA-API film grain synthesis needs two surfaces: current_frame holds the
+    // ungrained picture for reference, current_display_picture holds the
+    // grained picture for display (FFmpeg vaapi_av1.c swaps them when
+    // apply_grain is set). The Iris node produces one CAPTURE completion per
+    // submitted picture and this driver publishes one target per completion,
+    // so the client's display surface would stay empty. Rebuilding the
+    // film_grain_params() syntax alone was tried on the target: libdav1d
+    // decoded the rebuilt OBU cleanly, but the hardware run ended in
+    // "getImage: surface has no decoded pixels". Clients that export film
+    // grain as side data (apply_grain=0) decode these streams in hardware
+    // without this restriction.
     if (picture.film_grain_info.film_grain_info_fields.bits.apply_grain) {
-        *reject_reason = "film grain parameters are not reconstructed";
+        *reject_reason = "AV1 film grain synthesis needs a separate display surface";
         return false;
     }
     if (picture.pic_info_fields.bits.large_scale_tile) {
@@ -883,7 +894,10 @@ bool av1_build_frame_obu(std::vector<uint8_t>& payload,
     if (!write_global_motion_params(writer, picture, references, frame_is_intra, reject_reason))
         return false;
 
-    // film_grain_params(): apply_grain was verified zero above.
+    // film_grain_params(): apply_grain was rejected above, so the only legal
+    // value is zero. When the sequence does not allow grain, or the frame is
+    // neither shown nor showable, the spec resets the parameters and no
+    // syntax is written.
     if (seq.film_grain_params_present && (pic.show_frame || pic.showable_frame))
         writer.bit(0);
 
