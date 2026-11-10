@@ -255,10 +255,10 @@ Lower priority than decode. Ground each item in the capability table's
 
 | ID | Item | Pass condition |
 | --- | --- | --- |
-| H1 | Investigate the recorded rate-control gap against the piano comparison, with a fresh A/B on the merged baseline | a measured, reproducible statement of what differs; no capability change without a gate |
-| H2 | Packed sequence headers / extradata for H.264 and HEVC encode | upstream has an open issue on this; decide whether it is in scope for this driver at all before coding |
-| H3 | Recheck each `rejected` entry (B-frames, packed headers, multi-slice, tiles/WPP, weighted prediction, scaling lists, chroma QP offsets, multiple reference indexes, 10-bit/non-4:2:0, HEVC Main10 encode) on the current firmware | either a hardware gate with tests, or keep the explicit `VA_STATUS_ERROR_UNIMPLEMENTED` and the table entry |
-| H4 | Keep the double-claim and `REQUEST_SYNC_FRAME` regressions covered | existing host/target gates stay green after any encode change |
+| H1 | Investigate the recorded rate-control gap against the piano comparison, with a fresh A/B on the merged baseline | a measured, reproducible statement of what differs; no capability change without a gate. `TEST-RESULTS.md` now carries a `strace`-backed A/B protocol; the unisolated observation is VBR 4M -> 9780 kbit/s (~2.4x) while `encode.cc` writes `BITRATE_PEAK` only for CBR. CBR already follows the request, so no code change is warranted before the A/B produces a verdict |
+| H2 | Packed sequence headers / extradata for H.264 and HEVC encode | upstream has an open issue on this; decide whether it is in scope for this driver at all before coding. Settled: do not do it here — `VA_ENC_PACKED_HEADER_NONE` is what opens the GStreamer path, and `picture.cc` silently drops packed header buffers, so advertising support would desynchronise MP4 extradata and reopen the double-claim `size 0` crash |
+| H3 | Recheck each `rejected` entry (B-frames, packed headers, multi-slice, tiles/WPP, weighted prediction, scaling lists, chroma QP offsets, multiple reference indexes, 10-bit/non-4:2:0, HEVC Main10 encode) on the current firmware | either a hardware gate with tests, or keep the explicit `VA_STATUS_ERROR_UNIMPLEMENTED` and the table entry. A host-side audit found code-level `require` backing for every entry; the only drift is the conditional deblocking item, which no longer fires on a kernel with 0002 installed. Firmware-level availability still needs a hardware gate |
+| H4 | Keep the double-claim and `REQUEST_SYNC_FRAME` regressions covered | existing host/target gates stay green after any encode change. Gap recorded: `claim_coded()` has no host unit test, and GStreamer `vah264enc`/`vah265enc` has no scripted gate; the only evidence is one manual target run in `TEST-RESULTS.md`. Adding it needs its own target run, not this decode delivery |
 
 ## 11. Workstream I — CI, tests and release plumbing
 
@@ -319,15 +319,15 @@ capability or browser-hardware claim.
 
 | Workstream | Items | Status |
 | --- | --- | --- |
-| §2 Lab prerequisites | L1-L6 | open: L1 charger, L2 screen state, L3 guard precondition, L4 scratch default; L5/L6 are per-run checks |
+| §2 Lab prerequisites | L1-L6 | L4 settled as "pass an explicit `IRIS_EXPERIMENT_DIR` under `~/Lab/Bridge/tmp` for every guarded run" (all recorded runs do); the default is left alone so existing `guard.state` semantics do not drift. L1 charger, L2 screen state, L3 guard precondition remain open; L5/L6 are per-run checks |
 | §3 AV1 held-picture removal | A1-A14 | done: internal DPB is the default, installed-package matrix/clip/DRC/EOS gates and Firefox/Chrome live-site browser gates pass on 2026-11-11; `TEST-RESULTS.md` records the run. Long corpus and 4K cost work remains in §6/§7 |
 | §4 Explicit refresh flags | B1-B8 | open / upstream-blocked; internal DPB removes the local need for an API change |
 | §5 Chrome VP9 Import | C1-C5 | open: session-side window is fixed (FFmpeg 515/515, misplaced=0); Chrome reuses a VP9 surface in `beginPicture`, which releases the still-in-flight picture, so 541 of 718 completions are dropped. The Copy baseline shows the same reuse (527 drops), and the project's acceptance rule refuses to count a re-presented frame as a pass. Qualifying this needs a retained-target ownership model, its own host regressions for the misplaced/detached case, and a fresh target gate — not a rename of `publish=drop` |
 | §6 AV1 feature completeness | D1-D6 | D1 done for exact framemd5: 1920x1080 60-frame 10-bit clip `EXACT`, 60 Import, 0 errors/drops/misplaced on 2026-11-11. D2 settled as a VA-API two-surface contract, not a kernel gap: scratch OBU writer was libdav1d-clean but the display surface stayed empty; host guard keeps the refusal fail-closed. Still open: 10-bit browser pixel comparison, 12-bit, large-scale tile, D3-D6 corpus work |
 | §7 Long-window, power, cost | E1-E5 | open / blocked on charger |
 | §8 Kernel and upstream sync | F1-F10 | open / decision recorded as "do not rebase"; 0005/0006 remain unbuilt and unloaded |
-| §9 Docs, consistency, hygiene | G1-G13 | open: only the AV1/default-path drift tied to PR #4 is fixed here |
-| §10 Encode | H1-H4 | open |
+| §9 Docs, consistency, hygiene | G1-G13 | open: only the AV1/default-path drift tied to PR #4 plus this branch's film-grain/10-bit evidence is fixed here |
+| §10 Encode | H1-H4 | H1/H2/H3/H4 re-examined and recorded with evidence and explicit non-goals; no encode code, capability entry or profile changed in this branch. H1 has a reproducible A/B protocol, H2 is settled as out of scope, H3 has a host-side audit, H4 has a named test-coverage gap |
 | §11 CI, tests, release plumbing | I1-I7 | open: host tests (25/25), guarded installed-package gates and the repo-owned 19-case AV1 browser matrix are in PR #4; packaging/CI automation for those target gates remains open |
 | §12 Priority | ranking | updated for the settled 0005 question |
 | §13 Non-goals | list | recorded |
