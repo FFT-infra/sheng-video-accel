@@ -70,7 +70,7 @@ cd packaging/arch && makepkg -si
 ## 已知限制
 
 - **VP9 零拷贝**：由于客户端在多帧合成包（alt-ref）完成过程中的表面生命周期管理限制，当前强制走 GPU 拷贝路径。
-- **AV1 解码缓冲**：translator 需持有一帧，直到下一个 access unit 的参考帧表指出它刷新了哪些 DPB 槽位。`vaDestroyContext` 会在 session drain 前发布最后一帧，所以文件解码不需要等同步超时；VA-API 没有单独的 flush 入口，逐帧同步且不销毁 context 的客户端仍会在码流末尾走带边界的同步释放。AV1 零拷贝 Import 已在解码顺序内核上验证。同一 VA 上下文内分辨率切换后，如果客户端继续按旧 CAPTURE 几何导出 surface，新几何无法通过 Import 投递：驱动会记录布局不匹配并改用 GPU 拷贝发布这些帧。
+- **AV1 解码缓冲**：translator 需持有一帧，直到下一个 access unit 的参考帧表指出它刷新了哪些 DPB 槽位。`vaDestroyContext` 会在 session drain 前发布最后一帧，所以文件解码不需要等同步超时；VA-API 没有单独的 flush 入口，逐帧同步且不销毁 context 的客户端仍会在码流末尾走带边界的同步释放。Firefox 158 在解码线程里逐帧同步 surface，等待当前 surface 时下一个 access unit 无法提交，硬解 AV1 会按 fail-closed 拒绝后续帧（`AV1 stream continued after a picture was released at download time`），Firefox 再回退到软件解码；Firefox 的 H.264、HEVC、VP9 硬解已验证，包括禁用 AV1 的 YouTube live 页面和 B 站 HEVC live 页面，AV1 硬解客户端是 Chrome 和 FFmpeg。AV1 零拷贝 Import 已在解码顺序内核上验证。同一 VA 上下文内分辨率切换后，如果客户端继续按旧 CAPTURE 几何导出 surface，新几何无法通过 Import 投递：驱动会记录布局不匹配并改用 GPU 拷贝发布这些帧。
 - **原版内核降级**：在缺少显示延迟控制或强制关键帧控制的内核上，解码降级为 GPU 拷贝，关键帧请求通过临时改动 intra period 实现。
 - **编码高级特性**：仅支持单图单切片结构。多切片、分块（Tiles）、B 帧及 ROI 配置直接返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。
 - **封装头信息**：头信息声明为 `VA_ENC_PACKED_HEADER_NONE`，参数集随码流带内传输。

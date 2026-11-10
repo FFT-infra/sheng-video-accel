@@ -5059,3 +5059,64 @@ Both gates printed `PASS real AV1 clip gate set=4k publish=import` and `PASS
 real AV1 clip gate set=all publish=import`. On the host, `sh
 test/run-static-checks.sh` passed, `meson test -C build-local
 --print-errorlogs` reported 22/22, and `git diff --check` was clean.
+
+## Firefox 158 browser decode and the AV1 held-picture client contract (2026-11-10)
+
+These runs add Firefox 158.0.1 to the browser evidence and re-run Chrome on
+the same live pages. They do not change the installed driver. Target: `sheng`,
+boot `2d5eed8d-57d7-4746-9e10-2cda0f4fe768` throughout, kernel
+`7.2.6-sm8550-g42f3b40-iris1` with the 0001-0004 module, installed package
+SHA-256 `da952fe4fe35896e215976213a1f5b6836cc5aa9ab9d97a1c08f55a909615da3`
+(`source_commit=079480d8b208c5bb6695d4e91e6c1953c4d9010c`, `source_dirty=0`),
+no `LIBVA_*`, publish or node override. The decoder resolved by
+`iris_driver` QUERYCAP to `/dev/video17`, `Iris Decoder`. Chrome was
+`156.0.8078.79`. The tablet was discharging (capacity fell from 58% to 54%
+during the runs, `usb=0`); these are short 10-second windows, not a soak or a
+power measurement.
+
+Firefox 158 has no CDP, so the evidence is a WebDriver BiDi
+`getVideoPlaybackQuality()` frame/drop delta over a 10-second window, Firefox's
+own `MOZ_LOG` (`PlatformDecoderModule`, `FFmpegVideo`, `MediaFormatReader`),
+and the driver's `V4L2_VA_TRACE=1` ledger. The harness lives in
+`~/Lab/Bridge/tmp/ff-final-20261110/` on the target. Firefox was launched on
+Wayland with `media.hardware-video-decoding.force-enabled=true` and
+`MOZ_DISABLE_RDD_SANDBOX=1`; the real-site runs use the same local HTTP/CONNECT
+relay as the Chrome runs and do not modify the site or the video. No
+`V4L2_VA_SYNC_TIMEOUT_MS` override was left in the harness: a longer timeout
+cannot release a picture that the same client thread must submit next.
+
+| Browser / page | Codec | Frame/drop window | Decoder evidence | Driver trace |
+| --- | --- | --- | --- | --- |
+| Firefox live YouTube | AV1 1920x1080 | 250 / 0 (first run 263 / 56) | `av1`, `hw:"true"` then `hw:"false"`; `NotifyError: NS_ERROR_DOM_MEDIA_DECODE_ERR ... avcodec_send_packet error: Input/output error` | 11 `publish=direct`, `submitted=11 completed=11 errors=0 drops=0`, `libva error: endPicture: AV1 stream continued after a picture was released at download time` |
+| Firefox live YouTube, `media.av1.enabled=false` | VP9 1920x1080 | 250 / 0 | `IsHardwareAccelerated=true`, 9 `VA-API FFmpeg init successful` | 518 `publish=direct`, 44 `publish=invisible`, no decode error |
+| Firefox live Bilibili | HEVC 640x360 | 251 / 0 | `hevc`, `ffmpeg video decoder (RDD remote)`, `hw:"true"` | 498 `publish=direct`, no decode error |
+| Firefox local 1080p H.264 clip | H.264 | 303 / 3 | `h264`, `hw:"true"` | 381 `publish=direct`, no decode error |
+| Firefox local VP9 / HEVC clips | VP9 / HEVC | 246 / 7 and 253 / 44 | `IsHardwareAccelerated=true` / `hw:"true"` | 297 and 308 `publish=direct`, no decode error |
+| Chrome live YouTube (control) | AV1 1920x1080 | 250 / 0 | `VaapiVideoDecoder`, `kIsPlatformVideoDecoder=true` | 725 `publish=import`, 3 `publish=drop`, GPU process holds `/dev/video17` |
+| Chrome live Bilibili (control) | HEVC 640x360 | 251 / 0 | `VaapiVideoDecoder`, `kIsPlatformVideoDecoder=true` | 761 `publish=import`, GPU process holds `/dev/video17` |
+
+Firefox's AV1 failure is the held-picture client contract, not a firmware
+reset: the driver trace shows no `session finish` with errors, no thermal or
+boot change, and two independent YouTube runs produce the same sequence.
+Firefox syncs each submitted surface from its decoder thread. The AV1
+translator holds one picture until the next access unit names the DPB slots it
+refreshed; that next access unit cannot arrive while the client waits on the
+current surface. After the bounded-sync timeout, `src/va/surface.cc` releases
+the held picture with guessed refresh flags, and the next real picture is
+refused by `src/codec/av1.cc` (`AV1 stream continued after a picture was
+released at download time`). Firefox then falls back to software AV1 and the
+window still reports 0 dropped frames; the fail-closed error is the reason the
+hardware AV1 claim cannot be made for this client. Disabling AV1 makes YouTube
+use VP9 hardware decode with 0 dropped frames, and Bilibili's HEVC page is
+hardware-decoded with 0 dropped frames. Chrome's live AV1 page does not take
+that sync path and reports 725 Import publications with 0 dropped frames in
+the same batch.
+
+`src/va/driver.cc` continues to expose `VAProfileAV1Profile0`; the capability
+table's AV1 `production: supported` records FFmpeg and Chrome hardware
+evidence, not a per-client guarantee. The READMEs and
+`data/iris-codec-capabilities.json` now name the Firefox AV1 synchronous-sync
+boundary alongside the existing `vaDestroyContext` / no-flush-entry-point
+notes. A per-client AV1 fix needs either an explicit VA-API flush entry point
+or a client that does not block the next access unit on the current surface;
+both are outside a driver-only change.
