@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 //
-// Experimental AV1 translator with an internal eight-slot DPB. VA-API does
-// not carry refresh_frame_flags, so the shipped translator holds each picture
-// until the next access unit's ref_frame_map names the slots it refreshed.
-// That hold is what Firefox 158 cannot service: it syncs each surface on its
-// decoder thread, so the next picture never arrives.
+// AV1 translator with an internal eight-slot DPB. VA-API does not carry
+// refresh_frame_flags; the former translator held each picture until the next
+// access unit's ref_frame_map named the slots it refreshed. A client that
+// syncs each surface before submitting the next picture could not service
+// that hold.
 //
-// Here the driver chooses the refresh slots itself. Each internal slot holds
+// The driver now chooses the refresh slots itself. Each internal slot holds
 // the VA surface that last refreshed it. Before building a frame we rewrite
 // ref_frame_idx[] (and the reference state) from VA's slot numbers to ours,
 // pick a free slot, and emit the frame immediately. When all eight slots are
@@ -17,8 +17,8 @@
 // The hidden frame produces a second CAPTURE completion with no client
 // surface. AccessUnit::completions = 2 tells the session to lend the same
 // client buffer twice, exactly as it already does for a VP9 alt-ref
-// superframe; the first NOSHOW completion is consumed as "invisible". This is
-// the userspace path that may avoid kernel patch 0005.
+// superframe; the first NOSHOW completion is consumed as "invisible".
+// Kernel patch 0005 is not needed for this completion accounting.
 
 #include "av1_dpb.h"
 

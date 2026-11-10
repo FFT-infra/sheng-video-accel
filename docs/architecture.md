@@ -481,10 +481,6 @@ va destroy_context id=<n> entrypoint=encslice frames=<n>
 va begin_picture ctx=<n> surface=<n>
 va begin_picture ctx=<n> surface=<n> entrypoint=encslice
 va end_picture ctx=<n> surface=<n> bytes=<n> seq_start=0|1
-va end_picture ctx=<n> surface=<n> deferred                     (AV1: the picture is held until
-                                                                 the next AU names its slots, or
-                                                                 until vaDestroyContext releases
-                                                                 the tail before the session drain)
 va end_picture ctx=<n> surface=<n> entrypoint=encslice bytes=<n>
 encode open node=<path> codec=<fourcc> raw=<w>x<h> crop=<w>x<h> mode=cbr|vbr|cqp
             gop=<n> rate=<num>/<den>
@@ -506,9 +502,6 @@ encode drain result=last|timeout
 encode control missing name=<control> id=<hex>        (optional control absent;
                                                        the session continues)
 va export_surface id=<n> persistent=0|1 source=frame|stable fd=<n> pitch=<n>
-va sync released the held picture surface=<n>        (the sync bound expired at end of
-                                                      stream; the held AV1 picture is
-                                                      submitted as final)
 ```
 
 ## 9. Phases and gates
@@ -623,16 +616,18 @@ below the first needs an MSM render node.
     the client may close its own. Any other geometry, modifier or object
     count is `VA_STATUS_ERROR_INVALID_PARAMETER` at creation, never a picture
     decoded into the wrong pixels.
-17. An AV1 picture is submitted only once its refreshed slots are known: VA
-    carries no `refresh_frame_flags`, so the translator recovers them from
-    the next picture's `ref_frame_map` (a shown key or switch frame refreshes
-    all eight by definition). Until then its surface reports
-    `VASurfaceRendering`, and `vaSyncSurface`, `vaGetImage`, `vaDeriveImage`
-    and `vaExportSurfaceHandle` release it rather than read it. When the sync
-    bound expires at end of stream the picture is submitted as final and
-    refreshes no slot; a following non-intra picture then fails with
-    `VA_STATUS_ERROR_OPERATION_FAILED` instead of decoding against slots
-    nobody can name.
+17. An AV1 picture is submitted at `vaEndPicture`. The internal eight-slot
+    DPB assigns refresh slots itself and rewrites `ref_frame_idx[]` to those
+    slot numbers, so no successor is needed to name refreshed slots. When all
+    eight slots are still referenced, the previous uncommitted picture is
+    replayed as a hidden NOSHOW frame in the same temporal unit before the
+    shown frame; `AccessUnit::completions = 2` and the invisible half consumes
+    one Import buffer without publishing pixels. A client `show_frame=0`
+    picture is submitted immediately with no client pixels to publish. A new
+    key frame clears internal slot identities and starts a fresh sequence;
+    EOS has no held tail to guess or release. `vaSyncSurface`, `vaGetImage`,
+    `vaDeriveImage` and `vaExportSurfaceHandle` wait for the picture's own
+    completion, never for a later access unit.
 18. An AV1 hidden picture (`show_frame=0`) is published, not failed. The node
     returns it with the ERROR flag, no KEYFRAME/PFRAME/BFRAME bit and zero
     bytes used. On a stock kernel it also has a zero timestamp and only the

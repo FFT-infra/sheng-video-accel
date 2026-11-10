@@ -1,14 +1,16 @@
 # Experiment: AV1 internal DPB slot translation (host spike, 2026-11-10)
 
 Branch: `exp/av1-noshow-dpb`, from `origin/main` `65686a2`.
-Status: **host prototype, one guarded native V4L2 completion probe, and one
-guarded real VA-API session on `sheng` using a build-tree override**. Nothing
-deployed or installed, no kernel module change, no capability claim; the
-shipped `src/va/` path is still the qualified held-picture translator. The VA
-session proved bit-exact rebuilt OBUs and the real two-completion install unit.
-Its two apparent decode errors were a false accounting of orphaned hidden
-completions, fixed on the host and re-verified on the target; `make_av1_dpb()`
-remains unselected pending the prototype gaps and a browser-client run.
+Status: **the branch now selects `make_av1_dpb()` by default**. The host
+prototype, guarded native V4L2 completion probe and guarded real VA-API
+sessions below established bit-exact rebuilt OBUs, the real two-completion
+install unit and the false-accounting fix. Host coverage for client hidden
+pictures, sequence restart and EOS is now in `test/av1-dpb-test.cc`, and the
+held-picture wait chain is removed from `src/va/`. What remains is the
+installed-package hardware gate and a browser client that syncs each surface;
+no Firefox AV1 hardware claim is made from this document. No kernel module was
+changed or loaded during the spike; 0005 is not needed for completion
+accounting.
 
 ## Question
 
@@ -151,9 +153,10 @@ one.
 
 ## Experimental DPB translator (2026-11-10, commit `45a36b9`)
 
-`src/codec/av1_dpb.cc` / `.h` add `make_av1_dpb()`, a separate translator that
-is **not** selected by `src/va/picture.cc` (`make_translator()` still returns
-the qualified held-picture translator). Nothing in the shipped runtime changed.
+At this commit, `src/codec/av1_dpb.cc` / `.h` added `make_av1_dpb()` as a
+separate translator that was **not** selected by `src/va/picture.cc`
+(`make_translator()` still returned the qualified held-picture translator).
+The branch later selects the DPB translator; see the status at the top.
 
 What it does:
 
@@ -294,8 +297,8 @@ What was wrong, and what changed in `src/codec/av1_dpb.cc`:
 
 Host gates after the fix: `sh test/run-static-checks.sh` rc=0,
 `meson test -C build-local --print-errorlogs` 24/24, `git diff --check` rc=0.
-This is still a host-only correctness fix. It does not select the translator,
-does not touch the shipped `src/va/` path, and adds no hardware evidence.
+At this commit this was still a host-only correctness fix: it did not select
+the translator, did not touch `src/va/`, and added no hardware evidence.
 
 ## Target completion probe (2026-11-10, unshipped scratch tool)
 
@@ -351,8 +354,8 @@ exercised the two-FRAME one.
 
 Boundaries of this evidence: it is a native MMAP CAPTURE probe, not a VA
 session, so there are no VA frame/drop counts and **the Import invariant has
-not been re-derived on the target**. It proves the completion shape, not that
-`make_av1_dpb()` can be selected safely. A reset or a thermal breach would
+not been re-derived on the target** at the time of this probe. It proves the
+completion shape, not the installed-package or browser gate. A reset or a thermal breach would
 have made this a failed experiment; neither happened.
 
 ## Real VA session on the target (2026-11-10, build-tree override only)
@@ -362,10 +365,10 @@ The DPB translator was finally run through a real VA-API client (FFmpeg
 `6191d13` into `~/Lab/Bridge/tmp/av1-dpb-target/`. The old
 `~/Lab/iris-vaapi-lab/src` tree was not used: its `src/codec/av1.cc` turned
 out to be a different, older internal-DPB implementation that expects kernel
-0005, so a mixed tree would have invalidated every result. A local-only,
-uncommitted patch to `src/va/picture.cc` selects `make_av1_dpb()` and adds the
-`av1_dpb.h` include; that patch exists only in the target scratch tree, not in
-the branch. `LIBVA_DRIVERS_PATH` points at a freshly built
+0005, so a mixed tree would have invalidated every result. At the time of this
+run a local-only patch to `src/va/picture.cc` selected `make_av1_dpb()` and
+added the `av1_dpb.h` include; the branch source now selects it directly.
+`LIBVA_DRIVERS_PATH` points at a freshly built
 `build-dpb/src/v4l2_drv_video.so`; `meson test -C build-dpb` was 24/24 before
 the run. Nothing was installed, no module was changed or loaded, no reboot.
 
@@ -458,10 +461,11 @@ two-completion units), 30 `publish=invisible` completions, `misplaced=0`,
 surfaces by the existing host tests; no skipped picture was observed. Both runs
 published `publish=import` on the visible completions.
 
-`make_av1_dpb()` is still unselected in the branch: the remaining prototype
-gaps below are unresolved, and these are build-tree override experiments. No
-capability claim, README change or `TEST-RESULTS.md` entry follows from them;
-a `DESTDIR` staging run would not be an installation either.
+These are build-tree override experiments. They justified selecting
+`make_av1_dpb()` in the branch source and adding host coverage for the client
+hidden-picture, sequence-restart and EOS paths; they do not by themselves
+qualify the installed package or a browser client. A `DESTDIR` staging run
+would not be an installation either. The remaining gates are listed below.
 
 Artifacts: `~/Lab/Bridge/tmp/av1-dpb-va/` and
 `~/Lab/Bridge/tmp/av1-baseline-va/` (guard state, command stdout/stderr
@@ -469,27 +473,25 @@ trace, `dump/iris-session-*.bin`, `provenance.txt`, framemd5 files). The Direct
 and Import launches reuse these directories, so the files hold the latest pair
 of each policy.
 
-## Stop / next gate
+## Remaining gate
 
-Before selecting this translator in `src/va/picture.cc`:
+The host prototype gaps that blocked selection are closed: client
+`show_frame=0`, sequence restart and EOS now have host tests, and the
+held-picture wait chain is removed. `src/va/picture.cc` selects
+`make_av1_dpb()`. The pixel-oracle gap was closed by the real VA session: the
+rebuilt OBU stream decodes bit-exact in both DPB and baseline.
 
-- Handle the remaining prototype gaps: client `show_frame=0` pictures,
-  resolution changes, EOS and sequence restart through the internal DPB. The
-  sequence-header reset is covered; the rest are not.
-- Remove `wait_for_release()` and the bounded-sync tail in
-  `src/va/surface.cc`; the DPB translator holds no picture, so they are dead
-  code, not the cause of the client-timing drops.
-- Re-run a browser client that syncs each surface: the FFmpeg null-output path
+Before the installed-package capability claim:
+
+- Re-run the four-codec matrix, 120-frame real AV1 clip, DRC clip and EOS
+  checks with the installed driver, recording source commit, driver hash,
+  resolved node, boot ID, decoder name, frame/drop counts and guard state.
+- Run a browser client that syncs each surface: the FFmpeg null-output path
   recycles surfaces early, so it proves completion accounting and rebuilt
   pixels but not the Firefox 158 send-one-receive-one loop this spike started
-  from.
+  from. A media surface must report the selected decoder with frame and drop
+  evidence before any Firefox AV1 hardware claim.
 
-The pixel-oracle gap is closed by the real VA session: the rebuilt OBU stream
-decodes bit-exact in both DPB and baseline. The completion-shape question is
-answered by the guarded probe, and the Radxa-order bugs are fixed on the host.
-What remains is the prototype work above and a browser-client run, which are
-prerequisites for **selecting** the translator, not for deciding whether
-kernel 0005 is needed.
 0005/0006 remain unbuilt and unloaded; a reset or a thermal breach is a
 failed experiment per `AGENTS.md`.
 

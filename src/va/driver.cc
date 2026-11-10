@@ -130,8 +130,9 @@ Capabilities probe_capabilities(const iris::Options& options)
     }
     // AV1 passed its gate on 2026-10-22 (matrix, FFmpeg over alt-ref and
     // no-alt-ref streams bit-exact against libdav1d, Chrome 152); see
-    // TEST-RESULTS.md. The translator holds one picture, so a client that
-    // syncs before submitting the next picture waits for the sync bound.
+    // TEST-RESULTS.md. The internal-DPB translator submits each picture at
+    // vaEndPicture, so a client that syncs each surface never waits for a
+    // successor.
     if (caps.output_formats.count(V4L2_PIX_FMT_AV1) && caps.nv12)
         caps.profiles.insert(VAProfileAV1Profile0);
     // profile-qualified-end
@@ -151,12 +152,13 @@ Capabilities probe_capabilities(const iris::Options& options)
     // completes far more often than it does for H.264: 564 of 768 queueings
     // carried abandoned=1 and 541 completions were dropped, against 2 and 4
     // for the H.264 control. VP9 qualifies once that path is clean, not
-    // before. AV1 keeps the held-picture translator: a picture is emitted
-    // once its successor names the DPB slots it refreshed, so Import queues
-    // each client buffer in the same lockstep as H.264/HEVC. Qualified by the
-    // 2026-11-10 matrix and real-clip runs in TEST-RESULTS.md (48/48 four-
+    // before. AV1's internal-DPB translator submits at vaEndPicture; Import
+    // lends one client buffer per completion, including the invisible half
+    // of a hidden install unit. The 2026-11-10 matrix and real-clip runs in
+    // TEST-RESULTS.md qualified the former held-picture path (48/48 four-
     // codec matrix, 120/120 AV1 and 80/80 DRC exact framemd5 under Import;
-    // the DRC clip switches to copy-gpu for its second half).
+    // the DRC clip switches to copy-gpu for its second half). The new default
+    // path keeps Import only if its own guarded matrix and framemd5 gate pass.
 
     // The encoder is a second iris_driver node. Its absence is not fatal:
     // the display still decodes, and no encode entrypoint is advertised.

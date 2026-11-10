@@ -1,5 +1,5 @@
-// Host-only tests for the experimental internal-DPB AV1 translator. Nothing
-// here touches the shipped held-picture path selected by make_av1().
+// Host-only tests for the default internal-DPB AV1 translator. make_av1()
+// remains available as a one-line rollback path and has its own tests.
 #include "../src/codec/av1_dpb.h"
 #include "../src/codec/translator.h"
 
@@ -292,6 +292,96 @@ void test_install_resolves_references_to_pending_surface()
     check(frames == 2, "install unit contains two FRAME OBUs");
 }
 
+// VA may submit a picture the stream never shows. It has no client pixels to
+// return, but it still refreshes a DPB slot and its successor may name it.
+void test_client_hidden_frame()
+{
+    auto t = iris::codec::make_av1_dpb(VAProfileAV1Profile0);
+    iris::codec::AccessUnit out;
+
+    auto key = params(100, true, 0);
+    for (unsigned i = 0; i < kSlots; ++i)
+        key.ref_frame_map[i] = VA_INVALID_SURFACE;
+    translate(key, *t, out);
+    check(!out.hidden, "shown key frame is not hidden");
+
+    auto hidden = params(101, false, 1);
+    hidden.pic_info_fields.bits.show_frame = 0;
+    hidden.pic_info_fields.bits.showable_frame = 0;
+    hidden.ref_frame_map[0] = 100;
+    for (unsigned i = 0; i < 7; ++i)
+        hidden.ref_frame_idx[i] = 0;
+    translate(hidden, *t, out);
+    check(out.hidden, "client show_frame=0 picture is marked hidden");
+    check(!out.deferred, "client hidden picture is submitted immediately");
+    check(out.completions == 1, "client hidden picture has one completion");
+
+    auto shown = params(102, false, 2);
+    shown.ref_frame_map[0] = 100;
+    shown.ref_frame_map[1] = 101;
+    for (unsigned i = 0; i < 7; ++i)
+        shown.ref_frame_idx[i] = 1;
+    translate(shown, *t, out);
+    check(!out.hidden, "successor is shown");
+    check(!out.bytes.empty(), "hidden reference still permits the next frame");
+}
+
+// A new sequence header must clear internal slot identities: a VA surface id
+// from the old sequence is not a reference in the new one.
+void test_sequence_restart_clears_slots()
+{
+    auto t = iris::codec::make_av1_dpb(VAProfileAV1Profile0);
+    iris::codec::AccessUnit out;
+    auto first = params(100, true, 0);
+    for (unsigned i = 0; i < kSlots; ++i)
+        first.ref_frame_map[i] = VA_INVALID_SURFACE;
+    translate(first, *t, out);
+    check(out.sequence_start, "first key frame starts a sequence");
+
+    auto restart = params(200, true, 0);
+    restart.frame_width_minus1 = 127;
+    restart.frame_height_minus1 = 127;
+    for (unsigned i = 0; i < kSlots; ++i)
+        restart.ref_frame_map[i] = VA_INVALID_SURFACE;
+    translate(restart, *t, out);
+    check(out.sequence_start, "a second key frame restarts the sequence");
+    check(out.completions == 1, "restart has no stale install replay");
+    const auto u = obus(out.bytes);
+    unsigned frames = 0, headers = 0;
+    for (const auto& o : u) {
+        if (o.type == 6)
+            ++frames;
+        if (o.type == 1)
+            ++headers;
+    }
+    check(frames == 1, "restart emits one frame");
+    check(headers == 1, "restart emits its own sequence header");
+
+    auto next = params(201, false, 1);
+    next.ref_frame_map[0] = 200;
+    for (unsigned i = 0; i < 7; ++i)
+        next.ref_frame_idx[i] = 0;
+    translate(next, *t, out);
+    check(!out.bytes.empty(), "successor resolves against the new sequence");
+}
+
+// The DPB holds no picture for a successor: EOS has no tail to guess and no
+// sync bound to expire.
+void test_flush_has_no_tail()
+{
+    auto t = iris::codec::make_av1_dpb(VAProfileAV1Profile0);
+    iris::codec::AccessUnit out;
+    auto key = params(100, true, 0);
+    for (unsigned i = 0; i < kSlots; ++i)
+        key.ref_frame_map[i] = VA_INVALID_SURFACE;
+    translate(key, *t, out);
+    check(!out.deferred, "key frame is already submitted");
+    check(t->held_surface() == VA_INVALID_ID, "nothing is held at EOS");
+    check(!t->flush(out), "flush submits no guessed tail");
+    check(!out.deferred, "flush leaves no deferred unit");
+    check(t->held_surface() == VA_INVALID_ID, "flush still holds nothing");
+}
+
 } // namespace
 
 int main()
@@ -300,6 +390,9 @@ int main()
         test_no_hold();
         test_slot_exhaustion_and_install();
         test_install_resolves_references_to_pending_surface();
+        test_client_hidden_frame();
+        test_sequence_restart_clears_slots();
+        test_flush_has_no_tail();
     } catch (const std::exception& e) {
         std::cerr << "FAIL: " << e.what() << '\n';
         return 1;
@@ -308,6 +401,6 @@ int main()
         std::cerr << failures << " AV1 DPB check(s) failed\n";
         return 1;
     }
-    std::cout << "PASS AV1 internal-DPB translator (no hold, slot exhaustion, install unit)\n";
+    std::cout << "PASS AV1 internal-DPB translator (no hold, install, hidden, restart, EOS)\n";
     return 0;
 }

@@ -71,9 +71,7 @@ void view_image(VAImage& image, uint32_t fourcc, unsigned width, unsigned height
 // CAPTURE frame, or stable buffer) into a packed image buffer.
 void copy_pixels(DriverData& d, Surface& s, const VAImage& image, uint8_t* destination)
 {
-    iris::require(s.has_pixels(), s.unsent ? "surface holds a picture that has not been submitted yet"
-                                           : "surface has no decoded pixels",
-        VA_STATUS_ERROR_OPERATION_FAILED);
+    iris::require(s.has_pixels(), "surface has no decoded pixels", VA_STATUS_ERROR_OPERATION_FAILED);
     const uint8_t* source = nullptr;
     iris::Layout layout;
     int fd = -1;
@@ -178,7 +176,7 @@ VAStatus deriveImage(VADriverContextP ctx, VASurfaceID id, VAImage* image)
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
             s = surface(d, id);
         }
-        if (s->rendering() || s->unsent)
+        if (s->rendering())
             syncSurface(ctx, id);
         // A view, not a copy. FFmpeg's encode upload maps the derived image
         // and writes straight into it, then unmaps without ever calling
@@ -247,7 +245,7 @@ VAStatus getImage(VADriverContextP ctx, VASurfaceID id, int x, int y, unsigned w
         }
         iris::require(x == 0 && y == 0 && width == image.width && height == image.height,
             "partial vaGetImage is not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
-        if (s->rendering() || s->unsent)
+        if (s->rendering())
             syncSurface(ctx, id);
         // An image obtained from vaDeriveImage already is a view of these
         // pixels; copying a surface onto itself would need a direction the

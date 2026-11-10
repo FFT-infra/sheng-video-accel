@@ -10,7 +10,6 @@
 #include "../util/prime.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cstring>
 
 extern "C" {
@@ -70,55 +69,6 @@ std::shared_ptr<iris::Session> session_of(DriverData& d, const Surface& s)
 {
     auto owner = owner_of(d, s);
     return owner ? owner->session : nullptr;
-}
-
-// AV1 holds a picture back until the following picture's reference map says
-// which slots it refreshed (codec/av1.cc). A client that asks for the held
-// surface before that is waiting on the stream, not on a broken frame:
-//
-// - a shown key frame refreshes every slot by definition, so its bits are
-//   already determined and it is submitted now;
-// - otherwise this waits for the next picture to release it;
-// - at end of stream no picture follows. After the sync timeout the held
-//   picture is decoded as the last one (refreshing nothing), which is what
-//   the stream's tail needs, rather than failing the final frame.
-VAStatus wait_for_release(DriverData& d, const std::shared_ptr<Surface>& s, const std::shared_ptr<Context>& owner,
-    VASurfaceID id)
-{
-    {
-        std::lock_guard<std::recursive_mutex> lock(d.mutex);
-        if (!s->unsent)
-            return VA_STATUS_SUCCESS;
-    }
-    if (!owner || !owner->translator) {
-        // destroyContext releases the held picture before it drops the
-        // context, so nothing can be left deferred without one.
-        std::lock_guard<std::recursive_mutex> lock(d.mutex);
-        iris::require(!s->unsent, "deferred surface has no live context", VA_STATUS_ERROR_INVALID_SURFACE);
-        return VA_STATUS_SUCCESS;
-    }
-    bool known = false;
-    {
-        std::lock_guard<std::mutex> translate(owner->translate_mutex);
-        known = owner->translator->held_surface() == id && owner->translator->held_flags_known();
-    }
-    if (known && release_held_picture(d, *owner))
-        return VA_STATUS_SUCCESS;
-    bool still_unsent = false;
-    {
-        std::unique_lock<std::recursive_mutex> lock(d.mutex);
-        const auto deadline = std::chrono::steady_clock::now()
-            + std::chrono::milliseconds(d.options.sync_timeout_ms);
-        while (s->unsent && d.released.wait_until(lock, deadline) != std::cv_status::timeout) {
-        }
-        still_unsent = s->unsent;
-    }
-    if (!still_unsent)
-        return VA_STATUS_SUCCESS;
-    d.trace("va sync released the held picture surface=%u", id);
-    iris::require(release_held_picture(d, *owner), "deferred picture could not be released",
-        VA_STATUS_ERROR_OPERATION_FAILED);
-    return VA_STATUS_SUCCESS;
 }
 
 // The buffer's real length. DMA-BUF llseek reports it on the Iris kernel, so
@@ -327,9 +277,6 @@ VAStatus syncSurface(VADriverContextP ctx, VASurfaceID id)
                 encoded->session->wait(encoded->ticket);
             return VA_STATUS_SUCCESS;
         }
-        const VAStatus release = wait_for_release(d, s, owner, id);
-        if (release != VA_STATUS_SUCCESS)
-            return release;
         return wait_for(d, std::move(session), s);
     });
 }
@@ -376,10 +323,7 @@ VAStatus querySurfaceStatus(VADriverContextP ctx, VASurfaceID id, VASurfaceStatu
         // A client that polls instead of syncing still drives completions.
         if (s->rendering() && session)
             session->service();
-        // A deferred picture has not been submitted yet; report it the same
-        // way, so a polling client keeps polling instead of downloading
-        // pixels that are still coming.
-        *status = (s->rendering() || s->unsent) ? VASurfaceRendering : VASurfaceReady;
+        *status = s->rendering() ? VASurfaceRendering : VASurfaceReady;
         return VA_STATUS_SUCCESS;
     });
 }
@@ -431,17 +375,11 @@ VAStatus exportSurfaceHandle(VADriverContextP ctx, VASurfaceID id, uint32_t mem_
             VA_STATUS_ERROR_UNSUPPORTED_MEMORY_TYPE);
         std::shared_ptr<Surface> s;
         std::shared_ptr<iris::Session> session;
-        std::shared_ptr<Context> owner;
         {
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
             s = surface(d, id);
             session = session_of(d, *s);
-            owner = owner_of(d, *s);
         }
-        // The client wants pixels: finish the picture first.
-        const VAStatus release = wait_for_release(d, s, owner, id);
-        if (release != VA_STATUS_SUCCESS)
-            return release;
         // The client wants pixels: finish the picture first. Asking even when
         // the target has stopped rendering is what catches a picture the
         // firmware already failed; exporting it would hand out a buffer that

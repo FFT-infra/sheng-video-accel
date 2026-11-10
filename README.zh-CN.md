@@ -70,7 +70,7 @@ cd packaging/arch && makepkg -si
 ## 已知限制
 
 - **VP9 零拷贝**：由于客户端在多帧合成包（alt-ref）完成过程中的表面生命周期管理限制，当前强制走 GPU 拷贝路径。
-- **AV1 解码缓冲**：translator 需持有一帧，直到下一个 access unit 的参考帧表指出它刷新了哪些 DPB 槽位。`vaDestroyContext` 会在 session drain 前发布最后一帧，所以文件解码不需要等同步超时；VA-API 没有单独的 flush 入口，逐帧同步且不销毁 context 的客户端仍会在码流末尾走带边界的同步释放。Firefox 158 在解码线程里逐帧同步 surface，等待当前 surface 时下一个 access unit 无法提交，硬解 AV1 会按 fail-closed 拒绝后续帧（`AV1 stream continued after a picture was released at download time`），Firefox 再回退到软件解码；Firefox 的 H.264、HEVC、VP9 硬解已验证，包括禁用 AV1 的 YouTube live 页面和 B 站 HEVC live 页面，AV1 硬解客户端是 Chrome 和 FFmpeg。AV1 零拷贝 Import 已在解码顺序内核上验证。同一 VA 上下文内分辨率切换后，如果客户端继续按旧 CAPTURE 几何导出 surface，新几何无法通过 Import 投递：驱动会记录布局不匹配并改用 GPU 拷贝发布这些帧。
+- **AV1 解码**：默认 translator 自己维护八槽 DPB，在 `vaEndPicture` 直接提交当前帧，逐帧同步 surface 的客户端不用等后续 access unit。八个槽位都被占用时，上一帧会以隐藏 NOSHOW 帧的形式重放进同一个 temporal unit；第一个完成事件不可见，只借用一个 Import buffer，不发布像素。客户端提交 `show_frame=0` 的帧会立即送进解码器且没有像素可发布，新的关键帧会清空内部槽位，EOS 没有待猜测的尾部帧。Firefox AV1 硬解暂不宣称可用，需要媒体表面给出选中解码器及帧数、丢帧证据；Firefox 的 H.264、HEVC、VP9 硬解和禁用 AV1 的 live 页面证据仍然有效。AV1 零拷贝 Import 在解码顺序内核上通过的是旧 held-picture 路径；默认内部 DPB 路径只有在自己的安装包矩阵、真实 clip 和 EOS 门禁通过后保留 Import。同一 VA 上下文内分辨率切换后，如果客户端继续按旧 CAPTURE 几何导出 surface，新几何无法通过 Import 投递：驱动会记录布局不匹配并改用 GPU 拷贝发布这些帧。
 - **原版内核降级**：在缺少显示延迟控制或强制关键帧控制的内核上，解码降级为 GPU 拷贝，关键帧请求通过临时改动 intra period 实现。
 - **编码高级特性**：仅支持单图单切片结构。多切片、分块（Tiles）、B 帧及 ROI 配置直接返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。
 - **封装头信息**：头信息声明为 `VA_ENC_PACKED_HEADER_NONE`，参数集随码流带内传输。
@@ -82,7 +82,7 @@ cd packaging/arch && makepkg -si
 | `LIBVA_V4L2_VIDEO_PATH` | probe | 强制指定 V4L2 解码节点路径 |
 | `LIBVA_V4L2_ENCODER_PATH` | probe | 强制指定 V4L2 编码节点路径 |
 | `V4L2_VA_TRACE` | off | 启用标准错误流执行轨迹追踪 |
-| `V4L2_VA_SYNC_TIMEOUT_MS` | 2000 | 表面同步超时时间（毫秒） |
+| `V4L2_VA_SYNC_TIMEOUT_MS` | 2000 | session 等待超时时间（毫秒） |
 | `V4L2_VA_COPY` | gpu | 拷贝引擎选择（`gpu` 或 `cpu`） |
 | `V4L2_VA_PUBLISH` | auto | 强制指定发布模式（`auto`、`direct`、`import`、`copy`） |
 | `V4L2_VA_DUMP` | off | 提交的码流单元转储目录路径 |
