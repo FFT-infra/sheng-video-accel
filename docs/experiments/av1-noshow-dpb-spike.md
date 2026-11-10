@@ -78,8 +78,22 @@ numbers, and drives nine pictures (one key frame, eight inter frames).
 
 5. A real AV1 OBU stream from `aomenc` decodes cleanly with libdav1d on this
    host, so the oracle is available: `ffmpeg -f obu -c:v libdav1d ...` produced
-   a frame hash for a 64x64 key frame. The spike has not yet produced a valid
-   multi-frame TU for that oracle to judge.
+   a frame hash for a 64x64 key frame.
+
+6. **One temporal unit with two `OBU_FRAME`s is legal AV1.** A 20-frame
+   lookahead stream (`-lag-in-frames 8 -arnr-max-frames 0`) produced TU 9 with
+   OBU types `[2, 6, 6]`: one temporal delimiter followed by two frame OBUs.
+   libdav1d decoded all 20 frames from that stream. Radxa's container shape is
+   therefore sound; our earlier failure was not the TU layout but the hand-
+   edited frame header. Clearing the `show_frame` bit in an existing key-frame
+   header is invalid: `show_frame=0` inserts a `showable_frame` bit and changes
+   the key-frame error-resilient syntax, so every following header field shifts.
+   ffmpeg's `av1_frame_merge` rejected it with `zero_bit out of range: 1`. A
+   hidden install frame must be *built* from the parsed parameters with
+   `show=0` (Radxa `frame(... bool show ...)`), not patched into a shown frame.
+   The earlier `slot-remap.cc` stream was rejected by libdav1d for the same
+   reason: concatenated per-call temporal units plus fake tile payloads, not a
+   single valid multi-frame TU.
 
 ## Consequence for the implementation
 
