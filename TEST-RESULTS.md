@@ -4832,11 +4832,13 @@ Installed driver: `/usr/lib64/dri/v4l2_drv_video.so` and its
 9120088. `/usr/local/share/iris-vaapi/install-manifest.txt` records
 `source_commit=079480d8b208c5bb6695d4e91e6c1953c4d9010c`,
 `source_dirty=0`, `tracked_source_sha256=d42c37b46ca54d3c645940f59d6ef81033199f1480b735442d8901d3ab547460`,
-`installed_at_utc=2026-11-10T01:15:14Z` and the same artifact hash. This is the
-PR head, built from a clean tracked-source archive; the earlier
-`source_dirty=1` install (`565073d3…`) was the same code with a stale comment
-and was replaced by the installer. This is
-a live system install, not a `DESTDIR` stage. The installer backed up that
+`installed_at_utc=2026-11-10T01:15:14Z` and the same artifact hash. This is a
+live system install, not a `DESTDIR` stage. The installed source is commit
+`079480d8b208c5bb6695d4e91e6c1953c4d9010c`; the later
+`54541f051c23d245518722eca01249a13eb6e766` commit changes TEST-RESULTS.md
+only and does not affect the driver. The earlier `source_dirty=1` install
+(`565073d3…`) was the same code with a stale comment and was replaced by the
+installer. The installer backed up that
 previous `565073d3…` driver. The inherited broken build
 (`c4a2c267af1af1ef6d3994eb1edb6259d29f3c658dc1bb5ae863cb951c3e90e4`)
 was backed up by the first install of this batch. `vainfo` resolves the driver through the alias
