@@ -21,7 +21,7 @@ does not work".
 On the tablet, run the following verification gates:
 - `test/iris-browser-acceptance.sh --clip ...`: verifies Chrome `VaapiVideoDecoder` selection, platform decoder status, and zero dropped frames.
 - `test/iris-matrix.sh`: framemd5 output equivalence against software.
-- `test/iris-real-clip-gate.sh`: real 120-frame AV1 clip and the in-context DRC clip against software framemd5, with the session's completion and publish counts. Needs `IRIS_REAL_CLIP_DIR` holding the clips and software baselines; opt-in from `test/iris-hardware-suite.sh`.
+- `test/iris-real-clip-gate.sh`: real 120-frame AV1 clip and the in-context DRC clip against software framemd5, with the session's completion and publish counts. Needs `IRIS_REAL_CLIP_DIR` holding the clips and software baselines; opt-in from `test/iris-hardware-suite.sh`. `IRIS_REAL_CLIP_SET=4k` runs only the short 3840x2160 AV1 Import probe; `all` does not include it. A guarded 4K probe is not a thermal, power or long-window result.
 - `test/iris-throughput.sh`: decode fps through this driver against the native V4L2 decoders, plus per-frame MD5 at every size it runs.
 - `test/iris-power-sampler.sh`: battery-side power of a saturated decode, this driver against software, arms interleaved. Needs the screen off; a paced playback run does not resolve the difference on this gauge.
 - `test/iris-structure-matrix.sh`: decoding structural variants (all-I, B-frames).

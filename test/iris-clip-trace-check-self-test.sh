@@ -7,7 +7,7 @@ set -eu
 
 root=${1:-$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)}
 checker="$root/test/iris-clip-trace-check.sh"
-scratch_base=${IRIS_TEST_SCRATCH_ROOT:-${TMPDIR:-/tmp}}
+scratch_base=${IRIS_TEST_SCRATCH_ROOT:-$HOME/Lab/Bridge/tmp}
 mkdir -p "$scratch_base"
 scratch=$(mktemp -d "$scratch_base/iris-clip-trace-check.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM
@@ -73,6 +73,15 @@ cp "$sw" "$va"
 sed -i 's/^0,          1,.*/0,          1,          1,        1,  1382400, 00000000000000000000000000000000/' "$va"
 # shellcheck disable=SC2086
 expect_fail pixel-mismatch sh "$checker" $args
+
+# The libavformat version in the framemd5 header differs between the host
+# that wrote the baseline and the target that decoded the clip. Only frame
+# hashes are compared; a header-only difference must pass.
+cp "$sw" "$va"
+sed -i 's/^#software:.*/#software: Lavf62.12.103/' "$va"
+# shellcheck disable=SC2086
+expect_ok header-version-difference sh "$checker" $args
+cp "$sw" "$va"
 
 cp "$sw" "$va"
 good_trace

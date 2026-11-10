@@ -5003,3 +5003,59 @@ lost completion, unexpected copy, sync-bound release, declared and
 unexplained DRC copies). CI's required-test list names both. The checker was
 also run against the earlier PR-head traces: both passed, and mutating one
 `publish=import` to `publish=copy-gpu` made it fail.
+
+## Short guarded 4K AV1 Import probe (2026-11-10)
+
+This is a 30-frame capability probe, not a 4K streaming, thermal, power or
+long-window result. The tablet stayed on battery throughout: at the time of
+the guard run it was discharging at 60% with `qcom-battmgr-usb online=0` and
+`ucsi-source-psy-pmic_glink.ucsi.01 online=0`; a later check read 58% with
+`current_now=-213000`. `test/iris-power-sampler.sh` and the long-window soak
+remain deferred until a charger and a screen-off state are available.
+
+The clip was generated on the host with SVT-AV1 v3.1.2 as 3840x2160, 30
+frames, AV1 Main profile, 8-bit `yuv420p` (preset M9, CRF 40), then decoded
+with a software decoder to produce `av1-4k-sw.md5` (30 frame hashes,
+`#software: Lavf62.12.102`). The gate never generates its own oracle. The
+same installed package was used, with no `LIBVA_*`, publish or node override:
+SHA-256 `da952fe4fe35896e215976213a1f5b6836cc5aa9ab9d97a1c08f55a909615da3`,
+manifest `source_commit=079480d8b208c5bb6695d4e91e6c1953c4d9010c`,
+`source_dirty=0`, installed `2026-11-10T01:15:14Z`. Boot
+`2d5eed8d-57d7-4746-9e10-2cda0f4fe768`, kernel
+`7.2.6-sm8550-g42f3b40-iris1` with the 0001-0004 module; the decoder resolved
+by `iris_driver` QUERYCAP to `/dev/video17`, card type `Iris Decoder`.
+
+The decode ran under `scripts/iris-experiment-guard.sh` with
+`IRIS_EXPERIMENT_TIMEOUT_SECONDS=180` and
+`IRIS_EXPERIMENT_MAX_TEMP_MILLIC=85000`. The guard recorded
+`status=complete`, unchanged boot ID, started `2026-11-10T05:58:59Z` and
+finished `2026-11-10T05:59:29Z`; no reset or thermal breach, hottest sample
+39800 millidegrees C (39.8 C). The guard captures the child's stderr into
+`guard/command.stderr`, so that file is the driver trace for this run and the
+`out/driver.trace` written by the ffmpeg wrapper is empty.
+
+Driver trace: `capture configure 3840x2176 stride=3840 size=12533760
+visible=3840x2160 pool=32 memory=import firmware-min=4`, 30
+`publish=import`, and `session finish submitted=30 completed=30 errors=0
+drops=0 timeouts=0 drains=1 misplaced=0`. Zero `sync timeout token=` and zero
+`va sync released the held picture` lines. The VA framemd5 has 30 frame
+hashes with `#software: Lavf62.12.103`; the hash lines match the host software
+baseline exactly. `test/iris-clip-trace-check.sh` now compares only `^0,`
+frame-hash lines because the libavformat version in the header differs
+between the host that wrote the baseline and the target that decoded it; the
+host-only self-test covers that header-only difference as a passing case.
+
+`IRIS_REAL_CLIP_SET=4k` runs only this lane in
+`test/iris-real-clip-gate.sh`; `all` still runs the 720p and DRC clips. Both
+lanes were re-run on the target with the final checker and its scratch root
+set to the project's `~/Lab/Bridge/tmp`:
+
+| Lane | Framemd5 | Session | Publish |
+| --- | --- | --- | --- |
+| `av1-4k.mkv`, 3840x2160 | 30/30 exact | `submitted=30 completed=30 errors=0 drops=0 timeouts=0 drains=1 misplaced=0` | 30 `publish=import` |
+| `all` (`av1-720.webm`, `resize-av1.mkv`) | 120/120 and 80/80 exact | as recorded in the previous section | 120 import; 42 import + 42 copy-gpu + 1 invisible |
+
+Both gates printed `PASS real AV1 clip gate set=4k publish=import` and `PASS
+real AV1 clip gate set=all publish=import`. On the host, `sh
+test/run-static-checks.sh` passed, `meson test -C build-local
+--print-errorlogs` reported 22/22, and `git diff --check` was clean.

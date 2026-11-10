@@ -5,14 +5,17 @@
 # separate gate, not a longer version of the matrix.
 #
 # Usage:
-#   IRIS_REAL_CLIP_DIR=DIR [IRIS_REAL_CLIP_SET=all|plain|drc] \
+#   IRIS_REAL_CLIP_DIR=DIR [IRIS_REAL_CLIP_SET=all|plain|drc|4k] \
 #       sh test/iris-real-clip-gate.sh
 #
 # The directory holds the clips and their software framemd5 baselines:
 #   av1-720.webm     + av1-720-sw.md5     (120 frames, all Import)
 #   resize-av1.mkv   + resize-av1-sw.md5 (80 frames, DRC: 42 Import, 42 copy)
+#   av1-4k.mkv       + av1-4k-sw.md5     (30 frames, 3840x2160, all Import)
 # Generate the baselines once with a software decoder; they are not produced
-# here so a broken VA driver cannot bless its own output.
+# here so a broken VA driver cannot bless its own output. The 4K lane is
+# opt-in: IRIS_REAL_CLIP_SET=4k runs only that clip. It is a short Import
+# capability probe, not a thermal, power or long-window result.
 #
 # The driver is chosen by the caller's environment. Leave LIBVA_DRIVERS_PATH
 # unset to test the installed package, or point it at a build tree.
@@ -33,7 +36,7 @@ render=${IRIS_RENDER_NODE:-/dev/dri/renderD128}
     echo 'FAIL IRIS_REAL_CLIP_DIR must name the directory holding the clips and software framemd5 files' >&2
     exit 2
 }
-case $clip_set in all|plain|drc) ;; *) echo "FAIL unknown IRIS_REAL_CLIP_SET=$clip_set" >&2; exit 2 ;; esac
+case $clip_set in all|plain|drc|4k) ;; *) echo "FAIL unknown IRIS_REAL_CLIP_SET=$clip_set" >&2; exit 2 ;; esac
 [ -d "$clip_dir" ] || { echo "FAIL clip directory missing: $clip_dir" >&2; exit 2; }
 [ -e "$render" ] || { echo "FAIL render node missing: $render" >&2; exit 2; }
 command -v ffmpeg >/dev/null 2>&1 || { echo 'FAIL ffmpeg is required' >&2; exit 2; }
@@ -87,6 +90,11 @@ if [ "$clip_set" = all ] || [ "$clip_set" = drc ]; then
     # CAPTURE pool is rebuilt at 896x480. The second half is copy-gpu by
     # design; the checker demands the recorded layout-mismatch reason.
     run_clip resize-av1 resize-av1.mkv 80 42 42 1 || failures=$((failures + 1))
+fi
+if [ "$clip_set" = 4k ]; then
+    # A 4K AV1 clip is a capability probe, not part of the default three-clip
+    # gate: run it only when the operator asks for that lane.
+    run_clip av1-4k av1-4k.mkv 30 30 0 0 || failures=$((failures + 1))
 fi
 
 [ "$failures" -eq 0 ] || exit 1

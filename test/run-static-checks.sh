@@ -13,6 +13,11 @@ set -eu
 
 root=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
 test_dir="$root/test"
+# Host-only self-tests create temporary fixtures. Keep them under the project's
+# scratch root, not /tmp, unless the caller names a different directory.
+: "${IRIS_TEST_SCRATCH_ROOT:=$HOME/Lab/Bridge/tmp}"
+export IRIS_TEST_SCRATCH_ROOT
+mkdir -p "$IRIS_TEST_SCRATCH_ROOT"
 failures=0
 
 run() {

@@ -68,7 +68,15 @@ actual_frames=$(grep -c '^0,' "$va_md5" || true)
 sw_frames=$(grep -c '^0,' "$sw_md5" || true)
 [ "$sw_frames" -eq "$frames" ] \
     || fail "software baseline has $sw_frames frames, expected $frames"
-if ! cmp -s "$va_md5" "$sw_md5"; then
+# framemd5 headers carry the libavformat version, which differs between the
+# host that generated the baseline and the target that decoded it. Compare
+# the frame hashes in order, not the tool that wrote the file. One awk over
+# both files avoids process substitution and a temporary file.
+if ! awk '
+    FNR == NR { if (/^0,/) a[++n] = $0; next }
+    /^0,/ { if (++m > n || $0 != a[m]) bad = 1 }
+    END { if (m != n || bad) exit 1 }
+' "$va_md5" "$sw_md5"; then
     fail "framemd5 differs from the software baseline"
 fi
 
