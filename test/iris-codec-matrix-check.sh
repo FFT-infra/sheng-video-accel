@@ -3,10 +3,11 @@
 # Validate the machine-readable production/fallback/rejected codec contract.
 set -eu
 root=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
-python3 - "$root/data/iris-codec-capabilities.json" <<'PY'
+python3 - "$root/data/iris-codec-capabilities.json" "$root" <<'PY'
 import json, pathlib, re, sys
 
 path = pathlib.Path(sys.argv[1])
+root = pathlib.Path(sys.argv[2])
 doc = json.loads(path.read_text())
 assert doc["schema_version"] == 2
 assert doc["policy"]["unknown_codec_action"] == "software-fallback"
@@ -71,6 +72,28 @@ want_profiles = {p for item in entries.values() for p in item["encode"]["va_prof
 want_formats = {f for item in entries.values() for f in item["encode"]["v4l2_capture_formats"]}
 assert encode_profiles == want_profiles, (encode_profiles, want_profiles)
 assert encode_formats == want_formats, (encode_formats, want_formats)
+# The English and Chinese README capability tables are prose, but they make
+# the same publish-policy claim. A table that still says AV1 is Copy while the
+# table says qualified is the drift this check exists to catch: the capability
+# JSON is the single source of truth, and the driver is checked against it
+# above. Read both tables and bind their Import/Copy words to it.
+for name in ("README.md", "README.zh-CN.md"):
+    text = (root / name).read_text()
+    # Decode table only: the encode table has the same codec names but its
+    # second and third columns are the entrypoint and input format. The
+    # first table in the Capabilities section is the decode table in both
+    # languages, so stop at the next heading rather than translating names.
+    decode = text[text.index("### "):].split("\n### ", 1)[0]
+    rows = dict(re.findall(r"^\|\s*(H\.264|HEVC|VP9|AV1)\s*\|[^|]*\|([^|]*)\|", decode, re.M))
+    assert set(rows) == {"H.264", "HEVC", "VP9", "AV1"}, (name, rows)
+    for codec, item in entries.items():
+        label = {"h264": "H.264", "hevc": "HEVC", "vp9": "VP9", "av1": "AV1"}[codec]
+        mode = rows[label]
+        qualified = item["publish_import"] == "qualified"
+        if qualified:
+            assert "Import" in mode and "Copy" not in mode, (name, label, mode, "qualified")
+        else:
+            assert "Copy" in mode and "Import" not in mode, (name, label, mode, "fallback")
 print(f"PASS codec capability matrix entries={len(entries)} profiles={sorted(decode_profiles)}"
       f" import-qualified={sorted(names)} encode-qualified={sorted(encode_profiles)}")
 PY
