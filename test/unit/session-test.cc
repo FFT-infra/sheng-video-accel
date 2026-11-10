@@ -382,6 +382,51 @@ void test_install_hidden_frame_needs_no_extra_target()
     CHECK(h.session->stats().misplaced == 0);
 }
 
+void test_released_install_completions_are_not_errors()
+{
+    // FFmpeg's null-output VA path recycles a surface before its picture has
+    // completed. Releasing that target leaves two orphaned completions for a
+    // hidden install unit: the invisible NOSHOW half never carried pixels or
+    // failed the decode, so it is consumed as invisible; the visible half is
+    // the one drop for the abandoned picture. Only a real error marker may
+    // raise the error count.
+    {
+        Harness h;
+        h.fake->set_auto_tick(false);
+        Target a;
+        h.submit(a);
+        h.fake->tick(1);
+        h.session->service();
+        h.fake->inject_altref_superframe();
+        Target b;
+        b.completions = 2;
+        h.submit(b);
+        h.session->release(b);
+        h.fake->tick(1);
+        h.session->service();
+        CHECK(h.session->stats().errors == 0);
+        CHECK(h.session->stats().drops == 1); // one abandoned picture
+    }
+    {
+        Harness h;
+        h.fake->set_auto_tick(false);
+        Target a;
+        h.submit(a);
+        h.fake->tick(1);
+        h.session->service();
+        h.fake->inject_altref_superframe();
+        Target b;
+        b.completions = 2;
+        h.submit(b);
+        h.fake->tick(1);
+        h.session->wait(b);
+        CHECK(b.completed && !b.error);
+        h.session->release(b);
+        CHECK(h.session->stats().errors == 0);
+        CHECK(h.session->stats().drops == 0);
+    }
+}
+
 void test_eio_fails_session_and_all_pending()
 {
     Harness h;
@@ -913,6 +958,7 @@ int main()
         { "timestamped hidden picture is published", test_timestamped_hidden_picture_is_published_not_failed },
         { "VP9 alt-ref superframe is one picture", test_vp9_altref_superframe_is_one_picture },
         { "install hidden frame needs no extra target", test_install_hidden_frame_needs_no_extra_target },
+        { "released install completions are not errors", test_released_install_completions_are_not_errors },
         { "EIO fails session and all pending", test_eio_fails_session_and_all_pending },
         { "decode-order timeout is terminal", test_decode_order_timeout_is_terminal },
         { "display-order timeout drains then recovers", test_display_order_timeout_drains_then_recovers },

@@ -5,8 +5,10 @@ Status: **host prototype, one guarded native V4L2 completion probe, and one
 guarded real VA-API session on `sheng` using a build-tree override**. Nothing
 deployed or installed, no kernel module change, no capability claim; the
 shipped `src/va/` path is still the qualified held-picture translator. The VA
-session proved bit-exact rebuilt OBUs but also exposed a surface-lifetime
-failure, so `make_av1_dpb()` remains unselected.
+session proved bit-exact rebuilt OBUs and the real two-completion install unit.
+Its two apparent decode errors were a false accounting of orphaned hidden
+completions, fixed on the host and re-verified on the target; `make_av1_dpb()`
+remains unselected pending the prototype gaps and a browser-client run.
 
 ## Question
 
@@ -401,57 +403,93 @@ produces two completions under one token and that the session's
 `completions = 2` path consumes the first as `publish=invisible` and publishes
 the second (`publish=direct`), on hardware, with no kernel 0005.
 
-**Negative result, and the current blocker.** DPB adds two `capture error
-index=… flags=0x4041 token=N publish=drop` events (tokens 11 and 25), each
-followed by a normal completion for the same token also reported as
-`publish=drop`. Both tokens immediately follow an install temporal unit
-(tokens 10 and 24). The cause is visible in `src/va/picture.cc:328`:
-`vaBeginPicture` unconditionally calls `c->session->release(s->target)` when a
-surface is reused. With no held picture the pipeline runs one picture ahead
-of the shipped translator, so a surface is recycled while its token is still
-in `pending_`; `Session::release_locked()` erases the token and both
-completions become drops. The shipped held-picture path is slow enough that
-this reuse does not happen. Baseline has `errors=0`, so this is specific to
-the no-hold path, not a firmware or clip artifact.
+**Corrected diagnosis of the two extra errors.** DPB reported two `capture
+error index=… flags=0x4041 token=N publish=drop` events (tokens 11 and 25),
+each followed by a normal completion for the same token also reported as
+`publish=drop`. Re-reading both traces shows the same surface reuse in both
+runs: `vaBeginPicture` reuses surface 18 before token 11 completes (t=142 DPB,
+t=181 baseline) and surface 34 before token 25 completes (t=157 DPB, t=192
+baseline). `c->session->release(s->target)` erases that token in both runs;
+baseline reports one drop per token, while DPB's token is an install temporal
+unit whose first completion is an invisible NOSHOW ERROR half. The old session
+code counted that orphaned invisible half as a decode error even though the
+target had merely been released, then dropped its visible half. This is not
+a no-hold-specific surface-lifetime defect: the same client recycles surfaces
+in the qualified held-picture run. `session.cc` now consumes an orphaned
+NOSHOW completion as `publish=invisible` without raising `errors`; the visible
+half remains the one drop for the abandoned picture. A host regression
+(`test/unit/session-test.cc`, `released install completions are not errors`)
+models both halves and asserts `errors=0`, `drops=1`.
 
-This is exactly why `make_av1_dpb()` is still unselected. The remaining work
-is not cosmetic: a no-hold translator must keep every submitted picture's
-target alive until all of its completions return, which in MMAP/Direct needs a
-release or surface-lifetime change on the VA side. On Import the equivalent
-constraint is the documented one-buffer-in-flight / no-skipped-picture rule.
-No capability claim, README change or `TEST-RESULTS.md` entry follows from
-this run; a `DESTDIR` staging run would not be an installation either.
+**Guarded re-run with the accounting fix (2026-11-10).** Both build-tree
+drivers were rebuilt from the same clean source with the fixed `session.cc`
+(`build-dpb` SHA-256 `ecd1a5e9…`, `build-baseline` SHA-256 `9907d530…`);
+`meson test` was 24/24 in both trees before the runs. Two Direct pairs and one
+Import pair used the same fixed clip, same kernel `7.2.6-sm8550-g42f3b40-iris1`,
+same module patch set 0001-0004, decoder resolved by `iris_driver` QUERYCAP,
+boot ID `7a26df99-f7ac-4148-9c80-135ba3adc661` unchanged. Every guard returned
+`status=complete`; hottest zone stayed between 37.1 C and 42.2 C, below the
+85000 mC limit, with no reset or thermal breach. The installed driver
+`278abdfe…` was untouched; `LIBVA_DRIVERS_PATH` selected a build-tree override.
+
+| | DPB Direct | baseline Direct | DPB Import | baseline Import |
+| --- | --- | --- | --- | --- |
+| submitted | 49 | 49 | 49 | 49 |
+| completed | 47 | 39–47 | 46 | 47 |
+| errors | **0** | 0 | **0** | 0 |
+| drops | **2** | 2–10 | 3 | 2 |
+| misplaced | 0 | 0 | **0** | 0 |
+| timeouts | 0 | 0 | 0 | 0 |
+| rebuilt OBU frames | 45/48 | 45/48 | not measured | not measured |
+
+DPB Direct was stable at `errors=0 drops=2` across both reruns. Baseline Direct
+swung between `drops=2`, `drops=3` and `drops=10`: FFmpeg's null-output path
+recycles surfaces at varying times, so the exact drop count is a client timing
+artifact, not a stable equality target. Every drop in both paths is a visible
+completion whose token `release()` had already erased; no decode error and no
+misplaced Import completion remains. The Direct framemd5 oracle again returned
+45 rebuilt frames against 48 source frames, with the same three source-only
+`show_existing_frame` hashes and no rebuilt-only hashes.
+
+The Import pair re-derived the one-buffer-in-flight rule on hardware: 79 Import
+queue events for 49 submitted DPB pictures (two buffers for each of the 30
+two-completion units), 30 `publish=invisible` completions, `misplaced=0`,
+`errors=0`. A completion that lands in a neighbour's buffer still fails both
+surfaces by the existing host tests; no skipped picture was observed. Both runs
+published `publish=import` on the visible completions.
+
+`make_av1_dpb()` is still unselected in the branch: the remaining prototype
+gaps below are unresolved, and these are build-tree override experiments. No
+capability claim, README change or `TEST-RESULTS.md` entry follows from them;
+a `DESTDIR` staging run would not be an installation either.
 
 Artifacts: `~/Lab/Bridge/tmp/av1-dpb-va/` and
 `~/Lab/Bridge/tmp/av1-baseline-va/` (guard state, command stdout/stderr
-trace, `dump/iris-session-*.bin`, `provenance.txt`, framemd5 files).
+trace, `dump/iris-session-*.bin`, `provenance.txt`, framemd5 files). The Direct
+and Import launches reuse these directories, so the files hold the latest pair
+of each policy.
 
 ## Stop / next gate
 
 Before selecting this translator in `src/va/picture.cc`:
 
-- **Fix the surface-lifetime bug the real VA session exposed.** Tokens 11 and
-  25 were erased from `pending_` by `vaBeginPicture`'s unconditional
-  `release()` before both their completions returned. A no-hold translator
-  must keep a submitted target alive until all of its declared completions
-  arrive; a surface reused for a new picture needs its own target state, not
-  the pending one. Re-run the fixed-clip DPB/baseline pair and require
-  `errors=0` and `drops` equal to baseline before going further.
 - Handle the remaining prototype gaps: client `show_frame=0` pictures,
   resolution changes, EOS and sequence restart through the internal DPB. The
   sequence-header reset is covered; the rest are not.
 - Remove `wait_for_release()` and the bounded-sync tail in
   `src/va/surface.cc`; the DPB translator holds no picture, so they are dead
-  code, not the cause of the two drops.
-- Re-derive the Import invariant on the target: one client buffer in flight,
-  no skipped picture, misplaced completions fail both surfaces. The run above
-  used MMAP/Direct `publish=direct` only.
+  code, not the cause of the client-timing drops.
+- Re-run a browser client that syncs each surface: the FFmpeg null-output path
+  recycles surfaces early, so it proves completion accounting and rebuilt
+  pixels but not the Firefox 158 send-one-receive-one loop this spike started
+  from.
 
 The pixel-oracle gap is closed by the real VA session: the rebuilt OBU stream
 decodes bit-exact in both DPB and baseline. The completion-shape question is
 answered by the guarded probe, and the Radxa-order bugs are fixed on the host.
-What remains is the surface-lifetime failure, which is a prerequisite for
-**selecting** the translator, not for deciding whether kernel 0005 is needed.
+What remains is the prototype work above and a browser-client run, which are
+prerequisites for **selecting** the translator, not for deciding whether
+kernel 0005 is needed.
 0005/0006 remain unbuilt and unloaded; a reset or a thermal breach is a
 failed experiment per `AGENTS.md`.
 
