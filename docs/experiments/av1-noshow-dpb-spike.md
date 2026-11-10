@@ -141,23 +141,72 @@ group then contained a nested frame header. Both are the reason the new entry
 point *builds* the hidden frame from VA parameters instead of editing a shown
 one.
 
+## Experimental DPB translator (2026-11-10, commit `45a36b9`)
+
+`src/codec/av1_dpb.cc` / `.h` add `make_av1_dpb()`, a separate translator that
+is **not** selected by `src/va/picture.cc` (`make_translator()` still returns
+the qualified held-picture translator). Nothing in the shipped runtime changed.
+
+What it does:
+
+- Every `vaEndPicture` emits a complete temporal unit immediately; no picture
+  is held, `flush()` has no tail, and `held_surface()` is always invalid.
+- An internal eight-slot DPB maps VA surface IDs to slot numbers.
+  `ref_frame_idx[]` is rewritten to those slot numbers before calling the OBU
+  writer, and `AV1ReferenceState` is kept in the same numbering.
+- `free_slot()` is derived from the *current* picture's `ref_frame_map`. When
+  no slot is free, the picture refreshes nothing and is kept as the pending
+  uncommitted reference. When a later picture still references that surface
+  and has released a slot, `av1_build_install_temporal_unit()` replays the
+  pending picture as a hidden frame into that slot, followed by the shown
+  frame, in one temporal unit. The AU sets `completions = 2`, reusing the
+  session's existing VP9 alt-ref accounting (`src/iris/session.cc:302-387`)
+  so the same client buffer is lent twice. **This is the userspace path that
+  may remove the need for kernel 0005**; it has not been tested on hardware.
+
+`test/av1-dpb-test.cc` (meson `av1-dpb`) drives a key frame, seven inter
+frames that fill the DPB, a full-DPB frame that becomes pending, and a tenth
+frame that releases one slot. It asserts no `deferred`, two `completions`, and
+two FRAME OBUs in the install unit. Host gates: `sh test/run-static-checks.sh`
+rc=0, `meson test -C build-local --print-errorlogs` 24/24,
+`git diff --check` rc=0; the new test is in CI's required list.
+
+Three real bugs were found and fixed while making that test pass; they are
+worth keeping in mind before this prototype is promoted:
+
+- Intra frames code no reference indices, so resolving `ref_frame_idx[]` on a
+  key frame rejected valid input.
+- Retiring an old surface and assigning the refreshed slot in one pass cleared
+  the slot that had just been written, leaving the DPB oscillating between two
+  slots. `remember()` now retires first, then assigns.
+- `need_install` originally required `free_slot < 0`, which is backwards: the
+  released slot is exactly where the pending picture gets installed.
+
+Known gaps in the prototype, not hidden by the passing test:
+
+- `remember()` still writes `references_.order_hint[s]` from the shown frame's
+  `order_hint`; the hidden install frame and GM state need their own values.
+- The test constructs plausible VA parameter structs, not pixels from a real
+  encoder. There is no libdav1d pixel oracle for the DPB path yet; the only
+  pixel oracle is the separate two-frame fixture in `av1-install-tu-roundtrip.sh`.
+- `out.hidden` is taken from the shown frame only. The internal hidden frame's
+  completion is not represented as a separate target.
+- The prototype does not handle `show_frame=0` client pictures, resolution
+  changes, EOS, or a sequence restart through the internal DPB.
+
 ## Stop / next gate
 
-The container-shape gate is now passed on the host. Still open before any
-`sheng` work:
+Decide the internal NOSHOW completion accounting before selecting this
+translator in `src/va/picture.cc`: either confirm `completions = 2` plus the
+existing invisible-completion path (`src/iris/session.cc:626-634`) consumes it
+without a client surface, or load kernel 0005 to recycle it in the kernel.
+Then re-derive the Import invariant (one client buffer in flight, no skipped
+picture, misplaced completions fail both surfaces), remove
+`wait_for_release()` and the bounded-sync tail in `src/va/surface.cc`, and
+add a real-clip libdav1d pixel oracle for the DPB path.
 
-- `src/codec/av1.cc`: replace the one-picture hold with the eight-slot DPB,
-  `free_slot()`, `remember()` and the pending uncommitted reference, and call
-  `av1_build_install_temporal_unit()` when a replay is needed.
-- `src/iris/session.cc` / `src/va/picture.cc`: account for the internal
-  NOSHOW completion that has no client surface, or confirm kernel 0005
-  recycles it. `src/va/surface.cc`: remove `wait_for_release()` and the
-  bounded-sync tail once no picture is held.
-- Import invariant re-derivation: one client buffer in flight, no skipped
-  picture, misplaced completions fail both surfaces.
-
-Only after those are decided does the target probe answer whether the
-0001-0004 module returns that NOSHOW completion to userspace
+Only after those are done does the target probe answer whether the 0001-0004
+module returns that NOSHOW completion to userspace
 (`scripts/iris-experiment-guard.sh -- ...`). A reset or a thermal breach is a
 failed experiment per `AGENTS.md`.
 
