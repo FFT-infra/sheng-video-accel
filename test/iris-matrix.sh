@@ -7,7 +7,8 @@
 
 set -eu
 
-. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/lib/iris-env.sh"
+here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+. "$here/lib/iris-env.sh"
 
 device=$(iris_resolve_device)
 driver_path=${LIBVA_DRIVERS_PATH:-$(pwd)/build/src}
@@ -55,11 +56,11 @@ run_va() {
         -i "$input" -vf "hwdownload,format=nv12,format=yuv420p" -f framemd5 "$md5" \
         2>"$trace"
     if [ "$eos_mode" = allow-bounded-sync ]; then
-        test/iris-eos-check.sh "$trace" "$frames" --allow-bounded-sync
+        sh "$here/iris-eos-check.sh" "$trace" "$frames" --allow-bounded-sync
     elif [ "$eos_mode" = hidden-pictures ]; then
-        test/iris-eos-check.sh "$trace" "$frames" --hidden-pictures
+        sh "$here/iris-eos-check.sh" "$trace" "$frames" --hidden-pictures
     else
-        test/iris-eos-check.sh "$trace" "$frames"
+        sh "$here/iris-eos-check.sh" "$trace" "$frames"
     fi
     echo "$codec frames=$(grep -c '^[0-9]' "$md5")"
     if diff -q "$sw" "$md5" >/dev/null 2>&1; then

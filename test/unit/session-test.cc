@@ -382,6 +382,49 @@ void test_install_hidden_frame_needs_no_extra_target()
     CHECK(h.session->stats().misplaced == 0);
 }
 
+void test_hidden_install_unit_publishes_its_client_half()
+{
+    // A client show_frame=0 picture can be the shown half of a hidden install
+    // unit. The firmware returns two identical NOSHOW completions under one
+    // token: the internal install frame and the client's hidden picture. Only
+    // the first may be consumed as invisible; the second must complete the
+    // client's target, or it waits forever. Marking the target shown makes
+    // both halves invisible (the 5ad34a9 DRC regression).
+    Harness h;
+    h.fake->set_auto_tick(false);
+    Target a;
+    h.submit(a);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(a.completed && !a.error);
+
+    // The observed target shape: a hidden install unit whose client shown
+    // half is itself show_frame=0, so both completions are NOSHOW.
+    h.fake->inject_hidden_install_unit();
+    Target b;
+    b.completions = 2;
+    b.hidden = true;
+    h.submit(b);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(b.completed && !b.error);
+    CHECK(h.session->stats().errors == 0);
+    CHECK(h.session->stats().drops == 0);
+    CHECK(h.session->stats().misplaced == 0);
+
+    // A two-completion unit with a shown client half still publishes its
+    // second half normally; the counter must not turn that into a hidden
+    // publication.
+    h.fake->inject_altref_superframe();
+    Target c;
+    c.completions = 2;
+    h.submit(c);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(c.completed && !c.error);
+    CHECK(h.session->stats().errors == 0);
+}
+
 void test_released_install_completions_are_not_errors()
 {
     // FFmpeg's null-output VA path recycles a surface before its picture has
@@ -826,6 +869,30 @@ void test_import_resolution_change_rebuilds_import_pool()
     CHECK(log_has(*h.fake, "REQBUFS CAPTURE 0 DMABUF"));
 }
 
+void test_noshow_drc_last_does_not_fail_a_picture()
+{
+    // During a resolution change the kernel can mark the boundary with an
+    // empty LAST buffer that also carries ERROR and no picture-type bit.
+    // It names a token only because the borrowed CAPTURE slot did; failing
+    // that target turns a normal DRC into a decode error and stops FFmpeg.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    Target a;
+    h.submit(a);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(a.completed && !a.error);
+
+    h.fake->inject_resolution_change(1280, 720);
+    h.fake->inject_noshow_drc_last();
+    Target b;
+    h.submit(b);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(!b.error);
+    CHECK(h.session->stats().errors == 0);
+}
+
 void test_import_altref_gets_a_buffer_per_completion()
 {
     // The firmware decodes a VP9 alt-ref superframe as two pictures and does
@@ -958,6 +1025,7 @@ int main()
         { "timestamped hidden picture is published", test_timestamped_hidden_picture_is_published_not_failed },
         { "VP9 alt-ref superframe is one picture", test_vp9_altref_superframe_is_one_picture },
         { "install hidden frame needs no extra target", test_install_hidden_frame_needs_no_extra_target },
+        { "hidden install unit publishes its client half", test_hidden_install_unit_publishes_its_client_half },
         { "released install completions are not errors", test_released_install_completions_are_not_errors },
         { "EIO fails session and all pending", test_eio_fails_session_and_all_pending },
         { "decode-order timeout is terminal", test_decode_order_timeout_is_terminal },
@@ -976,6 +1044,7 @@ int main()
         { "import rejected on a layout mismatch", test_import_rejected_on_layout_mismatch },
         { "import drain lends a scratch buffer for LAST", test_import_drain_lends_scratch_for_last },
         { "import resolution change rebuilds the import pool", test_import_resolution_change_rebuilds_import_pool },
+        { "NOSHOW DRC LAST does not fail a picture", test_noshow_drc_last_does_not_fail_a_picture },
         { "import alt-ref gets a buffer per completion", test_import_altref_gets_a_buffer_per_completion },
         { "import install hidden frame lends one buffer twice",
             test_import_install_hidden_frame_lends_one_buffer_twice },

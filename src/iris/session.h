@@ -62,8 +62,14 @@ struct Target {
     // How many CAPTURE completions this picture produces. A VP9 alt-ref
     // superframe is one VA picture the firmware decodes as two, and it wants
     // a buffer for each half before it returns the first, so an Import pool
-    // queues this target's client buffer once per completion.
+    // queues this target's client buffer once per completion. The session
+    // also uses this count to attribute the first invisible half of a
+    // two-completion unit when both halves have the NOSHOW shape.
     unsigned completions = 1;
+    // NOSHOW (ERROR, no picture-type bit, no payload) completions already
+    // consumed as the invisible half of this picture's install unit. Only
+    // the first one is invisible: the second is the client's own picture.
+    unsigned invisible = 0;
     Publish publish = Publish::Direct;
     StableBuffer* destination = nullptr; // Copy / Import: where pixels go
     unsigned width = 0, height = 0;

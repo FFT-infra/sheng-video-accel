@@ -357,10 +357,10 @@ void test_client_hidden_frame()
 }
 
 // A client show_frame=0 picture can also be the shown half of an install
-// unit. Its target must not stay hidden: the session would publish the
-// internal hidden completion and then consume the same token's install half
-// as invisible, giving one picture two conflicting publications.
-void test_hidden_install_target_is_not_hidden()
+// unit. Both firmware completions are NOSHOW, so the target must stay hidden:
+// the session consumes the internal install half as invisible and publishes
+// this client picture on the second half (test/unit/session-test.cc).
+void test_hidden_install_target_stays_hidden()
 {
     auto t = iris::codec::make_av1_dpb(VAProfileAV1Profile0);
     iris::codec::AccessUnit out;
@@ -393,7 +393,7 @@ void test_hidden_install_target_is_not_hidden()
         hidden.ref_frame_idx[i] = 7;
     translate(hidden, *t, out);
     check(out.completions == 2, "hidden install unit declares two completions");
-    check(!out.hidden, "hidden install target is not marked hidden");
+    check(out.hidden, "hidden install target stays hidden");
 }
 
 // A new sequence header must clear internal slot identities: a VA surface id
@@ -462,7 +462,7 @@ int main()
         test_slot_exhaustion_and_install();
         test_install_resolves_references_to_pending_surface();
         test_client_hidden_frame();
-        test_hidden_install_target_is_not_hidden();
+        test_hidden_install_target_stays_hidden();
         test_sequence_restart_clears_slots();
         test_flush_has_no_tail();
     } catch (const std::exception& e) {

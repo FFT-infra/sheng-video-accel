@@ -92,7 +92,10 @@ if [ "$clip_set" = all ] || [ "$clip_set" = drc ]; then
     # The DRC clip's client keeps exporting surfaces at 1280x720 while the
     # CAPTURE pool is rebuilt at 896x480. The second half is copy-gpu by
     # design; the checker demands the recorded layout-mismatch reason.
-    run_clip resize-av1 resize-av1.mkv 80 42 42 1 || failures=$((failures + 1))
+    # The internal-DPB translator adds one invisible install completion to
+    # each of the 42 two-completion pictures in the first half, plus 21
+    # from the second half: 63 invisible completions, no drops or errors.
+    run_clip resize-av1 resize-av1.mkv 80 42 42 63 || failures=$((failures + 1))
 fi
 if [ "$clip_set" = 4k ]; then
     # A 4K AV1 clip is a capability probe, not part of the default three-clip
