@@ -39,6 +39,7 @@ cc = meson.get_compiler('cpp')
 
 libva_dep = dependency('libva', version : '>= 1.1.0')
 libdrm_dep = dependency('libdrm', version : '>= 2.4.52')
+threads_dep = dependency('threads')
 # GPU copy engine for persistent exports (docs/architecture.md §3.3). Optional
 # at build time so a host without Mesa dev packages still builds and tests
 # the core; the driver falls back to the CPU engine when absent.

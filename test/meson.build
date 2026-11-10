@@ -15,6 +15,14 @@ annexb_test = executable(
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('annexb', annexb_test)
 
+# Concurrent trace writers must keep one record per line.
+trace_test = executable(
+  'trace-test',
+  'trace-test.cc',
+  dependencies: [iris_core_dep, threads_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+test('trace', trace_test)
+
 # Hardware probe, built but not registered as a meson test: it needs a
 # decode-order Iris node and arguments. Proves by content that picture k
 # lands in the k-th queued client DMA-BUF; the acceptance test
