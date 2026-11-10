@@ -4948,3 +4948,58 @@ Import. No `publish=error` appears in either browser log. The `publish=drop`
 records are fail-closed results for abandoned client surfaces in a live
 streaming session. These runs qualify the AV1 Import policy and record
 real-site hardware decode; they do not change the VP9 Copy policy.
+
+## Real AV1 clip gate and the held-picture / DRC contract (2026-11-10)
+
+These runs add a hardware gate for real AV1 clips and record two behaviours
+that the earlier matrix could not distinguish. They do not change the
+installed driver.
+
+Target: `sheng`, boot `2d5eed8d-57d7-4746-9e10-2cda0f4fe768` (unchanged
+across the runs), kernel `7.2.6-sm8550-g42f3b40-iris1` with the 0001-0004
+module. The installed package was used, with no `LIBVA_DRIVER_NAME`,
+`LIBVA_DRIVERS_PATH`, `V4L2_VA_PUBLISH` or node override: SHA-256
+`da952fe4fe35896e215976213a1f5b6836cc5aa9ab9d97a1c08f55a909615da3`, manifest
+`source_commit=079480d8b208c5bb6695d4e91e6c1953c4d9010c`, `source_dirty=0`,
+installed at `2026-11-10T01:15:14Z`. The decoder resolved to `/dev/video17`.
+The tablet was discharging at 60% with no USB supply; these are short clip
+runs, not a soak or a power measurement.
+
+`test/iris-real-clip-gate.sh` was installed into a scratch tree on the target
+and run with `IRIS_REAL_CLIP_DIR` pointing at the existing 120-frame AV1 clip
+and the 80-frame in-context DRC clip plus their software framemd5 baselines.
+The gate decodes through the installed VA driver and calls
+`test/iris-clip-trace-check.sh` on the resulting framemd5 and driver trace.
+
+| Clip | Framemd5 | Session | Publish |
+| --- | --- | --- | --- |
+| `av1-720.webm`, 1280x720 | 120/120 exact | `submitted=120 completed=120 errors=0 drops=0 timeouts=0 drains=1 misplaced=0` | 120 `publish=import` |
+| `resize-av1.mkv`, 1280x720 -> 854x480 | 80/80 exact | `submitted=84 completed=84 errors=0 drops=0 timeouts=0 drains=2 misplaced=0` | 42 `publish=import`, 42 `publish=copy-gpu`, 1 `publish=invisible` |
+
+Both traces have zero `sync timeout token=` and zero `va sync released the
+held picture` lines. `vaDestroyContext` releases the AV1 held picture before
+the session drains (`src/va/picture.cc`), so the file decode reaches EOS
+without the bounded-sync release. VA-API has no separate flush entry point; a
+client that syncs each picture and keeps its context alive can still take the
+bounded-sync path in `src/va/surface.cc`, which is now documented as a client
+contract rather than a decoder defect.
+
+The DRC trace records `import rejected: client layout differs from the
+CAPTURE layout (client stride=1280 chroma=942080 size=1413120; capture
+stride=896 chroma=430080 size=647168)`, then configures the rebuilt CAPTURE
+pool with `memory=mmap`. The client kept exporting surfaces at the old
+1280x720 geometry after the change, so an Import pool would write 896-pitch
+pixels into a buffer the client reads at 1280 pitch. The GPU copy is the
+fail-safe publication for those pictures. `test/iris-clip-trace-check.sh`
+accepts the copy half only when that layout-mismatch line is present; a copy
+without the recorded reason fails the gate.
+
+On the host, `sh test/run-static-checks.sh` passed, `meson test -C
+build-local --print-errorlogs` reported 22/22, and `git diff --check` was
+clean. The new host-only tests are `av1-translator` (held-picture release at
+EOS, including refusing a stream that continues after guessed refresh flags)
+and `iris-clip-trace-check-self-test` (truncated framemd5, pixel mismatch,
+lost completion, unexpected copy, sync-bound release, declared and
+unexplained DRC copies). CI's required-test list names both. The checker was
+also run against the earlier PR-head traces: both passed, and mutating one
+`publish=import` to `publish=copy-gpu` made it fail.
