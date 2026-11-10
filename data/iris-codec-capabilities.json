@@ -157,7 +157,7 @@
       ],
       "fallback": "software",
       "rejected": [
-        "film grain synthesis",
+        "film grain synthesis (VA-API needs a separate current_display_picture surface; the Iris node publishes one target per completion. Clients exporting grain as side data decode in hardware)",
         "12-bit",
         "large-scale tile (10-bit only)"
       ],

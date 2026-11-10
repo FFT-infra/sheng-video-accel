@@ -191,8 +191,8 @@ completions dropped, against 2 and 4 for the H.264 control.
 
 | ID | Item | Recorded boundary | Pass condition |
 | --- | --- | --- | --- |
-| D1 | 1080p 10-bit AV1 | only a 640x360 30-frame 10-bit clip is in `TEST-RESULTS.md`; depth is decided before the first AU | a 1080p 10-bit clip with exact framemd5 and Chrome media-surface evidence |
-| D2 | Film grain | refused at `endPicture`; kernel-blocked in the recorded runs | either a kernel-side change with evidence or keep the rejection and the capability table `rejected` entry |
+| D1 | 1080p 10-bit AV1 | 1920x1080 60-frame `yuv420p10le` clip passed on 2026-11-11: `EXACT` framemd5, 60 Import, 0 errors/drops/misplaced on the installed package; depth is decided before the first AU | done for exact framemd5; a 10-bit browser pixel comparison against software output is still open |
+| D2 | Film grain | a scratch build wrote a spec-correct `film_grain_params()` OBU (libdav1d decoded the rebuilt stream) but the hardware run still ended in `getImage: surface has no decoded pixels`: VA-API needs `current_frame` plus a separate `current_display_picture`, and this driver publishes one target per completion. `-export_side_data film_grain` decodes all 24 frames in hardware | keep the fail-closed rejection with the two-surface reason, the host guard and the capability table `rejected` entry; a kernel patch does not remove the VA surface contract |
 | D3 | 128x128 superblock / loop-restoration unit shift | one-bit header bug fixed; GStreamer `vaav1dec` still refuses the codec | retest on merged baseline with a native control; browser evidence required for any claim |
 | D4 | Tiles, superres, lossless, still picture, global motion, lookahead, 4K 10-bit | upstream `tests/decoder/av1.py` covers these on other SoCs; our gate covers 720p, DRC and 30-frame 4K 8-bit | independent software oracle per case (A11), exact pixel hashes, no new `publish=error/drop/misplaced` |
 | D5 | AV1 12-bit and large-scale tile | in the capability table `rejected` | keep rejected until a hardware gate exists; do not infer from format enumeration |
@@ -322,8 +322,8 @@ capability or browser-hardware claim.
 | §2 Lab prerequisites | L1-L6 | open: L1 charger, L2 screen state, L3 guard precondition, L4 scratch default; L5/L6 are per-run checks |
 | §3 AV1 held-picture removal | A1-A14 | done: internal DPB is the default, installed-package matrix/clip/DRC/EOS gates and Firefox/Chrome live-site browser gates pass on 2026-11-11; `TEST-RESULTS.md` records the run. Long corpus and 4K cost work remains in §6/§7 |
 | §4 Explicit refresh flags | B1-B8 | open / upstream-blocked; internal DPB removes the local need for an API change |
-| §5 Chrome VP9 Import | C1-C5 | open |
-| §6 AV1 feature completeness | D1-D6 | open: D4 tiles/alt-ref and 720p 10-bit/4K browser rows now have evidence; 1080p 10-bit framemd5, film grain, 12-bit and large-scale tile remain |
+| §5 Chrome VP9 Import | C1-C5 | open: session-side window is fixed (FFmpeg 515/515, misplaced=0); Chrome reuses a VP9 surface in `beginPicture`, which releases the still-in-flight picture, so 541 of 718 completions are dropped. The Copy baseline shows the same reuse (527 drops), and the project's acceptance rule refuses to count a re-presented frame as a pass. Qualifying this needs a retained-target ownership model, its own host regressions for the misplaced/detached case, and a fresh target gate — not a rename of `publish=drop` |
+| §6 AV1 feature completeness | D1-D6 | D1 done for exact framemd5: 1920x1080 60-frame 10-bit clip `EXACT`, 60 Import, 0 errors/drops/misplaced on 2026-11-11. D2 settled as a VA-API two-surface contract, not a kernel gap: scratch OBU writer was libdav1d-clean but the display surface stayed empty; host guard keeps the refusal fail-closed. Still open: 10-bit browser pixel comparison, 12-bit, large-scale tile, D3-D6 corpus work |
 | §7 Long-window, power, cost | E1-E5 | open / blocked on charger |
 | §8 Kernel and upstream sync | F1-F10 | open / decision recorded as "do not rebase"; 0005/0006 remain unbuilt and unloaded |
 | §9 Docs, consistency, hygiene | G1-G13 | open: only the AV1/default-path drift tied to PR #4 is fixed here |

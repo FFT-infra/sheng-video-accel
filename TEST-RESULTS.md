@@ -5257,3 +5257,104 @@ The 10-bit and 4K rows are capability probes at 720p/2160p 8-bit and one
 `va_profiles` beyond `AV1Profile0`, and the 10-bit row has no Chrome pixel
 comparison against software output. Film grain, 12-bit, large-scale tile and
 Chromium 152's software AV1 selection remain outside this matrix.
+
+## AV1 film grain and 1080p 10-bit probes (2026-11-11)
+
+Target `sheng`, boot `7a26df99-f7ac-4148-9c80-135ba3adc661`, kernel
+`7.2.6-sm8550-g42f3b40-iris1` with the 0001-0004 module, decoder
+`/dev/video17` (`iris_driver`, `Iris Decoder`). No kernel module was changed
+or reloaded during these runs. Battery 98% and full, peak zone 30700 millic,
+no reset and no thermal breach.
+
+### Film grain synthesis is a two-surface VA-API contract
+
+A 320x180 24-frame AV1 clip was generated with
+`libaom-av1 -aom-params film-grain-test=1`; libdav1d reported
+`grain.present=1 grain.update=1 seed=45231 num_y_points=14 ar_coeff_lag=2`.
+On the installed package `e97a861f…`, FFmpeg's VA-API path failed at
+`endPicture` with `film grain parameters are not reconstructed`, then every
+later frame failed with `AV1 reference slot is empty`.
+
+A scratch build replaced the refusal with a full `film_grain_params()` OBU
+writer. `V4L2_VA_DUMP` captured the rebuilt stream and libdav1d decoded it
+without errors, reporting the same grain parameters as the source, so the
+syntax was correct. The hardware run still ended in `getImage: surface has
+no decoded pixels`: FFmpeg's `vaapi_av1.c` points `vaBeginPicture` at a
+separate `tmp_frame` when `apply_grain` is set, and names the client's
+display surface only as `current_display_picture`. The Iris node produces one
+CAPTURE completion per submitted picture and this driver publishes one
+target, so the display surface receives no pixels. Reconstruction of the OBU
+syntax alone cannot satisfy that contract; the refusal stays fail-closed with
+the reason `AV1 film grain synthesis needs a separate display surface`.
+`test/av1-obu-test.cc` asserts both the refusal and that `apply_grain=0`
+still rebuilds a frame.
+
+With `-export_side_data film_grain` the client sets `apply_grain=0` and
+handles grain itself; that run downloaded all 24 frames
+(2073600 bytes of yuv420p) with `submitted=25 completed=25 errors=0
+drops=0 misplaced=0`. So grain-carrying AV1 streams decode in hardware when
+the client exports the parameters, and the `rejected` entry in
+`data/iris-codec-capabilities.json` concerns synthesis by the driver.
+
+### 1080p 10-bit AV1 exact framemd5
+
+A 1920x1080 60-frame `yuv420p10le` clip was encoded with `libsvtav1`
+(`-preset 8 -crf 30`); `ffprobe` reports `codec_name=av1`, `profile=Main`,
+`pix_fmt=yuv420p10le`, 1920x1080. The software oracle is
+`libdav1d`/FFmpeg framemd5 at `yuv420p10le`.
+
+The installed package (`e97a861f…`, `source_commit=a34d348…`,
+`source_dirty=0`) was exercised with `LIBVA_DRIVERS_PATH=/usr/lib64/dri` and
+`V4L2_VA_PUBLISH=import`, decoding to P010 VA surfaces and downloading to
+`yuv420p10le` framemd5:
+
+| Result | Value |
+| --- | --- |
+| framemd5 | `EXACT` (60/60 frame hashes equal) |
+| session | `submitted=60 completed=60 errors=0 drops=0 timeouts=0 misplaced=0` |
+| publish | `import=60 copy=0 direct=0 drop=0 error=0 invisible=13` |
+
+This is a capability probe, not a new VA profile: `va_profiles` stays
+`AV1Profile0`, and no 10-bit browser pixel comparison was made here.
+
+### Encode rate control: reproducible A/B protocol (recorded 2026-11-11)
+
+The table above is unchanged: this driver follows the CBR request and
+libva-v4l2 stays near 700-900 kbit/s. The one unisolated observation is VBR
+4 Mbit/s producing 9780 kbit/s (about 2.4x the target) while CBR at the same
+target produces 4034 kbit/s; `src/iris/encode.cc:163-170` writes
+`BITRATE_PEAK` only for CBR. These are recorded as observations, not a
+diagnosis, and no encode code or capability entry was changed.
+
+A host-side / target-side A/B that isolates the layer without changing
+`src/`:
+
+```sh
+# Fixed 600-frame 1080p30 NV12 source, one clip, one boot ID.
+# LIBVA_DRIVERS_PATH points at the build tree under test; strace records the
+# exact VIDIOC_S_CTRL values so a control-write difference is visible before
+# any bitrate measurement is interpreted.
+run() {
+    tag=$1; shift
+    strace -f -e trace=ioctl -yy -o "$tag.ioctl" \
+        ffmpeg -hide_banner -loglevel error -vaapi_device /dev/dri/renderD128 \
+        -f rawvideo -pix_fmt yuv420p -s 1920x1080 -r 30 -i "$SRC" \
+        -vf format=nv12,hwupload -c:v h264_vaapi -g 60 "$@" -f h264 -y "$tag.h264"
+}
+run cqp      -rc_mode CQP -q:v 24
+run cbr4     -rc_mode CBR -b:v 4M -maxrate 4M
+run vbr4     -b:v 4M
+run vbr4peak -b:v 4M -maxrate 4M -bufsize 8M
+run vbr1     -b:v 1M
+run vbr12    -b:v 12M
+run vbr24    -b:v 24M
+```
+
+Pass conditions, each pointing at one layer: all runs write
+`BITRATE=4000000` (or the matching target) and `FRAME_RC_ENABLE=1` with the
+right `BITRATE_MODE`; CBR stays monotone with the target; `vbr4peak` versus
+`vbr4` shows whether the missing VBR peak is the lever; a flat VBR curve at
+~2x the target across 1M/4M/12M/24M would support (not prove) the firmware
+RC-property hypothesis. `strace` is a probe only, not part of the shipped
+test suite. Record source commit, driver hash, resolved encoder node, boot
+ID, and whether the run used an installed package or a build-tree override.
