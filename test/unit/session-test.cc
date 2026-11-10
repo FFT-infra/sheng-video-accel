@@ -352,6 +352,36 @@ void test_vp9_altref_superframe_is_one_picture()
     CHECK(h.session->stats().drops == 0);
 }
 
+void test_install_hidden_frame_needs_no_extra_target()
+{
+    // An AV1 hidden reference-installation frame lives in the same temporal
+    // unit as the shown frame and has no client surface of its own. The
+    // firmware returns its NOSHOW completion first (ERROR flag, no picture
+    // type, no payload, same token), then the shown frame with pixels. The
+    // AccessUnit declares completions=2, so the Import window lends the same
+    // client buffer twice and the session consumes the first completion as
+    // "invisible" without a second Target. This is the userspace path that
+    // may remove the need for kernel 0005.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    Target a;
+    h.submit(a);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(a.completed && !a.error);
+
+    h.fake->inject_altref_superframe(); // same two-completion shape
+    Target b;
+    b.completions = 2;
+    h.submit(b);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(b.completed && !b.error);
+    CHECK(h.session->stats().errors == 0);
+    CHECK(h.session->stats().drops == 0);
+    CHECK(h.session->stats().misplaced == 0);
+}
+
 void test_eio_fails_session_and_all_pending()
 {
     Harness h;
@@ -787,6 +817,39 @@ void test_import_altref_gets_a_buffer_per_completion()
     CHECK(h.session->capture_queued() == 0);
 }
 
+void test_import_install_hidden_frame_lends_one_buffer_twice()
+{
+    // The Import variant of the hidden install frame: both completions must
+    // land in the same client buffer, with no buffer from the next picture
+    // queued alongside them. That is the "one client picture in flight" rule
+    // applied to a two-completion access unit.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    const Layout layout = capture_layout_of({});
+    ClientBuffer a(layout), b(layout);
+    Target ta, tb;
+    ta.publish = tb.publish = Publish::Import;
+    ta.destination = a.stable.get();
+    tb.destination = b.stable.get();
+    h.submit(ta);
+    h.fake->tick(1);
+    h.session->wait(ta);
+
+    h.fake->inject_altref_superframe();
+    tb.completions = 2;
+    h.submit(tb);
+    CHECK(h.session->capture_queued() == 2);
+    CHECK(same_buffer(h.fake->capture_fd(0), b.fd));
+    CHECK(same_buffer(h.fake->capture_fd(1), b.fd));
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(tb.completed && !tb.error);
+    CHECK(h.session->stats().errors == 0);
+    CHECK(h.session->stats().drops == 0);
+    CHECK(h.session->stats().misplaced == 0);
+    CHECK(h.session->capture_queued() == 0);
+}
+
 void test_import_altref_does_not_stall_the_next_picture()
 {
     // With one buffer lent per picture, an alt-ref held the window: the next
@@ -849,6 +912,7 @@ int main()
             test_timestamped_corrupt_completion_fails_target_at_once },
         { "timestamped hidden picture is published", test_timestamped_hidden_picture_is_published_not_failed },
         { "VP9 alt-ref superframe is one picture", test_vp9_altref_superframe_is_one_picture },
+        { "install hidden frame needs no extra target", test_install_hidden_frame_needs_no_extra_target },
         { "EIO fails session and all pending", test_eio_fails_session_and_all_pending },
         { "decode-order timeout is terminal", test_decode_order_timeout_is_terminal },
         { "display-order timeout drains then recovers", test_display_order_timeout_drains_then_recovers },
@@ -867,6 +931,8 @@ int main()
         { "import drain lends a scratch buffer for LAST", test_import_drain_lends_scratch_for_last },
         { "import resolution change rebuilds the import pool", test_import_resolution_change_rebuilds_import_pool },
         { "import alt-ref gets a buffer per completion", test_import_altref_gets_a_buffer_per_completion },
+        { "import install hidden frame lends one buffer twice",
+            test_import_install_hidden_frame_lends_one_buffer_twice },
         { "import alt-ref does not stall the next picture", test_import_altref_does_not_stall_the_next_picture },
     };
     int ran = 0;
