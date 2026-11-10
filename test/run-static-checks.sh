@@ -74,6 +74,7 @@ run iris-experiment-guard-self-test sh "$test_dir/iris-experiment-guard-self-tes
 run iris-eos-check-self-test sh "$test_dir/iris-eos-check-self-test.sh" "$root"
 run iris-clip-trace-check-self-test sh "$test_dir/iris-clip-trace-check-self-test.sh" "$root"
 run av1-install-tu-roundtrip sh "$test_dir/av1-install-tu-roundtrip.sh" "$root"
+run av1-dpb-oracle sh "$test_dir/av1-dpb-oracle.sh" "$root"
 run iris-setup-path-check sh "$test_dir/iris-setup-path-check.sh" "$root"
 run iris-packaging-check sh "$test_dir/iris-packaging-check.sh" "$root"
 run iris-kernel-patch-check sh "$test_dir/iris-kernel-patch-check.sh" "$root"
