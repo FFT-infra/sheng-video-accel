@@ -111,14 +111,55 @@ least:
 - Import invariant re-derivation: one client buffer in flight, no skipped
   picture, misplaced completions fail both surfaces.
 
+## Host implementation landed (2026-11-10, commit `d23b450`)
+
+`src/codec/av1_obu.cc` now exposes `av1_build_frame_obu()` and
+`av1_build_install_temporal_unit()`. The latter builds one temporal delimiter,
+one sequence header, and two `OBU_FRAME`s: a hidden frame built from its own
+VA parameters with `show_frame=0`, followed by the shown frame. The original
+`av1_build_temporal_unit()` is a thin wrapper over the same frame helper, so
+the shipped single-frame path is byte-identical; the new C++ test asserts
+byte parity between the two builders.
+
+Host gates:
+
+- `test/av1-install-tu-test.cc` (meson `av1-install-tu`): OBU structure, the
+  two `show_frame` bits, and single-frame byte parity.
+- `test/av1-install-tu-roundtrip.sh` (invoked by `run-static-checks.sh`):
+  decodes `test/fixtures/av1-two-frame-tu.obu` with libdav1d and requires two
+  distinct frame hashes. The fixture is a 3030-byte `testsrc2` clip encoded
+  with libaom-av1 (TD + SEQ + two real key-frame FRAME OBUs); it is checked in
+  so the test never generates its own oracle.
+- `sh test/run-static-checks.sh`, `meson test -C build-local --print-errorlogs`
+  23/23, `git diff --check`: all green. The new meson test is in CI's required
+  list.
+
+An earlier prototype tried to patch `show_frame` on an existing key-frame
+header and failed libdav1d with `zero_bit out of range: 1`. Passing the real
+frame OBU payload as tile bytes also decoded only one frame, because the tile
+group then contained a nested frame header. Both are the reason the new entry
+point *builds* the hidden frame from VA parameters instead of editing a shown
+one.
+
 ## Stop / next gate
 
-Do not deploy to `sheng` until a host prototype builds a legal two-frame
-temporal unit that libdav1d decodes to the same pixels as a software-encoded
-reference, and the internal-completion accounting is decided. Target probe
-(`scripts/iris-experiment-guard.sh -- ...`) then answers only whether the
-0001-0004 module returns that NOSHOW completion to userspace; a reset or a
-thermal breach is a failed experiment per `AGENTS.md`.
+The container-shape gate is now passed on the host. Still open before any
+`sheng` work:
+
+- `src/codec/av1.cc`: replace the one-picture hold with the eight-slot DPB,
+  `free_slot()`, `remember()` and the pending uncommitted reference, and call
+  `av1_build_install_temporal_unit()` when a replay is needed.
+- `src/iris/session.cc` / `src/va/picture.cc`: account for the internal
+  NOSHOW completion that has no client surface, or confirm kernel 0005
+  recycles it. `src/va/surface.cc`: remove `wait_for_release()` and the
+  bounded-sync tail once no picture is held.
+- Import invariant re-derivation: one client buffer in flight, no skipped
+  picture, misplaced completions fail both surfaces.
+
+Only after those are decided does the target probe answer whether the
+0001-0004 module returns that NOSHOW completion to userspace
+(`scripts/iris-experiment-guard.sh -- ...`). A reset or a thermal breach is a
+failed experiment per `AGENTS.md`.
 
 ## Environment note
 
