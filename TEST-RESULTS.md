@@ -5207,3 +5207,53 @@ Artifacts: `~/Lab/Bridge/tmp/gates5-20261110T182908Z/`,
 `~/Lab/Bridge/tmp/site-final-20261110/final-clean-chrome-youtube/`,
 `final-clean-chrome-bilibili/`,
 `~/Lab/Bridge/tmp/browser-clean-final/`.
+
+## Complete AV1 browser matrix (2026-11-11)
+
+The one-off browser probes above are now a repo-owned, repeatable matrix:
+`test/iris-av1-browser-matrix.sh` with `test/iris-firefox-media.py`
+(WebDriver BiDi + MOZ_LOG), `test/iris-chrome-media.py` (CDP Media domain)
+and a generated corpus (`~/Lab/Bridge/tmp/av1-browser-corpus/`). Each case
+launches the installed package directly, with no `LIBVA_*`, publish or node
+override, on Wayland; a 30-second window reports decoded/dropped frames, the
+selected decoder, the driver's `V4L2_VA_TRACE=1` ledger and a live `/proc` fd
+scan for the Iris node. Local clips carry libdav1d software framemd5 baselines.
+Live sites use the local 127.0.0.1:8899 relay. Chrome 156.0.8078.79,
+Firefox 158.0.1, driver `e97a861f8b66aa3297c22a438fa5ac6620e0c347ed147c6398deb220c29b0478`,
+`source_commit=a34d348f2354041433d7476abb621cc435218ae6`, `source_dirty=0`:
+the matrix adds test scripts only and does not rebuild the driver. Boot
+`7a26df99-f7ac-4148-9c80-135ba3adc661` unchanged, no reset, no thermal breach
+(peak zone 46100 millic, battery 72 -> 100% while charging).
+
+| Case | Browser | Decoded / dropped (30 s) | Decoder evidence | Driver evidence |
+| --- | --- | --- | --- | --- |
+| 720p local | Firefox | 724 / 5 | `IsHardwareAccelerated=true`, VA-API init | 929 `publish=direct`, 0 errors |
+| 720p local | Chrome | 718 / 0 | `VaapiVideoDecoder`, platform=true | hardware session |
+| 1080p local | Firefox | 726 / 7 | `IsHardwareAccelerated=true`, VA-API init | 929 `publish=direct`, 0 errors |
+| 1080p local | Chrome | 714 / 0 | `VaapiVideoDecoder`, platform=true | hardware session |
+| 4K local | Firefox | 732 / 13 | `IsHardwareAccelerated=true`, VA-API init | 925 `publish=direct`, 0 errors |
+| 4K local | Chrome | 702 / 0 | `VaapiVideoDecoder`, platform=true | hardware session |
+| 10-bit 720p local | Firefox | 726 / 7 | `IsHardwareAccelerated=true`, VA-API init | 934 `publish=direct`, P010 surfaces |
+| 10-bit 720p local | Chrome | 717 / 0 | `VaapiVideoDecoder`, platform=true | hardware session |
+| 4x2 tiles local | Firefox | 725 / 5 | `IsHardwareAccelerated=true`, VA-API init | 925 `publish=direct`, 0 errors |
+| 4x2 tiles local | Chrome | 718 / 0 | `VaapiVideoDecoder`, platform=true | hardware session |
+| dense alt-ref local | Firefox | 724 / 5 | `IsHardwareAccelerated=true`, VA-API init | 991 `publish=direct`, 0 errors |
+| dense alt-ref local | Chrome | 717 / 0 | `VaapiVideoDecoder`, platform=true | hardware session |
+| live YouTube | Firefox | 750 / 1 | AV1/VP9, VA-API init | 924 `publish=direct`, 0 errors |
+| live YouTube | Chrome | 752 / 0 | `VaapiVideoDecoder`, platform=true | hardware session |
+| live Bilibili | Firefox | 750 / 2 | AV1, VA-API init | 892 `publish=direct`, 0 errors |
+| live Bilibili | Chrome | 752 / 0 | `VaapiVideoDecoder`, platform=true | hardware session |
+| live YouTube, AV1 off (control) | Firefox | 751 / 1 | VP9, VA-API init | 981 `publish=direct`, 0 errors |
+
+`PASS AV1 browser matrix mode=all`, `failures=0`. Firefox's MOZ_LOG child
+file is read with `errors="replace"` after waiting for the init line: strict
+UTF-8 decoding of a large child log had made an earlier checker run report
+four genuine hardware runs as software. Firefox local windows show 5-13
+dropped frames; Chrome and the live-site windows report 0-2. These are
+30-second playback windows, not a power or long-window soak.
+
+The 10-bit and 4K rows are capability probes at 720p/2160p 8-bit and one
+720p 10-bit corpus clip; they do not extend the capability table's
+`va_profiles` beyond `AV1Profile0`, and the 10-bit row has no Chrome pixel
+comparison against software output. Film grain, 12-bit, large-scale tile and
+Chromium 152's software AV1 selection remain outside this matrix.

@@ -323,12 +323,12 @@ capability or browser-hardware claim.
 | §3 AV1 held-picture removal | A1-A14 | done: internal DPB is the default, installed-package matrix/clip/DRC/EOS gates and Firefox/Chrome live-site browser gates pass on 2026-11-11; `TEST-RESULTS.md` records the run. Long corpus and 4K cost work remains in §6/§7 |
 | §4 Explicit refresh flags | B1-B8 | open / upstream-blocked; internal DPB removes the local need for an API change |
 | §5 Chrome VP9 Import | C1-C5 | open |
-| §6 AV1 feature completeness | D1-D6 | open |
+| §6 AV1 feature completeness | D1-D6 | open: D4 tiles/alt-ref and 720p 10-bit/4K browser rows now have evidence; 1080p 10-bit framemd5, film grain, 12-bit and large-scale tile remain |
 | §7 Long-window, power, cost | E1-E5 | open / blocked on charger |
 | §8 Kernel and upstream sync | F1-F10 | open / decision recorded as "do not rebase"; 0005/0006 remain unbuilt and unloaded |
 | §9 Docs, consistency, hygiene | G1-G13 | open: only the AV1/default-path drift tied to PR #4 is fixed here |
 | §10 Encode | H1-H4 | open |
-| §11 CI, tests, release plumbing | I1-I7 | open: host tests (25/25) and guarded installed-package evidence are in PR #4; packaging/CI automation for those target gates remains open |
+| §11 CI, tests, release plumbing | I1-I7 | open: host tests (25/25), guarded installed-package gates and the repo-owned 19-case AV1 browser matrix are in PR #4; packaging/CI automation for those target gates remains open |
 | §12 Priority | ranking | updated for the settled 0005 question |
 | §13 Non-goals | list | recorded |
 | §14 Done criteria | check | PR #4 is the single delivery PR; installed-package and browser gates pass. Remaining items are the explicitly open workstreams above, not blockers for this PR |
