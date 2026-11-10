@@ -5278,14 +5278,19 @@ later frame failed with `AV1 reference slot is empty`.
 A scratch build replaced the refusal with a full `film_grain_params()` OBU
 writer. `V4L2_VA_DUMP` captured the rebuilt stream and libdav1d decoded it
 without errors, reporting the same grain parameters as the source, so the
-syntax was correct. The hardware run still ended in `getImage: surface has
-no decoded pixels`: FFmpeg's `vaapi_av1.c` points `vaBeginPicture` at a
-separate `tmp_frame` when `apply_grain` is set, and names the client's
-display surface only as `current_display_picture`. The Iris node produces one
-CAPTURE completion per submitted picture and this driver publishes one
-target, so the display surface receives no pixels. Reconstruction of the OBU
-syntax alone cannot satisfy that contract; the refusal stays fail-closed with
-the reason `AV1 film grain synthesis needs a separate display surface`.
+syntax was correct. The firmware also exposes
+`HFI_PROP_AV1_FILM_GRAIN_PRESENT` (a 0/1 capability flag, not a parameter
+channel), so it applies grain from the bitstream itself. The hardware run
+still ended in `getImage: surface has no decoded pixels`: FFmpeg's
+`vaapi_av1.c` points `vaBeginPicture` at a separate ungrained `tmp_frame`
+when `apply_grain` is set, and names the client's display surface only as
+`current_display_picture` in the VA picture parameters. This driver
+publishes one target per CAPTURE completion, the one named by
+`vaBeginPicture`, and never maps a completion to `current_display_picture`,
+so the display surface receives no pixels. Supporting synthesis therefore
+needs a second-target publish path in the VA/session layer, not just OBU
+syntax. The refusal stays fail-closed with the reason
+`AV1 film grain synthesis needs a separate display surface`.
 `test/av1-obu-test.cc` asserts both the refusal and that `apply_grain=0`
 still rebuilds a frame.
 
@@ -5358,3 +5363,36 @@ right `BITRATE_MODE`; CBR stays monotone with the target; `vbr4peak` versus
 RC-property hypothesis. `strace` is a probe only, not part of the shipped
 test suite. Record source commit, driver hash, resolved encoder node, boot
 ID, and whether the run used an installed package or a build-tree override.
+
+## Installed-package verification of the completion branch (2026-11-11)
+
+Source commit `d486be20da66f9166c66c10f66afc65812aa0bc1` (a later
+`0447b59` changes docs only), clean tree of 157 tracked files,
+`tracked_source_sha256=c609d282c726620698b5f30d17c75da618bb179805ac448d41fb99e3fddbc682`,
+`source_dirty=0`. A fresh target build with the pinned `/usr/bin` toolchain
+produced `/usr/lib64/dri/v4l2_drv_video.so` SHA-256
+`8f87efde9b27bab31113ef8492deef1b563fe2a2bbc4f469a99cf821e64c907f`, with no
+undefined symbols and 25/25 target meson tests. This is an installed package
+(`LIBVA_DRIVERS_PATH=/usr/lib64/dri`), not a build-tree override and not a
+`DESTDIR` staging run. Rollback: the previous installed driver
+`e97a861f…` is preserved at
+`/home/xinyang/Lab/Bridge/tmp/rollback-final-20261111/v4l2_drv_video.so` and
+`/usr/local/share/iris-vaapi/backup/v4l2_drv_video.so`. No kernel module was
+changed or reloaded; boot ID stayed
+`7a26df99-f7ac-4148-9c80-135ba3adc661`, decoder `/dev/video17`
+(`iris_driver`, `Iris Decoder`), battery 98% and full, peak thermal zone
+37000 millic, no reset and no thermal breach.
+
+Host gates: `sh test/run-static-checks.sh` PASS,
+`meson test -C build-local --print-errorlogs` 25/25, `git diff --check`
+clean. Guarded target runs used `IRIS_EXPERIMENT_DIR` under
+`~/Lab/Bridge/tmp/gates-final-20261111` and explicit
+`V4L2_VA_PUBLISH=import`.
+
+| Gate | Result |
+| --- | --- |
+| four-codec Import matrix | 48/48 exact, all four codecs `content=frame-md5`, `submitted=48 capture=48 drain=1 timeouts=0 drops=0`, AV1 `noshow=23`; guard `status=complete` |
+| 120-frame AV1 clip (plain) | `frames=120 submitted=120 completed=120 import=120 copy=0 invisible=42`, framemd5 EXACT; guard `status=complete` |
+| in-context DRC clip | `frames=80 submitted=84 completed=84 import=42 copy=42 invisible=63`, framemd5 EXACT; guard `status=complete` |
+| 1080p 10-bit AV1 | <!-- P10_RESULT --> |
+| complete 19-case AV1 browser matrix | <!-- BROWSER_RESULT --> |

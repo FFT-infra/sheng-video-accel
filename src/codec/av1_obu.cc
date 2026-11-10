@@ -639,17 +639,20 @@ bool av1_build_frame_obu(std::vector<uint8_t>& payload,
         *reject_reason = "only AV1 profile 0 is supported";
         return false;
     }
-    // VA-API film grain synthesis needs two surfaces: current_frame holds the
-    // ungrained picture for reference, current_display_picture holds the
-    // grained picture for display (FFmpeg vaapi_av1.c swaps them when
-    // apply_grain is set). The Iris node produces one CAPTURE completion per
-    // submitted picture and this driver publishes one target per completion,
-    // so the client's display surface would stay empty. Rebuilding the
-    // film_grain_params() syntax alone was tried on the target: libdav1d
-    // decoded the rebuilt OBU cleanly, but the hardware run ended in
-    // "getImage: surface has no decoded pixels". Clients that export film
-    // grain as side data (apply_grain=0) decode these streams in hardware
-    // without this restriction.
+    // VA-API film grain synthesis names two surfaces in the picture
+    // parameters: current_frame holds the ungrained picture for reference,
+    // current_display_picture holds the grained picture for display (FFmpeg
+    // vaapi_av1.c points vaBeginPicture at the former when apply_grain is
+    // set). This driver publishes one target per CAPTURE completion, the one
+    // named by vaBeginPicture, and does not map the completion to
+    // current_display_picture, so the client's display surface stays empty.
+    // Rebuilding the film_grain_params() syntax alone was tried on the
+    // target: libdav1d decoded the rebuilt OBU cleanly and the firmware has
+    // HFI_PROP_AV1_FILM_GRAIN_PRESENT, but the hardware run still ended in
+    // "getImage: surface has no decoded pixels". Supporting this needs a
+    // second-target publish path, not just OBU syntax. Clients that export
+    // film grain as side data (apply_grain=0) decode these streams in
+    // hardware without this restriction.
     if (picture.film_grain_info.film_grain_info_fields.bits.apply_grain) {
         *reject_reason = "AV1 film grain synthesis needs a separate display surface";
         return false;
