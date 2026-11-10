@@ -4828,14 +4828,18 @@ installed-package runs.
 
 Installed driver: `/usr/lib64/dri/v4l2_drv_video.so` and its
 `msm_drv_video.so` alias, SHA-256
-`565073d3afa57f30a7234190170005daf510ed4f957778e5c1e610104bd2ab69`, size
+`da952fe4fe35896e215976213a1f5b6836cc5aa9ab9d97a1c08f55a909615da3`, size
 9120088. `/usr/local/share/iris-vaapi/install-manifest.txt` records
-`source_commit=3ef2e70e4e2938e62a910226d41d8c9fe3b3d84d`,
-`source_dirty=1`, `tracked_source_sha256=3e9f4d99bef87dc4632b2af0d7fe2c072a55711e28f972de8de32004f994c182`,
-`installed_at_utc=2026-11-09T23:26:26Z` and the same artifact hash. This is
-a live system install, not a `DESTDIR` stage. The broken build it replaced
-(`c4a2c267af1af1ef6d3994eb1edb6259d29f3c658dc1bb5ae863cb951c3e90e4`) was
-backed up by the installer. `vainfo` resolves the driver through the alias
+`source_commit=079480d8b208c5bb6695d4e91e6c1953c4d9010c`,
+`source_dirty=0`, `tracked_source_sha256=d42c37b46ca54d3c645940f59d6ef81033199f1480b735442d8901d3ab547460`,
+`installed_at_utc=2026-11-10T01:15:14Z` and the same artifact hash. This is the
+PR head, built from a clean tracked-source archive; the earlier
+`source_dirty=1` install (`565073d3…`) was the same code with a stale comment
+and was replaced by the installer. This is
+a live system install, not a `DESTDIR` stage. The installer backed up that
+previous `565073d3…` driver. The inherited broken build
+(`c4a2c267af1af1ef6d3994eb1edb6259d29f3c658dc1bb5ae863cb951c3e90e4`)
+was backed up by the first install of this batch. `vainfo` resolves the driver through the alias
 without `LIBVA_DRIVER_NAME`.
 
 ### Regression found in the inherited branch
@@ -4864,7 +4868,8 @@ assets, documented as such in `packaging/kernel/README.md`.
 
 ### Installed-package decode evidence
 
-`test/iris-matrix.sh` on the installed driver, no environment overrides:
+`test/iris-matrix.sh` on the installed PR-head driver, with
+`LIBVA_DRIVERS_PATH=/usr/lib64/dri` pointing at the installed package:
 `auto` and `V4L2_VA_PUBLISH=import` each produced 48/48 exact framemd5 for
 H.264, HEVC, VP9 and AV1 (`MATCH` against the software baseline for all eight
 pairs). Real 1280x720 AV1 clip: 120/120 exact framemd5, trace
@@ -4875,14 +4880,15 @@ errors=0 drops=0 timeouts=0 drains=1 misplaced=0`. In-context DRC clip
 resolution switch, `errors=0 drops=0 misplaced=0`. Import is qualified for
 AV1 on the 0001-0004 decode-order kernel; VP9 stays Copy.
 
-Local-file Chrome acceptance on the installed driver, `control-local`, used
-the AV1 1280x720 clip: `VaapiVideoDecoder`, platform flag `true`, 192 decoded
-frames / 0 dropped over an 8-second window, GPU process held `/dev/video17`
-and mapped `/usr/lib64/dri/v4l2_drv_video.so`, `hardware_decode=true`.
-Four-codec local acceptance runs (H.264, AV1, HEVC, VP9) on the
-build-tree override `d6d583b7d9f049ae6abbad5202a225486af3a96a67c380b00281fed3d8ac108e`
-each reported 240 frames / 0 drops; the installed-package control above is
-the release-path evidence. An `auto`-policy AV1 Chrome run produced 372
+Local-file Chrome acceptance on the installed PR-head driver used the AV1
+1280x720 clip: `VaapiVideoDecoder`, platform flag `true`, 282 decoded frames /
+0 dropped over a 12-second window, GPU process held `/dev/video17` and mapped
+`/usr/lib64/dri/v4l2_drv_video.so`, `hardware_decode=true`, trace 433
+`publish=import` and 6 `publish=drop`. An earlier control on the
+`565073d3…` install reported 192 frames / 0 drops over 8 seconds. Four-codec
+local acceptance runs (H.264, AV1, HEVC, VP9) on the build-tree override
+`d6d583b7d9f049ae6abbad5202a225486af3a96a67c380b00281fed3d8ac108e` each
+reported 240 frames / 0 drops. An `auto`-policy AV1 Chrome run produced 372
 `publish=import`, 6 `publish=drop` and 183 noshow/invisible completions.
 
 ### Real YouTube and Bilibili media streams
@@ -4895,40 +4901,48 @@ request was never sent. The cause was the cookie store waiting on the system
 keychain: `--password-store=basic --use-mock-keychain` makes both real pages
 load and play with no proxy at all (control runs: YouTube 4 decoded frames /
 7 `publish=import`, Bilibili 389 frames / 399 `publish=import`). The
-collected 10-second runs additionally used a local HTTP/CONNECT relay that
-resolves through the system resolver; it only forwards bytes and does not
-modify the site or the video. All of these runs use the installed driver with
-no `LIBVA_*` override.
+collected 10-second runs used a local HTTP/CONNECT relay that resolves
+through the system resolver; it only forwards bytes and does not modify the
+site or the video. All of these runs use the installed driver with no
+`LIBVA_*` override.
 
 `yt-dlp` downloaded unmodified real-site video-only streams, then
-`test/iris-browser-acceptance.sh` played each through the working Chrome
-path. All five passed with `hardware_decode=true`,
-`decoder_name=VaapiVideoDecoder`, `is_platform_video_decoder=true`, 501
-decoded frames / 0 dropped over a 20-second window, and the GPU process
-holding `/dev/video17`:
+`test/iris-browser-acceptance.sh` played each through the working Chrome path
+on the installed PR-head driver. All five passed with
+`hardware_decode=true`, `decoder_name=VaapiVideoDecoder`,
+`is_platform_video_decoder=true`, 300-301 decoded frames / 0 dropped over a
+12-second window, and the GPU process holding `/dev/video17`:
 
-| Site / format | Resolution | Codec | Publish trace |
+| Site / format | Resolution | Codec | Window frames / drops |
 | --- | --- | --- | --- |
-| YouTube `dQw4w9WgXcQ` format 397 | 854x480 | AV1 | 664 `import`, 1 `drop`, 0 errors |
-| YouTube `dQw4w9WgXcQ` format 247 | 1280x720 | VP9 | 708 `copy-gpu`, 60 `invisible`, 10 `drop`, 3 errors |
-| Bilibili `BV1GJ411x7h7` format 100024 | 1280x720 | AV1 | 647 `import`, 1 `drop`, 0 errors |
-| Bilibili `BV1GJ411x7h7` format 100111 | 1280x720 | HEVC | 643 `import`, 1 `drop`, 0 errors |
-| Bilibili `BV1GJ411x7h7` format 30064 | 1280x720 | H.264 | 650 `import`, 1 `drop`, 0 errors |
+| YouTube `dQw4w9WgXcQ` format 397 | 854x480 | AV1 | 300 / 0 |
+| YouTube `dQw4w9WgXcQ` format 247 | 1280x720 | VP9 | 300 / 0 |
+| Bilibili `BV1GJ411x7h7` format 100024 | 1280x720 | AV1 | 300 / 0 |
+| Bilibili `BV1GJ411x7h7` format 100111 | 1280x720 | HEVC | 300 / 0 |
+| Bilibili `BV1GJ411x7h7` format 30064 | 1280x720 | H.264 | 301 / 0 |
 
-Live pages with the same installed driver, collected through CDP Media and
+The earlier 20-second runs on the `565073d3…` install reported 501 frames / 0
+drops for each of the same five streams, with 664/647/643/650 `publish=import`
+for the four Import codecs and 708 `publish=copy-gpu` for VP9.
+
+Live pages on the installed PR-head driver, collected through CDP Media and
 the driver trace over a 10-second window:
 
 | Site | Decoder / platform | Window frames / drops | Codec | Trace |
 | --- | --- | --- | --- | --- |
-| `https://www.youtube.com/watch?v=dQw4w9WgXcQ` | `VaapiVideoDecoder`, `true` | 250 / 0 | AV1 1920x1080 | 730 `publish=import`, 37 `publish=drop`, 0 errors / timeouts / misplaced |
-| `https://www.bilibili.com/video/BV1GJ411x7h7` | `VaapiVideoDecoder`, `true` | 250 / 0 | HEVC 640x360 | 751 `publish=import`, 2 `publish=drop`, 0 errors / timeouts / misplaced |
+| `https://www.youtube.com/watch?v=dQw4w9WgXcQ` | `VaapiVideoDecoder`, `true` | 251 / 0 | AV1, 854x480 -> 1920x1080 during the window | 547 `publish=import`, 8 `publish=drop` |
+| `https://www.bilibili.com/video/BV1GJ411x7h7` | `VaapiVideoDecoder`, `true` | 250 / 0 | HEVC 640x360 | 742 `publish=import`, 3 `publish=drop` |
 
-`stats_first`/`stats_second` for YouTube were 488 -> 738 decoded frames with
-`dropped=0` at both ends; Bilibili was 494 -> 744 with `dropped=0`. Both GPU
+`stats_first`/`stats_second` for YouTube were 287 -> 538 decoded frames with
+`dropped=0` at both ends; Bilibili was 481 -> 731 with `dropped=0`. Both GPU
 processes held `/dev/video17`, the page URLs and titles came from the real
-sites, and `va init` resolved `/dev/video17` without an override. The
-`publish=drop` records are fail-closed results for abandoned client surfaces
-in a live streaming session; `getVideoPlaybackQuality()` reports 0 dropped
-frames in the measurement window, and neither trace has a `publish=error`, a
-timeout or a `misplaced` completion. These runs qualify the AV1 Import policy
-and record real-site hardware decode; they do not change the VP9 Copy policy.
+sites, and `va init` resolved `/dev/video17` without an override. YouTube's
+adaptive player opened a second AV1 session at 1920x1080 while the page was
+playing; the first session's drain reports
+`submitted=442 completed=439 errors=1 drops=2 timeouts=0 misplaced=0`. Both
+surfaces fail closed on that abandoned old session; the live 10-second window
+still reports 0 dropped frames and the second session publishes through
+Import. No `publish=error` appears in either browser log. The `publish=drop`
+records are fail-closed results for abandoned client surfaces in a live
+streaming session. These runs qualify the AV1 Import policy and record
+real-site hardware decode; they do not change the VP9 Copy policy.
