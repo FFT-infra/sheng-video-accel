@@ -194,16 +194,48 @@ Known gaps in the prototype, not hidden by the passing test:
 - The prototype does not handle `show_frame=0` client pictures, resolution
   changes, EOS, or a sequence restart through the internal DPB.
 
+## NOSHOW completion accounting (2026-11-10, commit `756269a`)
+
+Two host cases were added to `test/unit/session-test.cc` using the existing
+`FakeDevice::inject_altref_superframe()` shape — one token, first completion
+`V4L2_BUF_FLAG_ERROR` with no picture-type bit and no payload, second with
+pixels. That is the same shape an internal hidden install frame would produce:
+
+- `install hidden frame needs no extra target`: with `completions = 2`, the
+  shown frame completes, and `errors`, `drops` and `misplaced` all stay zero.
+  The first NOSHOW completion is consumed by the invisible-completion path
+  (`src/iris/session.cc:626-634`) without a second `Target`.
+- `import install hidden frame lends one buffer twice`: the Import window
+  queues exactly two CAPTURE slots, both carrying the same client fd, and both
+  return. No slot from the next picture is queued alongside them.
+
+`sh test/run-static-checks.sh` rc=0, `meson test -C build-local
+--print-errorlogs` 24/24, `git diff --check` rc=0.
+
+**Consequence:** kernel 0005 is not required *by this accounting*. The session
+already handles a two-completion access unit whose first completion has no
+client surface. What remains unverified is whether the Iris firmware on the
+0001-0004 module actually returns that NOSHOW completion with this exact shape
+(flags, timestamp, payload) — that is a target probe, not a host test. 0005
+would still be needed if the firmware recycles the buffer internally and
+returns only one completion, or if its NOSHOW completion carries no usable
+timestamp and would be counted as an error.
+
 ## Stop / next gate
 
-Decide the internal NOSHOW completion accounting before selecting this
-translator in `src/va/picture.cc`: either confirm `completions = 2` plus the
-existing invisible-completion path (`src/iris/session.cc:626-634`) consumes it
-without a client surface, or load kernel 0005 to recycle it in the kernel.
-Then re-derive the Import invariant (one client buffer in flight, no skipped
-picture, misplaced completions fail both surfaces), remove
-`wait_for_release()` and the bounded-sync tail in `src/va/surface.cc`, and
-add a real-clip libdav1d pixel oracle for the DPB path.
+Before selecting this translator in `src/va/picture.cc`:
+
+- Add a real-clip libdav1d pixel oracle for the DPB path (the current DPB test
+  uses constructed VA parameters, not encoded pixels).
+- Remove `wait_for_release()` and the bounded-sync tail in
+  `src/va/surface.cc`; the DPB translator holds no picture.
+- Re-derive the Import invariant on the target: one client buffer in flight,
+  no skipped picture, misplaced completions fail both surfaces.
+
+Then a guarded target probe answers whether the 0001-0004 module returns the
+NOSHOW completion to userspace with the shape the host test models
+(`scripts/iris-experiment-guard.sh -- ...`). A reset or a thermal breach is a
+failed experiment per `AGENTS.md`.
 
 Only after those are done does the target probe answer whether the 0001-0004
 module returns that NOSHOW completion to userspace
