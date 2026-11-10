@@ -45,6 +45,7 @@ jobs:
             hevc-parameter-sets \
             av1-obu \
             av1-translator \
+            av1-install-tu \
             encode-params \
             encode-session \
             prime-import \

@@ -77,3 +77,24 @@ bool av1_build_temporal_unit(std::vector<uint8_t>& out,
     const VADecPictureParameterBufferAV1& picture, const AV1SequenceState& sequence,
     const AV1ReferenceState& references, bool emit_sequence_header, uint8_t refresh_frame_flags,
     const uint8_t* tile_data, const std::vector<AV1TileEntry>& tiles, const char** reject_reason);
+
+// Build one OBU_FRAME payload (frame header plus tile group). Exposed so a
+// caller can place two frames in one temporal unit without duplicating the
+// bit-writing code.
+bool av1_build_frame_obu(std::vector<uint8_t>& payload,
+    const VADecPictureParameterBufferAV1& picture, const AV1SequenceState& sequence,
+    const AV1ReferenceState& references, uint8_t refresh_frame_flags,
+    const uint8_t* tile_data, const std::vector<AV1TileEntry>& tiles, const char** reject_reason);
+
+// One temporal unit containing a hidden reference-installation frame followed
+// by the shown frame. The hidden frame is built from its own VA parameters with
+// show_frame=0; it is not a shown frame with a bit flipped. Both frames share
+// the temporal delimiter and sequence header of this single unit.
+bool av1_build_install_temporal_unit(std::vector<uint8_t>& out,
+    const VADecPictureParameterBufferAV1& hidden, const AV1SequenceState& hidden_sequence,
+    const AV1ReferenceState& hidden_references, uint8_t hidden_refresh,
+    const uint8_t* hidden_tile_data, const std::vector<AV1TileEntry>& hidden_tiles,
+    const VADecPictureParameterBufferAV1& shown, const AV1SequenceState& shown_sequence,
+    const AV1ReferenceState& shown_references, uint8_t shown_refresh,
+    const uint8_t* shown_tile_data, const std::vector<AV1TileEntry>& shown_tiles,
+    bool emit_sequence_header, const char** reject_reason);

@@ -141,6 +141,17 @@ av1_translator_test = executable(
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('av1-translator', av1_translator_test)
 
+# A hidden reference-installation frame and a shown frame in one temporal
+# unit: structure, show_frame bits, and byte parity with the single-frame
+# builder. libdav1d decoding of a real two-frame fixture is checked by
+# av1-install-tu-roundtrip.sh, invoked from run-static-checks.sh.
+av1_install_tu_test = executable(
+  'av1-install-tu-test',
+  'av1-install-tu-test.cc',
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+test('av1-install-tu', av1_install_tu_test)
+
 # VA encode parameters -> V4L2 controls, both codecs, no hardware.
 encode_params_test = executable(
   'encode-params-test',
