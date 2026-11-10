@@ -1,8 +1,9 @@
 # Experiment: AV1 internal DPB slot translation (host spike, 2026-11-10)
 
 Branch: `exp/av1-noshow-dpb`, from `origin/main` `65686a2`.
-Status: **host spike phase only**. Nothing deployed to `sheng`, no `src/`
-change, no kernel module change, no capability claim.
+Status: **host prototype plus one guarded native V4L2 completion probe on
+`sheng`**. Nothing deployed, no kernel module change, no capability claim;
+the shipped `src/va/` path is still the qualified held-picture translator.
 
 ## Question
 
@@ -72,9 +73,11 @@ numbers, and drives nine pictures (one key frame, eight inter frames).
    to expect an internal completion, or kernel patch 0005 recycles that
    completion inside the kernel (`packaging/kernel/0005-*.patch` description:
    "Recycle successful NOSHOW CAPTURE buffers within the driver instead of
-   completing them through vb2"). **This is the point where 0005 becomes a real
-   prerequisite**, which corrects the earlier claim that only `av1.cc` and
-   `av1_obu.cc` would need changing.
+   completing them through vb2"). At this point 0005 looked like a real
+   prerequisite; the later session tests and the guarded target probe below
+   corrected that: the userspace `completions = 2` accounting already consumes
+   this completion, and the 0001-0004 firmware does return it. This paragraph
+   records the state of the spike before that evidence existed.
 
 5. A real AV1 OBU stream from `aomenc` decodes cleanly with libdav1d on this
    host, so the oracle is available: `ffmpeg -f obu -c:v libdav1d ...` produced
@@ -237,6 +240,64 @@ means the DPB translator itself still lacks a pixel-level oracle; the test
 proves the container shape is real AV1, not that this translator emits decodable
 pixels for arbitrary VA parameters.
 
+## Target completion probe (2026-11-10, unshipped scratch tool)
+
+The read-only guarded probe described in the previous section was run on
+`sheng` with the installed 0001-0004 module. The tool is a standalone native
+V4L2 program in `~/Lab/Bridge/tmp/av1-noshow-spike/`; it is **not** in the
+repository, loads no VA driver, changes no kernel module and uses no build-tree
+override. The decoder was resolved at runtime by `iris_driver` QUERYCAP
+(`scripts/lib/iris-node.sh`), with no fixed node number in the launcher.
+
+Input: a 320x180, 20-temporal-unit `testsrc2`/libaom-av1 lookahead OBU stream
+(SHA-256 `f2535e34…`). TU 9 contains two `OBU_FRAME`s, first `show_frame=0`
+and second `show_frame=1`; libdav1d decodes the whole stream to 20 frames on
+the host. Each TU was queued as one OUTPUT buffer with `timestamp = TU+1`, so
+token 0 remains reserved for "the firmware gave this completion no timestamp".
+
+Evidence (all artifacts under `~/Lab/Bridge/tmp/av1-noshow-probe/`):
+
+- Source commit `2e04d77585d2faf1ba3230dd8d261f21ed1735e0`, boot ID
+  `7a26df99-f7ac-4148-9c80-135ba3adc661` (unchanged after the run), kernel
+  `7.2.6-sm8550-g42f3b40-iris1`, resolved node `/dev/video17`, decoder
+  `Iris Decoder` / `iris_driver`, installed driver SHA-256 `278abdfe…`
+  (recorded but **not loaded**), module `qcom_iris`, patch set 0001-0004,
+  0005/0006 not built or loaded.
+- Guard: `scripts/iris-experiment-guard.sh -- …`, started at 65.5 C hottest
+  zone, limit 85000 mC, timeout 120 s, `status=complete`, finished in 6 s,
+  no thermal breach and no boot-ID change.
+- 22 CAPTURE completions for 20 TUs: 20 shown frames, one hidden-frame
+  completion, one empty `LAST` at drain. Every shown frame carries its own
+  token and 110592 bytes.
+- **TU 9 (token=10) produced exactly two completions with the same token:**
+  `flags=0x4041 ts=10 bytes=0` (`ERROR`, no picture-type bit, no payload),
+  then `flags=0x4011 ts=10 bytes=110592` (normal picture). The drain `LAST`
+  is `flags=0x104001 ts=0 bytes=0`.
+
+This is the answer the branch was missing. The 0001-0004 firmware does return
+the hidden frame's NOSHOW completion to userspace, and it carries the OUTPUT
+token in its timestamp rather than zero. That is the VP9 alt-ref shape the
+`completions = 2` session path (`src/iris/session.cc:626-634`) consumes: the
+first completion is `noshow_shape && !target.hidden`, so the target stays
+pending and the second completion publishes it. `make_av1_dpb()` sets
+`out.hidden` from the *shown* frame, which is `show_frame=1` for an install
+unit, so it takes that path correctly. **Kernel 0005 is not needed for this
+completion accounting**; loading it would instead recycle the buffer inside
+the kernel and, as `packaging/kernel/README.md` records, lose the frame with
+the current userspace.
+
+The zero-timestamp NOSHOW completion in `TEST-RESULTS.md` (2026-10-22) is a
+different case: a single `show_frame=0` client picture, whose completion is
+attributed by decode order to the oldest `Target::hidden`
+(`src/iris/session.cc:588-605`). Both paths exist on this module; this probe
+exercised the two-FRAME one.
+
+Boundaries of this evidence: it is a native MMAP CAPTURE probe, not a VA
+session, so there are no VA frame/drop counts and **the Import invariant has
+not been re-derived on the target**. It proves the completion shape, not that
+`make_av1_dpb()` can be selected safely. A reset or a thermal breach would
+have made this a failed experiment; neither happened.
+
 ## Stop / next gate
 
 Before selecting this translator in `src/va/picture.cc`:
@@ -249,20 +310,10 @@ Before selecting this translator in `src/va/picture.cc`:
 - Re-derive the Import invariant on the target: one client buffer in flight,
   no skipped picture, misplaced completions fail both surfaces.
 
-Then a guarded target probe answers whether the 0001-0004 module returns the
-NOSHOW completion to userspace with the shape the host test models
-(`scripts/iris-experiment-guard.sh -- ...`). **No such probe has been run and
-kernel 0005 has not been loaded in this experiment.** The target was re-read
-before this work: boot `7a26df99-f7ac-4148-9c80-135ba3adc661`, `Charging` at
-52% with USB online, but the hottest thermal zone was 90.7 C, above the
-guard's 85 C default (`scripts/iris-experiment-guard.sh:64`), so a guarded run
-would be refused before starting. A reset or a thermal breach is a failed
-experiment per `AGENTS.md`.
-
-Only after those are done does the target probe answer whether the 0001-0004
-module returns that NOSHOW completion to userspace
-(`scripts/iris-experiment-guard.sh -- ...`). A reset or a thermal breach is a
-failed experiment per `AGENTS.md`.
+The completion-shape question is answered by the guarded probe above. The
+remaining three items are prerequisites for **selecting** the translator, not
+for deciding whether kernel 0005 is needed. 0005/0006 remain unbuilt and
+unloaded; a reset or a thermal breach is a failed experiment per `AGENTS.md`.
 
 ## Environment note
 
