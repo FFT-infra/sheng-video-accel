@@ -328,7 +328,7 @@ capability or browser-hardware claim.
 | §8 Kernel and upstream sync | F1-F10 | open / decision recorded as "do not rebase"; 0005/0006 remain unbuilt and unloaded |
 | §9 Docs, consistency, hygiene | G1-G13 | open: only the AV1/default-path drift tied to PR #4 plus this branch's film-grain/10-bit evidence is fixed here |
 | §10 Encode | H1-H4 | H1/H2/H3/H4 re-examined and recorded with evidence and explicit non-goals; no encode code, capability entry or profile changed in this branch. H1 has a reproducible A/B protocol, H2 is settled as out of scope, H3 has a host-side audit, H4 has a named test-coverage gap |
-| §11 CI, tests, release plumbing | I1-I7 | open: host tests (25/25), guarded installed-package gates and the repo-owned 19-case AV1 browser matrix are in PR #4; packaging/CI automation for those target gates remains open |
+| §11 CI, tests, release plumbing | I1-I7 | open: host tests (25/25), guarded installed-package gates and the repo-owned 17-case AV1 browser matrix are in PR #4; packaging/CI automation for those target gates remains open |
 | §12 Priority | ranking | updated for the settled 0005 question |
 | §13 Non-goals | list | recorded |
 | §14 Done criteria | check | PR #4 is the single delivery PR; installed-package and browser gates pass. Remaining items are the explicitly open workstreams above, not blockers for this PR |

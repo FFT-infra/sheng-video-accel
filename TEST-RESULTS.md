@@ -5366,27 +5366,35 @@ ID, and whether the run used an installed package or a build-tree override.
 
 ## Installed-package verification of the completion branch (2026-11-11)
 
-Source commit `d486be20da66f9166c66c10f66afc65812aa0bc1` (a later
-`0447b59` changes docs only), clean tree of 157 tracked files,
-`tracked_source_sha256=c609d282c726620698b5f30d17c75da618bb179805ac448d41fb99e3fddbc682`,
+Installed from source commit `a53963d6ca162a1a01ee18fa49ea44443723019c`
+(the branch head at install time; later commits are docs-only and are not
+part of the installed binary), clean tree of 157 tracked files,
+`tracked_source_sha256=3afc83c329e7a89c66058eabe7a9f8aced405931b16fb8a63918eea8c10e4ab4`,
 `source_dirty=0`. A fresh target build with the pinned `/usr/bin` toolchain
 produced `/usr/lib64/dri/v4l2_drv_video.so` SHA-256
-`8f87efde9b27bab31113ef8492deef1b563fe2a2bbc4f469a99cf821e64c907f`, with no
+`323c07cbd42f5a152cfca4278a78d64d726534a85f95f0d0db22379e4317a37d`, with no
 undefined symbols and 25/25 target meson tests. This is an installed package
 (`LIBVA_DRIVERS_PATH=/usr/lib64/dri`), not a build-tree override and not a
-`DESTDIR` staging run. Rollback: the previous installed driver
-`e97a861f…` is preserved at
-`/home/xinyang/Lab/Bridge/tmp/rollback-final-20261111/v4l2_drv_video.so` and
-`/usr/local/share/iris-vaapi/backup/v4l2_drv_video.so`. No kernel module was
+`DESTDIR` staging run. Rollback: the previous installed drivers
+`8f87efde…` and `e97a861f…` are preserved at
+`/home/xinyang/Lab/Bridge/tmp/rollback-final-20261111/v4l2_drv_video.so`
+(`e97a861f…`), `/usr/local/share/iris-vaapi/backup/v4l2_drv_video.so`
+(`8f87efde…`), and the `final-install/src/build` tree. No kernel module was
 changed or reloaded; boot ID stayed
 `7a26df99-f7ac-4148-9c80-135ba3adc661`, decoder `/dev/video17`
-(`iris_driver`, `Iris Decoder`), battery 98% and full, peak thermal zone
-37000 millic, no reset and no thermal breach.
+(`iris_driver`, `Iris Decoder`), battery 98% and full.
+
+An earlier guarded run of the same hardware gates followed by the browser
+matrix in one guard was stopped by the guard at a CPU hot spot of 95100
+millic (> the 85000 limit) after 8 browser cases, with 0 FAILED. Per
+the project rule a thermal breach is a failed experiment, not evidence, so
+the hardware gates and the browser matrix were rerun as separate guarded
+runs after the tablet cooled back to 37000 millic.
 
 Host gates: `sh test/run-static-checks.sh` PASS,
 `meson test -C build-local --print-errorlogs` 25/25, `git diff --check`
 clean. Guarded target runs used `IRIS_EXPERIMENT_DIR` under
-`~/Lab/Bridge/tmp/gates-final-20261111` and explicit
+`~/Lab/Bridge/tmp/gates-final2-20261111` and explicit
 `V4L2_VA_PUBLISH=import`.
 
 | Gate | Result |
@@ -5394,5 +5402,5 @@ clean. Guarded target runs used `IRIS_EXPERIMENT_DIR` under
 | four-codec Import matrix | 48/48 exact, all four codecs `content=frame-md5`, `submitted=48 capture=48 drain=1 timeouts=0 drops=0`, AV1 `noshow=23`; guard `status=complete` |
 | 120-frame AV1 clip (plain) | `frames=120 submitted=120 completed=120 import=120 copy=0 invisible=42`, framemd5 EXACT; guard `status=complete` |
 | in-context DRC clip | `frames=80 submitted=84 completed=84 import=42 copy=42 invisible=63`, framemd5 EXACT; guard `status=complete` |
-| 1080p 10-bit AV1 | <!-- P10_RESULT --> |
-| complete 19-case AV1 browser matrix | <!-- BROWSER_RESULT --> |
+| 1080p 10-bit AV1 | 60/60 framemd5 EXACT against the libdav1d software oracle, `submitted=60 completed=60 errors=0 drops=0 timeouts=0 misplaced=0`, `publish=import` on all 60 frames, `invisible=13`; guard `status=complete` |
+| complete 17-case AV1 browser matrix | `PASS AV1 browser matrix mode=all`, `failures=0`, 17/17 media surfaces, guard `status=complete`; Chrome 全部 8 例 `decoder=VaapiVideoDecoder platform=True dropped=0` (`decoded=695..752`), Firefox 全部 9 例 `hw_log=True errors=0` (`decoded=724..751`, `dropped=0..12`); 本地 720p/1080p/4K/10-bit/altref/tiles + 在线 YouTube/B 站 + noav1 对照; 热峰值 61100 millic, 无 reset, boot 不变 |
