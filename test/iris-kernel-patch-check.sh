@@ -60,15 +60,15 @@ if [ -n "$bad" ]; then
     fail "recorded hash does not match: $bad"
 fi
 
-# Only the four patches may be listed, and every one of them must be.
+# Only the six patches may be listed, and every one of them must be.
 listed=$(awk '{print $2}' "$sums")
-for name in 0001 0002 0003 0004; do
+for name in 0001 0002 0003 0004 0005 0006; do
     printf '%s\n' "$listed" | grep -q "^$name-" \
         || fail "SHA256SUMS does not record $name"
 done
 count=$(printf '%s\n' "$listed" | grep -c '\.patch$' || true)
-[ "$count" -eq 4 ] \
-    || fail "SHA256SUMS must record exactly four patches, found $count"
+[ "$count" -eq 6 ] \
+    || fail "SHA256SUMS must record exactly six patches, found $count"
 for name in $(printf '%s\n' "$listed" | grep '\.patch$'); do
     [ -f "$kernel_dir/$name" ] || fail "SHA256SUMS records a file that is not there: $name"
 done
@@ -105,6 +105,12 @@ expect_marker "$kernel_dir/0004-media-iris-preserve-timestamps-on-error-buffers.
 # behind next to the new assignment.
 expect_marker "$kernel_dir/0004-media-iris-preserve-timestamps-on-error-buffers.patch" \
     '-		vb2->timestamp = 0;' 1
+expect_marker "$kernel_dir/0005-media-iris-recycle-decoder-buffers-for-non-display-pictures.patch" \
+    '+static int iris_hfi_gen2_requeue_output_buffer(' 1
+expect_marker "$kernel_dir/0005-media-iris-recycle-decoder-buffers-for-non-display-pictures.patch" \
+    '+	if (inst->domain == DECODER &&' 1
+expect_marker "$kernel_dir/0006-media-iris-discard-unmatched-timestamp-metadata.patch" \
+    '+	memset(&vbuf->timecode, 0, sizeof(vbuf->timecode));' 1
 
 # 0004's whole point is that the copy lands in the ERROR branch. Checking the
 # line order inside the hunk is what distinguishes that from a copy added to
@@ -188,4 +194,4 @@ if [ "$failures" -ne 0 ]; then
     printf 'FAIL kernel patches: %d problem(s)\n' "$failures" >&2
     exit 1
 fi
-printf 'PASS kernel patches: four files, recorded hashes, Iris-only paths\n'
+printf 'PASS kernel patches: six files, recorded hashes, Iris-only paths\n'

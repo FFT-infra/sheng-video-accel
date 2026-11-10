@@ -13,6 +13,11 @@ set -eu
 
 root=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
 test_dir="$root/test"
+# Host-only self-tests create temporary fixtures. Keep them under the project's
+# scratch root, not /tmp, unless the caller names a different directory.
+: "${IRIS_TEST_SCRATCH_ROOT:=$HOME/Lab/Bridge/tmp}"
+export IRIS_TEST_SCRATCH_ROOT
+mkdir -p "$IRIS_TEST_SCRATCH_ROOT"
 failures=0
 
 run() {
@@ -67,6 +72,7 @@ run iris-env-doc-check sh "$test_dir/iris-env-doc-check.sh" "$root"
 run iris-codec-matrix-check sh "$test_dir/iris-codec-matrix-check.sh" "$root"
 run iris-experiment-guard-self-test sh "$test_dir/iris-experiment-guard-self-test.sh" "$root"
 run iris-eos-check-self-test sh "$test_dir/iris-eos-check-self-test.sh" "$root"
+run iris-clip-trace-check-self-test sh "$test_dir/iris-clip-trace-check-self-test.sh" "$root"
 run iris-setup-path-check sh "$test_dir/iris-setup-path-check.sh" "$root"
 run iris-packaging-check sh "$test_dir/iris-packaging-check.sh" "$root"
 run iris-kernel-patch-check sh "$test_dir/iris-kernel-patch-check.sh" "$root"

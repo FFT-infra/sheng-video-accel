@@ -4814,3 +4814,309 @@ soak (`dual-h264` and `mixed`, 172800 frames per context) remains the
 standing concurrency record, and the 2026-10-24 Chrome 152 acceptance runs
 remain the standing browser-decode record. No rerun is attempted in this
 batch; a charged supply is the prerequisite for a later short window.
+
+
+## AV1 Import qualification, regression A/B and real-site browser runs (2026-11-10)
+
+Target: `sheng`, boot `2d5eed8d-57d7-4746-9e10-2cda0f4fe768` (unchanged
+before and after every run below), kernel `7.2.6-sm8550-g42f3b40-iris1`,
+booted with the 0001-0004 `qcom-iris` module only. The decoder node was
+resolved at runtime by `iris_driver` QUERYCAP as `/dev/video17`; the encoder
+was `/dev/video18`. Chrome was `Chrome/156.0.8078.79`. No `LIBVA_*`,
+`V4L2_VA_PUBLISH`, `V4L2_VA_ZERO_COPY` or node override was set for the
+installed-package runs.
+
+Installed driver: `/usr/lib64/dri/v4l2_drv_video.so` and its
+`msm_drv_video.so` alias, SHA-256
+`da952fe4fe35896e215976213a1f5b6836cc5aa9ab9d97a1c08f55a909615da3`, size
+9120088. `/usr/local/share/iris-vaapi/install-manifest.txt` records
+`source_commit=079480d8b208c5bb6695d4e91e6c1953c4d9010c`,
+`source_dirty=0`, `tracked_source_sha256=d42c37b46ca54d3c645940f59d6ef81033199f1480b735442d8901d3ab547460`,
+`installed_at_utc=2026-11-10T01:15:14Z` and the same artifact hash. This is a
+live system install, not a `DESTDIR` stage. The installed source is commit
+`079480d8b208c5bb6695d4e91e6c1953c4d9010c`; the later
+`54541f051c23d245518722eca01249a13eb6e766` commit changes TEST-RESULTS.md
+only and does not affect the driver. The earlier `source_dirty=1` install
+(`565073d3…`) was the same code with a stale comment and was replaced by the
+installer. The installer backed up that
+previous `565073d3…` driver. The inherited broken build
+(`c4a2c267af1af1ef6d3994eb1edb6259d29f3c658dc1bb5ae863cb951c3e90e4`)
+was backed up by the first install of this batch. `vainfo` resolves the driver through the alias
+without `LIBVA_DRIVER_NAME`.
+
+### Regression found in the inherited branch
+
+The inherited rewrite replaced the AV1 held-picture translator with a dynamic
+8-slot DPB, added `detached`/`shared_ptr` lifetime machinery and a UBWC
+modifier path, and claimed kernel patch 0005 recycled NOSHOW buffers. The
+loaded module was built from 0001-0004 (module timestamp 2026-10-22); 0005
+and 0006 were never loaded. `detached` was never set true. The two surfaces
+that decide qualification disagree with those claims if 0005 is loaded: it
+swallows the NOSHOW completions this userspace publishes by decode order.
+
+A/B on the same target, kernel, clips and 48-frame matrix:
+
+| Build | 48-frame four-codec matrix | 1280x720 AV1 real clip | Result |
+| --- | --- | --- | --- |
+| inherited rewritten build | 48/48 exact framemd5 for all four codecs | 33/120 frames under `auto`, 39/120 under `import`; each with 2 `publish=error` | fails to decode a real AV1 stream |
+| committed HEAD (`3ef2e70`) | 48/48 exact | 120/120 exact framemd5, 0 errors | correct |
+| HEAD plus only `V4L2_PIX_FMT_AV1` in `import_formats` | 48/48 exact | 120/120 exact framemd5, 120 `publish=import`, 0 errors/drops | AV1 zero-copy works |
+
+The synthetic matrix did not expose the regression; the real clip did. All
+twelve rewritten files were reverted to HEAD. The kept change is the one-line
+Import enabler in `src/va/driver.cc` plus the capability/docs updates in the
+same commit. Kernel patches 0005/0006 remain as unvalidated experimental
+assets, documented as such in `packaging/kernel/README.md`.
+
+### Installed-package decode evidence
+
+`test/iris-matrix.sh` on the installed PR-head driver, with
+`LIBVA_DRIVERS_PATH=/usr/lib64/dri` pointing at the installed package:
+`auto` and `V4L2_VA_PUBLISH=import` each produced 48/48 exact framemd5 for
+H.264, HEVC, VP9 and AV1 (`MATCH` against the software baseline for all eight
+pairs). Real 1280x720 AV1 clip: 120/120 exact framemd5, trace
+`120 publish=import`, `session finish submitted=120 completed=120
+errors=0 drops=0 timeouts=0 drains=1 misplaced=0`. In-context DRC clip
+`resize-av1.mkv` (1280x720 -> 854x480): 80/80 exact framemd5, 84 completions,
+`42 publish=import`, `1 publish=invisible`, `42 publish=copy-gpu` after the
+resolution switch, `errors=0 drops=0 misplaced=0`. Import is qualified for
+AV1 on the 0001-0004 decode-order kernel; VP9 stays Copy.
+
+Local-file Chrome acceptance on the installed PR-head driver used the AV1
+1280x720 clip: `VaapiVideoDecoder`, platform flag `true`, 282 decoded frames /
+0 dropped over a 12-second window, GPU process held `/dev/video17` and mapped
+`/usr/lib64/dri/v4l2_drv_video.so`, `hardware_decode=true`, trace 433
+`publish=import` and 6 `publish=drop`. An earlier control on the
+`565073d3…` install reported 192 frames / 0 drops over 8 seconds. Four-codec
+local acceptance runs (H.264, AV1, HEVC, VP9) on the build-tree override
+`d6d583b7d9f049ae6abbad5202a225486af3a96a67c380b00281fed3d8ac108e` each
+reported 240 frames / 0 drops. An `auto`-policy AV1 Chrome run produced 372
+`publish=import`, 6 `publish=drop` and 183 noshow/invisible completions.
+
+### Real YouTube and Bilibili media streams
+
+Chrome's default navigation on this tablet hung at `about:blank` even for
+plain `http://127.0.0.1`; `curl`/Python resolve and fetch normally through
+Tailscale MagicDNS and the Mihomo TUN. The netlog showed CONNECT, TLS
+handshake and certificate verification succeeding while the main-frame
+request was never sent. The cause was the cookie store waiting on the system
+keychain: `--password-store=basic --use-mock-keychain` makes both real pages
+load and play with no proxy at all (control runs: YouTube 4 decoded frames /
+7 `publish=import`, Bilibili 389 frames / 399 `publish=import`). The
+collected 10-second runs used a local HTTP/CONNECT relay that resolves
+through the system resolver; it only forwards bytes and does not modify the
+site or the video. All of these runs use the installed driver with no
+`LIBVA_*` override.
+
+`yt-dlp` downloaded unmodified real-site video-only streams, then
+`test/iris-browser-acceptance.sh` played each through the working Chrome path
+on the installed PR-head driver. All five passed with
+`hardware_decode=true`, `decoder_name=VaapiVideoDecoder`,
+`is_platform_video_decoder=true`, 300-301 decoded frames / 0 dropped over a
+12-second window, and the GPU process holding `/dev/video17`:
+
+| Site / format | Resolution | Codec | Window frames / drops |
+| --- | --- | --- | --- |
+| YouTube `dQw4w9WgXcQ` format 397 | 854x480 | AV1 | 300 / 0 |
+| YouTube `dQw4w9WgXcQ` format 247 | 1280x720 | VP9 | 300 / 0 |
+| Bilibili `BV1GJ411x7h7` format 100024 | 1280x720 | AV1 | 300 / 0 |
+| Bilibili `BV1GJ411x7h7` format 100111 | 1280x720 | HEVC | 300 / 0 |
+| Bilibili `BV1GJ411x7h7` format 30064 | 1280x720 | H.264 | 301 / 0 |
+
+The earlier 20-second runs on the `565073d3…` install reported 501 frames / 0
+drops for each of the same five streams, with 664/647/643/650 `publish=import`
+for the four Import codecs and 708 `publish=copy-gpu` for VP9.
+
+Live pages on the installed PR-head driver, collected through CDP Media and
+the driver trace over a 10-second window:
+
+| Site | Decoder / platform | Window frames / drops | Codec | Trace |
+| --- | --- | --- | --- | --- |
+| `https://www.youtube.com/watch?v=dQw4w9WgXcQ` | `VaapiVideoDecoder`, `true` | 251 / 0 | AV1, 854x480 -> 1920x1080 during the window | 547 `publish=import`, 8 `publish=drop` |
+| `https://www.bilibili.com/video/BV1GJ411x7h7` | `VaapiVideoDecoder`, `true` | 250 / 0 | HEVC 640x360 | 742 `publish=import`, 3 `publish=drop` |
+
+`stats_first`/`stats_second` for YouTube were 287 -> 538 decoded frames with
+`dropped=0` at both ends; Bilibili was 481 -> 731 with `dropped=0`. Both GPU
+processes held `/dev/video17`, the page URLs and titles came from the real
+sites, and `va init` resolved `/dev/video17` without an override. YouTube's
+adaptive player opened a second AV1 session at 1920x1080 while the page was
+playing; the first session's drain reports
+`submitted=442 completed=439 errors=1 drops=2 timeouts=0 misplaced=0`. Both
+surfaces fail closed on that abandoned old session; the live 10-second window
+still reports 0 dropped frames and the second session publishes through
+Import. No `publish=error` appears in either browser log. The `publish=drop`
+records are fail-closed results for abandoned client surfaces in a live
+streaming session. These runs qualify the AV1 Import policy and record
+real-site hardware decode; they do not change the VP9 Copy policy.
+
+## Real AV1 clip gate and the held-picture / DRC contract (2026-11-10)
+
+These runs add a hardware gate for real AV1 clips and record two behaviours
+that the earlier matrix could not distinguish. They do not change the
+installed driver.
+
+Target: `sheng`, boot `2d5eed8d-57d7-4746-9e10-2cda0f4fe768` (unchanged
+across the runs), kernel `7.2.6-sm8550-g42f3b40-iris1` with the 0001-0004
+module. The installed package was used, with no `LIBVA_DRIVER_NAME`,
+`LIBVA_DRIVERS_PATH`, `V4L2_VA_PUBLISH` or node override: SHA-256
+`da952fe4fe35896e215976213a1f5b6836cc5aa9ab9d97a1c08f55a909615da3`, manifest
+`source_commit=079480d8b208c5bb6695d4e91e6c1953c4d9010c`, `source_dirty=0`,
+installed at `2026-11-10T01:15:14Z`. The decoder resolved to `/dev/video17`.
+The tablet was discharging at 60% with no USB supply; these are short clip
+runs, not a soak or a power measurement.
+
+`test/iris-real-clip-gate.sh` was installed into a scratch tree on the target
+and run with `IRIS_REAL_CLIP_DIR` pointing at the existing 120-frame AV1 clip
+and the 80-frame in-context DRC clip plus their software framemd5 baselines.
+The gate decodes through the installed VA driver and calls
+`test/iris-clip-trace-check.sh` on the resulting framemd5 and driver trace.
+
+| Clip | Framemd5 | Session | Publish |
+| --- | --- | --- | --- |
+| `av1-720.webm`, 1280x720 | 120/120 exact | `submitted=120 completed=120 errors=0 drops=0 timeouts=0 drains=1 misplaced=0` | 120 `publish=import` |
+| `resize-av1.mkv`, 1280x720 -> 854x480 | 80/80 exact | `submitted=84 completed=84 errors=0 drops=0 timeouts=0 drains=2 misplaced=0` | 42 `publish=import`, 42 `publish=copy-gpu`, 1 `publish=invisible` |
+
+Both traces have zero `sync timeout token=` and zero `va sync released the
+held picture` lines. `vaDestroyContext` releases the AV1 held picture before
+the session drains (`src/va/picture.cc`), so the file decode reaches EOS
+without the bounded-sync release. VA-API has no separate flush entry point; a
+client that syncs each picture and keeps its context alive can still take the
+bounded-sync path in `src/va/surface.cc`, which is now documented as a client
+contract rather than a decoder defect.
+
+The DRC trace records `import rejected: client layout differs from the
+CAPTURE layout (client stride=1280 chroma=942080 size=1413120; capture
+stride=896 chroma=430080 size=647168)`, then configures the rebuilt CAPTURE
+pool with `memory=mmap`. The client kept exporting surfaces at the old
+1280x720 geometry after the change, so an Import pool would write 896-pitch
+pixels into a buffer the client reads at 1280 pitch. The GPU copy is the
+fail-safe publication for those pictures. `test/iris-clip-trace-check.sh`
+accepts the copy half only when that layout-mismatch line is present; a copy
+without the recorded reason fails the gate.
+
+On the host, `sh test/run-static-checks.sh` passed, `meson test -C
+build-local --print-errorlogs` reported 22/22, and `git diff --check` was
+clean. The new host-only tests are `av1-translator` (held-picture release at
+EOS, including refusing a stream that continues after guessed refresh flags)
+and `iris-clip-trace-check-self-test` (truncated framemd5, pixel mismatch,
+lost completion, unexpected copy, sync-bound release, declared and
+unexplained DRC copies). CI's required-test list names both. The checker was
+also run against the earlier PR-head traces: both passed, and mutating one
+`publish=import` to `publish=copy-gpu` made it fail.
+
+## Short guarded 4K AV1 Import probe (2026-11-10)
+
+This is a 30-frame capability probe, not a 4K streaming, thermal, power or
+long-window result. The tablet stayed on battery throughout: at the time of
+the guard run it was discharging at 60% with `qcom-battmgr-usb online=0` and
+`ucsi-source-psy-pmic_glink.ucsi.01 online=0`; a later check read 58% with
+`current_now=-213000`. `test/iris-power-sampler.sh` and the long-window soak
+remain deferred until a charger and a screen-off state are available.
+
+The clip was generated on the host with SVT-AV1 v3.1.2 as 3840x2160, 30
+frames, AV1 Main profile, 8-bit `yuv420p` (preset M9, CRF 40), then decoded
+with a software decoder to produce `av1-4k-sw.md5` (30 frame hashes,
+`#software: Lavf62.12.102`). The gate never generates its own oracle. The
+same installed package was used, with no `LIBVA_*`, publish or node override:
+SHA-256 `da952fe4fe35896e215976213a1f5b6836cc5aa9ab9d97a1c08f55a909615da3`,
+manifest `source_commit=079480d8b208c5bb6695d4e91e6c1953c4d9010c`,
+`source_dirty=0`, installed `2026-11-10T01:15:14Z`. Boot
+`2d5eed8d-57d7-4746-9e10-2cda0f4fe768`, kernel
+`7.2.6-sm8550-g42f3b40-iris1` with the 0001-0004 module; the decoder resolved
+by `iris_driver` QUERYCAP to `/dev/video17`, card type `Iris Decoder`.
+
+The decode ran under `scripts/iris-experiment-guard.sh` with
+`IRIS_EXPERIMENT_TIMEOUT_SECONDS=180` and
+`IRIS_EXPERIMENT_MAX_TEMP_MILLIC=85000`. The guard recorded
+`status=complete`, unchanged boot ID, started `2026-11-10T05:58:59Z` and
+finished `2026-11-10T05:59:29Z`; no reset or thermal breach, hottest sample
+39800 millidegrees C (39.8 C). The guard captures the child's stderr into
+`guard/command.stderr`, so that file is the driver trace for this run and the
+`out/driver.trace` written by the ffmpeg wrapper is empty.
+
+Driver trace: `capture configure 3840x2176 stride=3840 size=12533760
+visible=3840x2160 pool=32 memory=import firmware-min=4`, 30
+`publish=import`, and `session finish submitted=30 completed=30 errors=0
+drops=0 timeouts=0 drains=1 misplaced=0`. Zero `sync timeout token=` and zero
+`va sync released the held picture` lines. The VA framemd5 has 30 frame
+hashes with `#software: Lavf62.12.103`; the hash lines match the host software
+baseline exactly. `test/iris-clip-trace-check.sh` now compares only `^0,`
+frame-hash lines because the libavformat version in the header differs
+between the host that wrote the baseline and the target that decoded it; the
+host-only self-test covers that header-only difference as a passing case.
+
+`IRIS_REAL_CLIP_SET=4k` runs only this lane in
+`test/iris-real-clip-gate.sh`; `all` still runs the 720p and DRC clips. Both
+lanes were re-run on the target with the final checker and its scratch root
+set to the project's `~/Lab/Bridge/tmp`:
+
+| Lane | Framemd5 | Session | Publish |
+| --- | --- | --- | --- |
+| `av1-4k.mkv`, 3840x2160 | 30/30 exact | `submitted=30 completed=30 errors=0 drops=0 timeouts=0 drains=1 misplaced=0` | 30 `publish=import` |
+| `all` (`av1-720.webm`, `resize-av1.mkv`) | 120/120 and 80/80 exact | as recorded in the previous section | 120 import; 42 import + 42 copy-gpu + 1 invisible |
+
+Both gates printed `PASS real AV1 clip gate set=4k publish=import` and `PASS
+real AV1 clip gate set=all publish=import`. On the host, `sh
+test/run-static-checks.sh` passed, `meson test -C build-local
+--print-errorlogs` reported 22/22, and `git diff --check` was clean.
+
+## Firefox 158 browser decode and the AV1 held-picture client contract (2026-11-10)
+
+These runs add Firefox 158.0.1 to the browser evidence and re-run Chrome on
+the same live pages. They do not change the installed driver. Target: `sheng`,
+boot `2d5eed8d-57d7-4746-9e10-2cda0f4fe768` throughout, kernel
+`7.2.6-sm8550-g42f3b40-iris1` with the 0001-0004 module, installed package
+SHA-256 `da952fe4fe35896e215976213a1f5b6836cc5aa9ab9d97a1c08f55a909615da3`
+(`source_commit=079480d8b208c5bb6695d4e91e6c1953c4d9010c`, `source_dirty=0`),
+no `LIBVA_*`, publish or node override. The decoder resolved by
+`iris_driver` QUERYCAP to `/dev/video17`, `Iris Decoder`. Chrome was
+`156.0.8078.79`. The tablet was discharging (capacity fell from 58% to 54%
+during the runs, `usb=0`); these are short 10-second windows, not a soak or a
+power measurement.
+
+Firefox 158 has no CDP, so the evidence is a WebDriver BiDi
+`getVideoPlaybackQuality()` frame/drop delta over a 10-second window, Firefox's
+own `MOZ_LOG` (`PlatformDecoderModule`, `FFmpegVideo`, `MediaFormatReader`),
+and the driver's `V4L2_VA_TRACE=1` ledger. The harness lives in
+`~/Lab/Bridge/tmp/ff-final-20261110/` on the target. Firefox was launched on
+Wayland with `media.hardware-video-decoding.force-enabled=true` and
+`MOZ_DISABLE_RDD_SANDBOX=1`; the real-site runs use the same local HTTP/CONNECT
+relay as the Chrome runs and do not modify the site or the video. No
+`V4L2_VA_SYNC_TIMEOUT_MS` override was left in the harness: a longer timeout
+cannot release a picture that the same client thread must submit next.
+
+| Browser / page | Codec | Frame/drop window | Decoder evidence | Driver trace |
+| --- | --- | --- | --- | --- |
+| Firefox live YouTube | AV1 1920x1080 | 250 / 0 (first run 263 / 56) | `av1`, `hw:"true"` then `hw:"false"`; `NotifyError: NS_ERROR_DOM_MEDIA_DECODE_ERR ... avcodec_send_packet error: Input/output error` | 11 `publish=direct`, `submitted=11 completed=11 errors=0 drops=0`, `libva error: endPicture: AV1 stream continued after a picture was released at download time` |
+| Firefox live YouTube, `media.av1.enabled=false` | VP9 1920x1080 | 250 / 0 | `IsHardwareAccelerated=true`, 9 `VA-API FFmpeg init successful` | 518 `publish=direct`, 44 `publish=invisible`, no decode error |
+| Firefox live Bilibili | HEVC 640x360 | 251 / 0 | `hevc`, `ffmpeg video decoder (RDD remote)`, `hw:"true"` | 498 `publish=direct`, no decode error |
+| Firefox local 1080p H.264 clip | H.264 | 303 / 3 | `h264`, `hw:"true"` | 381 `publish=direct`, no decode error |
+| Firefox local VP9 / HEVC clips | VP9 / HEVC | 246 / 7 and 253 / 44 | `IsHardwareAccelerated=true` / `hw:"true"` | 297 and 308 `publish=direct`, no decode error |
+| Chrome live YouTube (control) | AV1 1920x1080 | 250 / 0 | `VaapiVideoDecoder`, `kIsPlatformVideoDecoder=true` | 725 `publish=import`, 3 `publish=drop`, GPU process holds `/dev/video17` |
+| Chrome live Bilibili (control) | HEVC 640x360 | 251 / 0 | `VaapiVideoDecoder`, `kIsPlatformVideoDecoder=true` | 761 `publish=import`, GPU process holds `/dev/video17` |
+
+Firefox's AV1 failure is the held-picture client contract, not a firmware
+reset: the driver trace shows no `session finish` with errors, no thermal or
+boot change, and two independent YouTube runs produce the same sequence.
+Firefox syncs each submitted surface from its decoder thread. The AV1
+translator holds one picture until the next access unit names the DPB slots it
+refreshed; that next access unit cannot arrive while the client waits on the
+current surface. After the bounded-sync timeout, `src/va/surface.cc` releases
+the held picture with guessed refresh flags, and the next real picture is
+refused by `src/codec/av1.cc` (`AV1 stream continued after a picture was
+released at download time`). Firefox then falls back to software AV1 and the
+window still reports 0 dropped frames; the fail-closed error is the reason the
+hardware AV1 claim cannot be made for this client. Disabling AV1 makes YouTube
+use VP9 hardware decode with 0 dropped frames, and Bilibili's HEVC page is
+hardware-decoded with 0 dropped frames. Chrome's live AV1 page does not take
+that sync path and reports 725 Import publications with 0 dropped frames in
+the same batch.
+
+`src/va/driver.cc` continues to expose `VAProfileAV1Profile0`; the capability
+table's AV1 `production: supported` records FFmpeg and Chrome hardware
+evidence, not a per-client guarantee. The READMEs and
+`data/iris-codec-capabilities.json` now name the Firefox AV1 synchronous-sync
+boundary alongside the existing `vaDestroyContext` / no-flush-entry-point
+notes. A per-client AV1 fix needs either an explicit VA-API flush entry point
+or a client that does not block the next access unit on the current surface;
+both are outside a driver-only change.

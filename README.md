@@ -15,7 +15,7 @@ Kernel patches, diagnostic scripts, and packaging specs are provided in this rep
 | H.264 | Constrained Baseline, Main, High | Import (zero-copy) | Bit-exact MD5, Fluster 72/135 |
 | HEVC | Main, Main 10 | Import (zero-copy) | Bit-exact MD5, Fluster 141/147 |
 | VP9 | Profile 0, Profile 2 | Copy (GPU blit) | Bit-exact MD5 |
-| AV1 | Profile 0 | Copy (GPU blit) | Bit-exact MD5 |
+| AV1 | Profile 0 | Import (zero-copy, decode-order kernel) | Bit-exact MD5, 2026-11-10 real-clip run |
 
 Hardware decode verification requires `VaapiVideoDecoder` reporting on the browser media surface with platform decoding enabled and zero frame drops over a 30-second window.
 
@@ -63,14 +63,14 @@ The driver selects buffer publishing policies dynamically:
 
 - **Direct**: Application exports an allocated surface after decode. Zero-copy.
 - **Import**: Application allocates and passes DMA-BUFs before decode. Zero-copy when running on decode-order patched kernels.
-- **Copy**: Firmware decodes to driver-owned slots; frames are blitted via GPU into application buffers. Used on stock kernels and for VP9/AV1.
+- **Copy**: Firmware decodes to driver-owned slots; frames are blitted via GPU into application buffers. Used on stock kernels, for VP9, and for the second half of an in-context AV1 resolution change. AV1 uses the Import policy on decode-order patched kernels (qualified 2026-11-10, see TEST-RESULTS.md).
 
 Imported DMA-BUF surfaces must match native CAPTURE layout (single linear object, 128-byte aligned pitch). Other configurations return `VA_STATUS_ERROR_INVALID_PARAMETER`.
 
 ## Known Limits
 
 - **VP9 zero-copy**: Requires the copy path due to client-side surface lifecycle constraints during multi-picture access unit completions.
-- **AV1 decoding**: Holds one picture buffer internally. Interactive pipelines syncing per-picture wait for the sync bound at the end of the stream.
+- **AV1 decoding**: The translator holds one picture until the next access unit names the DPB slots it refreshed. `vaDestroyContext` releases the tail before the session drains, so a file decode completes without a sync timeout; VA-API has no separate flush entry point, so a client that syncs every picture and keeps the context alive still reaches the bounded-sync release at the end of the stream. Firefox 158 syncs each surface from its decoder thread: the next access unit cannot arrive while that thread waits, so hardware AV1 fails closed (`AV1 stream continued after a picture was released at download time`) and Firefox falls back to software. Firefox hardware decode is verified for H.264, HEVC and VP9, including live YouTube with AV1 disabled and live Bilibili HEVC; Chrome and FFmpeg are the AV1 hardware clients. AV1 zero-copy Import is qualified on decode-order kernels. After an in-context resolution change, a client that keeps exporting surfaces at the old CAPTURE geometry cannot receive the new geometry through Import: the driver records the layout mismatch and publishes those pictures with a GPU copy instead.
 - **Stock kernel fallback**: On kernels without display-delay or sync-frame controls, decode degrades to GPU copy and requested IDRs are handled via intra-period repositioning.
 - **Encode features**: Single full-picture slice only. Multi-slice, tiles, B-frames, and ROI return `VA_STATUS_ERROR_UNIMPLEMENTED`.
 - **Packed headers**: Extradata emission reports `VA_ENC_PACKED_HEADER_NONE`. Parameter sets are carried in-band.

@@ -463,6 +463,14 @@ import token=<n> index=<i> fd=<n> backlog=<n> abandoned=0|1 lent=<n>/<n>
                                                       alt-ref superframe
                                                       reaches 2/2)
 import rejected: <why> (client stride=<n> chroma=<n> size=<n>; capture stride=<n> chroma=<n> size=<n>)
+                                                                     (after an in-context DRC: the
+                                                                      client kept exporting the old
+                                                                      geometry, so the rebuilt pool
+                                                                      uses Mmap and the pictures
+                                                                      publish with copy-gpu;
+                                                                      test/iris-clip-trace-check.sh
+                                                                      requires this line before
+                                                                      accepting those copies)
 import fence token=<n> fd=<n> waited=<n>ms          (only when the wait exceeds 20 ms)
 import token=<n> failed: no client buffer
 va create_surfaces count=<n> <w>x<h> fourcc=<fourcc> imported=0|1 fd=<n>
@@ -474,7 +482,9 @@ va begin_picture ctx=<n> surface=<n>
 va begin_picture ctx=<n> surface=<n> entrypoint=encslice
 va end_picture ctx=<n> surface=<n> bytes=<n> seq_start=0|1
 va end_picture ctx=<n> surface=<n> deferred                     (AV1: the picture is held until
-                                                                 the next AU names its slots)
+                                                                 the next AU names its slots, or
+                                                                 until vaDestroyContext releases
+                                                                 the tail before the session drain)
 va end_picture ctx=<n> surface=<n> entrypoint=encslice bytes=<n>
 encode open node=<path> codec=<fourcc> raw=<w>x<h> crop=<w>x<h> mode=cbr|vbr|cqp
             gop=<n> rate=<num>/<den>
