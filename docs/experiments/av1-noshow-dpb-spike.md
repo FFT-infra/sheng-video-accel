@@ -187,15 +187,17 @@ worth keeping in mind before this prototype is promoted:
 
 Known gaps in the prototype, not hidden by the passing test:
 
-- `remember()` still writes `references_.order_hint[s]` from the shown frame's
-  `order_hint`; the hidden install frame and GM state need their own values.
 - The test constructs plausible VA parameter structs, not pixels from a real
   encoder. There is no libdav1d pixel oracle for the DPB path yet; the only
   pixel oracle is the separate two-frame fixture in `av1-install-tu-roundtrip.sh`.
 - `out.hidden` is taken from the shown frame only. The internal hidden frame's
   completion is not represented as a separate target.
 - The prototype does not handle `show_frame=0` client pictures, resolution
-  changes, EOS, or a sequence restart through the internal DPB.
+  changes or EOS through the internal DPB.
+
+The `remember()` order-hint issue and the install-order bugs listed here are
+corrected by the "DPB semantics audit" section below; this paragraph records
+the state of the prototype at commit `45a36b9`.
 
 ## NOSHOW completion accounting (2026-11-10, commit `756269a`)
 
@@ -239,6 +241,56 @@ the oracle decodes the whole stream rather than the isolated unit. That also
 means the DPB translator itself still lacks a pixel-level oracle; the test
 proves the container shape is real AV1, not that this translator emits decodable
 pixels for arbitrary VA parameters.
+
+## DPB semantics audit against Radxa (2026-11-10)
+
+Re-reading Radxa `qcom-va-driver/src/av1.cpp` (`free_slot()`, `remember()`,
+`reference_slots()`, `av1_bitstream()`) against the prototype exposed a class of
+bugs the original `av1-dpb` test could not see: it set every `ref_frame_idx[i]`
+to 0, so no reference ever named a surface outside slot 0, and it never
+inspected the generated frame headers. A new test drives `ref_frame_idx[i] = 7`
+against the pending surface and failed with
+`AV1 reference is outside the internal DPB` before any fix.
+
+What was wrong, and what changed in `src/codec/av1_dpb.cc`:
+
+- **Install order.** The hidden install frame has to be registered in the DPB
+  before the shown frame's `ref_frame_idx[]` is resolved, otherwise a successor
+  that names the pending surface has no slot to point at. Radxa does
+  `frame(pending, ...)` → `remember(pending)` → `frame(current, ...)`. The
+  prototype resolved all references first and called `remember()` only after
+  the whole temporal unit was built.
+- **One slot refreshed twice.** Hidden and shown frames both used
+  `1 << install_slot`; the second `remember()` retired the first, so the
+  install disappeared. The shown frame now recomputes `free_slot()` after the
+  install and refreshes a different slot (or becomes the new pending picture).
+  A bit-level test now decodes both frame headers and asserts the two
+  `refresh_frame_flags` differ.
+- **Hidden key frames.** Forcing `frame_type = INTER_FRAME` on a pending key
+  frame made the writer emit inter-frame syntax for intra tiles. A hidden key
+  is now written as `INTRA_ONLY_FRAME`, matching Radxa's
+  `frame(... show=false, reset=false)`.
+- **Reference state.** `remember()` was fed the *current* picture's
+  `order_hint`, and `AV1ReferenceState` / `gm_params` were updated from the
+  remapped copy rather than the frame that actually refreshed the slot. The
+  hidden install frame now uses a snapshot of the pre-install reference state,
+  and each `remember()` / `av1_update_reference_gm()` call gets its own picture.
+- **Dead write.** `remapped.ref_frame_map[s] = slots_[s].surface` wrote surface
+  IDs into a field `av1_obu.cc` never reads; the bitstream codes the eight DPB
+  slot numbers directly. It is gone. `ref_frame_idx[]` is now the only field
+  remapped, resolved against `slots_[]` the same way Radxa's
+  `reference_slots()` does.
+- **Sequence restart.** A new sequence now resets `references_`, `slots_[]`
+  and the pending picture instead of translating the first frame against a DPB
+  from the previous sequence.
+- `out.hidden` is still taken from the shown frame only. For an install unit
+  the shown frame is `show_frame=1`, so the session's `completions = 2`
+  invisible path is selected; the internal hidden frame has no `Target`.
+
+Host gates after the fix: `sh test/run-static-checks.sh` rc=0,
+`meson test -C build-local --print-errorlogs` 24/24, `git diff --check` rc=0.
+This is still a host-only correctness fix. It does not select the translator,
+does not touch the shipped `src/va/` path, and adds no hardware evidence.
 
 ## Target completion probe (2026-11-10, unshipped scratch tool)
 
@@ -304,16 +356,22 @@ Before selecting this translator in `src/va/picture.cc`:
 
 - Give the DPB translator a pixel oracle that feeds real encoder-derived VA
   parameters through `make_av1_dpb()` and compares the rebuilt OBUs to a
-  software decode.
+  software decode. The `av1-dpb` test now proves the reference-slot semantics
+  and the two frames' `refresh_frame_flags` differ, but it still feeds
+  constructed VA structs and fake tile bytes, not encoder pixels.
+- Handle the remaining prototype gaps: client `show_frame=0` pictures,
+  resolution changes, EOS and sequence restart through the internal DPB. The
+  sequence-header reset is covered; the rest are not.
 - Remove `wait_for_release()` and the bounded-sync tail in
   `src/va/surface.cc`; the DPB translator holds no picture.
 - Re-derive the Import invariant on the target: one client buffer in flight,
   no skipped picture, misplaced completions fail both surfaces.
 
-The completion-shape question is answered by the guarded probe above. The
-remaining three items are prerequisites for **selecting** the translator, not
-for deciding whether kernel 0005 is needed. 0005/0006 remain unbuilt and
-unloaded; a reset or a thermal breach is a failed experiment per `AGENTS.md`.
+The completion-shape question is answered by the guarded probe above, and the
+Radxa-order bugs found in the audit are fixed on the host. The remaining items
+are prerequisites for **selecting** the translator, not for deciding whether
+kernel 0005 is needed. 0005/0006 remain unbuilt and unloaded; a reset or a
+thermal breach is a failed experiment per `AGENTS.md`.
 
 ## Environment note
 

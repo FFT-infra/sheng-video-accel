@@ -51,6 +51,7 @@ VADecPictureParameterBufferAV1 params(unsigned surface, bool key, unsigned hint)
 struct Obu {
     unsigned type;
     size_t size;
+    std::vector<uint8_t> payload;
 };
 
 std::vector<Obu> obus(const std::vector<uint8_t>& data)
@@ -78,10 +79,69 @@ std::vector<Obu> obus(const std::vector<uint8_t>& data)
         }
         if (c + size > data.size())
             throw std::runtime_error("truncated OBU payload");
-        out.push_back({ type, size });
+        out.push_back({ type, size, { data.begin() + static_cast<long>(c),
+                                     data.begin() + static_cast<long>(c + size) } });
         i = c + size;
     }
     return out;
+}
+
+// MSB-first bit reader over the frame header. The tests below only read the
+// fixed-position fields before any variable-length syntax.
+class Bits {
+public:
+    explicit Bits(const std::vector<uint8_t>& data)
+        : data_(data)
+    {
+    }
+    unsigned get(unsigned count)
+    {
+        unsigned value = 0;
+        for (unsigned i = 0; i < count; ++i) {
+            if (pos_ >= data_.size() * 8)
+                throw std::runtime_error("frame header ended early");
+            value = (value << 1) | ((data_[pos_ / 8] >> (7 - (pos_ % 8))) & 1u);
+            ++pos_;
+        }
+        return value;
+    }
+    void skip(unsigned count) { get(count); }
+
+private:
+    const std::vector<uint8_t>& data_;
+    size_t pos_ = 0;
+};
+
+// show_existing_frame(1), frame_type(2), show_frame(1), showable(1 when
+// hidden), error_resilient(1 unless forced), disable_cdf(1),
+// allow_screen_content(1), force_integer_mv(1 when allowed), frame_size_
+// override(1), then refresh_frame_flags(8) for a non-reset inter frame.
+struct FrameHeader {
+    unsigned frame_type;
+    bool show_frame;
+    uint8_t refresh;
+};
+
+FrameHeader frame_header(const Obu& frame, bool allow_screen_content, bool error_resilient)
+{
+    Bits b(frame.payload);
+    b.get(1); // show_existing_frame
+    const unsigned type = b.get(2);
+    const bool show = b.get(1) != 0;
+    if (!show)
+        b.get(1); // showable_frame
+    b.get(1); // error_resilient_mode
+    b.get(1); // disable_cdf_update
+    if (allow_screen_content) {
+        b.get(1); // allow_screen_content_tools
+        b.get(1); // force_integer_mv
+    }
+    b.get(1); // frame_size_override_flag
+    // The test fixtures disable order hints and set primary_ref_frame to
+    // PRIMARY_REF_NONE, so no order_hint or primary bits precede refresh.
+    const uint8_t refresh = static_cast<uint8_t>(b.get(8));
+    (void)error_resilient;
+    return { type, show, refresh };
 }
 
 void translate(const VADecPictureParameterBufferAV1& p,
@@ -171,6 +231,65 @@ void test_slot_exhaustion_and_install()
             ++frames;
     check(frames == 2, "install unit contains two FRAME OBUs");
     check(u.size() == 3 || u.size() == 4, "one TD, optional SEQ, two FRAMEs");
+    std::vector<FrameHeader> headers;
+    for (const auto& o : u)
+        if (o.type == 6)
+            headers.push_back(frame_header(o, false, true));
+    check(headers.size() == 2, "two frame headers are parseable");
+    check(!headers[0].show_frame, "install frame is hidden");
+    check(headers[1].show_frame, "shown frame is shown");
+    check(headers[0].refresh != 0, "install frame refreshes a slot");
+    check(headers[0].refresh != headers[1].refresh,
+        "hidden install and shown frame must not refresh the same slot");
+}
+
+// The successor must be able to name the pending picture through a real
+// ref_frame_idx value. The install has to register that picture in the
+// internal DPB *before* the shown frame's references are resolved.
+void test_install_resolves_references_to_pending_surface()
+{
+    auto t = iris::codec::make_av1_dpb(VAProfileAV1Profile0);
+    iris::codec::AccessUnit out;
+
+    auto key = params(100, true, 0);
+    for (unsigned i = 0; i < kSlots; ++i)
+        key.ref_frame_map[i] = VA_INVALID_SURFACE;
+    translate(key, *t, out);
+
+    for (unsigned frame = 2; frame <= 8; ++frame) {
+        auto p = params(100 + frame - 1, false, frame - 1);
+        for (unsigned i = 0; i < kSlots; ++i)
+            p.ref_frame_map[i] = i < frame - 1 ? static_cast<VASurfaceID>(100 + i)
+                : VA_INVALID_SURFACE;
+        for (unsigned i = 0; i < 7; ++i)
+            p.ref_frame_idx[i] = 0;
+        translate(p, *t, out);
+    }
+
+    auto full = params(108, false, 8);
+    for (unsigned i = 0; i < kSlots; ++i)
+        full.ref_frame_map[i] = 100 + i;
+    for (unsigned i = 0; i < 7; ++i)
+        full.ref_frame_idx[i] = 0;
+    translate(full, *t, out);
+
+    // Slot 1 is released, but the pending surface 108 stays live in slot 7
+    // and every reference name points at it.
+    auto p = params(109, false, 9);
+    for (unsigned i = 0; i < kSlots; ++i)
+        p.ref_frame_map[i] = 100 + i;
+    p.ref_frame_map[1] = VA_INVALID_SURFACE;
+    p.ref_frame_map[7] = 108;
+    for (unsigned i = 0; i < 7; ++i)
+        p.ref_frame_idx[i] = 7;
+    translate(p, *t, out);
+    check(out.completions == 2, "install unit declares two completions");
+    const auto u = obus(out.bytes);
+    unsigned frames = 0;
+    for (const auto& o : u)
+        if (o.type == 6)
+            ++frames;
+    check(frames == 2, "install unit contains two FRAME OBUs");
 }
 
 } // namespace
@@ -180,6 +299,7 @@ int main()
     try {
         test_no_hold();
         test_slot_exhaustion_and_install();
+        test_install_resolves_references_to_pending_surface();
     } catch (const std::exception& e) {
         std::cerr << "FAIL: " << e.what() << '\n';
         return 1;

@@ -64,133 +64,95 @@ public:
             || params.pic_info_fields.bits.frame_type == 0; // KEY_FRAME
         if (starts_sequence) {
             sequence_ = av1_sequence_state(params);
+            references_ = {};
+            for (Slot& slot : slots_)
+                slot.surface = VA_INVALID_SURFACE;
+            pending_ = {};
             seen_sequence_ = true;
             emit_sequence_header_ = true;
         }
-
-        // Which VA surfaces does this picture still need? A slot is free when
-        // no surface in ref_frame_map[] occupies it.
-        bool busy[kSlots] = {};
-        for (unsigned i = 0; i < kSlots; ++i) {
-            const VASurfaceID id = params.ref_frame_map[i];
-            if (id == VA_INVALID_SURFACE)
-                continue;
-            for (unsigned s = 0; s < kSlots; ++s)
-                if (slots_[s].surface == id)
-                    busy[s] = true;
-        }
-        int free_slot = -1;
-        for (unsigned s = 0; s < kSlots; ++s)
-            if (!busy[s]) {
-                free_slot = static_cast<int>(s);
-                break;
-            }
-
-        // Build a copy of the VA parameters whose ref_frame_idx[] names our
-        // internal slots. av1_obu.cc codes those indices verbatim and uses
-        // the same numbers to index AV1ReferenceState. Intra frames code no
-        // reference indices, so a VA_INVALID_SURFACE there is expected and
-        // must not be resolved.
-        VADecPictureParameterBufferAV1 remapped = params;
-        const bool intra = params.pic_info_fields.bits.frame_type == 0
-            || params.pic_info_fields.bits.frame_type == 2;
-        if (!intra) {
-            for (unsigned i = 0; i < 7; ++i) {
-                const VASurfaceID id = params.ref_frame_map[params.ref_frame_idx[i]];
-                require(id != VA_INVALID_SURFACE, "AV1 reference slot is empty",
-                    VA_STATUS_ERROR_INVALID_PARAMETER);
-                int slot = -1;
-                for (unsigned s = 0; s < kSlots; ++s)
-                    if (slots_[s].surface == id) {
-                        slot = static_cast<int>(s);
-                        break;
-                    }
-                require(slot >= 0, "AV1 reference is outside the internal DPB",
-                    VA_STATUS_ERROR_INVALID_PARAMETER);
-                remapped.ref_frame_idx[i] = static_cast<uint8_t>(slot);
-            }
-        }
-        for (unsigned s = 0; s < kSlots; ++s)
-            remapped.ref_frame_map[s] = slots_[s].surface;
 
         std::vector<uint8_t> tile_data;
         std::vector<AV1TileEntry> tiles;
         collect_tiles(picture, tile_data, tiles);
 
         const bool resets = av1_refreshes_all_slots(params);
-        // A pending picture is the one that could not refresh any slot. As
-        // soon as a successor still references it and has released a slot,
-        // that slot is where the pending picture is installed before the
-        // successor is decoded.
-        const bool need_install = pending_.valid && !resets && pending_referenced(params)
-            && free_slot >= 0;
-
         out.bytes.clear();
         out.deferred = false;
         out.sequence_start = starts_sequence;
+        // The internal hidden install frame has no client surface. Its
+        // completion is the first of two under this token, so the target must
+        // NOT be marked hidden: session.cc consumes that completion as the
+        // VP9 alt-ref "invisible" shape.
         out.hidden = params.pic_info_fields.bits.show_frame == 0;
         out.released_surface = VA_INVALID_ID;
         out.completions = 1;
 
         const char* reject = nullptr;
+        // A pending picture refreshed no slot. If this picture still names it
+        // and has dropped one reference, install it as a hidden NOSHOW frame
+        // first. The install must be registered in the DPB before the shown
+        // frame's ref_frame_idx[] is resolved, otherwise a reference to the
+        // pending surface has no slot to point at.
+        const bool need_install = pending_.valid && !resets && pending_referenced(params);
         if (need_install) {
-            // The current picture drops a reference, so one slot is free for
-            // the uncommitted picture. Recompute which one after excluding
-            // the surfaces this picture still names.
-            int install_slot = -1;
-            for (unsigned s = 0; s < kSlots; ++s) {
-                bool referenced = false;
-                for (unsigned i = 0; i < kSlots; ++i)
-                    if (params.ref_frame_map[i] == slots_[s].surface
-                        && slots_[s].surface != VA_INVALID_SURFACE)
-                        referenced = true;
-                if (!referenced) {
-                    install_slot = static_cast<int>(s);
-                    break;
-                }
-            }
+            const int install_slot = free_slot(params);
             require(install_slot >= 0, "AV1 reference map exceeds eight frames",
                 VA_STATUS_ERROR_INVALID_PARAMETER);
 
-            VADecPictureParameterBufferAV1 hidden_params = pending_.params;
-            hidden_params.pic_info_fields.bits.show_frame = 0;
-            hidden_params.pic_info_fields.bits.frame_type = 1; // INTER_FRAME
+            VADecPictureParameterBufferAV1 hidden = pending_.params;
+            hidden.pic_info_fields.bits.show_frame = 0;
+            hidden.pic_info_fields.bits.showable_frame = 0;
+            // A hidden key frame must not take the implicit all-slot refresh
+            // of a shown key frame. Radxa writes it as INTRA_ONLY for the same
+            // reason; an INTER_FRAME pending picture keeps its own type and
+            // its own references.
+            if (hidden.pic_info_fields.bits.frame_type == 0) // KEY_FRAME
+                hidden.pic_info_fields.bits.frame_type = 2; // INTRA_ONLY_FRAME
+            remap_references(hidden);
+
             const uint8_t hidden_refresh = static_cast<uint8_t>(1u << install_slot);
-            const uint8_t shown_refresh = static_cast<uint8_t>(1u << install_slot);
+            // The hidden frame is decoded against the DPB as it stood before
+            // the install; the shown frame against the DPB after it.
+            const AV1ReferenceState hidden_references = references_;
+            remember(pending_.surface_id, hidden_refresh, pending_.params);
+            av1_update_reference_gm(references_, hidden, hidden_refresh);
+
+            VADecPictureParameterBufferAV1 shown = params;
+            remap_references(shown);
+            const int shown_slot = free_slot(params);
+            const uint8_t shown_refresh = resets ? 0xff
+                : shown_slot >= 0 ? static_cast<uint8_t>(1u << shown_slot) : 0;
 
             const bool built = av1_build_install_temporal_unit(out.bytes,
-                hidden_params, sequence_, references_, hidden_refresh,
+                hidden, sequence_, hidden_references, hidden_refresh,
                 pending_.tile_data.data(), pending_.tiles,
-                remapped, sequence_, references_, shown_refresh,
+                shown, sequence_, references_, shown_refresh,
                 tile_data.data(), tiles,
                 emit_sequence_header_, &reject);
             require(built, reject ? reject : "AV1 install temporal unit rejected",
                 VA_STATUS_ERROR_UNSUPPORTED_BUFFERTYPE);
             out.completions = 2;
-            remember(pending_.surface_id, hidden_refresh, params);
             remember(picture.surface_id, shown_refresh, params);
-            av1_update_reference_gm(references_, hidden_params, hidden_refresh);
-            av1_update_reference_gm(references_, remapped, shown_refresh);
+            av1_update_reference_gm(references_, shown, shown_refresh);
+            pending_ = shown_refresh ? Pending {}
+                : Pending { params, std::move(tile_data), std::move(tiles), picture.surface_id, true };
         } else {
+            VADecPictureParameterBufferAV1 remapped = params;
+            remap_references(remapped);
+            const int slot = free_slot(params);
             const uint8_t refresh = resets ? 0xff
-                : free_slot >= 0 ? static_cast<uint8_t>(1u << free_slot) : 0;
+                : slot >= 0 ? static_cast<uint8_t>(1u << slot) : 0;
             const bool built = av1_build_temporal_unit(out.bytes, remapped, sequence_, references_,
                 emit_sequence_header_, refresh, tile_data.data(), tiles, &reject);
             require(built, reject ? reject : "AV1 temporal unit rejected",
                 VA_STATUS_ERROR_UNSUPPORTED_BUFFERTYPE);
-            remember(picture.surface_id, refresh, remapped);
+            remember(picture.surface_id, refresh, params);
             av1_update_reference_gm(references_, remapped, refresh);
+            pending_ = refresh ? Pending {}
+                : Pending { params, std::move(tile_data), std::move(tiles), picture.surface_id, true };
         }
         emit_sequence_header_ = false;
-
-        // With no free slot and no pending replay, this picture refreshes
-        // nothing. Keep it so the next picture can install it into whichever
-        // slot that next picture drops.
-        if (free_slot < 0 && !need_install) {
-            pending_ = { params, std::move(tile_data), std::move(tiles), picture.surface_id, true };
-        } else {
-            pending_ = {};
-        }
     }
 
     bool flush(AccessUnit&) override
@@ -217,6 +179,47 @@ private:
     {
         return std::find(std::begin(params.ref_frame_map), std::end(params.ref_frame_map),
             pending_.surface_id) != std::end(params.ref_frame_map);
+    }
+
+    bool referenced(const VADecPictureParameterBufferAV1& params, VASurfaceID surface) const
+    {
+        return surface != VA_INVALID_SURFACE
+            && std::find(std::begin(params.ref_frame_map), std::end(params.ref_frame_map), surface)
+                != std::end(params.ref_frame_map);
+    }
+
+    int free_slot(const VADecPictureParameterBufferAV1& params) const
+    {
+        for (unsigned s = 0; s < kSlots; ++s)
+            if (!referenced(params, slots_[s].surface))
+                return static_cast<int>(s);
+        return -1;
+    }
+
+    // libva's ref_frame_idx[] names entries in ref_frame_map[8]. The AV1 bit
+    // stream instead codes the eight DPB slot numbers directly (3 bits each),
+    // and av1_obu.cc uses the same numbers to index AV1ReferenceState. Resolve
+    // each VA surface to the internal slot that currently holds it.
+    void remap_references(VADecPictureParameterBufferAV1& remapped) const
+    {
+        const bool intra = remapped.pic_info_fields.bits.frame_type == 0
+            || remapped.pic_info_fields.bits.frame_type == 2;
+        if (intra)
+            return;
+        for (unsigned i = 0; i < 7; ++i) {
+            const VASurfaceID id = remapped.ref_frame_map[remapped.ref_frame_idx[i]];
+            require(id != VA_INVALID_SURFACE, "AV1 reference slot is empty",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
+            int slot = -1;
+            for (unsigned s = 0; s < kSlots; ++s)
+                if (slots_[s].surface == id) {
+                    slot = static_cast<int>(s);
+                    break;
+                }
+            require(slot >= 0, "AV1 reference is outside the internal DPB",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
+            remapped.ref_frame_idx[i] = static_cast<uint8_t>(slot);
+        }
     }
 
     void remember(VASurfaceID surface, uint8_t refresh,
