@@ -5251,6 +5251,25 @@ Firefox local windows show 5-13 dropped frames; Chrome and live-site windows
 report 0-2. These are 30-second playback windows, not a power or long-window
 soak.
 
+The dropped-frame column is browser-side `getVideoPlaybackQuality().droppedVideoFrames`,
+which also counts frames not presented in time, not driver `publish=drop`
+events. Every Firefox row reports `publish=direct` with `0 errors` and no
+`publish=drop` or `publish=misplaced`. The local corpus clips are shorter than
+the window (2.5-7.5 s against 30 s) and `test/playback.html` loops the video,
+so loop boundaries fall inside the sampled window; the local drop counts track
+the number of boundaries. Live-site windows have no loop and report 0-2. This
+is an attribution note, not a claim that the loop causes the drops.
+
+No gate in this repository requires a zero-drop browser window.
+`test/iris-browser-acceptance.sh` on `main` decides `hardware_decode` from the
+selected decoder, the platform flag, decoded frames, a node holder and an
+unchanged boot ID; it records `window_dropped_frames` as evidence only. The
+Firefox and Chrome PASS conditions in `test/iris-av1-browser-matrix.sh` do the
+same. AGENTS.md requires a media surface that reports the selected decoder
+with frame and drop evidence. Both READMEs now state that criterion; the
+earlier English sentence about "zero frame drops over a 30-second window" was
+stale documentation, not an enforced gate.
+
 The 10-bit and 4K rows are capability probes at 720p/2160p 8-bit and one
 720p 10-bit corpus clip; they do not extend the capability table's
 `va_profiles` beyond `AV1Profile0`, and the 10-bit row has no Chrome pixel

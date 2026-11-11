@@ -17,7 +17,7 @@ Kernel patches, diagnostic scripts, and packaging specs are provided in this rep
 | VP9 | Profile 0, Profile 2 | Copy (GPU blit) | Bit-exact MD5 |
 | AV1 | Profile 0 | Import (zero-copy, decode-order kernel) | Bit-exact MD5, 2026-11-11 installed-package and browser runs |
 
-Hardware decode verification requires the media surface to report the selected hardware decoder (for Chrome, `VaapiVideoDecoder` with `kIsPlatformVideoDecoder=true`; for Firefox, successful VA-API initialization) along with decoded and dropped frame counts over the test window. Minor dropped frames do not automatically disqualify hardware decode; verification checks driver traces for attribution.
+Hardware decode verification requires a media surface that reports the selected hardware decoder (for Chrome, `VaapiVideoDecoder` with `kIsPlatformVideoDecoder=true`; for Firefox, successful VA-API initialization) together with decoded and dropped frame counts over the test window.
 
 ### Encode
 
