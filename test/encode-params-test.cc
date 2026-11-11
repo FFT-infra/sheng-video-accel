@@ -153,6 +153,18 @@ void test_h264_translation()
     const iris::EncodeParams split_params = encoder->translate(split_input);
     check(split_params.bitrate == 4000000, "the target is the percentage of the maximum");
     check(split_params.peak_bitrate == 8000000, "the maximum above the target is the peak");
+
+    // FFmpeg renders the rate-control misc once, with the first picture. A
+    // later picture without it must keep that target: falling back to the
+    // sequence field reprogrammed the controller with the maximum on every
+    // following picture, which is an encoder alternating between 4 and 8
+    // Mbit/s and producing 8.
+    VAEncSequenceParameterBufferH264 split_sequence = sequence;
+    split_sequence.bits_per_second = 8000000;
+    const EncodePicture later = h264_input(split_sequence, picture, {});
+    const iris::EncodeParams later_params = encoder->translate(later);
+    check(later_params.bitrate == 4000000, "a picture without rate control keeps the target");
+    check(later_params.peak_bitrate == 8000000, "and keeps the ceiling");
     check(params.gop_size == 60, "GOP from intra_period");
     check(params.cabac, "CABAC from the picture flags");
     check(params.min_qp == 10 && params.max_qp == 40, "QP bounds from the rate-control misc");

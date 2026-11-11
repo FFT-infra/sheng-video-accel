@@ -129,11 +129,19 @@ public:
                 // A maximum above the target is the client's VBR ceiling.
                 if (rate->bits_per_second > out.bitrate)
                     out.peak_bitrate = rate->bits_per_second;
+                bitrate_ = out.bitrate;
+                peak_bitrate_ = out.peak_bitrate;
             }
             if (rate->min_qp)
                 out.min_qp = rate->min_qp;
             if (rate->max_qp)
                 out.max_qp = rate->max_qp;
+        } else if (bitrate_) {
+            // No rate control in this picture: keep what the client last
+            // configured instead of the sequence field, which is a rate and
+            // not the target the client asked for.
+            out.bitrate = bitrate_;
+            out.peak_bitrate = peak_bitrate_;
         }
         if (const auto* frame = static_cast<const VAEncMiscParameterFrameRate*>(
                 find_misc(picture.misc, VAEncMiscParameterTypeFrameRate))) {
@@ -255,6 +263,13 @@ public:
 private:
     VAProfile profile_;
     RateMode rate_mode_;
+    // The rate the client configured most recently. FFmpeg renders the
+    // rate-control misc buffer once, with the first picture, so every later
+    // picture arrives without it; falling back to the sequence field there
+    // would reprogram the controller on each picture with a value that is a
+    // rate rather than the client's target.
+    uint32_t bitrate_ = 0;
+    uint32_t peak_bitrate_ = 0;
 };
 
 } // namespace
