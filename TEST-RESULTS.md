@@ -5502,3 +5502,36 @@ The nine Firefox rows from the 2026-11-11 17-case matrix were re-checked
 against that condition on the target's existing artifacts: all nine pass
 (`decoded=724..751`, `published=875..974`, `errors=0`). This is a contract
 check against recorded traces, not a new browser playback run.
+
+## PR #6 tablet read-only survey (2026-11-12)
+
+WP4 feasibility and WP1 prerequisites were checked on `sheng` over SSH with
+read-only commands. No module was built, loaded or replaced; no reboot; no
+guarded decode run. Kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`7a26df99-f7ac-4148-9c80-135ba3adc661`, battery 27% Discharging, thermal
+zones 34000..37200 millic. The installed VA driver is still
+`323c07cbd42f5a15…`; the installed `qcom-iris.ko.zst` hash is
+`9b16a40179a08e414d0f4bb38ea54f5bb12ada2b9ce176f0dc6b3b602e7bc83d`.
+Decoder/encoder resolved by `iris_driver` were `/dev/video17` and
+`/dev/video18`; `display_delay`, `display_delay_enable` and
+`min_number_of_capture_buffers` are present on the active module.
+
+VPP backends: `/dev/fastrpc-cdsp` exists and `libcdsprpc.so.1` is installed,
+but no Hexagon compiler (`hexagon-clang`, `q6-clang`) is present. Vulkan
+1.4.341 and `libvulkan.so` are installed, `vulkan.pc` reports 1.4.341 and
+the freedreno ICD file is present, but `vulkaninfo`, `glslangValidator` and
+`glslc` are absent. Neither backend is buildable/verifiable as-is; WP4's
+current verdict is "no proven viable backend on this target", with the CDSP
+runtime probe still outstanding. This is a read-only inventory, not a VPP
+capability claim.
+
+WP1 module build prerequisites: `/boot/config-7.2.6-sm8550-g42f3b40` and
+`/proc/config.gz` are available (there is no `-iris1` config file), LLVM,
+`make`, `zstd`, `git` and `awk` are present, and `sudo -n` works. BTI/PAC are
+enabled in the running config (`CONFIG_ARM64_BTI=y`,
+`CONFIG_ARM64_PTR_AUTH=y`, `CONFIG_ARM64_PTR_AUTH_KERNEL=y`), so the module
+must be built with the same toolchain and config as the running kernel. No
+complete kernel source tree or `Module.symvers` was found under `~/Lab`, and
+no rollback copy of `qcom-iris.ko.zst` was found. The module-install step is
+therefore blocked until a source tree, symbol versions and a rollback copy
+are staged on the target.

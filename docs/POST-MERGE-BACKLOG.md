@@ -367,9 +367,19 @@ open questions: <items needing a maintainer decision>
 
 No code change. Recorded in `TEST-RESULTS.md` §"Post-merge baseline
 (2026-11-12)": live `origin/main` `4125b11`, identical local trees, clean
-worktree, green merge-commit CI, host gates 25/25.
+worktree, green merge-commit CI, host gates 25/25. PR #6 later added the §8
+checker, so its own host gates are 26/26.
 
 ### WP1 validate 0006 — next, before WP2/WP3
+
+**Current blocker (2026-11-12 read-only survey, `TEST-RESULTS.md` §"PR #6
+tablet read-only survey")**: the target has LLVM, `make`, `zstd`, `/proc/config.gz`
+and `/boot/config-7.2.6-sm8550-g42f3b40`, but no complete kernel source tree,
+no `Module.symvers` and no rollback copy of `qcom-iris.ko.zst`. BTI/PAC are
+enabled in the running config, so an out-of-tree module built with a different
+config is not acceptable. Stage the source tree, symbol versions and a
+verified rollback copy first; do not install a module without them. Battery
+was 27% Discharging during the survey; check power before any guarded run.
 
 Purpose: 0006 discards unmatched timestamp metadata instead of borrowing it;
 upstream saw a spurious LAST/EPIPE and 32 of 150 VP9 frames dropped on SM8750
@@ -415,6 +425,14 @@ and both READMEs. Re-run the four-codec matrix, 120-frame AV1 clip, DRC,
 write the reason in the backlog and do not implement WP3.
 
 ### WP4 VPP feasibility spike — conclusion first
+
+Read-only inventory on 2026-11-12 (`TEST-RESULTS.md` §"PR #6 tablet read-only
+survey"): `/dev/fastrpc-cdsp` and `libcdsprpc.so.1` exist but there is no
+Hexagon compiler; Vulkan 1.4.341, `libvulkan.so` and the freedreno ICD exist
+but `vulkaninfo`/`glslangValidator` are absent. Neither backend is
+buildable/verifiable as-is, and no CDSP session was opened. The current
+verdict is "no proven viable backend", subject to a runtime CDSP probe and
+package availability checks.
 
 We have no VPP. `radxa-pkg/qcom-va-driver` has optional CDSP and Vulkan VPP
 paths (scale, crop, rotate, bit-depth conversion, RGB overlay, HDR10 P010 to
