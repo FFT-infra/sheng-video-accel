@@ -22,13 +22,17 @@ jobs:
             libegl-dev libgles-dev libgbm-dev \
             ffmpeg
 
-      # The AV1 oracle checks in run-static-checks.sh skip themselves when
-      # ffmpeg lacks libdav1d; assert the decoder is present so a green CI
-      # always means the real software oracle ran, not an empty skip.
+      # The AV1 oracle checks in run-static-checks.sh fail loudly when their
+      # tools are missing, so a green CI always means the real software oracle
+      # ran. Assert both the decoder and the encoder the corpus needs.
       - name: Verify AV1 software oracle prerequisites
         run: |
           ffmpeg -hide_banner -decoders | grep -q libdav1d || {
             echo "CI ffmpeg has no libdav1d decoder" >&2
+            exit 1
+          }
+          ffmpeg -hide_banner -encoders | grep -q libaom-av1 || {
+            echo "CI ffmpeg has no libaom-av1 encoder" >&2
             exit 1
           }
 

@@ -1,13 +1,14 @@
 #!/bin/sh
 
-# Host-only pixel oracle for the two-frame temporal unit shape the internal
+# Host-only syntax oracle for the two-frame temporal unit shape the internal
 # DPB translator emits. No hardware, no V4L2 node, no driver.
 #
 # A real aomenc stream with a lookahead alt-ref contains one temporal unit
-# with two OBU_FRAMEs (the hidden NOSHOW frame and the shown frame). Extract
-# that unit and decode it with libdav1d; both frames must decode, and their
-# hashes must appear in the software decode of the source, in order. This is
-# an independent oracle: the VA driver never generated the source clip.
+# with two OBU_FRAMEs (the hidden NOSHOW frame and the shown frame). This
+# checks the unit's shape, and that an independent libdav1d decode of the
+# whole source produces at least two distinct frames. A single inter-frame
+# unit cannot be decoded standalone, so the extracted unit itself is not
+# pixel-hashed; the installed-package framemd5 gates cover pixels.
 
 set -eu
 
@@ -23,8 +24,12 @@ if ! command -v ffmpeg >/dev/null 2>&1; then
     exit 2
 fi
 if ! ffmpeg -hide_banner -decoders 2>/dev/null | grep -q libdav1d; then
-    echo "SKIP av1-dpb-oracle needs an ffmpeg with libdav1d" >&2
-    exit 0
+    echo "FAIL av1-dpb-oracle needs an ffmpeg with libdav1d" >&2
+    exit 2
+fi
+if ! ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libaom-av1; then
+    echo "FAIL av1-dpb-oracle needs an ffmpeg with libaom-av1" >&2
+    exit 2
 fi
 if ! command -v python3 >/dev/null 2>&1; then
     echo "FAIL python3 is required" >&2

@@ -25,8 +25,8 @@ if ! command -v ffmpeg >/dev/null 2>&1; then
     exit 2
 fi
 if ! ffmpeg -hide_banner -decoders 2>/dev/null | grep -q libdav1d; then
-    echo "SKIP av1-install-tu-roundtrip needs an ffmpeg with libdav1d" >&2
-    exit 0
+    echo "FAIL av1-install-tu-roundtrip needs an ffmpeg with libdav1d" >&2
+    exit 2
 fi
 if [ ! -s "$fixture" ]; then
     echo "FAIL missing AV1 two-frame fixture: $fixture" >&2

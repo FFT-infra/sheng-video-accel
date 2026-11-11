@@ -49,8 +49,8 @@ export WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-1}
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/1000}
 
 port_base=${IRIS_BROWSER_PORT_BASE:-9500}
-failures=0
 run_index=0
+cases=0
 
 firefox_profile() {
     profile=$1
@@ -105,9 +105,10 @@ run_firefox() {
     label=$1
     url=$2
     out=$out_base/$label
+    rm -rf "$out"
     mkdir -p "$out"
     profile=$out/profile
-    rm -rf "$profile"; mkdir -p "$profile"
+    mkdir -p "$profile"
     firefox_profile "$profile"
     port=$((port_base + run_index)); run_index=$((run_index + 1))
     log=$out/moz.log
@@ -127,7 +128,7 @@ run_firefox() {
     ( for i in $(seq 1 80); do sample_holders "$out"; sleep 1; done ) & sampler=$!
     sleep 12
     python3 -I "$here/iris-firefox-media.py" "$port" "$seconds" "$out/media.json" \
-        >"$out/media.stdout" 2>&1 || true
+        >"$out/media.stdout" 2>&1 || : >"$out/FAILED"
     kill "$sampler" 2>/dev/null || true
     cleanup; trap - EXIT
     python3 -I - "$out" "$label" <<'PY' || : >"$out/FAILED"
@@ -152,9 +153,15 @@ for _ in range(20):
     time.sleep(0.5)
 trace = open(os.path.join(out, "browser.log"), errors="replace").read()
 direct = trace.count("publish=direct")
-errors = trace.count("publish=error") + trace.count("session failed")
-print(f"  firefox {label}: decoded={dec} dropped={drop} first={first.get('decoded')} second={second.get('decoded')} hw_log={hw} direct={direct} errors={errors}")
-if not isinstance(dec, int) or dec <= 0 or not hw or errors > 0:
+imports = trace.count("publish=import")
+published = direct + imports
+errors = (trace.count("publish=error") + trace.count("publish=misplaced")
+          + trace.count("publish=drop") + trace.count("session failed"))
+print(f"  firefox {label}: decoded={dec} dropped={drop} first={first.get('decoded')} second={second.get('decoded')} hw_log={hw} direct={direct} import={imports} errors={errors}")
+# MOZ_LOG is process-wide; a VA-API init line alone does not prove this player's
+# decode. Require that this process published the window's frames through the
+# installed driver with no driver-side error, misplacement or drop.
+if not isinstance(dec, int) or dec <= 0 or not hw or published < dec or errors > 0:
     print(f"FAIL {label}: no hardware AV1 window or driver error"); sys.exit(1)
 print(f"PASS firefox {label}")
 PY
@@ -165,9 +172,10 @@ run_chrome() {
     label=$1
     url=$2
     out=$out_base/$label
+    rm -rf "$out"
     mkdir -p "$out"
     profile=$out/profile
-    rm -rf "$profile"; mkdir -p "$profile"
+    mkdir -p "$profile"
     port=$((port_base + run_index)); run_index=$((run_index + 1))
     proxy=''
     case ${IRIS_BROWSER_PROXY:-} in 1) proxy='--proxy-server=http://127.0.0.1:8899' ;; esac
@@ -186,7 +194,7 @@ run_chrome() {
     trap cleanup EXIT
     sleep 12
     python3 -I "$here/iris-chrome-media.py" "$port" "$seconds" "$out/media.json" \
-        >"$out/media.stdout" 2>&1 || true
+        >"$out/media.stdout" 2>&1 || : >"$out/FAILED"
     cleanup; trap - EXIT
     python3 -I - "$out" "$label" <<'PY' || : >"$out/FAILED"
 import json, os, sys
@@ -208,6 +216,7 @@ run_pair() {
     name=$1
     clip_path=$2
     url="file://$here/playback.html?src=file://$clip_path"
+    cases=$((cases + 2))
     run_firefox "ff-$name" "$url"
     run_chrome "chrome-$name" "$url"
 }
@@ -222,10 +231,15 @@ if [ "$mode" != sites-only ]; then
             run_pair "$(basename "$f" .mkv)" "$f"
         done
     fi
+    [ "$cases" -gt 0 ] || {
+        echo "FAIL local-only mode ran no clips: check IRIS_BROWSER_CLIP and IRIS_BROWSER_CLIPS_DIR" >&2
+        exit 2
+    }
 fi
 
 if [ "$mode" != local-only ]; then
     IRIS_BROWSER_PROXY=1
+    cases=$((cases + 5))
     run_firefox ff-youtube 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
     run_chrome chrome-youtube 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
     run_firefox ff-bilibili 'https://www.bilibili.com/video/BV1GJ411x7h7/'
@@ -235,7 +249,8 @@ if [ "$mode" != local-only ]; then
 fi
 
 failures=$(find "$out_base" -name FAILED -type f | wc -l | tr -d ' ')
-printf 'node=%s driver=%s boot=%s seconds=%s failures=%s out=%s\n' \
-    "$node" "$driver_sha" "$boot_before" "$seconds" "$failures" "$out_base"
+printf 'node=%s driver=%s boot=%s seconds=%s cases=%s failures=%s out=%s\n' \
+    "$node" "$driver_sha" "$boot_before" "$seconds" "$cases" "$failures" "$out_base"
+[ "$cases" -gt 0 ] || { echo "FAIL no browser cases ran" >&2; exit 1; }
 [ "$failures" -eq 0 ] || exit 1
-echo "PASS AV1 browser matrix mode=$mode"
+echo "PASS AV1 browser matrix mode=$mode cases=$cases"
