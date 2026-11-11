@@ -270,7 +270,7 @@ Lower priority than decode. Ground each item in the capability table's
 | I2 | Any new invariant gets a regression test that fails on the old code, plus a name in `.github/workflows/ci.yml` required list (G13) | red-on-old, green-on-new, CI inventory check passes |
 | I3 | `test/iris-clip-trace-check.sh` compares ordered `^0,` framemd5 lines because host and target `Lavf` versions differ | keep the header-only-difference self-test; do not reintroduce a whole-file `cmp` |
 | I4 | `test/run-static-checks.sh` is the single CI entry point for host-only checks; keep hardware suites out of it | unchanged on merge |
-| I5 | Provenance: source commit, tracked-source SHA-256, dirty flag, artifact hash; CI must stay clean (`source_dirty=0`) | CI "Generate and verify provenance" step passes |
+| I5 | Provenance: source commit, tracked-source SHA-256, dirty flag, artifact hash; CI must stay clean (`source_dirty=0`) | CI "Generate and verify provenance" step passes. **2026-11-12 update**: `deploy.sh` now re-hashes every tracked path on the target with `sha256sum -c` before the rebuild, so the digest in the manifest is measured where the build happens instead of injected from the sender; a controlled probe (marker file, same-size corruption, tampered file) confirmed the sync repairs content and the check rejects a tree that does not match. The same edit fixed an exclude pattern that had been silently withholding the two tracked files whose names begin with `build` |
 | I6 | `ldd -r` rejects undefined symbols in `v4l2_drv_video.so` | unchanged |
 | I7 | Distribution layers are reported separately: source, build, staged `DESTDIR`, installed package, target runtime, registry/release | never say "installed" or "released" from a source or CI check alone |
 

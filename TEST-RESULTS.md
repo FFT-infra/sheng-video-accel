@@ -6004,3 +6004,35 @@ against 1841 ms pinned. At this load the measurement is not sensitive to CPU
 clock state, so the DVFS caution that applies to the earlier per-frame finding
 does not change this number. It is still not a thermal, power or long-window
 result, and the 4K lane remains an opt-in Import capability probe.
+
+## Deploy sync: the digest is now measured on the target (2026-11-12)
+
+A run earlier in this session reported `PASS provenance verified` for a commit
+whose change was not in the tree on the tablet, and the sync was worked around
+by hand. The mechanism was reproduced here instead of argued about, from a
+clone carrying a marker comment in `src/codec/encode_h264.cc` and a scratch
+remote root (`~/Lab/Bridge/tmp/deploy-probe-target`, since removed):
+
+| Probe | Action | Result |
+| --- | --- | --- |
+| delivery | deploy at the marker commit | marker present on the target, both copies `f9331aa4…`, artifact `1def30fd…` |
+| repair | rewrite the target file at the same size | the next deploy restored `f9331aa4…`; `--checksum` does not trust size |
+| bite | append a line to the target file, verify the host listing | `src/codec/encode_h264.cc: FAILED`, exit 1 |
+
+So `rsync` delivered content in every probe, and the provenance gate still
+carried a gap: `provenance.py verify` compares the artifact against a manifest
+whose source identity this host injected, so a sync that delivered an older
+tree would produce a manifest that verifies. `deploy.sh` now re-hashes every
+tracked path on the target with `sha256sum -c` against the host's own listing
+before the rebuild, and fails the deploy on a mismatch. The digest in the
+manifest is then a measured fact about the target.
+
+The probe also found that the exclude pattern `build*` matched two tracked
+files by basename — `docs/build-and-deploy.md` and
+`packaging/kernel/build-module.sh` — so they had never reached the target
+while the digest claimed them as part of the identity. The directory patterns
+now end in a slash (`build*/`), and both files arrive.
+
+What is still unproven: the earlier session's mismatch was not reproduced
+from the current tree, so it is recorded as unexplained and now gated by
+measurement rather than by inspection.

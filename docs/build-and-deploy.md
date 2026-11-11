@@ -34,6 +34,13 @@ target. The remote lab directory is durable and defaults to
 resources and Qualcomm test tools
 stay there rather than under a disposable scratch directory.
 
+After the sync and before the rebuild, every tracked path is re-hashed on the
+target with `sha256sum -c` against the host's own listing. The digest the
+manifest records is therefore measured on the target rather than assumed from
+the sender: a sync that delivered an older tree fails here instead of
+producing a manifest that verifies against a library built from the wrong
+source. A checkout without `.git` has no file list to check and says so.
+
 Every successful deployment also writes
 `build/iris-vaapi-provenance.json`. Because `.git` is deliberately not copied
 to the target, `deploy.sh` resolves the full source commit and a SHA-256 over
@@ -44,6 +51,11 @@ and Meson versions, the target kernel, and the exact driver path, size and
 SHA-256. Deployment immediately verifies the manifest against the generated
 shared object; a copied, rebuilt or modified `.so` cannot retain a passing
 record accidentally.
+
+What the manifest verification alone does not prove is that the tree on the
+target is the tree the identity names — it compares the artifact and the
+identity against each other, both of which came from this host. The tracked
+path check above is what closes that gap.
 
 To re-check a deployed artifact later:
 

@@ -1,7 +1,9 @@
 #!/bin/sh
 
-# Sync this checkout to the V4L2 target, rebuild the driver from scratch, and
-# refuse to hand back a library that cannot resolve its own symbols.
+# Sync this checkout to the V4L2 target, verify that every tracked file
+# arrived with the content this checkout holds, rebuild the driver from
+# scratch, and refuse to hand back a library that cannot resolve its own
+# symbols.
 #
 # This exists because an earlier debugging session lost most of a day to a
 # stale incremental build: rsync preserved the original mtimes, Ninja decided
@@ -85,8 +87,12 @@ case "$source_commit" in
 esac
 
 if [ "$has_git" -eq 1 ]; then
-    source_digest=$(cd "$local_root" && git ls-files -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+    source_manifest=$(cd "$local_root" && git ls-files -z | xargs -0 sha256sum)
+    source_digest=$(printf '%s\n' "$source_manifest" | sha256sum | awk '{print $1}')
 else
+    # Without .git there is no file list to verify against; the caller's
+    # digest is still recorded, but it cannot be checked on the target.
+    source_manifest=
     source_digest=${IRIS_TRACKED_SOURCE_SHA256:-}
 fi
 case "$source_digest" in
@@ -119,16 +125,36 @@ REMOTE_PREP
 
 # --checksum instead of the default size/mtime heuristic: the whole point of
 # this script is that mtimes lie after a sync.
+# The directory patterns end in a slash so they match directories only: the
+# plain `build*` this replaced also dropped the tracked files whose names
+# begin with "build", and the digest check below then had nothing to verify
+# them against.
 rsync -rlv --checksum --delete \
     --exclude '.git' \
-    --exclude 'build*' \
-    --exclude 'output' \
-    --exclude 'chromium' \
-    --exclude '.playwright-cli' \
+    --exclude 'build*/' \
+    --exclude 'output/' \
+    --exclude 'chromium/' \
+    --exclude '.playwright-cli/' \
     --exclude '*.mp4' \
     --exclude '*.ivf' \
     --exclude '.DS_Store' \
     -- "$local_root/" "$host:$remote_root/" | tail -20
+
+# rsync is trusted to copy, not to have copied. The provenance gate below
+# verifies the built library against an identity this host injected, so a
+# sync that silently delivered an older tree would still produce a manifest
+# that verifies. Re-hash every tracked file where it landed: the digest the
+# manifest records is then a measured fact about the target, not a claim
+# about the sender. A tracker-free tree has no file list, and says so.
+if [ -n "$source_manifest" ]; then
+    echo "== verify the synced tree against $source_digest"
+    if ! printf '%s\n' "$source_manifest" \
+        | ssh -- "$host" "cd \"\$HOME/$remote_root\" && sha256sum -c --quiet -"; then
+        echo 'FAIL the synced tree does not match the tracked source digest' >&2
+        exit 1
+    fi
+    echo 'PASS synced tree matches the tracked source digest'
+fi
 
 echo "== rebuild"
 ssh -- "$host" "IRIS_REMOTE_ROOT='$remote_root' IRIS_SOURCE_COMMIT='$source_commit' IRIS_TRACKED_SOURCE_SHA256='$source_digest' IRIS_SOURCE_DIRTY='$source_dirty' IRIS_DEPLOY_INCREMENTAL='$incremental' sh -s" <<'REMOTE'
