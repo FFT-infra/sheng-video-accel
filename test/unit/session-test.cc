@@ -497,11 +497,10 @@ void test_released_hidden_install_unit_is_not_an_error()
     CHECK(!b.completed);
     CHECK(!b.error);
     // Both halves have the NOSHOW shape, so both take the invisible branch
-    // and stats().drops stays 0. The comment in handle_capture_returns()
-    // describes the alt-ref case, where the visible half reports the drop.
-    // The trace-accounting difference is recorded in the backlog (G14); the
-    // load-bearing invariant here is that an abandoned picture never becomes
-    // a decode error.
+    // and stats().drops stays 0. A visible payload completion would report
+    // the one drop in the branch below; with two NOSHOW halves there are no
+    // pixels to abandon. The load-bearing invariant here is that an
+    // abandoned picture never becomes a decode error.
     CHECK(h.session->stats().drops == 0);
 }
 

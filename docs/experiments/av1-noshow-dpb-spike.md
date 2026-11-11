@@ -497,8 +497,10 @@ Before the installed-package capability claim:
   from. A media surface must report the selected decoder with frame and drop
   evidence before any Firefox AV1 hardware claim.
 
-0005/0006 remain unbuilt and unloaded; a reset or a thermal breach is a
-failed experiment per `AGENTS.md`.
+0005 was not built or loaded for this spike; 0006 later gained a staged
+module-only build (WP1, `TEST-RESULTS.md` §"WP1: 0006 module build staged")
+but has not been loaded or run through a decode gate. A reset or a thermal
+breach is a failed experiment per `AGENTS.md`.
 
 ## Environment note
 

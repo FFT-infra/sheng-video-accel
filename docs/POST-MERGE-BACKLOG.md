@@ -242,13 +242,13 @@ runtime behaviour.
 | G5 | Stale capability boundary | local, gitignored `docs/github-community-assets.md:55` keeps VP9/H.264/HEVC as the production boundary | **closed**: same untracked scratch note; the tracked capability table and both READMEs are the source of truth |
 | G6 | Scratch root defaults | 9 tracked scripts default to `${TMPDIR:-/tmp}`; `test/README.md:166-169` uses `/tmp/iris-hardware-suite` | **closed as intentional, no code change**: every guarded run passes an explicit `IRIS_EXPERIMENT_DIR` under `~/Lab/Bridge/tmp` (§15, L4); the default is left alone so existing `guard.state` semantics do not drift |
 | G7 | Trace vocabulary drift | `docs/architecture.md` §8 had no checker; AGENTS.md calls this out | **done**: §8 matches the current emitters (`publish=import` on `capture noshow`, `encode drain result=complete|timeout outstanding`, `submitted token=`, error-side `publish=misplaced`/`publish=error`, plus the encode error records). `test/iris-trace-vocab-check.py` compares all 54 emitter prefixes against §8, with four named VA startup/teardown exceptions; it is registered in `run-static-checks.sh`, Meson and CI's required list |
-| G8 | License wording | `COPYING` says the project is released under LGPL-2.1 and MIT; all 54 SPDX-tagged source files are MIT, LGPL appears only in `COPYING.LGPL`, the Fedora spec and the Arch PKGBUILD; the spec's `MIT AND LGPL-2.1-or-later` is conservative | clarify `COPYING` and the spec comment as "derived work MIT; upstream LGPL text retained"; do not delete `COPYING.LGPL`; confirm the `/usr/share/licenses` install list still covers all three files |
-| G9 | Kernel patch licence headers | the six files in `packaging/kernel/` carry no SPDX header; they patch GPL-2.0 kernel files and are not compiled into the driver package | decide whether to add a header; confirm packaging licence fields need no change |
-| G10 | Merge commit identity | PR #2 merge commit author is `xinyang`, the local git user is `phxinyang` | note for release notes / author statistics; no code action |
+| G8 | License wording | `COPYING` said the project was released under LGPL-2.1 and MIT; the SPDX-tagged driver sources are MIT, LGPL appears only in `COPYING.LGPL` and the package metadata; the spec's `MIT AND LGPL-2.1-or-later` is conservative | **done**: `COPYING` now says the driver source is MIT and `COPYING.LGPL` retains upstream provenance; the spec and PKGBUILD comments say the same. `COPYING.LGPL` is retained, and both packages still install all three files under `/usr/share/licenses` |
+| G9 | Kernel patch licence headers | the six files in `packaging/kernel/` carry no SPDX header; they patch GPL-2.0 kernel files and are not compiled into the driver package | **closed, no header added**: the patched kernel files keep their own GPL-2.0-only identifier; adding an SPDX line to a patch would change the `SHA256SUMS` pins the downstream kernel spec verifies. `packaging/kernel/README.md` now records this. The MIT driver's licence fields are unchanged |
+| G10 | Merge commit identity | merge commits `4125b11` and `65686a2` are authored `xinyang`, while later commits use `phxinyang`; the e-mail is the same | **closed as a release-note fact**: same account, two display names in history. No code action, no history rewrite; mention it when compiling author statistics or release notes |
 | G11 | `FIX-LOG.md` 待办 section | local, gitignored file; not tracked in any ref | **closed**: not a shipped checklist; this backlog is the tracked ledger |
 | G12 | 4K lane discoverability | `IRIS_REAL_CLIP_SET=4k` is opt-in and not part of `all`; `test/README.md` records it | **done**: `test/README.md:24` states a guarded 4K probe is not a thermal, power or long-window result |
 | G13 | CI required-test list | `.github/workflows/ci.yml` named 19 of the then-25 Meson tests | **done**: all names are now listed, including the new `iris-trace-vocab-check`; `meson test` at `:85` already ran all of them, so this closed an inventory-guard gap, not a skipped-test gap |
-| G14 | Released hidden-install accounting | a released `inject_hidden_install_unit()` target emits two `publish=invisible` records and no `publish=drop`, while `session.cc` says one abandoned picture is one drop; `iris-clip-trace-check.sh` counts invisible records | host test `released hidden install unit is not an error` now covers the shape; open: decide whether the trace should carry an explicit per-picture drop marker |
+| G14 | Released hidden-install accounting | a released `inject_hidden_install_unit()` target emits two `publish=invisible` records and no `publish=drop`, while `session.cc` said one abandoned picture is one drop; `iris-clip-trace-check.sh` counts invisible records | **closed, no new trace record**: a visible payload completion reports the one drop, but two NOSHOW halves have no pixels to abandon, so `drops=0` is correct. No per-picture marker is added; §8, the `session.cc` comment and the host test now state the same rule, and the trace vocabulary stays unchanged |
 
 ## 10. Workstream H — encode backlog
 
@@ -326,8 +326,8 @@ node, or a running GPU process is not a capability or browser-hardware claim.
 | §5 Chrome VP9 Import | C1-C5 | open: session-side window is fixed (FFmpeg 515/515, misplaced=0); Chrome reuses a VP9 surface in `beginPicture`, which releases the still-in-flight picture. In the forced-Import run `submitted=718 completed=177 drops=541`, with 564 of 768 import queueings abandoned; the forced-Copy baseline completed 708 with `drops=1`. The H.264 control had 2 abandoned and 4 drops out of 670; the numbers are in `TEST-RESULTS.md` §"Why VP9 Import still is not qualified". Qualifying this needs a retained-target ownership model, its own host regressions for the misplaced/detached case, and a fresh target gate — not a rename of `publish=drop` |
 | §6 AV1 feature completeness | D1-D6 | D1 done for exact framemd5: 1920x1080 60-frame 10-bit clip `EXACT`, 60 Import, 0 errors/drops/misplaced on 2026-11-11. D2 settled as a user-space second-target publish gap, not a kernel limitation: scratch OBU writer was libdav1d-clean and the firmware carries the grain capability flag, but the display surface stayed empty; host guard keeps the refusal fail-closed. D4 partly covered by the A11 corpus (tiles, lookahead, still-picture, lossless exact; superres and global motion excluded with a recorded encoder reason). Still open: 10-bit browser pixel comparison, 12-bit, large-scale tile, D3 (128x128 SB / GStreamer), D5/D6 negative tests |
 | §7 Long-window, power, cost | E1-E5 | open / blocked on charger |
-| §8 Kernel and upstream sync | F1-F10 | open / decision recorded as "do not rebase"; 0005/0006 remain unbuilt and unloaded |
-| §9 Docs, consistency, hygiene | G1-G14 | G1, G2, G3, G7, G12 and G13 done; G4, G5, G6 and G11 closed (untracked scratch notes, intentional scratch default); G8 (licence wording), G9 (patch SPDX headers), G10 (merge-commit identity note) and G14 (per-picture drop marker for a released hidden install unit) remain open |
+| §8 Kernel and upstream sync | F1-F10 | open / decision recorded as "do not rebase"; 0005 is unbuilt and unloaded, 0006 has a staged module build only (WP1) and has not been loaded |
+| §9 Docs, consistency, hygiene | G1-G14 | all closed: G1, G2, G3, G7, G8, G12, G13 and G14 done; G4, G5, G6, G9, G10 and G11 closed with explicit reasons (untracked scratch notes, intentional scratch default, kernel SPDX provenance, release-note identity fact, no new trace marker) |
 | §10 Encode | H1-H4 | H1/H2/H3/H4 re-examined and recorded with evidence and explicit non-goals; no encode code, capability entry or profile changed in this branch. H1 has a reproducible A/B protocol, H2 is settled as out of scope, H3 has a host-side audit, H4 has a named test-coverage gap |
 | §11 CI, tests, release plumbing | I1-I7 | open: host tests (25/25), guarded installed-package gates and the repo-owned 17-case AV1 browser matrix are in PR #5; packaging/CI automation for those target gates remains open |
 | §12 Priority | ranking | updated for the settled 0005 question |
@@ -370,28 +370,32 @@ No code change. Recorded in `TEST-RESULTS.md` §"Post-merge baseline
 worktree, green merge-commit CI, host gates 25/25. PR #6 later added the §8
 checker, so its own host gates are 26/26.
 
-### WP1 validate 0006 — next, before WP2/WP3
+### WP1 validate 0006 — build staged, target validation pending
 
-**Current blocker (2026-11-12 read-only survey, `TEST-RESULTS.md` §"PR #6
-tablet read-only survey")**: the target has LLVM, `make`, `zstd`, `/proc/config.gz`
-and `/boot/config-7.2.6-sm8550-g42f3b40`, but no complete kernel source tree,
-no `Module.symvers` and no rollback copy of `qcom-iris.ko.zst`. BTI/PAC are
-enabled in the running config, so an out-of-tree module built with a different
-config is not acceptable. Stage the source tree, symbol versions and a
-verified rollback copy first; do not install a module without them. Battery
-was 27% Discharging during the survey; check power before any guarded run.
+**Staged on 2026-11-12 (`TEST-RESULTS.md` §"WP1: 0006 module build staged")**:
+`packaging/kernel/build-module.sh` now reproduces the module-only build on
+`sheng`. Source tree `ianchb/sm8550-mainline` `42f3b40c702a`, `.config` from
+`/proc/config.gz`, `localversion` derived from `uname -r`, a 333-entry
+video-subsystem `Module.symvers` regenerated from `/proc/kallsyms`, and
+0001-0004 + 0006 applied in order (0005 absent). The built module's vermagic
+is `7.2.6-sm8550-g42f3b40-iris1`, its 136 undefined symbols are all exported
+by the running kernel, and a rollback copy was compared byte-for-byte with the
+installed `qcom-iris.ko.zst`. This is a build and identity result only: no
+module was installed, no reboot, no decode run, no capability claim. The
+earlier read-only survey's "no source tree / no Module.symvers / no rollback
+copy" blocker is closed.
 
 Purpose: 0006 discards unmatched timestamp metadata instead of borrowing it;
 upstream saw a spurious LAST/EPIPE and 32 of 150 VP9 frames dropped on SM8750
 when CAPTURE consumption was slow. SM8550 has no recorded reproduction yet.
+A search of retained guard artifacts found no EPIPE/spurious-LAST record, so
+the baseline defect is still unreproduced.
 
-Build and install **0001-0004 + 0006 only**. WP1 does not install 0005:
-`packaging/kernel/README.md` records that recycling NOSHOW buffers in the
-kernel loses frames with this userspace, so loading both at once would make
-any AV1 matrix failure unattributable. 0005 stays for WP3. Build per the
-module guide, checking `LOCALVERSION`, `Module.symvers` provenance and
-BTI/PAC-related build flags on the target first; keep the 0001-0004 and stock
-modules for rollback.
+Install **0001-0004 + 0006 only**, and only after explicit approval for that
+target change. WP1 does not install 0005: `packaging/kernel/README.md`
+records that recycling NOSHOW buffers in the kernel loses frames with this
+userspace, so loading both at once would make any AV1 matrix failure
+unattributable. 0005 stays for WP3.
 
 Before loading 0006, reproduce the slow-CAPTURE defect on the 0001-0004
 baseline; the repo has no slow-consumer VP9 harness yet, so this needs either a

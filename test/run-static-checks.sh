@@ -34,7 +34,7 @@ run() {
 # of the trace checkers shipped broken for a while because a typo made it grep
 # a path instead of a file, so parse every script we own on every run.
 echo "== shell syntax"
-for script in "$test_dir"/*.sh "$test_dir"/remote/*.sh "$root"/scripts/*.sh; do
+for script in "$test_dir"/*.sh "$test_dir"/remote/*.sh "$root"/scripts/*.sh "$root"/packaging/kernel/*.sh; do
     [ -f "$script" ] || continue
     run "syntax $(basename "$script")" sh -n "$script"
 done

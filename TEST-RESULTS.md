@@ -5536,6 +5536,10 @@ no rollback copy of `qcom-iris.ko.zst` was found. The module-install step is
 therefore blocked until a source tree, symbol versions and a rollback copy
 are staged on the target.
 
+This was the state at survey time. The later WP1 build section records that
+the source tree, symbol table and verified rollback copy were staged; the
+survey itself remains a read-only record and is not retroactively edited.
+
 ## WP2: cost of one extra NOSHOW completion per AV1 picture (2026-11-12)
 
 Measurement only, from the existing guarded traces on `sheng`. No driver
@@ -5593,3 +5597,65 @@ vendor-patched graphics stack. The 2026-11-12 survey confirms the target has
 not add `debian/`**: no Debian/Ubuntu distribution is a qualified target, and
 adding a package that cannot reproduce the Fedora/Arch provenance and the
 installed-package gates would create an unverified distribution surface.
+
+## WP1: 0006 module build staged on sheng (2026-11-12)
+
+Source commit `42f3b40c702abbc37c3a04c95af008cd283aeaf3`
+(`ianchb/sm8550-mainline`, branch `sheng-7.2.6`). Kernel release
+`7.2.6-sm8550-g42f3b40-iris1`, boot ID
+`7a26df99-f7ac-4148-9c80-135ba3adc661`. Installed VA driver
+`323c07cbd42f5a152cfca427`; installed `qcom-iris.ko.zst`
+`9b16a40179a08e414d0f4bb38ea54f5bb12ada2b9ce176f0dc6b3b602e7bc83d`.
+Decoder and encoder resolved by `iris_driver` were `qcom-iris-decoder` and
+`qcom-iris-encoder`. The installed package was unchanged throughout; this run
+used no build-tree driver override and no module override.
+
+The build used `packaging/kernel/build-module.sh` from this branch on the
+target's case-sensitive f2fs filesystem. A host-side clone was rejected: its
+filesystem is case-insensitive and collided Linux's `xt_TCPMSS.c` /
+`xt_tcpmss.c`. `.config` came from `/proc/config.gz`, because the two
+`/boot/config-*` files have different hashes and there is no config named
+after the `-iris1` release. `localversion` was derived from `uname -r`, and a
+333-entry video-subsystem `Module.symvers` was regenerated from
+`/proc/kallsyms`; sorting shows its symbol set matches the earlier lab copy
+`~/Lab/kernel-iris-syncframe/Module.symvers`, whose `stock.sha256` check
+passes. Patches 0001-0004 and 0006 applied in order by `git apply`; the 0005
+marker `iris_hfi_gen2_requeue_output_buffer` is absent from the applied tree.
+The running config has `CONFIG_ARM64_BTI=y`, `CONFIG_ARM64_PTR_AUTH=y`,
+`CONFIG_ARM64_PTR_AUTH_KERNEL=y`, `CONFIG_CC_IS_CLANG=y`, `CONFIG_LD_IS_LLD=y`
+and `CONFIG_LTO_CLANG_THIN=y`, so the module was built with `LLVM=1` against
+the running config rather than a fresh defconfig.
+
+Two independent builds on `sheng` agreed on the contract:
+
+| Build | `qcom-iris.ko` sha256 | `qcom-iris.ko.zst` sha256 |
+| --- | --- | --- |
+| initial staged build | `1e15727da6c9ae91efce9b7319cfe477e03ee8d642db70395f56ab505535aa2a` | `d3987ee62109da8a98843709661ddb14500d8338be090a946077d2dcabb0ce72` |
+| `build-module.sh` end-to-end re-run | `875b48f3cd15928d182d5447cc9ece30bb3fc305ef0b2bfb952089c120a31ee9` | `b90bd823fdab98957739ad2196eb4016f5a264f2280d22735963e40c8488c715` |
+
+The two ELF hashes differ in LTO-local symbol names, not in the patch set;
+both have the same vermagic, `7.2.6-sm8550-g42f3b40-iris1 SMP preempt
+mod_unload aarch64`, and the same 136 undefined symbols. Both undefined
+symbol sets are byte-identical to the running module's, and all 136 names are
+present in the running kernel's `__ksymtab`; `modinfo -F license` reports
+GPL on both. `readelf -S` shows no `__versions` or `.BTF` section in either
+module, consistent with `CONFIG_MODVERSIONS` and BTF being off. The
+`KBUILD_MODPOST_WARN=1` messages about core-kernel symbols are expected from
+a partial `Module.symvers`; the `__ksymtab` comparison is the actual load
+check.
+
+A rollback copy under `~/Lab/Bridge/tmp/wp1-verify/out/` was compared
+byte-for-byte with the installed `qcom-iris.ko.zst` before the second build.
+Battery was 96% Discharging, thermal zones 24400..37000 millic. No module was
+installed, `depmod` was not run, the device was not rebooted, and the boot ID,
+driver hash, module hash and node names above were re-read unchanged after
+the build. No decode, matrix, browser, EOS or DRC gate ran, so there are no
+frame, drop or `misplaced` counts for this section.
+
+A search of 838 retained guard logs/traces found no `EPIPE`, spurious LAST or
+premature LAST record. The slow-CAPTURE VP9 defect that 0006 addresses is
+therefore still unreproduced on SM8550. Until it is reproduced on the
+0001-0004 baseline, a later clean run cannot be called "fixed"; the correct
+verdict would be "no regression". Installation and the guarded hardware gates
+remain a separate, explicitly approved target action. This section is a build
+and module-identity result, not codec evidence and not a capability claim.

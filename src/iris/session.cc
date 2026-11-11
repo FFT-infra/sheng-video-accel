@@ -628,12 +628,15 @@ bool Session::handle_capture_returns()
                 if (noshow_shape) {
                     // The invisible half of a two-completion unit whose target
                     // was released before it returned. It never carried pixels
-                    // and was never a decode failure. One abandoned picture is
-                    // one drop, reported by its visible half below; counting
-                    // this half as well would charge the client twice for the
-                    // same picture and register a false decode error. Use
-                    // publish=invisible for the trace parser, which counts
-                    // one invisible publication per two-completion unit.
+                    // and was never a decode failure. A visible payload
+                    // completion reports the one drop below; when both halves
+                    // are NOSHOW, neither half has pixels to abandon, so
+                    // drops stays 0 and the pair is two invisible records.
+                    // Counting this half as a drop would charge the client
+                    // twice for one picture and register a false decode error.
+                    // Use publish=invisible for the trace parser: a normal
+                    // two-completion unit has one such record, this fully
+                    // abandoned NOSHOW pair has two.
                     trace_("capture token=%llu index=%u flags=%#x publish=invisible",
                         static_cast<unsigned long long>(returned->timestamp_us), returned->index,
                         returned->flags);
