@@ -5535,3 +5535,61 @@ complete kernel source tree or `Module.symvers` was found under `~/Lab`, and
 no rollback copy of `qcom-iris.ko.zst` was found. The module-install step is
 therefore blocked until a source tree, symbol versions and a rollback copy
 are staged on the target.
+
+## WP2: cost of one extra NOSHOW completion per AV1 picture (2026-11-12)
+
+Measurement only, from the existing guarded traces on `sheng`. No driver
+change, no new target run, no module swap, no reboot. The installed package is
+the one recorded above (`323c07cb…`, 0001-0004 module, boot
+`7a26df99-f7ac-4148-9c80-135ba3adc661`). The traces carry ` t=<ms>` since the
+first record of each process, so the cost is read from their own timestamps.
+
+| Trace | Pictures published | `publish=invisible` | Max `import backlog` | Import queue events | Median invisible -> next publish |
+| --- | --- | --- | --- | --- | --- |
+| 1080p 10-bit probe (2026-11-11 final gates) | 60 | 13 | 3 | 73 | 2 ms (max 11 ms) |
+| 320x180 internal-DPB VA probe | 46 | 30 | 4 | 79 | 1 ms (max 4 ms) |
+| 320x180 `make_av1()` baseline (no hidden install) | 47 | 0 | 3 | 49 | n/a |
+
+The extra completion costs one Import queue event and one borrowed client
+buffer per hidden install picture. Its trace-level delay is 1-2 ms median and
+11 ms worst case in these two processes; the Import backlog stayed between 3
+and 4, with no sign of pressure. The 120-frame clip and DRC clip from the
+final gates report 42 and 63 invisible completions respectively, but their
+`command.stderr` traces were not retained, so they contribute counts only,
+not timing.
+
+**WP2 verdict: not worth doing.** On this evidence, changing the shipped
+userspace to a 0005 dual path would trade a measured 1-2 ms trace-level cost
+for a kernel-module install, a new capability probe, a second completion
+ledger in `session.cc`, a trace-vocabulary change and a full re-run of every
+installed-package and browser gate. The current 0001-0004 module already
+passes those gates with exact framemd5. WP3 is therefore not implemented;
+see `docs/POST-MERGE-BACKLOG.md` §16. This is a cost judgment from existing
+traces, not a 0005 hardware measurement.
+
+## WP4/WP5/WP6 decisions from the 2026-11-12 survey (no code change)
+
+WP4: the CDSP device node and runtime library exist, but no Hexagon compiler
+or SDK package is installed; the read-only `dnf list available` query could
+not complete because one configured repository failed GPG metadata
+verification, so package availability is unconfirmed. The Vulkan loader and
+freedreno ICD exist, but `vulkan-tools` and `glslang` are not installed.
+Neither backend is buildable/verifiable as-is. The decision is **do not
+implement VPP** in this repository now, and do not advertise a VPP capability.
+The inventory does not prove the backends impossible: it records that no
+viable backend was demonstrated.
+
+WP5 depends on WP4. With no VPP, the answer to "who consumes RGB import" is
+that no recorded VA client in this project's gates needs BGRA/RGBA; the
+current CAPTURE-layout NV12/P010 contract is what the hardware decode and
+encode gates exercise. The decision is **no RGB import code**, keep the
+capability table's RGB rejection entries, and record `radxa-pkg/qcom-va-driver`
+as the reference implementation if a real consumer appears.
+
+WP6: `docs/build-and-deploy.md` already records why there is no Debian/Ubuntu
+package: `libgbm-dev` pins an exact `libgbm1` and can downgrade a
+vendor-patched graphics stack. The 2026-11-12 survey confirms the target has
+`mesa-libgbm` and `mesa-libgbm-devel` both at 26.2.5. The decision is **do
+not add `debian/`**: no Debian/Ubuntu distribution is a qualified target, and
+adding a package that cannot reproduce the Fedora/Arch provenance and the
+installed-package gates would create an unverified distribution surface.

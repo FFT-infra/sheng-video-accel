@@ -405,15 +405,21 @@ start the guard only after the reboot so its "boot ID unchanged" rule measures
 the experiment, not the installation. On failure keep the record, roll the
 module back, stop and report.
 
-### WP2 measure the cost of 0005 — measurement only, no behaviour change
+### WP2 measure the cost of 0005 — done, verdict "not worth doing"
 
-On 0001-0004, using the existing AV1 clip, DRC clip and matrix, count the
-invisible completions per AV1 picture, their time cost (trace timestamp deltas
-or profiler), and the maximum Import backlog depth. Produce one cost table and
-one sentence: worth doing / not worth doing. That sentence is the decision gate
-for WP3. Do not tune the driver to make the numbers look better.
+Measured from the existing timestamped traces, with no new target run and no
+driver change (`TEST-RESULTS.md` §"WP2: cost of one extra NOSHOW completion").
+The extra completion costs one Import queue event and one borrowed client
+buffer per hidden install picture; trace-level delay is 1-2 ms median, 11 ms
+worst case, and the Import backlog stayed at 3-4. The 120-frame and DRC clip
+traces were not retained, so those contribute counts (42 and 63 invisible)
+only. Change the shipped userspace for 0005 only if a future measurement
+shows a real target-level cost; the current evidence does not.
 
-### WP3 0005 dual path — only if WP2 says worth doing
+### WP3 0005 dual path — not implemented (WP2 verdict "not worth doing")
+
+The following design is retained for the record only. Do not implement it
+without a new measured cost and an explicit decision.
 
 Probe for 0005 at configure time the way `sync_frame_control_` is probed. With
 0005: `AccessUnit::completions = 1`, no second borrowed client buffer, no
@@ -421,10 +427,9 @@ Probe for 0005 at configure time the way `sync_frame_control_` is probed. With
 commit update session NOSHOW attribution, `queue_import_next`, the §8 trace
 vocabulary and its consumers, invariant 17, the capability table `sync_note`
 and both READMEs. Re-run the four-codec matrix, 120-frame AV1 clip, DRC,
-10-bit probe and the Chrome/Firefox browser matrix. If WP2 says not worth it,
-write the reason in the backlog and do not implement WP3.
+10-bit probe and the Chrome/Firefox browser matrix.
 
-### WP4 VPP feasibility spike — conclusion first
+### WP4 VPP feasibility spike — done, verdict "do not implement VPP"
 
 Read-only inventory on 2026-11-12 (`TEST-RESULTS.md` §"PR #6 tablet read-only
 survey"): `/dev/fastrpc-cdsp` and `libcdsprpc.so.1` exist but there is no
@@ -445,27 +450,30 @@ the target by per-pixel or PSNR baseline. If neither is viable, write the
 feasibility conclusion and stop. Do not advertise VPP without a working
 backend.
 
-### WP5 RGB import — depends on WP4
+### WP5 RGB import — done, verdict "no RGB import code"
 
-First answer who consumes RGB import when there is no VPP. If WP4 lands,
-support linear single-buffer BGRA/RGBA through PRIME2 `vaCreateSurfaces2` and
-`vaDeriveImage`, with refusal cases. If WP4 does not land, record the conclusion
-only; no code change.
+WP4 did not produce a viable backend, and no VA client in this project's
+recorded gates needs BGRA/RGBA. The current NV12/P010 CAPTURE-layout contract
+is what the decode and encode gates exercise. Keep the capability table's RGB
+rejection entries. `radxa-pkg/qcom-va-driver` is the reference implementation
+if a real consumer appears (`TEST-RESULTS.md` §"WP4/WP5/WP6 decisions").
 
-### WP6 Debian packaging — independent
+### WP6 Debian packaging — done, verdict "do not add debian/"
 
-Either provide `debian/` or write down why not. `docs/build-and-deploy.md`
-already records that `libgbm-dev` pins `libgbm1` and can downgrade a
-vendor-patched graphics stack; a package must not introduce a dependency that
-does that. Build and install must reproduce provenance, and no Debian/Ubuntu
-distribution is a qualified target.
+`docs/build-and-deploy.md` records that `libgbm-dev` pins an exact `libgbm1`
+and can downgrade a vendor-patched graphics stack. The 2026-11-12 survey
+confirms `mesa-libgbm` and `mesa-libgbm-devel` are both 26.2.5 on `sheng`.
+No Debian/Ubuntu distribution is a qualified target; a package that cannot
+reproduce the Fedora/Arch provenance and installed-package gates would add an
+unverified distribution surface (`TEST-RESULTS.md` §"WP4/WP5/WP6 decisions").
 
-### WP7 SoC portability audit — docs only, no support claim
+### WP7 SoC portability audit — done, docs only
 
-List the SM8550-specific pieces: kernel patch hunks, `inst_fw_cap` platform
-data, packaging, defaults and validation records. Write what a new SoC must
-redo and which gates must be re-run. Do not change the capability table's
-`target` to hint at other SoCs.
+`docs/soc-portability.md` lists the SM8550-specific kernel hunks,
+`inst_fw_cap` platform data, BTI/PAC build identity, node-resolution rule,
+capability table, defaults, packaging and validation records, then names the
+patches, probes and gates a new SoC must redo. It changes no capability entry
+and makes no support claim for another SoC.
 
 ### Order and decision gates
 
