@@ -163,11 +163,15 @@ void EncoderSession::configure(
         set_control(V4L2_CID_MPEG_VIDEO_BITRATE_MODE, bitrate_mode(params.rate_mode), "bitrate mode");
         if (params.bitrate)
             set_control(V4L2_CID_MPEG_VIDEO_BITRATE, static_cast<int32_t>(params.bitrate), "bitrate");
-        if (params.rate_mode == RateMode::Cbr) {
-            const uint32_t peak = params.peak_bitrate ? params.peak_bitrate : params.bitrate;
-            if (peak)
-                set_control(V4L2_CID_MPEG_VIDEO_BITRATE_PEAK, static_cast<int32_t>(peak), "peak bitrate");
-        }
+        // CBR always has a peak (its target when the client gave none). VBR
+        // has one only when the client's maximum is above its target, and
+        // leaving it unwritten would hand the firmware a default instead of
+        // the ceiling the client asked for.
+        const uint32_t peak = params.rate_mode == RateMode::Cbr && !params.peak_bitrate
+            ? params.bitrate
+            : params.peak_bitrate;
+        if (peak)
+            set_control(V4L2_CID_MPEG_VIDEO_BITRATE_PEAK, static_cast<int32_t>(peak), "peak bitrate");
     }
     set_control(V4L2_CID_MPEG_VIDEO_B_FRAMES, 0, "b frames");
     set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, gop_control(params.gop_size), "gop size");
@@ -349,12 +353,12 @@ void EncoderSession::apply_dynamic(const EncodeParams& params)
         set_control(V4L2_CID_MPEG_VIDEO_BITRATE, static_cast<int32_t>(params.bitrate), "bitrate");
         applied_.bitrate = params.bitrate;
     }
-    if (params.rate_mode == RateMode::Cbr) {
-        const uint32_t peak = params.peak_bitrate ? params.peak_bitrate : params.bitrate;
-        if (peak && peak != applied_.peak_bitrate) {
-            set_control(V4L2_CID_MPEG_VIDEO_BITRATE_PEAK, static_cast<int32_t>(peak), "peak bitrate");
-            applied_.peak_bitrate = peak;
-        }
+    const uint32_t peak = params.rate_mode == RateMode::Cbr && !params.peak_bitrate
+        ? params.bitrate
+        : params.peak_bitrate;
+    if (peak && peak != applied_.peak_bitrate) {
+        set_control(V4L2_CID_MPEG_VIDEO_BITRATE_PEAK, static_cast<int32_t>(peak), "peak bitrate");
+        applied_.peak_bitrate = peak;
     }
     if (params.gop_size != applied_.gop_size) {
         set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, gop_control(params.gop_size), "gop size");

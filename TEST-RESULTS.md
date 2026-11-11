@@ -5781,3 +5781,94 @@ gauge cannot measure battery-side draw, so that refusal belongs to the power
 measurement itself rather than to experiment admission. E1-E4 now need the
 guarded target windows with their start/end capacity reported; a shorter window
 is a shortened result, not a cancelled experiment.
+
+## AV1 browser matrix, local clips only (2026-11-12, `sheng`)
+
+`test/iris-av1-browser-matrix.sh local-only` over the six generated AV1 clips
+(`av1-720p`, `av1-1080p`, `av1-4k`, `av1-10bit`, `av1-altref`, `av1-tiles`),
+Firefox and Chrome, 30 s of playback each. Identity: boot ID
+`17928711-7fd8-4f87-a024-9bf6b5bc44b6`, installed package
+`323c07cbd42f5a152cfca4278a78d64d726534a85f95f0d0db22379e4317a37d`, decoder
+resolved by the `iris_driver` QUERYCAP name to `/dev/video5`, no `LIBVA_*`,
+publish or node override, and the 0001-0004 + 0006 module
+`b90bd823fdab98957739ad2196eb4016f5a264f2280d22735963e40c8488c715` loaded.
+`failures=0`, `PASS AV1 browser matrix mode=local-only cases=12`.
+
+| Case | Result |
+| --- | --- |
+| Firefox 720p | `decoded=724 dropped=6 hw_log=True direct=927 import=0 errors=0` |
+| Firefox 1080p | `decoded=726 dropped=13 hw_log=True direct=936 import=0 errors=0` |
+| Firefox 4k | `decoded=732 dropped=17 hw_log=True direct=924 import=0 errors=0` |
+| Firefox 10bit | `decoded=726 dropped=12 hw_log=True direct=937 import=0 errors=0` |
+| Firefox altref | `decoded=724 dropped=10 hw_log=True direct=1007 import=0 errors=0` |
+| Firefox tiles | `decoded=724 dropped=7 hw_log=True direct=924 import=0 errors=0` |
+| Chrome, all six | `decoder=VaapiVideoDecoder platform=True dropped=0`, decoded 699-718 |
+
+Every Firefox case published through the direct path only (`import=0`), which
+is what `publish_import` AV1 being qualified does not claim: FFmpeg does not
+pre-export surfaces, so it never takes the Import path. Chrome dropped no
+frames in any case; Firefox dropped 6-17 frames per 30 s window, which is the
+browser's own display pacing on this compositor, not a driver drop count.
+
+Two boundaries. The loaded module is the experimental 0001-0004 + 0006 build,
+so this run is a no-regression check for that module, not a re-qualification
+of the 0001-0004 baseline; the qualified 17-case browser result remains the
+2026-11-11 run. And `local-only` means the five live-site cases (YouTube,
+Bilibili, and the `media.av1.enabled=false` control) did not run in this
+window: they need the relay on `127.0.0.1:8899`.
+
+The first attempt at this matrix failed 12/12 with `no BiDi report` /
+`no CDP report` because the deployed tree on `sheng` was missing
+`test/iris-firefox-media.py` and `test/iris-chrome-media.py`; the browsers had
+in fact decoded (the Firefox trace shows `begin_picture`/`direct` publishes),
+but the report step could not run. After syncing both helpers the rerun above
+passed. That failed attempt is a deployment gap, not a driver result.
+
+## Battery-side power A/B: the software arm is stopped by the guard's ceiling (2026-11-12)
+
+`test/iris-power-sampler.sh` with a fixed 1080p30 High-profile H.264 source
+(`testsrc2`, 10 s, re-decoded back to back), screen off, unplugged, 20 s per
+arm with 10 s baselines either side. Identity on every run: boot ID
+`17928711-7fd8-4f87-a024-9bf6b5bc44b6`, installed package
+`323c07cbd42f...`, 0001-0004 + 0006 module `b90bd823...`, no build-tree
+override, start/end pack state in each `run.txt`.
+
+The hardware arm finishes. The software arm does not: eight threads of
+ffmpeg software decode take the CPU zones from 40 C to past 85 C in about
+nine seconds, and `scripts/iris-experiment-guard.sh` terminated the run on
+its 85 C ceiling each time.
+
+| Attempt | Start | Window | Outcome |
+| --- | --- | --- | --- |
+| 1 | 74 C hottest zone | 20 s x 4 | `temperature exceeded limit: 94700 > 85000`, `cpu7-middle-thermal`, 61 s in |
+| 2 | 40.2 C | 20 s x 4 | `90300 > 85000`, `cpu5-bottom-thermal`, in the first software window |
+| 3 | 39.8 C | 8 s x 4 | `87600 > 85000`, first software window |
+
+The hardware arm's device-level increment, measured in the same guarded runs
+before the software arm was stopped (steady window minus the mean of its two
+baselines, whole-device gauge so this is not decoder-package power):
+
+| Run | VA window | Pre | Post | Increment |
+| --- | --- | --- | --- | --- |
+| 1 | 4.46 W | 2.86 W | 2.93 W | +1.57 W |
+| 2 | 3.94 W | 3.06 W | 2.98 W | +0.92 W |
+| 3 | 4.58 W | 3.01 W | 3.01 W | +1.57 W |
+| 4 (unguarded trace run, 20 s) | 3.98 W | 2.91 W | 2.90 W | +1.08 W |
+
+The software arm was rising through 9 W total (about +6 W over its 2.8-3.3 W
+baseline) when the guard cut it, so its steady state is not measurable here.
+No VA-versus-software ratio is claimed. The one complete round that exists
+came from run 4, which ran under `sh -x` without the guard to find the
+failure cause; its increments were `va=1077799uW sw=6163760uW`, and its
+thermal state was not sampled, so it is an observation and not the A/B.
+
+For the record, the kernel's own trip points on these zones are passive at
+90 C and 95 C and critical at 110 C. The guard's 85 C is the project's
+ceiling, stricter than the firmware's, and it was not raised for this
+measurement: a run that needs a higher ceiling to finish is a different
+experiment, not a longer one.
+
+E2 therefore stays open with a narrower question: the software half needs a
+workload or a cooling design that stays under 85 C at saturation, or an
+explicit decision to measure a different (and therefore not directly
+comparable) software configuration.

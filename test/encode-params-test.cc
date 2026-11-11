@@ -140,7 +140,19 @@ void test_h264_translation()
     check(params.level == V4L2_MPEG_VIDEO_H264_LEVEL_4_1, "H.264 level 4.1");
     check(params.rate_mode == RateMode::Vbr, "VBR rate mode");
     check(params.bitrate == 5000000, "rate-control bitrate wins over the sequence bitrate");
-    check(params.peak_bitrate == 0, "VBR sends no peak bitrate");
+    check(params.peak_bitrate == 0, "a rate with no separate maximum sends no peak bitrate");
+
+    // VA's field is the controller's maximum and target_percentage names the
+    // target inside it. FFmpeg without -maxrate sends 2x the requested rate
+    // at 50 %, which used to program an encoder at twice the client's rate.
+    VAEncMiscParameterRateControl split = {};
+    split.bits_per_second = 8000000;
+    split.target_percentage = 50;
+    std::vector<uint32_t> split_storage = misc(VAEncMiscParameterTypeRateControl, split);
+    const EncodePicture split_input = h264_input(sequence, picture, { split_storage.data() });
+    const iris::EncodeParams split_params = encoder->translate(split_input);
+    check(split_params.bitrate == 4000000, "the target is the percentage of the maximum");
+    check(split_params.peak_bitrate == 8000000, "the maximum above the target is the peak");
     check(params.gop_size == 60, "GOP from intra_period");
     check(params.cabac, "CABAC from the picture flags");
     check(params.min_qp == 10 && params.max_qp == 40, "QP bounds from the rate-control misc");

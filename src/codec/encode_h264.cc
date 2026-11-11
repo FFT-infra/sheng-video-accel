@@ -143,8 +143,19 @@ public:
 
         if (const auto* rate = static_cast<const VAEncMiscParameterRateControl*>(
                 find_misc(picture.misc, VAEncMiscParameterTypeRateControl))) {
-            if (rate->bits_per_second)
-                out.bitrate = rate->bits_per_second;
+            if (rate->bits_per_second) {
+                // The field is the rate controller's maximum; the target is
+                // target_percentage of it (va.h). A client asking for VBR
+                // without a maximum gets 2x its own rate at 50 % — FFmpeg
+                // fills that in when -maxrate is absent — so programming the
+                // raw field runs the encoder at twice the requested rate.
+                const uint32_t percentage = rate->target_percentage ? rate->target_percentage : 100;
+                out.bitrate = static_cast<uint32_t>(
+                    static_cast<uint64_t>(rate->bits_per_second) * percentage / 100);
+                // A maximum above the target is the client's VBR ceiling.
+                if (rate->bits_per_second > out.bitrate)
+                    out.peak_bitrate = rate->bits_per_second;
+            }
             if (rate->min_qp)
                 out.min_qp = rate->min_qp;
             if (rate->max_qp)
@@ -236,7 +247,12 @@ public:
         }
         require(params->pic_fields.bits.reference_pic_flag != 0,
             "non-reference pictures are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
-        out.peak_bitrate = out.rate_mode == RateMode::Cbr ? out.bitrate : 0;
+        // CBR names its target as the peak. VBR keeps the client's ceiling
+        // when it gave one above the target; CQP has no rate control at all.
+        if (out.rate_mode == RateMode::Cbr)
+            out.peak_bitrate = out.bitrate;
+        else if (out.rate_mode == RateMode::Cqp)
+            out.peak_bitrate = 0;
         require(out.rate_mode != RateMode::Cbr || out.bitrate > 0, "CBR needs a bitrate",
             VA_STATUS_ERROR_INVALID_PARAMETER);
         // CQP has no bitrate: the picture QP is what the bitstream carries,
