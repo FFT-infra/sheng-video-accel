@@ -1,8 +1,11 @@
 #!/bin/sh
 
-# Run one bounded Iris experiment while recording the boot and thermal state.
-# A reboot, missing thermal inventory, or temperature limit breach terminates
-# the child and leaves a durable interrupted guard for operator review.
+# Run one bounded Iris experiment while recording the boot, thermal and pack
+# state. A reboot, missing thermal inventory, or temperature limit breach
+# terminates the child and leaves a durable interrupted guard for operator
+# review. Battery level is recorded, not enforced: discharge is a valid lab
+# condition, and a short run at a low pack is evidence with a boundary, not a
+# reason to refuse the run.
 
 set -eu
 
@@ -22,6 +25,7 @@ interval=${IRIS_EXPERIMENT_TEMPERATURE_INTERVAL_SECONDS:-30}
 max_temperature=${IRIS_EXPERIMENT_MAX_TEMP_MILLIC:-85000}
 allow_stale=${IRIS_EXPERIMENT_ALLOW_STALE_GUARD:-0}
 thermal_root=${IRIS_EXPERIMENT_THERMAL_ROOT:-/sys/class/thermal}
+battery_root=${IRIS_EXPERIMENT_BATTERY_ROOT:-/sys/class/power_supply}
 boot_id_file=/proc/sys/kernel/random/boot_id
 
 case "$max_seconds:$interval:$max_temperature" in
@@ -54,6 +58,44 @@ temperature_snapshot() {
     [ "$found" -eq 1 ]
 }
 
+# Record the pack state at the start, then sample it with the thermal loop.
+# Missing or unreadable gauges are written as "unknown" so the evidence says
+# what was measured instead of implying a healthy pack.
+battery_snapshot() {
+    timestamp=$1
+    gauge=''
+    for supply in "$battery_root"/*; do
+        [ -r "$supply/capacity" ] || continue
+        [ -r "$supply/status" ] || continue
+        gauge=$supply
+        break
+    done
+    if [ -z "$gauge" ]; then
+        printf '%s,unknown,unknown,unknown,unknown,unknown,unknown\n' "$timestamp"
+        return 0
+    fi
+    capacity=$(tr -d '\n' <"$gauge/capacity" 2>/dev/null || printf 'unknown')
+    state=$(tr -d '\n' <"$gauge/status" 2>/dev/null || printf 'unknown')
+    voltage=$(tr -d '\n' <"$gauge/voltage_now" 2>/dev/null || printf 'unknown')
+    current=$(tr -d '\n' <"$gauge/current_now" 2>/dev/null || printf 'unknown')
+    online=''
+    for supply in "$battery_root"/*; do
+        [ -r "$supply/online" ] || continue
+        online=$(tr -d '\n' <"$supply/online")
+        break
+    done
+    [ -n "$online" ] || online=unknown
+    case "$capacity:$voltage:$current:$online" in
+        *[!0-9:.-]*)
+            capacity=unknown; voltage=unknown; current=unknown; online=unknown ;;
+        *:*:*:*) : ;;
+        *) capacity=unknown; voltage=unknown; current=unknown; online=unknown ;;
+    esac
+    printf '%s,%s,%s,%s,%s,%s,%s\n' \
+        "$timestamp" "$(basename "$gauge")" "$capacity" "$state" \
+        "$voltage" "$current" "$online"
+}
+
 now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 initial_boot_id=$(tr -d '\n' <"$boot_id_file")
 if ! temperature_snapshot "$now" >"$root/temperature-initial.csv"; then
@@ -65,6 +107,10 @@ initial_hottest=$(awk -F, 'BEGIN { max=-999999 } $3+0 > max { max=$3+0 } END { p
     echo "FAIL initial temperature exceeds limit: $initial_hottest > $max_temperature millidegrees C" >&2
     exit 1
 }
+battery_snapshot "$now" >"$root/battery-initial.csv"
+printf 'timestamp,gauge,capacity_percent,status,voltage_uv,current_ua,usb_online\n' \
+    >"$root/battery.log"
+cat "$root/battery-initial.csv" >>"$root/battery.log"
 
 started_at=$now
 write_guard() {
@@ -120,6 +166,8 @@ while kill -0 "$pid" 2>/dev/null; do
     fi
     hottest=$(awk -F, 'BEGIN { max=-999999 } $3+0 > max { max=$3+0 } END { print max }' "$root/temperature-current.csv")
     cat "$root/temperature-current.csv" >>"$root/temperature.log"
+    battery_snapshot "$stamp" >"$root/battery-current.csv"
+    cat "$root/battery-current.csv" >>"$root/battery.log"
     if [ "$hottest" -gt "$max_temperature" ]; then
         failure="temperature exceeded limit: $hottest > $max_temperature millidegrees C"
         echo "$failure" >"$root/failure"
@@ -136,5 +184,6 @@ else
 fi
 [ "$rc" -eq 124 ] && { echo "experiment timeout after ${max_seconds}s" >"$root/failure"; exit 1; }
 [ "$rc" -eq 0 ] || exit "$rc"
+battery_snapshot "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$root/battery.log"
 completed=1
 echo "PASS experiment guard boot_id=$initial_boot_id root=$root"

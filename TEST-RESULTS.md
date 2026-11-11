@@ -4092,7 +4092,9 @@ rewrote to carry these numbers.
 
 The tablet was at 6% and charging when the run started, 10% by the end, at
 about 2.0 A. No soak or media-generation pass was attempted; the two-hour
-concurrency soak still needs a charged pack.
+concurrency soak was deferred at the time. The guarded runs after 2026-11-12
+record pack state in `battery.log` and treat a discharging or low pack as a
+measured boundary rather than a start gate.
 
 ## VP9 Import: one picture, one buffer per completion (2026-10-24)
 
@@ -5744,3 +5746,38 @@ profile or publish policy is advertised from this run. The verified rollback
 copy and `wp1-rollback.sh` restore the qualified module with `depmod -a` and a
 reboot if a later run fails or another experiment needs the baseline. 0005 was
 not built or loaded.
+
+## Guard pack state: recording replaces the charger gate (2026-11-12)
+
+The battery prerequisite in `docs/POST-MERGE-BACKLOG.md` §2 (L1) previously
+required a charger and a stable `Charging|Full` pack before any long-window
+run. That turned a measured condition into a start gate: the 2026-11-10 soak
+was deferred at 26 % `Discharging`, but the short capability and browser
+windows were still useful with a recorded boundary. The guard now writes
+`battery.log` with `capacity_percent`, `status`, `voltage_uv`, `current_ua` and
+`usb_online` at the start, on each thermal sample and at the end. It does not
+refuse a low, discharging or charging pack. Boot ID, thermal inventory, the
+85 C ceiling, the timeout and the interrupted-guard rule are unchanged;
+`IRIS_EXPERIMENT_BATTERY_ROOT` overrides the power-supply directory for the
+host self-test.
+
+Host verification: `shellcheck -s sh` clean on the guard and its self-test;
+`test/iris-experiment-guard-self-test.sh` covers 19 % `Discharging`, 100 %
+`Charging` and a missing gauge, each reaching `status=complete` with the pack
+state written; `sh test/run-static-checks.sh` PASS and
+`meson test -C build-local --print-errorlogs` 26/26.
+
+Target smoke run on `sheng`, boot ID
+`17928711-7fd8-4f87-a024-9bf6b5bc44b6`, installed VA driver
+`323c07cbd42f5a152cfca427`, 0001-0004 + 0006 module
+`b90bd823fdab98957739ad2196eb4016f5a264f2280d22735963e40c8488c715`:
+`guard-battery-live3` reached `status=complete` with four `battery.log` rows,
+for example `85,Discharging,4174000,-830000,0`. No decode, matrix or browser
+gate ran in this smoke test; it is a guard-instrumentation result, not codec
+evidence.
+
+`test/iris-power-sampler.sh` still refuses `Charging|Full`: a plugged-in fuel
+gauge cannot measure battery-side draw, so that refusal belongs to the power
+measurement itself rather than to experiment admission. E1-E4 now need the
+guarded target windows with their start/end capacity reported; a shorter window
+is a shortened result, not a cancelled experiment.

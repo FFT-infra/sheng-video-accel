@@ -151,9 +151,12 @@ test/iris-context-retirement-check.sh /path/to/trace.log # every destroyed conte
 ```
 
 Firmware experiments (anything that can reset the decoder) go through
-`scripts/iris-experiment-guard.sh -- command`, which records the boot ID and
-temperature, applies a timeout, and leaves an `interrupted` marker that must
-be reviewed before another run.
+`scripts/iris-experiment-guard.sh -- command`, which records the boot ID,
+temperature and pack state (`battery.log`), applies a timeout, and leaves an
+`interrupted` marker that must be reviewed before another run. The guard
+records a low or discharging pack instead of refusing it; report the start and
+end capacity with the result. `IRIS_EXPERIMENT_BATTERY_ROOT` overrides the
+power-supply directory for a host-side self-test.
 
 ## Full target hardware suite
 

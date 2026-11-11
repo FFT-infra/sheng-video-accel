@@ -254,9 +254,14 @@ when the native V4L2 node can decode it.
 
 For experiments that may reset firmware, wrap the bounded command with
 `scripts/iris-experiment-guard.sh -- ...`. It records the initial boot ID,
-thermal samples and command output, enforces a timeout, and refuses to reuse a
-running guard file until the previous run has been inspected. A reset or
-thermal breach is a failed experiment, not evidence of codec support.
+thermal samples, pack state (`battery.log`: capacity, charging status, voltage,
+current and USB online) and command output, enforces a timeout, and refuses to
+reuse a running guard file until the previous run has been inspected. Battery
+level is a recorded boundary, not a start gate: a discharging or low pack is
+valid lab state, and the report must say what the pack did. Classify a long
+run by the recorded start/end capacity; a shortened window is a shortened
+result, not a cancelled experiment. A reset or thermal breach is a failed
+experiment, not evidence of codec support.
 
 Run the dedicated H.264 reconfiguration gate on the target:
 
