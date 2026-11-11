@@ -15,9 +15,9 @@ Kernel patches, diagnostic scripts, and packaging specs are provided in this rep
 | H.264 | Constrained Baseline, Main, High | Import (zero-copy) | Bit-exact MD5, Fluster 72/135 |
 | HEVC | Main, Main 10 | Import (zero-copy) | Bit-exact MD5, Fluster 141/147 |
 | VP9 | Profile 0, Profile 2 | Copy (GPU blit) | Bit-exact MD5 |
-| AV1 | Profile 0 | Import (zero-copy, decode-order kernel) | Bit-exact MD5, 2026-11-10 real-clip run |
+| AV1 | Profile 0 | Import (zero-copy, decode-order kernel) | Bit-exact MD5, 2026-11-11 installed-package and browser runs |
 
-Hardware decode verification requires `VaapiVideoDecoder` reporting on the browser media surface with platform decoding enabled and zero frame drops over a 30-second window.
+Hardware decode verification requires the media surface to report the selected hardware decoder (for Chrome, `VaapiVideoDecoder` with `kIsPlatformVideoDecoder=true`; for Firefox, successful VA-API initialization) along with decoded and dropped frame counts over the test window. Minor dropped frames do not automatically disqualify hardware decode; verification checks driver traces for attribution.
 
 ### Encode
 
@@ -63,15 +63,16 @@ The driver selects buffer publishing policies dynamically:
 
 - **Direct**: Application exports an allocated surface after decode. Zero-copy.
 - **Import**: Application allocates and passes DMA-BUFs before decode. Zero-copy when running on decode-order patched kernels.
-- **Copy**: Firmware decodes to driver-owned slots; frames are blitted via GPU into application buffers. Used on stock kernels, for VP9, and for the second half of an in-context AV1 resolution change. AV1 uses the Import policy on decode-order patched kernels (qualified 2026-11-10, see TEST-RESULTS.md).
+- **Copy**: Firmware decodes to driver-owned slots; frames are blitted via GPU into application buffers. Used on stock kernels, for VP9, and for the second half of an in-context AV1 resolution change. AV1 uses the Import policy on decode-order patched kernels (qualified 2026-11-11 on the installed package, see TEST-RESULTS.md).
 
 Imported DMA-BUF surfaces must match native CAPTURE layout (single linear object, 128-byte aligned pitch). Other configurations return `VA_STATUS_ERROR_INVALID_PARAMETER`.
 
 ## Known Limits
 
-- **VP9 zero-copy**: Requires the copy path due to client-side surface lifecycle constraints during multi-picture access unit completions.
-- **AV1 decoding**: The default translator owns an internal eight-slot DPB and submits each picture at `vaEndPicture`, so a client that syncs every surface does not wait for a successor. When all eight slots are live, the previous uncommitted picture is replayed as a hidden NOSHOW frame in the same temporal unit; the first completion is invisible and consumes one Import buffer without publishing pixels, while `Target::invisible` keeps the second NOSHOW half attributed to the client picture. A client `show_frame=0` picture is submitted immediately with no pixels to publish, a new key frame clears internal slot identities, and EOS has no held tail. The installed-package four-codec Import matrix, 120-frame AV1 clip and in-context DRC clip passed on 2026-11-11 with exact framemd5; Firefox 158 local AV1 and live YouTube/Bilibili AV1, and Chrome 156 live pages, report the selected hardware decoder with frame and drop windows. Chromium 152 selects a software AV1 decoder for a local file, so no hardware claim is made for that browser. After an in-context resolution change, a client that keeps exporting surfaces at the old CAPTURE geometry cannot receive the new geometry through Import: the driver records the layout mismatch and publishes those pictures with a GPU copy instead. See TEST-RESULTS.md for the run.
-- **AV1 film grain synthesis**: Refused at `endPicture`. VA-API names `current_frame` (the ungrained reference) and `current_display_picture` (the grained display surface) in the picture parameters, while this driver publishes one target per CAPTURE completion and never maps the completion to the display surface. A spec-correct `film_grain_params()` OBU writer was tested on the target: libdav1d decoded the rebuilt stream and the firmware has the AV1 film-grain capability flag, but the client's display surface stayed empty. Supporting synthesis needs a second-target publish path. Clients that export film grain as side data (`apply_grain=0`) decode those streams in hardware; see TEST-RESULTS.md. A 1920x1080 60-frame 10-bit AV1 clip also passed exact framemd5 with 60 Import publications on the installed package (a capability probe, not a new VA profile).
+- **VP9 zero-copy**: Requires the GPU copy path due to client-side surface lifecycle constraints during multi-picture access unit completions.
+- **AV1 dynamic resolution change & browser selection**: The internal eight-slot DPB emits each picture at `vaEndPicture` without holding frames across access units. After an in-context resolution change, if a client continues exporting surfaces with the previous CAPTURE geometry, the driver falls back to GPU copy for those pictures to avoid pitch corruption. For local file playback, Chromium 152 chooses its built-in software AV1 decoder; hardware AV1 is verified on live Chrome 156 web pages and in Firefox 158.
+- **AV1 film grain synthesis**: Refused at `endPicture`. VA-API picture parameters distinguish `current_frame` (ungrained reference) from `current_display_picture` (grained display surface). Because the driver maps each CAPTURE completion to a single target surface, synthesis requires a separate dual-target publishing path in user space. Streams with film grain decode in hardware when the client exports grain parameters as side data (`apply_grain=0`).
+- **AV1 10-bit profile**: Verified on hardware via a 1080p 60-frame 10-bit capability probe (exact framemd5 with zero-copy Import), but no 10-bit VA profile (such as Main 10) is currently advertised in the driver.
 - **Stock kernel fallback**: On kernels without display-delay or sync-frame controls, decode degrades to GPU copy and requested IDRs are handled via intra-period repositioning.
 - **Encode features**: Single full-picture slice only. Multi-slice, tiles, B-frames, and ROI return `VA_STATUS_ERROR_UNIMPLEMENTED`.
 - **Packed headers**: Extradata emission reports `VA_ENC_PACKED_HEADER_NONE`. Parameter sets are carried in-band.

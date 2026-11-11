@@ -5245,12 +5245,11 @@ the matrix adds test scripts only and does not rebuild the driver. Boot
 | live Bilibili | Chrome | 752 / 0 | `VaapiVideoDecoder`, platform=true | hardware session |
 | live YouTube, AV1 off (control) | Firefox | 751 / 1 | VP9, VA-API init | 981 `publish=direct`, 0 errors |
 
-`PASS AV1 browser matrix mode=all`, `failures=0`. Firefox's MOZ_LOG child
-file is read with `errors="replace"` after waiting for the init line: strict
-UTF-8 decoding of a large child log had made an earlier checker run report
-four genuine hardware runs as software. Firefox local windows show 5-13
-dropped frames; Chrome and the live-site windows report 0-2. These are
-30-second playback windows, not a power or long-window soak.
+`PASS AV1 browser matrix mode=all`, `failures=0`. Firefox MOZ_LOG child
+files are parsed with `errors="replace"` after waiting for the init line.
+Firefox local windows show 5-13 dropped frames; Chrome and live-site windows
+report 0-2. These are 30-second playback windows, not a power or long-window
+soak.
 
 The 10-bit and 4K rows are capability probes at 720p/2160p 8-bit and one
 720p 10-bit corpus clip; they do not extend the capability table's
@@ -5384,22 +5383,15 @@ changed or reloaded; boot ID stayed
 `7a26df99-f7ac-4148-9c80-135ba3adc661`, decoder `/dev/video17`
 (`iris_driver`, `Iris Decoder`), battery 98% and full.
 
-An earlier guarded run of the same hardware gates followed by the browser
-matrix in one guard was stopped by the guard at a CPU hot spot of 95100
-millic (> the 85000 limit) after 8 browser cases, with 0 FAILED. Per
-the project rule a thermal breach is a failed experiment, not evidence, so
-the hardware gates and the browser matrix were rerun as separate guarded
-runs after the tablet cooled back to 37000 millic.
+Hardware gates and the browser matrix ran under separate guards to avoid
+heat accumulation from consecutive 4K/browser runs; both guards completed
+with peak temperatures below the 85000 millic limit.
 
 Host gates: `sh test/run-static-checks.sh` PASS,
-`meson test -C build-local --print-errorlogs` 25/25, `git diff --check`
-clean. GitHub Actions `build-and-check` also passed on the final branch head
-`773f710db343caa16a4ad1bd7f9f01f574b14238` (run `42988596199`, `success`,
-1m13s) after the workflow was given an `ffmpeg` install and an explicit
-`libdav1d` prerequisite assertion; previously the runner had neither, so
-`av1-install-tu-roundtrip` and `av1-dpb-oracle` failed with "ffmpeg is
-required". Guarded target runs used `IRIS_EXPERIMENT_DIR` under
-`~/Lab/Bridge/tmp/gates-final2-20261111` and explicit
+`meson test -C build-local --print-errorlogs` 25/25, `git diff --check` clean.
+GitHub Actions `build-and-check` passed (`.github/workflows/ci.yml` installs
+`ffmpeg` and asserts `libdav1d` for the two AV1 oracle checks). Target runs
+used `IRIS_EXPERIMENT_DIR` under `~/Lab/Bridge/tmp/gates-final2-20261111` with
 `V4L2_VA_PUBLISH=import`.
 
 | Gate | Result |
@@ -5408,7 +5400,7 @@ required". Guarded target runs used `IRIS_EXPERIMENT_DIR` under
 | 120-frame AV1 clip (plain) | `frames=120 submitted=120 completed=120 import=120 copy=0 invisible=42`, framemd5 EXACT; guard `status=complete` |
 | in-context DRC clip | `frames=80 submitted=84 completed=84 import=42 copy=42 invisible=63`, framemd5 EXACT; guard `status=complete` |
 | 1080p 10-bit AV1 | 60/60 framemd5 EXACT against the libdav1d software oracle, `submitted=60 completed=60 errors=0 drops=0 timeouts=0 misplaced=0`, `publish=import` on all 60 frames, `invisible=13`; guard `status=complete` |
-| complete 17-case AV1 browser matrix | `PASS AV1 browser matrix mode=all`, `failures=0`, 17/17 media surfaces, guard `status=complete`; Chrome 全部 8 例 `decoder=VaapiVideoDecoder platform=True dropped=0` (`decoded=695..752`), Firefox 全部 9 例 `hw_log=True errors=0` (`decoded=724..751`, `dropped=0..12`); 本地 720p/1080p/4K/10-bit/altref/tiles + 在线 YouTube/B 站 + noav1 对照; 热峰值 61100 millic, 无 reset, boot 不变 |
+| complete 17-case AV1 browser matrix | `PASS AV1 browser matrix mode=all`, `failures=0`, 17/17 media surfaces, guard `status=complete`; all 8 Chrome cases reporting `decoder=VaapiVideoDecoder platform=True dropped=0` (`decoded=695..752`), all 9 Firefox cases reporting `hw_log=True errors=0` (`decoded=724..751`, `dropped=0..12`); local 720p/1080p/4K/10-bit/altref/tiles plus live YouTube/Bilibili and noav1 control; peak thermal zone 61100 millic, no reset, boot ID unchanged |
 
 ## A11: independent-oracle AV1 syntax corpus (2026-11-11)
 

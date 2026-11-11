@@ -1,7 +1,7 @@
 # Experiment: AV1 internal DPB slot translation (host spike, 2026-11-10)
 
 Branch: `exp/av1-noshow-dpb`, from `origin/main` `65686a2`.
-Status: **shipped as the default in PR #4**. The host prototype, guarded
+Status: **shipped as the default in PR #4 (consolidated into PR #5)**. The host prototype, guarded
 native V4L2 completion probe and guarded real VA-API sessions below
 established bit-exact rebuilt OBUs, the real two-completion install unit and
 the false-accounting fix. The held-picture wait chain is removed from

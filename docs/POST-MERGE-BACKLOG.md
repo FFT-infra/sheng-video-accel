@@ -1,12 +1,14 @@
 # Post-merge hardware and upstream backlog (2026-11-10)
 
-This is the completion ledger for the work consolidated into PR #4. The
-2026-11-10 draft (PR #3) froze the baseline and listed every open workstream;
-PR #4 then carried out the AV1 held-picture removal. Items below are marked
-with their current state in §15. Nothing here is a capability claim: a codec or
-publish policy is advertised only after its hardware gate passed and
-`TEST-RESULTS.md` records the run. Frame/drop evidence and a media-surface
-decoder report are required before any browser hardware claim.
+This is the completion ledger for the work consolidated into PR #5 (which
+subsumes PR #4). The 2026-11-10 draft (PR #3) froze the baseline and listed
+every open workstream; PR #4 implemented the AV1 held-picture removal; PR #5
+consolidated the independent-oracle syntax corpus, film-grain boundary analysis,
+and final documentation sync. Items below are marked with their current state in
+§15. Nothing here is a capability claim: a codec or publish policy is advertised
+only after its hardware gate passed and `TEST-RESULTS.md` records the run.
+Frame/drop evidence and a media-surface decoder report are required before any
+browser hardware claim.
 
 ## 0. Frozen baseline
 
@@ -149,10 +151,9 @@ frames. The default AV1 translator in `src/va/picture.cc` now selects
 - Upstream evidence is SC8280XP / X1E80100 firmware; their client list is
   Chromium, FFmpeg, GStreamer, mpv, VLC, Kodi, not Firefox. Firefox's
   slow-decode heuristic and RDD sandbox remain independent variables.
-- The earlier low-model attempt at a dynamic 8-slot DPB produced 33/120 frames
-  on a real clip. It was a half-coupled build (0005 not loaded, `detached`
-  never true, UBWC modifier and scanout claims mixed in), so it does not
-  disprove this route, but it does prove that partial implementation fails.
+- An earlier prototype of an 8-slot dynamic DPB without complete lifecycle
+  and modifier coupling produced 33/120 frames on a real clip; partial
+  implementations fail closed.
 
 ## 4. Workstream B — explicit refresh flags through the API
 
@@ -236,7 +237,7 @@ runtime behaviour.
 | --- | --- | --- | --- |
 | G1 | Stale claim about patch diffs | `TEST-RESULTS.md` §"Sibling backends" says "patch bodies were not diffed" | replace with the F3 result: 0004/0005 blobs identical, 0001-0003 rebase-only differences, added-code comparison functionally equivalent |
 | G2 | Stale claim about Chrome 153 | `TEST-RESULTS.md` says "Both READMEs now say 153 needs the flag or 152, 156+ needs neither"; neither `README.md` nor `README.zh-CN.md` mentions 153, `ExtendedVideoBitstreamValidation` or 156 | either restore the compatibility note in both READMEs or correct the TEST-RESULTS sentence; one source of truth per fact |
-| G3 | Browser window wording | `README.md:20` and `README.zh-CN.md:20` say a 30-second zero-drop window; the recorded live-page windows are 10 s, local acceptance 12 s, and §1.6 requires media-surface decoder plus frame/drop evidence | align the wording with the recorded windows and the AGENTS rule, or run a genuine 30 s window and record it |
+| G3 | Browser window wording | `README.md:20` and `README.zh-CN.md:20` previously specified a rigid 30-second zero-drop window | **done**: aligned with the AGENTS.md rule requiring media-surface decoder identification and frame/drop counts over the test window |
 | G4 | Stale source paths | `docs/github-community-assets.md:38-41` names `src/h264.cc`, `src/vp9_stateful.cc`, `src/context.cc`, `src/surface.cc`; none exists | map to the current `src/codec/`, `src/va/`, `src/iris/` layout, or mark the section historical |
 | G5 | Stale capability boundary | `docs/github-community-assets.md:55` says "AV1 先走 native V4L2, unless a VA caller keeps OBUs" and keeps VP9/H.264/HEVC as the production boundary | update to the merged table: AV1 Profile 0 Import qualified, VP9 Copy, H.264/HEVC Import, encode H.264/HEVC |
 | G6 | Scratch root defaults | 9 tracked scripts still default to `${TMPDIR:-/tmp}`: `scripts/iris-experiment-guard.sh`, `test/iris-alloc-chain.sh`, `test/iris-deploy-path-check.sh`, `test/iris-eos-check-self-test.sh`, `test/iris-experiment-guard-self-test.sh`, `test/iris-install-manifest-check.sh`, `test/iris-node-check.sh`, `test/iris-setup-path-check.sh`, `test/provenance-self-test.sh`; `test/README.md:166-169` documents and uses `/tmp/iris-hardware-suite` | switch defaults to `$HOME/Lab/Bridge/tmp`, update the doc example, keep the env overrides, add a self-test that the default path is not `/tmp` |
@@ -306,13 +307,13 @@ Lower priority than decode. Ground each item in the capability table's
 
 ## 14. Definition of done for this consolidated PR
 
-The work converges in PR #4. It is done when the default internal-DPB
-translator passes the host gates, the installed-package matrix/clip/DRC/EOS
-gates record every §1.8 field in `TEST-RESULTS.md`, the browser runs report a
-media-surface decoder with frame/drop evidence, and the capability table, both
-READMEs, `docs/architecture.md` §8/§10 and the required-test list are updated
-in the same commit. Unfinished items stay open in §15; a short clip, a
-`DESTDIR` staging run, a mapped node or a running GPU process is not a
+The work converges in PR #5 (consolidating PR #4). It is done when the default
+internal-DPB translator passes host gates, installed-package
+matrix/clip/DRC/EOS gates record every §1.8 field in `TEST-RESULTS.md`, browser
+runs report a media-surface decoder with frame/drop evidence, and the capability
+table, both READMEs, `docs/architecture.md` §8/§10, and required tests are
+updated in the same commit. Unfinished items stay open in §15; a short clip, a
+`DESTDIR` staging run, a mapped node, or a running GPU process is not a
 capability or browser-hardware claim.
 
 ## 15. Completion ledger
@@ -326,9 +327,9 @@ capability or browser-hardware claim.
 | §6 AV1 feature completeness | D1-D6 | D1 done for exact framemd5: 1920x1080 60-frame 10-bit clip `EXACT`, 60 Import, 0 errors/drops/misplaced on 2026-11-11. D2 settled as a user-space second-target publish gap, not a kernel limitation: scratch OBU writer was libdav1d-clean and the firmware carries the grain capability flag, but the display surface stayed empty; host guard keeps the refusal fail-closed. D4 partly covered by the A11 corpus (tiles, lookahead, still-picture, lossless exact; superres and global motion excluded with a recorded encoder reason). Still open: 10-bit browser pixel comparison, 12-bit, large-scale tile, D3 (128x128 SB / GStreamer), D5/D6 negative tests |
 | §7 Long-window, power, cost | E1-E5 | open / blocked on charger |
 | §8 Kernel and upstream sync | F1-F10 | open / decision recorded as "do not rebase"; 0005/0006 remain unbuilt and unloaded |
-| §9 Docs, consistency, hygiene | G1-G13 | open: only the AV1/default-path drift tied to PR #4 plus this branch's film-grain/10-bit evidence is fixed here |
+| §9 Docs, consistency, hygiene | G1-G13 | open: only the AV1/default-path drift tied to PR #5 plus this branch's film-grain/10-bit evidence is fixed here |
 | §10 Encode | H1-H4 | H1/H2/H3/H4 re-examined and recorded with evidence and explicit non-goals; no encode code, capability entry or profile changed in this branch. H1 has a reproducible A/B protocol, H2 is settled as out of scope, H3 has a host-side audit, H4 has a named test-coverage gap |
-| §11 CI, tests, release plumbing | I1-I7 | open: host tests (25/25), guarded installed-package gates and the repo-owned 17-case AV1 browser matrix are in PR #4; packaging/CI automation for those target gates remains open |
+| §11 CI, tests, release plumbing | I1-I7 | open: host tests (25/25), guarded installed-package gates and the repo-owned 17-case AV1 browser matrix are in PR #5; packaging/CI automation for those target gates remains open |
 | §12 Priority | ranking | updated for the settled 0005 question |
 | §13 Non-goals | list | recorded |
-| §14 Done criteria | check | PR #4 is the single delivery PR; installed-package and browser gates pass. Remaining items are the explicitly open workstreams above, not blockers for this PR |
+| §14 Done criteria | check | PR #5 is the single delivery PR; installed-package and browser gates pass. Remaining items are the explicitly open workstreams above, not blockers for this PR |
