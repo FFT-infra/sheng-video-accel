@@ -264,7 +264,7 @@ Lower priority than decode. Ground each item in the capability table's
 
 | ID | Item | Pass condition |
 | --- | --- | --- |
-| I1 | Cross-repo fork PR CI still needs base-repo admin approval for `pull_request` runs; fork `push` runs are green | record the actual approval state per run; never describe a pending PR run as passing |
+| I1 | Cross-repo fork PR CI still needs base-repo admin approval for `pull_request` runs; fork `push` runs are green | record the actual approval state per run; never describe a pending PR run as passing. **2026-11-11 update**: PR #5's `pull_request` run `42988596199` completed `success` in 1m13s without an approval hold; `.github/workflows/ci.yml` now installs `ffmpeg` and asserts `libdav1d` so the two AV1 oracle checks run instead of failing or silently skipping |
 | I2 | Any new invariant gets a regression test that fails on the old code, plus a name in `.github/workflows/ci.yml` required list (G13) | red-on-old, green-on-new, CI inventory check passes |
 | I3 | `test/iris-clip-trace-check.sh` compares ordered `^0,` framemd5 lines because host and target `Lavf` versions differ | keep the header-only-difference self-test; do not reintroduce a whole-file `cmp` |
 | I4 | `test/run-static-checks.sh` is the single CI entry point for host-only checks; keep hardware suites out of it | unchanged on merge |

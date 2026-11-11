@@ -5393,7 +5393,12 @@ runs after the tablet cooled back to 37000 millic.
 
 Host gates: `sh test/run-static-checks.sh` PASS,
 `meson test -C build-local --print-errorlogs` 25/25, `git diff --check`
-clean. Guarded target runs used `IRIS_EXPERIMENT_DIR` under
+clean. GitHub Actions `build-and-check` also passed on the final branch head
+`773f710db343caa16a4ad1bd7f9f01f574b14238` (run `42988596199`, `success`,
+1m13s) after the workflow was given an `ffmpeg` install and an explicit
+`libdav1d` prerequisite assertion; previously the runner had neither, so
+`av1-install-tu-roundtrip` and `av1-dpb-oracle` failed with "ffmpeg is
+required". Guarded target runs used `IRIS_EXPERIMENT_DIR` under
 `~/Lab/Bridge/tmp/gates-final2-20261111` and explicit
 `V4L2_VA_PUBLISH=import`.
 
