@@ -5958,3 +5958,49 @@ probed the OUTPUT queue; the node table above was resolved by queue role and
 the runner now prints both. The `driver_sha` line in each run header is the
 installed package and is not what the override run used; both digests are
 recorded here for that reason.
+
+## E3/E4: 4K AV1 Import under pinned clocks (2026-11-12)
+
+The 4K lane of `test/iris-real-clip-gate.sh` declared `invisible=0` and failed
+with `publish=invisible is 1, expected 0`. The decode itself was correct: the
+VA framemd5 matched the software baseline on all 30 frames, `submitted=30
+completed=30`, and the 14 NOSHOW halves were unchanged from the recorded run.
+The expected count was stale. The 4K record in this file was taken on source
+`079480d8` (2026-11-10), which predates `e5c8fae` (2026-11-11, "attribute both
+NOSHOW halves of an install unit by token"); that commit is what reports the
+install half of a two-completion access unit as one invisible record. The clip
+carries exactly one such access unit. Three repeats on the installed driver
+gave 1 invisible and 14 NOSHOW halves every time, so the lane now declares 1
+and cites the reason.
+
+Run identity for both measurements: installed package
+`323c07cbd42f5a152cfca4278a78d64d726534a85f95f0d0db22379e4317a37d` (no
+`LIBVA_DRIVERS_PATH` override), boot `17928711-7fd8-4f87-a024-9bf6b5bc44b6`,
+decoder `/dev/video5` and encoder `/dev/video6` as the driver's own
+`va init node=` line reports them, kernel `7.2.6-sm8550-g42f3b40-iris1` with
+the 0001-0004 + 0006 module, clip `av1-4k.mkv` (3840x2160, 30 frames, 30 fps),
+battery 74 % discharging, no charger attached.
+
+The guarded run (`guard-20261111T211550Z`, timeout 2400 s, temperature interval
+5 s) is `status=complete`, unchanged boot ID, hottest sample 42400 millic,
+battery 74 % -> 72 %, with every CPU policy pinned to `performance` at its
+maximum (policy0 2016 MHz, policy3 2803 MHz, policy7 2956 MHz):
+
+| Measurement | Frames | Wall | Per frame | Note |
+| --- | --- | --- | --- | --- |
+| clip gate, then 20 separate `ffmpeg` passes | 600 | 20830 ms | 34.7 ms | session-bound, see below |
+| one process, `-stream_loop 19` | 600 | 1841 ms | 3.07 ms | 326 fps, `utime=0.132s stime=0.127s` |
+| the same, default `schedutil` governor | 600 | 1878 ms | 3.13 ms | 0.31 s client CPU |
+
+The 20-pass figure is not a throughput number. Twenty short sessions pay
+twenty client startups — VA init, 4K surface allocation, decoder open and
+drain — and one long process shows the same 600 frames in 1.84 s, so about a
+second per session dominates a 30-frame clip. The per-frame cost to quote is
+3.07 ms with the clocks pinned, and the client's own CPU time is 0.26 s for
+600 frames, which is 14 % of the wall time: the rest is the hardware decoder.
+
+Running the same single process with the default governor produced 1878 ms
+against 1841 ms pinned. At this load the measurement is not sensitive to CPU
+clock state, so the DVFS caution that applies to the earlier per-frame finding
+does not change this number. It is still not a thermal, power or long-window
+result, and the 4K lane remains an opt-in Import capability probe.
