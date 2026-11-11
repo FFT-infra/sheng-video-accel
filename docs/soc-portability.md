@@ -14,7 +14,9 @@ SoC until its own hardware gate passes and `TEST-RESULTS.md` records the run.
    `DISPLAY_DELAY_ENABLE`/`DISPLAY_DELAY` to `inst_fw_cap_sm8550_dec` and the
    `sm8550_vdec_input_config_param_*` arrays; 0002 and 0003 add controls to
    `inst_fw_cap_sm8550_enc`; 0004 changes `iris_vb2_buffer_done()`; 0005 and
-   0006 are experimental and must stay out of a port baseline. A new SoC has
+   0006 are experimental and must stay out of a port baseline. 0006 has one
+   guarded WP1 run on SM8550 with a "no regression" verdict, which is not a
+   fix claim or portability evidence. A new SoC has
    its own platform tables and firmware capability enum, so every hunk needs
    re-review and rebase, not a blind `git am`. `test/iris-kernel-patch-check.sh`
    pins the current hashes and paths; refresh `SHA256SUMS` in the same commit

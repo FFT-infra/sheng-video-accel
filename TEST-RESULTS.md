@@ -4874,8 +4874,9 @@ A/B on the same target, kernel, clips and 48-frame matrix:
 The synthetic matrix did not expose the regression; the real clip did. All
 twelve rewritten files were reverted to HEAD. The kept change is the one-line
 Import enabler in `src/va/driver.cc` plus the capability/docs updates in the
-same commit. Kernel patches 0005/0006 remain as unvalidated experimental
-assets, documented as such in `packaging/kernel/README.md`.
+same commit. At the time of this 2026-11-10 run, kernel patches 0005/0006
+were unvalidated experimental assets; 0006 later had one separate guarded WP1
+run, recorded below.
 
 ### Installed-package decode evidence
 
@@ -5657,5 +5658,89 @@ premature LAST record. The slow-CAPTURE VP9 defect that 0006 addresses is
 therefore still unreproduced on SM8550. Until it is reproduced on the
 0001-0004 baseline, a later clean run cannot be called "fixed"; the correct
 verdict would be "no regression". Installation and the guarded hardware gates
-remain a separate, explicitly approved target action. This section is a build
-and module-identity result, not codec evidence and not a capability claim.
+were later run as a separate, explicitly approved target action; see the next
+section. This section is a build and module-identity result, not codec
+evidence and not a capability claim.
+
+## WP1: 0006 loaded on sheng — guarded gates, "no regression" (2026-11-12)
+
+One experimental kernel patch was installed at a time: 0001-0004 + 0006, with
+0005 absent. The VA driver, capability table, VA profiles and publish policies
+are unchanged. Reboot was explicitly approved for this WP1 run; the guard was
+started only after the reboot, so its "boot ID unchanged" rule measures the
+experiment rather than the installation.
+
+**Identity and runtime** (installed package, no build-tree driver override;
+`LIBVA_DRIVER_NAME=v4l2`, `LIBVA_DRIVERS_PATH=/usr/lib64/dri`):
+
+| Field | Value |
+| --- | --- |
+| Kernel source | `42f3b40c702abbc37c3a04c95af008cd283aeaf3` (`ianchb/sm8550-mainline`, `sheng-7.2.6`) |
+| Kernel release | `7.2.6-sm8550-g42f3b40-iris1` |
+| Installed VA driver | `323c07cbd42f5a152cfca4278a78d64d726534a85f95f0d0db22379e4317a37d` (unchanged) |
+| Module before | `9b16a40179a08e414d0f4bb38ea54f5bb12ada2b9ce176f0dc6b3b602e7bc83d` (0001-0004) |
+| Module after | `b90bd823fdab98957739ad2196eb4016f5a264f2280d22735963e40c8488c715` (0001-0004 + 0006) |
+| Loaded vermagic | `7.2.6-sm8550-g42f3b40-iris1 SMP preempt mod_unload aarch64` |
+| Boot ID before reboot | `7a26df99-f7ac-4148-9c80-135ba3adc661` |
+| Boot ID after reboot / during guard | `17928711-7fd8-4f87-a024-9bf6b5bc44b6` |
+| Decoder | `iris_driver` QUERYCAP name `qcom-iris-decoder`, card `Iris Decoder`, node `/dev/video5` after reboot (`/dev/video17` before). Formats `H264 HEVC VP90 AV01`. |
+| Encoder | `iris_driver` QUERYCAP name `qcom-iris-encoder` |
+| Rollback | `~/Lab/Bridge/tmp/wp1-verify/out/rollback-qcom-iris.ko.zst`, `sha256sum -c` verified before install; restore script `~/Lab/Bridge/tmp/wp1-rollback.sh` was not run |
+
+Before installing, `~/Lab/Bridge/tmp/wp1-install.sh` re-checked the rollback
+copy, copied the built module, ran `depmod -a` and rebooted. The reboot changes
+the boot ID by design; both IDs are recorded above.
+
+**Baseline reproduction attempt on 0001-0004** (boot
+`7a26df99-f7ac-4148-9c80-135ba3adc661`): six runs of the retained 1280x720
+480-frame alt-ref VP9 clip, all `rc=0 frames=480 last=1 epipe=0 errors=0
+drops=0` with `session finish submitted=515 completed=515 errors=0 drops=0
+timeouts=0 drains=1 misplaced=0`. All six framemd5 files are byte-identical
+(md5 `653d13e6913e9dec741f77116509b376`) and are retained under
+`~/Lab/Bridge/tmp/wp1-baseline-0001-0004/`. A raw V4L2 slow-CAPTURE probe
+(640-frame H.264, two CAPTURE slots, `delay_us=2000` and `10000`, OUTPUT
+buffers tagged with TIMECODE metadata) reported `submitted=640 completed=632
+last_before_end=0 epipe=0 errors=0 tc_checked=632 tc_mismatch=0
+queued_cap=634` on both delays; its console output is recorded in the session
+log, while the probe binary and clip remain on the target. No separate log file
+was kept for that pre-install probe. The earlier search of 838 retained guard
+logs/traces also found no `EPIPE`, spurious LAST or premature LAST record. The
+slow-CAPTURE defect that 0006 addresses is therefore **not reproduced** on
+SM8550 with the qualified module, so a clean run with 0006 can only be called
+"no regression", never "fixed".
+
+**Final guarded run**: `~/Lab/Bridge/tmp/wp1-verify/guard-20261111T193559Z`,
+`IRIS_EXPERIMENT_TIMEOUT_SECONDS=1800`,
+`IRIS_EXPERIMENT_MAX_TEMP_MILLIC=85000`,
+`status=complete`, `finished_at=2026-11-11T19:37:00Z`, boot ID unchanged,
+maximum recorded temperature 40400 millic, no `failure` file, no thermal
+breach and no firmware reset. Three earlier attempts were `interrupted` and are
+retained as audit records: a relative `test/iris-eos-check.sh` path, a stale
+node/gate deployment after the reboot changed the decoder node, and an EOS
+checker invocation without `--hidden-pictures`. None of them was a decode or
+firmware failure. The final run used a fresh guard directory.
+
+| Gate | Result |
+| --- | --- |
+| Four-codec matrix | H.264, VP9, HEVC, AV1 each `frames=48 submitted=48 capture=48 drain=1 timeouts=0 drops=0` with exact framemd5; AV1 `noshow=23`. `SKIP mpeg2/vp8 device-formats-unavailable`. |
+| Long VP9 clip, six runs | `rc=0 frames=480 last=1 epipe=0 errors=0 drops=0`, `submitted=515 completed=515 errors=0 drops=0 timeouts=0 drains=1 misplaced=0` each run. All six framemd5 files have the same md5 as the 0001-0004 baseline, and `run1.md5` is byte-identical between the two modules. |
+| EOS contract | `PASS frames=480 contexts=1 submitted=515 capture=515 drain=1 timeouts=0 drops=0 noshow=0` with `--hidden-pictures`: 480 visible pictures and 35 hidden alt-reference completions. |
+| Real AV1 clip | `PASS frames=120 submitted=120 completed=120 import=120 copy=0 invisible=42` |
+| AV1 DRC clip | `PASS frames=80 submitted=84 completed=84 import=42 copy=42 invisible=63` |
+| Slow CAPTURE, `delay_us=2000` | `submitted=640 completed=632 last_before_end=0 epipe=0 errors=0 tc_checked=632 tc_mismatch=0 queued_cap=634 elapsed=1343ms` |
+| Slow CAPTURE, `delay_us=10000` | Same counters, `elapsed=6454ms` |
+
+The long VP9 reproduction probe requests `V4L2_VA_PUBLISH=import`, which the
+capability table refuses for VP9; its traces show `publish=copy-gpu` for the
+515 payload completions and `publish=invisible` for 35 hidden ones. It is a
+reproduction attempt, not a VP9 Import gate. No browser matrix, 10-bit probe
+or capability qualification ran in WP1.
+
+**Decision**: keep the 0001-0004 + 0006 module installed on `sheng`. The
+guarded gates show no regression against the 0001-0004 baseline; the defect
+0006 addresses was never reproduced here, so there is no "fixed" claim. 0006
+stays experimental, the qualified module remains 0001-0004, and no codec,
+profile or publish policy is advertised from this run. The verified rollback
+copy and `wp1-rollback.sh` restore the qualified module with `depmod -a` and a
+reboot if a later run fails or another experiment needs the baseline. 0005 was
+not built or loaded.

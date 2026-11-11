@@ -1,13 +1,15 @@
 # Iris Kernel Module Patches
 
 This directory provides four qualified kernel patches (0001-0004) plus two
-experimental, unvalidated ones (0005-0006), targeting the `qcom-iris` driver on
+experimental ones (0005-0006), targeting the `qcom-iris` driver on
 `ianchb/sm8550-mainline` (branch `sheng-7.2.6`, commit `42f3b40c702a`).
 
 Only 0001-0004 make up the module the driver's decode results in
 TEST-RESULTS.md are qualified on, including the 2026-11-10 AV1 zero-copy
 Import run. The driver detects missing kernel controls at runtime and degrades
-gracefully on stock kernels.
+gracefully on stock kernels. Neither experimental patch is part of that
+qualified baseline; 0006 has one guarded WP1 run on `sheng` recorded in
+TEST-RESULTS.md, with a "no regression" verdict and no capability change.
 
 ## Patch Summary
 
@@ -18,7 +20,7 @@ gracefully on stock kernels.
 | `0003-media-iris-encoder-request-sync-frame.patch` | Qualcomm (Wangao Wang) | Implements `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` (`HFI_PROP_REQUEST_SYNC_FRAME`) | Enables direct hardware sync-frame requests |
 | `0004-media-iris-preserve-timestamps-on-error-buffers.patch` | Radxa / `qcom-va-driver` | Preserves buffer timestamp on `V4L2_BUF_FLAG_ERROR` completions | Allows immediate failure attribution for corrupted frames |
 | `0005-media-iris-recycle-decoder-buffers-for-non-display-pictures.patch` | Radxa / `qcom-va-driver` | Recycles non-display (NOSHOW) decoder buffers internally | **Experimental, not validated with this driver.** Requeues NOSHOW CAPTURE buffers in the kernel instead of completing them to userspace; this driver's AV1 path consumes those completions by decode order to publish hidden reference frames, so loading 0005 with the current userspace loses the frames. Qualifying it needs its own translator/session rewrite plus hardware runs. |
-| `0006-media-iris-discard-unmatched-timestamp-metadata.patch` | yzddmr6 / `linux-sm8750-piano` | Discards unmatched timestamp metadata instead of borrowing | **Experimental, not validated on hardware.** A module containing it was built on `sheng` (WP1, 2026-11-12) but has not been installed, loaded or run through a decode gate. |
+| `0006-media-iris-discard-unmatched-timestamp-metadata.patch` | yzddmr6 / `linux-sm8750-piano` | Discards unmatched timestamp metadata instead of borrowing | **Experimental, one guarded WP1 run only.** Built, installed with 0001-0004, rebooted and run through the four-codec matrix, long VP9 clip, AV1 real/DRC clips, EOS and slow-CAPTURE probes on `sheng` (2026-11-12). The upstream defect was not reproduced on the 0001-0004 baseline, so the verdict is "no regression", not "fixed". It is not part of the qualified baseline and adds no codec, profile or publish-policy claim. |
 
 ## Verification & Integrity
 
@@ -61,10 +63,12 @@ the installed `qcom-iris.ko.zst`. `run-static-checks.sh` parses this script.
 
 ### Installation
 
-Installation is a separate, explicit decision. Before replacing anything,
-record the source commit, the installed driver hash, the kernel module hash,
-boot ID, resolved decoder/encoder nodes, battery state and thermal zones. Keep
-the verified rollback copy from `build-module.sh`.
+Installation is a separate, explicit decision. WP1's installation, reboot and
+guarded gates are recorded in `TEST-RESULTS.md` §"WP1: 0006 loaded on sheng";
+the three interrupted guard attempts are retained as audit records. Before
+replacing anything, record the source commit, the installed driver hash, the
+kernel module hash, boot ID, resolved decoder/encoder nodes, battery state and
+thermal zones. Keep the verified rollback copy from `build-module.sh`.
 
 ```sh
 work=~/Lab/Bridge/tmp/iris-kernel-module

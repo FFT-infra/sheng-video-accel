@@ -119,7 +119,7 @@ frames. The default AV1 translator in `src/va/picture.cc` now selects
 | --- | --- | --- | --- | --- | --- |
 | A1 | Read-through of upstream `src/av1.cpp`, `src/decoder.cpp`, `src/internal.hpp` and `tests/decoder/av1.py`; write a contract diff against our `src/codec/av1.cc`, `av1_obu.cc`, `src/iris/session.*`, `src/va/surface.cc` | host, read-only | none | a written list of every behaviour that differs, including DPB slot selection, hidden replay, sequence-header emission, tile layout and EOS | none needed |
 | A2 | Define the new V4L2 completion ledger on the 0001-0004 module | target probe | L1, L5, guard | **done**: `docs/experiments/av1-noshow-dpb-spike.md` records the two completions under one token (`ERROR`/no payload, then pixels), the empty LAST at drain, and the zero-timestamp single hidden picture path | none; no module swap happened |
-| A3 | Build and load 0001-0005 on `sheng`, reboot, confirm the module hash and active controls | target, can reset firmware | A2 design, L1, guard wrapped | **not applicable**: A2 settled that 0005 is not needed and would lose frames with this userspace | none; 0005/0006 remain unbuilt and unloaded |
+| A3 | Build and load 0001-0005 on `sheng`, reboot, confirm the module hash and active controls | target, can reset firmware | A2 design, L1, guard wrapped | **not applicable**: A2 settled that 0005 is not needed and would lose frames with this userspace | none; 0005 remains unbuilt and unloaded (0006 later had one separate guarded WP1 run) |
 | A4 | Short AV1 decode against the new module with `V4L2_VA_TRACE=1` only to characterise suppressions | target | A3 | **done on 0001-0004**: guarded real VA-API sessions recorded `publish=invisible`, `publish=direct`/`publish=import`, `errors=0`, `misplaced=0` and bit-exact rebuilt OBUs | none; build-tree override only, installed driver untouched |
 | A5 | Rewrite the AV1 translator to emit one complete temporal unit per `vaEndPicture` with an explicit 8-slot DPB and hidden-reference replay | code | A1, A4 | **done**: `src/codec/av1_dpb.cc`, `av1_build_install_temporal_unit()`; host tests cover DPB-full install, pending-surface references, client hidden frames, sequence restart and no held EOS tail | revert `src/va/picture.cc` to `make_av1()` |
 | A6 | Rewrite the session / surface / EOS accounting for the completions | code | A4, A5 | **done**: `unsent`, `wait_for_release()`, `release_held_picture()` and the bounded-release tail are removed; orphaned invisible halves are consumed as `publish=invisible`; `test/iris-clip-trace-check.sh` still balances submitted/completed | revert `src/iris/` and `src/va/` changes |
@@ -184,7 +184,7 @@ completions dropped, against 2 and 4 for the H.264 control.
 | --- | --- | --- |
 | C1 | Re-measure Chrome's early surface release on the merged baseline with CDP frame/drop deltas and `abandoned=` trace counts; separate "surface released" from "picture completed" | a per-surface timeline with no ambiguous attribution |
 | C2 | Decide the ownership model: retained/duplicated DMA-BUF fd after `destroySurfaces`, or a copy window; write it down before code | one written model, no half-state |
-| C3 | Kernel patch 0006 (`7c28b27`, unmatched timestamp metadata ring) — decide whether it is needed at all on SM8550 | build/load only if C1 shows a spurious LAST/EPIPE; otherwise record "not needed" and leave 0006 experimental |
+| C3 | Kernel patch 0006 (`7c28b27`, unmatched timestamp metadata ring) — decide whether it is needed at all on SM8550 | **WP1 settled the local kernel question**: the slow-CAPTURE defect was not reproduced on 0001-0004, and one guarded 0001-0004 + 0006 run passed with "no regression". 0006 stays experimental and out of the qualified baseline; no VP9 Import qualification follows from it. Chrome's early surface release (C1/C2) is still open. |
 | C4 | Target run: one-buffer vs two-buffer window; known bad case 153/609 misplaced must stay a regression test | FFmpeg 515/515 clean, Chrome no drops, `misplaced=0`, exact framemd5 |
 | C5 | Only after C4: qualify VP9 `publish_import` in the table, both READMEs, §8 trace vocabulary, TEST-RESULTS.md and CI | evidence-before-capability satisfied; otherwise Copy stays |
 
@@ -226,7 +226,7 @@ to one of the items above.
 | F7 | `intel/libva`, Firefox `FFmpegVideoDecoder.cpp` | `va_dec_av1.h` last changed 2021; recent Firefox changes in that file are Vulkan Video / Android, the "send one frame, immediately receive" loop is unchanged | re-check before starting B work |
 | F8 | `yzddmr6/linux-sm8750-piano` v1.2.0 (2026-11-10) | camera, serial, audio; no new Iris commits; 0006's origin commit unchanged | no action |
 | F9 | `GhfunNiHe/sheng-fedora-packages` | last push 2026-10-25; pins patches against `iris-kernel-patches-v1` | re-check packaging pin only if a patch hash changes |
-| F10 | 0005/0006 experiment branch | no such branch exists; only `feat/vpu-zerocopy-ubwc` and its fork remote | created from `main` when A3 is authorised; never enabled by default |
+| F10 | 0005/0006 experiment branch | no such branch exists; only `feat/vpu-zerocopy-ubwc` and its fork remote; 0006's WP1 build and guarded target run are recorded on `chore/post-merge-hygiene` | open a separate branch before any 0005 work; never enabled by default |
 
 ## 9. Workstream G — documentation, consistency and hygiene debt
 
@@ -292,8 +292,9 @@ Lower priority than decode. Ground each item in the capability table's
 
 - Do not rebase the whole `src/` tree onto `radxa-pkg/qcom-va-driver`; the two
   backends have different memory models and different target SoCs.
-- Do not load 0005 or 0006 against the current userspace outside a guarded
-  experiment branch.
+- Do not load 0005 against the current userspace outside a guarded experiment
+  branch. Do not treat 0006's single guarded WP1 run as qualification; the
+  module stays experimental and outside the qualified baseline.
 - Do not delete `COPYING.LGPL`, the vendored UAPI headers, or the experimental
   kernel patches as "cleanup".
 - Do not add a browser launcher, a desktop entry, a Chrome feature override, or
@@ -326,7 +327,7 @@ node, or a running GPU process is not a capability or browser-hardware claim.
 | §5 Chrome VP9 Import | C1-C5 | open: session-side window is fixed (FFmpeg 515/515, misplaced=0); Chrome reuses a VP9 surface in `beginPicture`, which releases the still-in-flight picture. In the forced-Import run `submitted=718 completed=177 drops=541`, with 564 of 768 import queueings abandoned; the forced-Copy baseline completed 708 with `drops=1`. The H.264 control had 2 abandoned and 4 drops out of 670; the numbers are in `TEST-RESULTS.md` §"Why VP9 Import still is not qualified". Qualifying this needs a retained-target ownership model, its own host regressions for the misplaced/detached case, and a fresh target gate — not a rename of `publish=drop` |
 | §6 AV1 feature completeness | D1-D6 | D1 done for exact framemd5: 1920x1080 60-frame 10-bit clip `EXACT`, 60 Import, 0 errors/drops/misplaced on 2026-11-11. D2 settled as a user-space second-target publish gap, not a kernel limitation: scratch OBU writer was libdav1d-clean and the firmware carries the grain capability flag, but the display surface stayed empty; host guard keeps the refusal fail-closed. D4 partly covered by the A11 corpus (tiles, lookahead, still-picture, lossless exact; superres and global motion excluded with a recorded encoder reason). Still open: 10-bit browser pixel comparison, 12-bit, large-scale tile, D3 (128x128 SB / GStreamer), D5/D6 negative tests |
 | §7 Long-window, power, cost | E1-E5 | open / blocked on charger |
-| §8 Kernel and upstream sync | F1-F10 | open / decision recorded as "do not rebase"; 0005 is unbuilt and unloaded, 0006 has a staged module build only (WP1) and has not been loaded |
+| §8 Kernel and upstream sync | F1-F10 | open / decision recorded as "do not rebase"; 0005 is unbuilt and unloaded; 0006 was built, installed with 0001-0004, rebooted and run through one guarded WP1 gate on `sheng` with a "no regression" verdict, still experimental and outside the qualified baseline |
 | §9 Docs, consistency, hygiene | G1-G14 | all closed: G1, G2, G3, G7, G8, G12, G13 and G14 done; G4, G5, G6, G9, G10 and G11 closed with explicit reasons (untracked scratch notes, intentional scratch default, kernel SPDX provenance, release-note identity fact, no new trace marker) |
 | §10 Encode | H1-H4 | H1/H2/H3/H4 re-examined and recorded with evidence and explicit non-goals; no encode code, capability entry or profile changed in this branch. H1 has a reproducible A/B protocol, H2 is settled as out of scope, H3 has a host-side audit, H4 has a named test-coverage gap |
 | §11 CI, tests, release plumbing | I1-I7 | open: host tests (25/25), guarded installed-package gates and the repo-owned 17-case AV1 browser matrix are in PR #5; packaging/CI automation for those target gates remains open |
@@ -339,10 +340,12 @@ node, or a running GPU process is not a capability or browser-hardware claim.
 
 Baseline: `main` == `origin/main` == `4125b11`, re-verified 2026-11-12; the
 worktree is clean and `build-and-check` run `43028113058` is green. The
-qualified module is 0001-0004; 0005/0006 are experimental and have not been
-loaded on `sheng`. Each package gets one branch and one draft PR, no force
-push, no rewriting `main`, no deleting branches, and no AI attribution in
-commits or public text.
+qualified module is 0001-0004; 0005/0006 are experimental. At the time of
+WP0, neither had been loaded on `sheng`; WP1 later loaded 0006 for one guarded
+run with a "no regression" verdict. That run does not change the qualified
+baseline or any capability claim. Each package gets one branch and one draft
+PR, no force push, no rewriting `main`, no deleting branches, and no AI
+attribution in commits or public text.
 
 Every package runs `sh test/run-static-checks.sh`,
 `meson test -C build-local --print-errorlogs`, `git diff --check`, and CI must
@@ -370,44 +373,42 @@ No code change. Recorded in `TEST-RESULTS.md` §"Post-merge baseline
 worktree, green merge-commit CI, host gates 25/25. PR #6 later added the §8
 checker, so its own host gates are 26/26.
 
-### WP1 validate 0006 — build staged, target validation pending
+### WP1 validate 0006 — done, verdict "no regression"
 
-**Staged on 2026-11-12 (`TEST-RESULTS.md` §"WP1: 0006 module build staged")**:
-`packaging/kernel/build-module.sh` now reproduces the module-only build on
-`sheng`. Source tree `ianchb/sm8550-mainline` `42f3b40c702a`, `.config` from
-`/proc/config.gz`, `localversion` derived from `uname -r`, a 333-entry
-video-subsystem `Module.symvers` regenerated from `/proc/kallsyms`, and
-0001-0004 + 0006 applied in order (0005 absent). The built module's vermagic
-is `7.2.6-sm8550-g42f3b40-iris1`, its 136 undefined symbols are all exported
-by the running kernel, and a rollback copy was compared byte-for-byte with the
-installed `qcom-iris.ko.zst`. This is a build and identity result only: no
-module was installed, no reboot, no decode run, no capability claim. The
-earlier read-only survey's "no source tree / no Module.symvers / no rollback
-copy" blocker is closed.
+`packaging/kernel/build-module.sh` reproduces the module-only build on
+`sheng`: source `ianchb/sm8550-mainline` `42f3b40c702a`, `.config` from
+`/proc/config.gz`, `localversion` from `uname -r`, a 333-entry video-subsystem
+`Module.symvers` regenerated from `/proc/kallsyms`, and 0001-0004 + 0006
+applied in order (0005 absent). The built module's vermagic is
+`7.2.6-sm8550-g42f3b40-iris1`, its 136 undefined symbols are all exported by
+the running kernel, and a rollback copy was compared byte-for-byte with the
+installed `qcom-iris.ko.zst`.
 
-Purpose: 0006 discards unmatched timestamp metadata instead of borrowing it;
-upstream saw a spurious LAST/EPIPE and 32 of 150 VP9 frames dropped on SM8750
-when CAPTURE consumption was slow. SM8550 has no recorded reproduction yet.
-A search of retained guard artifacts found no EPIPE/spurious-LAST record, so
-the baseline defect is still unreproduced.
+The slow-CAPTURE defect that 0006 addresses was not reproduced on the
+0001-0004 baseline. Six 480-frame alt-ref VP9 runs were clean, and a raw V4L2
+slow-CAPTURE probe at `delay_us=2000` and `10000` produced no premature LAST,
+EPIPE or timecode mismatch; the earlier search of 838 retained guard artifacts
+also found no such record. The 0001-0004 framemd5 files are retained.
 
-Install **0001-0004 + 0006 only**, and only after explicit approval for that
-target change. WP1 does not install 0005: `packaging/kernel/README.md`
-records that recycling NOSHOW buffers in the kernel loses frames with this
-userspace, so loading both at once would make any AV1 matrix failure
-unattributable. 0005 stays for WP3.
+After explicit approval for the reboot, 0001-0004 + 0006 was installed and
+loaded on `sheng`. The guard started after the reboot, so its "boot ID
+unchanged" rule measured the experiment. Three interrupted attempts are kept
+as audit records (relative EOS path, stale node/gate deployment, and an EOS
+checker call without `--hidden-pictures`). The final run
+`guard-20261111T193559Z` has `status=complete`, `WP1_GATES_DONE failures=0`,
+unchanged boot ID, maximum temperature 40400 millic, no thermal breach and no
+reset. The four-codec matrix is 48/48 exact for each codec, six long VP9 runs
+keep `submitted=515 completed=515 drops=0 misplaced=0` with byte-identical
+framemd5, EOS passes with `--hidden-pictures`, both AV1 clip gates pass, and
+both slow-CAPTURE probes stay clean. Full identity fields, numbers and the
+rollback path are in `TEST-RESULTS.md` §"WP1: 0006 loaded on sheng".
 
-Before loading 0006, reproduce the slow-CAPTURE defect on the 0001-0004
-baseline; the repo has no slow-consumer VP9 harness yet, so this needs either a
-new harness or a recorded proxy scenario. If no spurious LAST/EPIPE is
-reproduced, the verdict is "no regression" and not "fixed". Then run a long VP9
-clip, the VP9 matrix, the four-codec matrix, and EOS/DRC gates, and compare with
-the 0001-0004 baseline. Pass means no spurious LAST/EPIPE, exact framemd5,
-`misplaced` no worse, guard `status=complete`, no thermal breach, and no reset.
-Installation needs a reboot: record the planned before/after boot IDs, then
-start the guard only after the reboot so its "boot ID unchanged" rule measures
-the experiment, not the installation. On failure keep the record, roll the
-module back, stop and report.
+**Decision**: keep the module installed. The verdict is "no regression", not
+"fixed"; 0006 remains experimental and outside the qualified 0001-0004
+baseline. No codec, VA profile or publish policy is advertised from this run,
+and the VA driver, capability table and trace vocabulary are unchanged. 0005
+was not built or loaded. The verified rollback copy and `wp1-rollback.sh`
+restore the qualified module with `depmod -a` and a reboot if needed.
 
 ### WP2 measure the cost of 0005 — done, verdict "not worth doing"
 
