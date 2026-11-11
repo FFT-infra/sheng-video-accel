@@ -5872,3 +5872,89 @@ E2 therefore stays open with a narrower question: the software half needs a
 workload or a cooling design that stays under 85 C at saturation, or an
 explicit decision to measure a different (and therefore not directly
 comparable) software configuration.
+
+## Encode rate control: the target was programmed as the maximum (2026-11-12)
+
+The recorded rate-control gap (VBR producing about twice its target) was
+reproducible and is a mapping defect in the translators, not a firmware
+property. `VAEncMiscParameterRateControl` defines `bits_per_second` as *the
+maximum* the controller may generate and `target_percentage` as *the target
+inside that maximum* (`/usr/include/va/va.h`). Both translators copied the
+raw field into the V4L2 target and ignored the percentage.
+
+FFmpeg's `vaapi_encode_init_rate_control()` makes that the common case: when
+the mode supports a maximum and the client gave no `rc_max_rate`, it
+programs `2 * bit_rate` with `target_percentage = 50`, so a plain `-b:v 4M`
+asks VA for 8 Mbit/s at a 50 % target.
+
+Seven arms on `sheng`, installed package `323c07cbd42f...`, boot
+`17928711-...`, encoder node `/dev/video6` as the strace shows it, fixed
+1080p30 `testsrc2` source, 600 frames per arm, `strace -e trace=ioctl`
+recording every `VIDIOC_S_CTRL`:
+
+| Arm | Request | `BITRATE` written | `BITRATE_PEAK` written | Output |
+| --- | --- | --- | --- | --- |
+| `cqp` | `-rc_mode CQP -q:v 24` | none (`FRAME_RC_ENABLE=0`) | none | 10534 kbit/s |
+| `cbr4` | `-rc_mode CBR -b:v 4M -maxrate 4M` | 4000000 | 4000000 | 3986 kbit/s |
+| `vbr4` | `-b:v 4M` | 8000000 | none | 8000 kbit/s |
+| `vbr4peak` | `-b:v 4M -maxrate 4M -bufsize 8M` | 4000000 (mode 1) | 4000000 | 3981 kbit/s |
+| `vbr1` | `-b:v 1M` | 2000000 | none | 2003 kbit/s |
+| `vbr12` | `-b:v 12M` | 24000000 | none | 23975 kbit/s |
+| `vbr24` | `-b:v 24M` | 48000000 | none | 30405 kbit/s |
+
+Every VBR request without a maximum came out at exactly twice its target,
+and the doubled value is visible in the control write, so the layer is
+identified: the translator, not the firmware's rate controller. The 24M arm
+is content-limited rather than rate-limited at 30.4 Mbit/s.
+
+Fix: the target is now `bits_per_second * target_percentage / 100` (0 means
+100 %, which keeps older clients unchanged), and a maximum above the target
+becomes `BITRATE_PEAK` for VBR as well as CBR. `encode-params-test` covers
+the split for both codecs. No capability entry changed.
+
+### The fix took two stages (same boot, source `efab9b5` then `0dbc385`)
+
+The percentage fix alone did not move the rate. With it built and loaded, the
+`vbr4` arm still produced 7934 kbit/s, and the control trace shows why: ten
+writes of 4000000 and ten of 8000000, alternating, one pair per picture.
+FFmpeg renders the rate-control misc buffer only with the first picture; every
+later picture arrives without it, the translator fell back to the sequence
+field, and that field carries the client's *rate* — the maximum — rather than
+the target derived from it. The controller was reprogrammed between 4 and
+8 Mbit/s on every picture.
+
+The second stage keeps the last configured rate when a picture carries no
+rate control, so the target the client asked for survives the sequence field.
+Two regression cases in `encode-params-test` cover it: a picture without rate
+control keeps the target and the ceiling of the picture before it. Both fail
+against the first stage's code.
+
+Seven arms again after both stages, build-tree driver
+`6efe4de9a6baa5862ea2397c48b2ad479e3b251a2d7de68316df098063b8bf4e`
+(`LIBVA_DRIVERS_PATH` override, `ldd -r` clean, tablet unit tests passing),
+installed package `323c07cbd42f...` untouched, boot `17928711-...`, decoder
+`/dev/video5` (compressed on OUTPUT), encoder `/dev/video6` (compressed on
+CAPTURE), same source, frame count and mount:
+
+| Arm | Request | `BITRATE` written | `BITRATE_PEAK` written | Output | Before |
+| --- | --- | --- | --- | --- | --- |
+| `cqp` | `-rc_mode CQP -q:v 24` | none | none | 10534 kbit/s | 10534 |
+| `cbr4` | `-rc_mode CBR -b:v 4M -maxrate 4M` | 4000000 | 4000000 | 3980 kbit/s | 3986 |
+| `vbr4` | `-b:v 4M` | 4000000 | 8000000 | 3992 kbit/s | 8000 |
+| `vbr4peak` | `-b:v 4M -maxrate 4M -bufsize 8M` | 4000000 | 4000000 | 3986 kbit/s | 3981 |
+| `vbr1` | `-b:v 1M` | 1000000 | 2000000 | 1386 kbit/s | 2003 |
+| `vbr12` | `-b:v 12M` | 12000000 | 24000000 | 11975 kbit/s | 23975 |
+| `vbr24` | `-b:v 24M` | 24000000 | 48000000 | 23934 kbit/s | 30405 |
+
+`vbr4` lands within 0.2 % of its target and writes each control once per
+session, which is the change that mattered. `vbr1` overshoots by 39 %: at
+1080p30 `testsrc2` the rate controller cannot reach 1 Mbit/s inside the QP
+range the firmware uses, so that arm is content-limited from below and is not
+a control defect. The 24M arm moved down with the rest, which shows the
+sequence-field fallback was in effect there too.
+
+The A/B runner's own header named `/dev/video5` as `encoder_node` because it
+probed the OUTPUT queue; the node table above was resolved by queue role and
+the runner now prints both. The `driver_sha` line in each run header is the
+installed package and is not what the override run used; both digests are
+recorded here for that reason.
