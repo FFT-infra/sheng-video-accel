@@ -203,6 +203,8 @@ test('iris-env-doc-check', find_program('iris-env-doc-check.sh'),
      args: [meson.project_source_root()])
 test('iris-codec-matrix-check', find_program('iris-codec-matrix-check.sh'),
      args: [meson.project_source_root()])
+test('iris-trace-vocab-check', find_program('python3'),
+     args: ['-I', files('iris-trace-vocab-check.py'), meson.project_source_root()])
 test('iris-experiment-guard-self-test', find_program('iris-experiment-guard-self-test.sh'),
      args: [meson.project_source_root()])
 test('iris-eos-check-self-test', find_program('iris-eos-check-self-test.sh'),

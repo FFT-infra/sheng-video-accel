@@ -523,10 +523,12 @@ encode control missing name=<control> id=<hex>        (optional control absent;
 va export_surface id=<n> persistent=0|1 source=frame|stable fd=<n> pitch=<n>
 ```
 
-Three VA-side diagnostics are emitted but intentionally stay out of the
-checker-oriented list above: `va init node=<path>`, `va error where=<name>` and
-`va sync failed ...`. They name driver startup failures, not session completions.
-G7's proposed checker would encode these as accepted exceptions.
+Four VA-side diagnostics are emitted but intentionally stay out of the
+checker-oriented list above: `va init node=<path>`, `va error where=<name>`,
+`va sync failed ...` and `va destroy_context encode finish failed: <reason>`.
+They name driver startup or teardown failures, not session completions.
+These are the accepted exceptions for `test/iris-trace-vocab-check.py`, which
+compares every trace format prefix in `src/` against the list above.
 
 ## 9. Phases and gates
 

@@ -5478,3 +5478,27 @@ the installed driver on `sheng` remains the one recorded at
 "Installed-package verification of the completion branch" above (source
 commit `a53963d6`, driver SHA-256 `323c07cb…`, boot
 `7a26df99-f7ac-4148-9c80-135ba3adc661`, 0001-0004 module).
+
+## PR #6 host hygiene gates (2026-11-12)
+
+PR #6 (`chore/post-merge-hygiene`, draft) adds the §8 trace-vocabulary checker,
+closes the Firefox browser-matrix hollow-green paths, makes the AV1 software
+oracles fail when their prerequisites are missing, and records the merged
+baseline and WP0-WP7 sequence. It is host-only: no target run, no driver
+reinstall, no kernel module swap, no capability or publish-policy change.
+
+Host gates on `d74f0f2`: `sh test/run-static-checks.sh` rc=0,
+`meson test -C build-local --print-errorlogs` 26/26 (the 26th is
+`iris-trace-vocab-check`), `git diff --check` clean. GitHub Actions
+`build-and-check` run `43061871540` completed `success` on `d74f0f2`. The
+earlier run `43059187865` on `096792d` failed in `Install build dependencies`
+before any project step ran; it is a runner-side bootstrap failure, not a
+product failure.
+
+The Firefox PASS condition now requires this browser process to publish at
+least the sampled window's decoded frames through the installed driver, with
+no `publish=error`, `publish=misplaced`, `publish=drop` or `session failed`.
+The nine Firefox rows from the 2026-11-11 17-case matrix were re-checked
+against that condition on the target's existing artifacts: all nine pass
+(`decoded=724..751`, `published=875..974`, `errors=0`). This is a contract
+check against recorded traces, not a new browser playback run.

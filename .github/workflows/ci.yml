@@ -67,6 +67,7 @@ jobs:
             encode-session \
             prime-import \
             iris-codec-matrix-check \
+            iris-trace-vocab-check \
             static-checks \
             iris-source-invariants \
             iris-env-doc-check \
