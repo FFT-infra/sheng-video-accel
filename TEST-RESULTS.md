@@ -5404,3 +5404,33 @@ clean. Guarded target runs used `IRIS_EXPERIMENT_DIR` under
 | in-context DRC clip | `frames=80 submitted=84 completed=84 import=42 copy=42 invisible=63`, framemd5 EXACT; guard `status=complete` |
 | 1080p 10-bit AV1 | 60/60 framemd5 EXACT against the libdav1d software oracle, `submitted=60 completed=60 errors=0 drops=0 timeouts=0 misplaced=0`, `publish=import` on all 60 frames, `invisible=13`; guard `status=complete` |
 | complete 17-case AV1 browser matrix | `PASS AV1 browser matrix mode=all`, `failures=0`, 17/17 media surfaces, guard `status=complete`; Chrome 全部 8 例 `decoder=VaapiVideoDecoder platform=True dropped=0` (`decoded=695..752`), Firefox 全部 9 例 `hw_log=True errors=0` (`decoded=724..751`, `dropped=0..12`); 本地 720p/1080p/4K/10-bit/altref/tiles + 在线 YouTube/B 站 + noav1 对照; 热峰值 61100 millic, 无 reset, boot 不变 |
+
+## A11: independent-oracle AV1 syntax corpus (2026-11-11)
+
+Five 640x360 AV1 clips were generated on `sheng` with `libaom-av1` and
+decoded by an independent `libdav1d` software oracle (the VA driver did not
+generate the oracle). Each clip was then decoded through the installed
+package (`LIBVA_DRIVERS_PATH=/usr/lib64/dri`, `V4L2_VA_PUBLISH=import`) and
+compared by ordered framemd5 hashes. The run was wrapped in
+`scripts/iris-experiment-guard.sh` with `IRIS_EXPERIMENT_DIR` under
+`~/Lab/Bridge/tmp/av1-syntax-corpus/a11-guard`:
+`status=complete`, boot `7a26df99-f7ac-4148-9c80-135ba3adc661` unchanged,
+no reset, thermal zones 37600 millic, battery 85% Discharging, driver
+`323c07cbd42f5a152cfca4278a78d64d726534a85f95f0d0db22379e4317a37d`.
+
+| Case | Encoder syntax | Oracle / hardware frames | Session | Publish | framemd5 |
+| --- | --- | --- | --- | --- | --- |
+| baseline | `libaom-av1 -cpu-used 8 -crf 32` | 60 / 60 | `submitted=62 completed=62 errors=0 drops=0 timeouts=0 drains=1 misplaced=0` | `import=62 invisible=51` | EXACT |
+| tiles | `-tiles 2x2` | 60 / 60 | `submitted=62 completed=62 errors=0 drops=0 timeouts=0 drains=1 misplaced=0` | `import=62 invisible=51` | EXACT |
+| lookahead | `-lag-in-frames 12` | 60 / 60 | `submitted=60 completed=60 errors=0 drops=0 timeouts=0 drains=1 misplaced=0` | `import=60 invisible=51` | EXACT |
+| stillpicture | `-still-picture 1` (1 frame) | 1 / 1 | `submitted=1 completed=1 errors=0 drops=0 timeouts=0 drains=1 misplaced=0` | `import=1` | EXACT |
+| lossless | `-aom-params lossless=1` | 60 / 60 | `submitted=62 completed=62 errors=0 drops=0 timeouts=0 drains=1 misplaced=0` | `import=62 invisible=52` | EXACT |
+
+`A11_RESULT failures=0`. Two upstream case designs were excluded rather
+than reported as passing: frame super-resolution could not be expressed by
+the target's `libaom-av1` (all `superres-*` `aom-params` variants produced no
+packets), and `-enable-global-motion 1` produced a bitstream whose decoded
+framemd5 was identical to the baseline, so it gives no distinguishable
+syntax coverage. No new VA profile or capability entry is claimed from this
+corpus; it is evidence that the default translator handles these five syntax
+shapes on the installed package.
