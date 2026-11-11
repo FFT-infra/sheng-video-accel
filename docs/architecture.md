@@ -415,7 +415,13 @@ Hardware checkers (`iris-eos-check.sh`, `iris-ending-check.sh`,
 `iris-context-retirement-check.sh`, `iris-zero-copy-suite.sh`,
 `iris-concurrency-soak.sh`) parse trace lines. These records are an API;
 renaming one requires updating its consumer in the same commit. Every
-record ends with ` t=<ms>` since the first record of the process.
+record ends with ` t=<ms>` since the first record of the process. A record
+is one atomic write under a process-wide mutex: two separate writes let a
+concurrent context splice `publish=invisibleva end_picture` into the log,
+which loses a vocabulary entry and fails the clip checker. The body is sized
+from `vsnprintf`'s return value, not a fixed buffer: a long
+`import rejected: <why>` record must keep its trailing fields intact.
+`test/trace-test.cc` covers concurrent writers and a record over 1024 bytes.
 
 ```
 session open node=<path> mode=decode-order|display-order codec=<fourcc> <w>x<h> au=<n> output=<n>
@@ -431,7 +437,8 @@ capture noshow token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu
                                                                       one, else by decode order)
 capture token=<n> index=<i> flags=<hex> publish=drop                 (released target; not published)
 capture token=<n> index=<i> flags=<hex> publish=error                (firmware error; not published)
-capture token=<n> index=<i> flags=<hex> publish=invisible            (VP9 alt-ref: first of two completions under one token, ERROR with no picture-type bit and no payload; keep the target pending for the visible frame)
+capture token=<n> index=<i> flags=<hex> publish=invisible            (VP9 alt-ref or AV1 hidden install: first of two completions under one token, ERROR with no picture-type bit and no payload; Target::invisible counts it so the second NOSHOW half still publishes the client picture. A released target leaves this completion orphaned; it is still invisible, not a decode error, and its visible half is the one drop)
+capture index=<i> flags=<hex> publish=invisible                     (unnamed NOSHOW LAST marker at a DRC boundary; no picture of its own)
 capture token=<n> index=<i> flags=<hex> publish=misplaced slot_token=<n>
                                                                      (Import: buffer was queued for
                                                                       another token; both surfaces fail)
@@ -481,10 +488,6 @@ va destroy_context id=<n> entrypoint=encslice frames=<n>
 va begin_picture ctx=<n> surface=<n>
 va begin_picture ctx=<n> surface=<n> entrypoint=encslice
 va end_picture ctx=<n> surface=<n> bytes=<n> seq_start=0|1
-va end_picture ctx=<n> surface=<n> deferred                     (AV1: the picture is held until
-                                                                 the next AU names its slots, or
-                                                                 until vaDestroyContext releases
-                                                                 the tail before the session drain)
 va end_picture ctx=<n> surface=<n> entrypoint=encslice bytes=<n>
 encode open node=<path> codec=<fourcc> raw=<w>x<h> crop=<w>x<h> mode=cbr|vbr|cqp
             gop=<n> rate=<num>/<den>
@@ -506,9 +509,6 @@ encode drain result=last|timeout
 encode control missing name=<control> id=<hex>        (optional control absent;
                                                        the session continues)
 va export_surface id=<n> persistent=0|1 source=frame|stable fd=<n> pitch=<n>
-va sync released the held picture surface=<n>        (the sync bound expired at end of
-                                                      stream; the held AV1 picture is
-                                                      submitted as final)
 ```
 
 ## 9. Phases and gates
@@ -623,16 +623,23 @@ below the first needs an MSM render node.
     the client may close its own. Any other geometry, modifier or object
     count is `VA_STATUS_ERROR_INVALID_PARAMETER` at creation, never a picture
     decoded into the wrong pixels.
-17. An AV1 picture is submitted only once its refreshed slots are known: VA
-    carries no `refresh_frame_flags`, so the translator recovers them from
-    the next picture's `ref_frame_map` (a shown key or switch frame refreshes
-    all eight by definition). Until then its surface reports
-    `VASurfaceRendering`, and `vaSyncSurface`, `vaGetImage`, `vaDeriveImage`
-    and `vaExportSurfaceHandle` release it rather than read it. When the sync
-    bound expires at end of stream the picture is submitted as final and
-    refreshes no slot; a following non-intra picture then fails with
-    `VA_STATUS_ERROR_OPERATION_FAILED` instead of decoding against slots
-    nobody can name.
+17. An AV1 picture is submitted at `vaEndPicture`. The internal eight-slot
+    DPB assigns refresh slots itself and rewrites `ref_frame_idx[]` to those
+    slot numbers, so no successor is needed to name refreshed slots. When all
+    eight slots are still referenced, the previous uncommitted picture is
+    replayed as a hidden NOSHOW frame in the same temporal unit before the
+    shown frame; `AccessUnit::completions = 2` and both completions carry one
+    token. The first NOSHOW half is invisible and consumes one Import buffer
+    without publishing pixels; `Target::invisible` counts it so the second
+    half is always the client picture, including when that picture's own
+    `show_frame=0` makes both halves NOSHOW. A NOSHOW LAST marker at a DRC
+    boundary names no picture and is consumed as invisible. A client
+    `show_frame=0` picture is submitted immediately with no client pixels to
+    publish. A new key frame clears internal slot identities and starts a
+    fresh sequence;
+    EOS has no held tail to guess or release. `vaSyncSurface`, `vaGetImage`,
+    `vaDeriveImage` and `vaExportSurfaceHandle` wait for the picture's own
+    completion, never for a later access unit.
 18. An AV1 hidden picture (`show_frame=0`) is published, not failed. The node
     returns it with the ERROR flag, no KEYFRAME/PFRAME/BFRAME bit and zero
     bytes used. On a stock kernel it also has a zero timestamp and only the

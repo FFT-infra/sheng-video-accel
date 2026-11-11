@@ -190,6 +190,13 @@ void FakeDevice::emit_last(unsigned slot)
     last.index = slot;
     last.flags = V4L2_BUF_FLAG_LAST;
     last.bytesused = 0;
+    if (noshow_drc_last_) {
+        // A DRC boundary marker may borrow a slot that still carries the
+        // firmware's NOSHOW flags. It is still an empty buffer with LAST,
+        // not a decoded picture that failed.
+        last.flags |= V4L2_BUF_FLAG_ERROR;
+        noshow_drc_last_ = false;
+    }
     capture_done_.push_back(last);
 }
 
@@ -455,7 +462,8 @@ void FakeDevice::complete_one()
         return;
     }
     require(!capture_queue_.empty(), "fake: no free CAPTURE slot for completion");
-    if (altref_superframe_ && capture_queue_.size() < 2) {
+    const bool two_completions = altref_superframe_ || hidden_install_unit_;
+    if (two_completions && capture_queue_.size() < 2) {
         // The firmware will not return the invisible half until it has a slot
         // for the visible one; the picture waits in the OUTPUT queue instead
         // of completing. This is the ~500 ms stall a one-buffer Import window
@@ -473,18 +481,23 @@ void FakeDevice::complete_one()
     } else {
         capture_queue_.pop_front();
     }
-    if (altref_superframe_) {
+    if (two_completions) {
         // A VP9 alt-ref is one VA picture the firmware decodes as two: the
         // invisible frame completes first with the ERROR flag, no
         // picture-type bit and no payload, under the same token the visible
-        // one will carry. Only the second completion has pixels.
+        // one will carry. Only the second completion has pixels. A hidden AV1
+        // install unit has the same two-completion shape, except its client
+        // shown half is show_frame=0 too and therefore also returns NOSHOW.
+        const bool hidden_shown = hidden_install_unit_;
         altref_superframe_ = false;
+        hidden_install_unit_ = false;
         Dequeued invisible;
         invisible.index = slot;
         invisible.flags = V4L2_BUF_FLAG_ERROR;
         invisible.timestamp_us = au.timestamp;
         invisible.bytesused = 0;
         capture_done_.push_back(invisible);
+        hidden_install_done_ = hidden_shown;
         require(!capture_queue_.empty(), "fake: no free CAPTURE slot for the visible frame");
         slot = capture_queue_.front();
         capture_queue_.pop_front();
@@ -497,6 +510,11 @@ void FakeDevice::complete_one()
         done.timestamp_us = output_queue_.front().timestamp;
     }
     done.bytesused = config_.stride * config_.coded_height * 3 / 2;
+    if (hidden_install_done_) {
+        done.flags = V4L2_BUF_FLAG_ERROR;
+        done.bytesused = 0;
+        hidden_install_done_ = false;
+    }
     capture_done_.push_back(done);
     // CAPTURE returns before OUTPUT on Iris.
     output_done_.push_back(au.index);

@@ -68,6 +68,11 @@ public:
     // fewer than two CAPTURE slots queued the picture simply waits — the
     // stall a one-buffer Import window produced on the target.
     void inject_altref_superframe() { altref_superframe_ = true; }
+    // A hidden install unit with a client show_frame=0 shown half: both
+    // completions are NOSHOW (ERROR, no picture-type bit, no payload). The
+    // first is the internal install frame, the second is the client's hidden
+    // picture; neither has pixels.
+    void inject_hidden_install_unit() { hidden_install_unit_ = true; }
     // Return EBUSY from START this many times.
     void inject_start_busy(unsigned count) { start_busy_ = count; }
     // After the next AU, announce a new resolution.
@@ -75,6 +80,10 @@ public:
     {
         pending_drc_ = { width, height };
     }
+    // The DRC boundary marker can itself carry a NOSHOW error shape: the
+    // kernel uses a free CAPTURE slot for the empty LAST buffer, and the
+    // firmware marks that slot with ERROR and no payload on some streams.
+    void inject_noshow_drc_last() { noshow_drc_last_ = true; }
     // Make the next DQBUF on CAPTURE fail with EIO.
     void inject_capture_eio() { capture_eio_ = true; }
     // Stop completing until released (models a stalled reorder window).
@@ -178,6 +187,8 @@ private:
     unsigned timestamped_errors_ = 0;
     uint32_t timestamped_error_flags_ = 0;
     bool altref_superframe_ = false;
+    bool hidden_install_unit_ = false;
+    bool hidden_install_done_ = false;
     std::optional<std::pair<unsigned, unsigned>> pending_drc_;
     bool capture_eio_ = false;
     bool auto_tick_ = true;
@@ -197,6 +208,7 @@ private:
     bool drc_last_pending_ = false;
     // The queued source change is a mid-stream one, so it ends with LAST.
     bool drc_change_ = false;
+    bool noshow_drc_last_ = false;
     void emit_last(unsigned slot);
 };
 

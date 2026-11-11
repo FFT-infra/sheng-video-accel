@@ -2,7 +2,7 @@
 
 # Validate the browser-facing stateful teardown trace. Chrome may retire VA
 # surfaces while an access unit is still in flight, but that must not turn into
-# a bounded sync timeout or an unmatched timestamp during surface destruction.
+# a bounded session sync timeout or an unmatched timestamp during surface destruction.
 
 set -eu
 

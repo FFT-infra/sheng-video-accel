@@ -126,12 +126,11 @@ for bad in 'publish=error$' 'publish=drop$' 'publish=misplaced' 'capture error i
     [ "$n" -eq 0 ] || fail "$n occurrence(s) of $bad"
 done
 
-# destroyContext releases the held AV1 picture before draining. A run that
-# needed the vaSyncSurface timeout bound did not take the EOS path.
+# A session sync timeout means the client never saw a completion. The default
+# AV1 path has no held tail, but the session still emits this record for any
+# codec when its bounded wait expires.
 n=$(count 'sync timeout token=')
-[ "$n" -eq 0 ] || fail "$n sync timeout(s); held picture was not released at EOS"
-n=$(count 'va sync released the held picture')
-[ "$n" -eq 0 ] || fail "$n sync-bound release(s); held picture was not released at EOS"
+[ "$n" -eq 0 ] || fail "$n session sync timeout(s) at EOS"
 
 [ "$failures" -eq 0 ] || exit 1
 printf 'PASS clip-check frames=%s submitted=%s completed=%s import=%s copy=%s invisible=%s\n' \

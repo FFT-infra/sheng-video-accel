@@ -5120,3 +5120,333 @@ boundary alongside the existing `vaDestroyContext` / no-flush-entry-point
 notes. A per-client AV1 fix needs either an explicit VA-API flush entry point
 or a client that does not block the next access unit on the current surface;
 both are outside a driver-only change.
+
+## Internal-DPB AV1 installed-package and browser gates (2026-11-11)
+
+This run qualifies the default internal eight-slot DPB translator as the
+installed package, replacing the held-picture path whose Firefox 158 AV1
+failure is recorded in the section above. Target: `sheng`, boot
+`7a26df99-f7ac-4148-9c80-135ba3adc661` throughout, kernel
+`7.2.6-sm8550-g42f3b40-iris1` with the 0001-0004 module (no kernel change or
+reload in this run). The decoder resolved by `iris_driver` QUERYCAP to
+`/dev/video17`, `Iris Decoder`. The installed package is
+`/usr/lib64/dri/v4l2_drv_video.so` SHA-256
+`e97a861f8b66aa3297c22a438fa5ac6620e0c347ed147c6398deb220c29b0478`,
+`source_commit=a34d348f2354041433d7476abb621cc435218ae6`,
+`source_dirty=0`,
+`tracked_source_sha256=bfd9ccf12b796f8a83fe53b49f2d5b5ae1f611bd8974bf129d1bd610cd18da57`.
+The build came from a clean tree containing only the 154 tracked files of that
+commit; no build-tree `LIBVA_DRIVERS_PATH` override was used for the gates.
+Rollback snapshot:
+`~/Lab/Bridge/tmp/rollback-3-20261110T182904Z/v4l2_drv_video.so` (previous
+installed SHA-256
+`84a329258baf6b2fdf2e1da8f1038b35a35b3e159637238daf55982da1daeb43`), plus the
+installer's own `/usr/local/share/iris-vaapi/backup/v4l2_drv_video.so`.
+
+Host and target build gates: `sh test/run-static-checks.sh` rc=0,
+`meson test -C build-local --print-errorlogs` 25/25,
+`git diff --check` rc=0; the target's clean-tree build also ran 25/25 and
+`ldd -r` reported no undefined symbols. The new `trace` test exercises 1600
+concurrent records after the fix for interleaved trace lines.
+
+Installed-package hardware gates, each under
+`scripts/iris-experiment-guard.sh` with `IRIS_EXPERIMENT_DIR` under
+`~/Lab/Bridge/tmp` and `V4L2_VA_PUBLISH=import`. Artifacts:
+`~/Lab/Bridge/tmp/gates5-20261110T182908Z/`. All three guards ended
+`status=complete`, no reset or thermal breach (battery 74->73%, peak zone
+37000 millic, boot ID unchanged).
+
+| Gate | Result |
+| --- | --- |
+| Four-codec matrix, 48 frames, Import | H.264/HEVC/VP9/AV1 framemd5 EXACT; AV1 `submitted=48 capture=48 drain=1 timeouts=0 drops=0 noshow=23` |
+| Real 1280x720 AV1 clip | 120/120 frames, `submitted=120 completed=120 import=120 copy=0 invisible=42`, framemd5 EXACT |
+| 1280x720 -> 854x480 in-context DRC clip | 80/80 frames, `submitted=84 completed=84 import=42 copy=42 invisible=63`, framemd5 EXACT, recorded `import rejected: client layout differs from the CAPTURE layout` |
+
+The DRC run on the clean `e5c8fae` install exposed one trace-writer defect,
+not a decode failure: `publish=invisibleva end_picture` spliced two records,
+so the checker counted 62 instead of 63 while framemd5 was already EXACT.
+`a34d348` makes each record one atomic `fprintf` under a process-wide mutex;
+the rerun above counts 63 and passes. Completion accounting for the same
+branch is from `e5c8fae`: `Target::invisible` consumes the first NOSHOW half
+of a two-completion install unit so the second half publishes the client
+picture even when both halves are NOSHOW, and a NOSHOW LAST marker at a DRC
+boundary is invisible rather than a decode error.
+
+Browser evidence uses the installed package with no `LIBVA_*`, publish or node
+override. The local relay on 127.0.0.1:8899 provides the system resolver path
+for live sites; `WAYLAND_DISPLAY=wayland-1`, `XDG_RUNTIME_DIR=/run/user/1000`.
+Chrome is `156.0.8078.79`, Firefox `158.0.1`, Chromium `152.0.7977.75`. A
+browser decode counts as hardware only where a media surface reports the
+selected decoder with a frame/drop window.
+
+| Browser / page | Codec | Frame/drop window | Decoder evidence | Driver trace |
+| --- | --- | --- | --- | --- |
+| Firefox local 1280x720 AV1 clip | AV1 | 243 / 3 | `VA-API FFmpeg init successful`, `IsHardwareAccelerated=true` | 272 `publish=direct`, 84 `publish=invisible`, `va init node=/dev/video17`, no errors |
+| Firefox live YouTube | AV1 / VP9 1920x1080 | 114 decoded at second sample (first sample had no video element) | `av1`, `VA-API FFmpeg init successful` | 129 `publish=direct`, 98 `publish=invisible`, no decode error |
+| Firefox live Bilibili | AV1 640x360 | 251 / 0 | `av1`, `VA-API FFmpeg init successful` | 447 `publish=direct`, 201 `publish=invisible`, no decode error |
+| Firefox live YouTube, `media.av1.enabled=false` (control) | VP9 1920x1080 | 251 / 0 | `vp9`, `VA-API FFmpeg init successful` | 488 `publish=direct`, 42 `publish=invisible`, no decode error |
+| Chrome local 1280x720 AV1 clip | AV1 | 287 / 0 | `VaapiVideoDecoder`, `kIsPlatformVideoDecoder=true`, GPU process holds `/dev/video17` | driver `installed:e97a861f8b66...`; see `~/Lab/Bridge/tmp/browser-clean-final/chrome-local` |
+| Chrome live YouTube | AV1 1920x1080 | 251 / 0 | `VaapiVideoDecoder`, `kIsPlatformVideoDecoder=true`, GPU process holds `/dev/video17` | 662 `publish=import`, 496 `publish=invisible`, `session finish submitted=442 completed=442 errors=0 drops=0 timeouts=0 drains=1 misplaced=0`; 4 `publish=drop` are released-surface completions after a decoder switch |
+| Chrome live Bilibili | AV1 640x360 | 251 / 0 | `VaapiVideoDecoder`, `kIsPlatformVideoDecoder=true`, GPU process holds `/dev/video17` | 750 `publish=import`, 342 `publish=invisible`, 3 `publish=drop` from released surfaces |
+| Chromium local AV1 (control) | AV1 | 288 / 0 | `Dav1dVideoDecoder`, `kIsPlatformVideoDecoder=false` | software decoder; Chromium 152 does not select VA-API for this local file |
+
+The earlier Firefox AV1 failure is resolved: the same client that stalled at
+2 decoded frames now decodes 243 frames in a 10-second window with hardware
+decoder evidence and no held-picture error. Firefox local AV1 shows 3 dropped
+frames in the window; the live-page windows report 0. Firefox's own
+`MOZ_LOG` and the driver trace both name the hardware decoder, and a live
+`/proc` fd scan during local playback found a Firefox content process holding
+`/dev/video17` while `publish=direct` ran. Chromium 152's software AV1 choice
+is a browser-side decoder selection, so no per-client AV1 claim is made for
+it; the Firefox, Chrome and FFmpeg evidence above is the qualification.
+
+Artifacts: `~/Lab/Bridge/tmp/gates5-20261110T182908Z/`,
+`~/Lab/Bridge/tmp/ff-final-20261110/ff-av1-clean-1/`,
+`ff-av1-clean-2/`, `ff-av1-clean-3/`, `ff-clean-youtube/`,
+`ff-clean-bilibili/`, `ff-clean-youtube-noav1/`,
+`~/Lab/Bridge/tmp/site-final-20261110/final-clean-chrome-youtube/`,
+`final-clean-chrome-bilibili/`,
+`~/Lab/Bridge/tmp/browser-clean-final/`.
+
+## Complete AV1 browser matrix (2026-11-11)
+
+The one-off browser probes above are now a repo-owned, repeatable matrix:
+`test/iris-av1-browser-matrix.sh` with `test/iris-firefox-media.py`
+(WebDriver BiDi + MOZ_LOG), `test/iris-chrome-media.py` (CDP Media domain)
+and a generated corpus (`~/Lab/Bridge/tmp/av1-browser-corpus/`). Each case
+launches the installed package directly, with no `LIBVA_*`, publish or node
+override, on Wayland; a 30-second window reports decoded/dropped frames, the
+selected decoder, the driver's `V4L2_VA_TRACE=1` ledger and a live `/proc` fd
+scan for the Iris node. Local clips carry libdav1d software framemd5 baselines.
+Live sites use the local 127.0.0.1:8899 relay. Chrome 156.0.8078.79,
+Firefox 158.0.1, driver `e97a861f8b66aa3297c22a438fa5ac6620e0c347ed147c6398deb220c29b0478`,
+`source_commit=a34d348f2354041433d7476abb621cc435218ae6`, `source_dirty=0`:
+the matrix adds test scripts only and does not rebuild the driver. Boot
+`7a26df99-f7ac-4148-9c80-135ba3adc661` unchanged, no reset, no thermal breach
+(peak zone 46100 millic, battery 72 -> 100% while charging).
+
+| Case | Browser | Decoded / dropped (30 s) | Decoder evidence | Driver evidence |
+| --- | --- | --- | --- | --- |
+| 720p local | Firefox | 724 / 5 | `IsHardwareAccelerated=true`, VA-API init | 929 `publish=direct`, 0 errors |
+| 720p local | Chrome | 718 / 0 | `VaapiVideoDecoder`, platform=true | hardware session |
+| 1080p local | Firefox | 726 / 7 | `IsHardwareAccelerated=true`, VA-API init | 929 `publish=direct`, 0 errors |
+| 1080p local | Chrome | 714 / 0 | `VaapiVideoDecoder`, platform=true | hardware session |
+| 4K local | Firefox | 732 / 13 | `IsHardwareAccelerated=true`, VA-API init | 925 `publish=direct`, 0 errors |
+| 4K local | Chrome | 702 / 0 | `VaapiVideoDecoder`, platform=true | hardware session |
+| 10-bit 720p local | Firefox | 726 / 7 | `IsHardwareAccelerated=true`, VA-API init | 934 `publish=direct`, P010 surfaces |
+| 10-bit 720p local | Chrome | 717 / 0 | `VaapiVideoDecoder`, platform=true | hardware session |
+| 4x2 tiles local | Firefox | 725 / 5 | `IsHardwareAccelerated=true`, VA-API init | 925 `publish=direct`, 0 errors |
+| 4x2 tiles local | Chrome | 718 / 0 | `VaapiVideoDecoder`, platform=true | hardware session |
+| dense alt-ref local | Firefox | 724 / 5 | `IsHardwareAccelerated=true`, VA-API init | 991 `publish=direct`, 0 errors |
+| dense alt-ref local | Chrome | 717 / 0 | `VaapiVideoDecoder`, platform=true | hardware session |
+| live YouTube | Firefox | 750 / 1 | AV1/VP9, VA-API init | 924 `publish=direct`, 0 errors |
+| live YouTube | Chrome | 752 / 0 | `VaapiVideoDecoder`, platform=true | hardware session |
+| live Bilibili | Firefox | 750 / 2 | AV1, VA-API init | 892 `publish=direct`, 0 errors |
+| live Bilibili | Chrome | 752 / 0 | `VaapiVideoDecoder`, platform=true | hardware session |
+| live YouTube, AV1 off (control) | Firefox | 751 / 1 | VP9, VA-API init | 981 `publish=direct`, 0 errors |
+
+`PASS AV1 browser matrix mode=all`, `failures=0`. Firefox MOZ_LOG child
+files are parsed with `errors="replace"` after waiting for the init line.
+Firefox local windows show 5-13 dropped frames; Chrome and live-site windows
+report 0-2. These are 30-second playback windows, not a power or long-window
+soak.
+
+The dropped-frame column is browser-side `getVideoPlaybackQuality().droppedVideoFrames`,
+which also counts frames not presented in time, not driver `publish=drop`
+events. Every Firefox row reports `publish=direct` with `0 errors` and no
+`publish=drop` or `publish=misplaced`. The local corpus clips are shorter than
+the window (2.5-7.5 s against 30 s) and `test/playback.html` loops the video,
+so loop boundaries fall inside the sampled window; the local drop counts track
+the number of boundaries. Live-site windows have no loop and report 0-2. This
+is an attribution note, not a claim that the loop causes the drops.
+
+No gate in this repository requires a zero-drop browser window.
+`test/iris-browser-acceptance.sh` on `main` decides `hardware_decode` from the
+selected decoder, the platform flag, decoded frames, a node holder and an
+unchanged boot ID; it records `window_dropped_frames` as evidence only. The
+Firefox and Chrome PASS conditions in `test/iris-av1-browser-matrix.sh` do the
+same. AGENTS.md requires a media surface that reports the selected decoder
+with frame and drop evidence. Both READMEs now state that criterion; the
+earlier English sentence about "zero frame drops over a 30-second window" was
+stale documentation, not an enforced gate.
+
+The 10-bit and 4K rows are capability probes at 720p/2160p 8-bit and one
+720p 10-bit corpus clip; they do not extend the capability table's
+`va_profiles` beyond `AV1Profile0`, and the 10-bit row has no Chrome pixel
+comparison against software output. Film grain, 12-bit, large-scale tile and
+Chromium 152's software AV1 selection remain outside this matrix.
+
+## AV1 film grain and 1080p 10-bit probes (2026-11-11)
+
+Target `sheng`, boot `7a26df99-f7ac-4148-9c80-135ba3adc661`, kernel
+`7.2.6-sm8550-g42f3b40-iris1` with the 0001-0004 module, decoder
+`/dev/video17` (`iris_driver`, `Iris Decoder`). No kernel module was changed
+or reloaded during these runs. Battery 98% and full, peak zone 30700 millic,
+no reset and no thermal breach.
+
+### Film grain synthesis is a two-surface VA-API contract
+
+A 320x180 24-frame AV1 clip was generated with
+`libaom-av1 -aom-params film-grain-test=1`; libdav1d reported
+`grain.present=1 grain.update=1 seed=45231 num_y_points=14 ar_coeff_lag=2`.
+On the installed package `e97a861f…`, FFmpeg's VA-API path failed at
+`endPicture` with `film grain parameters are not reconstructed`, then every
+later frame failed with `AV1 reference slot is empty`.
+
+A scratch build replaced the refusal with a full `film_grain_params()` OBU
+writer. `V4L2_VA_DUMP` captured the rebuilt stream and libdav1d decoded it
+without errors, reporting the same grain parameters as the source, so the
+syntax was correct. The firmware also exposes
+`HFI_PROP_AV1_FILM_GRAIN_PRESENT` (a 0/1 capability flag, not a parameter
+channel), so it applies grain from the bitstream itself. The hardware run
+still ended in `getImage: surface has no decoded pixels`: FFmpeg's
+`vaapi_av1.c` points `vaBeginPicture` at a separate ungrained `tmp_frame`
+when `apply_grain` is set, and names the client's display surface only as
+`current_display_picture` in the VA picture parameters. This driver
+publishes one target per CAPTURE completion, the one named by
+`vaBeginPicture`, and never maps a completion to `current_display_picture`,
+so the display surface receives no pixels. Supporting synthesis therefore
+needs a second-target publish path in the VA/session layer, not just OBU
+syntax. The refusal stays fail-closed with the reason
+`AV1 film grain synthesis needs a separate display surface`.
+`test/av1-obu-test.cc` asserts both the refusal and that `apply_grain=0`
+still rebuilds a frame.
+
+With `-export_side_data film_grain` the client sets `apply_grain=0` and
+handles grain itself; that run downloaded all 24 frames
+(2073600 bytes of yuv420p) with `submitted=25 completed=25 errors=0
+drops=0 misplaced=0`. So grain-carrying AV1 streams decode in hardware when
+the client exports the parameters, and the `rejected` entry in
+`data/iris-codec-capabilities.json` concerns synthesis by the driver.
+
+### 1080p 10-bit AV1 exact framemd5
+
+A 1920x1080 60-frame `yuv420p10le` clip was encoded with `libsvtav1`
+(`-preset 8 -crf 30`); `ffprobe` reports `codec_name=av1`, `profile=Main`,
+`pix_fmt=yuv420p10le`, 1920x1080. The software oracle is
+`libdav1d`/FFmpeg framemd5 at `yuv420p10le`.
+
+The installed package (`e97a861f…`, `source_commit=a34d348…`,
+`source_dirty=0`) was exercised with `LIBVA_DRIVERS_PATH=/usr/lib64/dri` and
+`V4L2_VA_PUBLISH=import`, decoding to P010 VA surfaces and downloading to
+`yuv420p10le` framemd5:
+
+| Result | Value |
+| --- | --- |
+| framemd5 | `EXACT` (60/60 frame hashes equal) |
+| session | `submitted=60 completed=60 errors=0 drops=0 timeouts=0 misplaced=0` |
+| publish | `import=60 copy=0 direct=0 drop=0 error=0 invisible=13` |
+
+This is a capability probe, not a new VA profile: `va_profiles` stays
+`AV1Profile0`, and no 10-bit browser pixel comparison was made here.
+
+### Encode rate control: reproducible A/B protocol (recorded 2026-11-11)
+
+The table above is unchanged: this driver follows the CBR request and
+libva-v4l2 stays near 700-900 kbit/s. The one unisolated observation is VBR
+4 Mbit/s producing 9780 kbit/s (about 2.4x the target) while CBR at the same
+target produces 4034 kbit/s; `src/iris/encode.cc:163-170` writes
+`BITRATE_PEAK` only for CBR. These are recorded as observations, not a
+diagnosis, and no encode code or capability entry was changed.
+
+A host-side / target-side A/B that isolates the layer without changing
+`src/`:
+
+```sh
+# Fixed 600-frame 1080p30 NV12 source, one clip, one boot ID.
+# LIBVA_DRIVERS_PATH points at the build tree under test; strace records the
+# exact VIDIOC_S_CTRL values so a control-write difference is visible before
+# any bitrate measurement is interpreted.
+run() {
+    tag=$1; shift
+    strace -f -e trace=ioctl -yy -o "$tag.ioctl" \
+        ffmpeg -hide_banner -loglevel error -vaapi_device /dev/dri/renderD128 \
+        -f rawvideo -pix_fmt yuv420p -s 1920x1080 -r 30 -i "$SRC" \
+        -vf format=nv12,hwupload -c:v h264_vaapi -g 60 "$@" -f h264 -y "$tag.h264"
+}
+run cqp      -rc_mode CQP -q:v 24
+run cbr4     -rc_mode CBR -b:v 4M -maxrate 4M
+run vbr4     -b:v 4M
+run vbr4peak -b:v 4M -maxrate 4M -bufsize 8M
+run vbr1     -b:v 1M
+run vbr12    -b:v 12M
+run vbr24    -b:v 24M
+```
+
+Pass conditions, each pointing at one layer: all runs write
+`BITRATE=4000000` (or the matching target) and `FRAME_RC_ENABLE=1` with the
+right `BITRATE_MODE`; CBR stays monotone with the target; `vbr4peak` versus
+`vbr4` shows whether the missing VBR peak is the lever; a flat VBR curve at
+~2x the target across 1M/4M/12M/24M would support (not prove) the firmware
+RC-property hypothesis. `strace` is a probe only, not part of the shipped
+test suite. Record source commit, driver hash, resolved encoder node, boot
+ID, and whether the run used an installed package or a build-tree override.
+
+## Installed-package verification of the completion branch (2026-11-11)
+
+Installed from source commit `a53963d6ca162a1a01ee18fa49ea44443723019c`
+(the branch head at install time; later commits are docs-only and are not
+part of the installed binary), clean tree of 157 tracked files,
+`tracked_source_sha256=3afc83c329e7a89c66058eabe7a9f8aced405931b16fb8a63918eea8c10e4ab4`,
+`source_dirty=0`. A fresh target build with the pinned `/usr/bin` toolchain
+produced `/usr/lib64/dri/v4l2_drv_video.so` SHA-256
+`323c07cbd42f5a152cfca4278a78d64d726534a85f95f0d0db22379e4317a37d`, with no
+undefined symbols and 25/25 target meson tests. This is an installed package
+(`LIBVA_DRIVERS_PATH=/usr/lib64/dri`), not a build-tree override and not a
+`DESTDIR` staging run. Rollback: the previous installed drivers
+`8f87efde…` and `e97a861f…` are preserved at
+`/home/xinyang/Lab/Bridge/tmp/rollback-final-20261111/v4l2_drv_video.so`
+(`e97a861f…`), `/usr/local/share/iris-vaapi/backup/v4l2_drv_video.so`
+(`8f87efde…`), and the `final-install/src/build` tree. No kernel module was
+changed or reloaded; boot ID stayed
+`7a26df99-f7ac-4148-9c80-135ba3adc661`, decoder `/dev/video17`
+(`iris_driver`, `Iris Decoder`), battery 98% and full.
+
+Hardware gates and the browser matrix ran under separate guards to avoid
+heat accumulation from consecutive 4K/browser runs; both guards completed
+with peak temperatures below the 85000 millic limit.
+
+Host gates: `sh test/run-static-checks.sh` PASS,
+`meson test -C build-local --print-errorlogs` 25/25, `git diff --check` clean.
+GitHub Actions `build-and-check` passed (`.github/workflows/ci.yml` installs
+`ffmpeg` and asserts `libdav1d` for the two AV1 oracle checks). Target runs
+used `IRIS_EXPERIMENT_DIR` under `~/Lab/Bridge/tmp/gates-final2-20261111` with
+`V4L2_VA_PUBLISH=import`.
+
+| Gate | Result |
+| --- | --- |
+| four-codec Import matrix | 48/48 exact, all four codecs `content=frame-md5`, `submitted=48 capture=48 drain=1 timeouts=0 drops=0`, AV1 `noshow=23`; guard `status=complete` |
+| 120-frame AV1 clip (plain) | `frames=120 submitted=120 completed=120 import=120 copy=0 invisible=42`, framemd5 EXACT; guard `status=complete` |
+| in-context DRC clip | `frames=80 submitted=84 completed=84 import=42 copy=42 invisible=63`, framemd5 EXACT; guard `status=complete` |
+| 1080p 10-bit AV1 | 60/60 framemd5 EXACT against the libdav1d software oracle, `submitted=60 completed=60 errors=0 drops=0 timeouts=0 misplaced=0`, `publish=import` on all 60 frames, `invisible=13`; guard `status=complete` |
+| complete 17-case AV1 browser matrix | `PASS AV1 browser matrix mode=all`, `failures=0`, 17/17 media surfaces, guard `status=complete`; all 8 Chrome cases reporting `decoder=VaapiVideoDecoder platform=True dropped=0` (`decoded=695..752`), all 9 Firefox cases reporting `hw_log=True errors=0` (`decoded=724..751`, `dropped=0..12`); local 720p/1080p/4K/10-bit/altref/tiles plus live YouTube/Bilibili and noav1 control; peak thermal zone 61100 millic, no reset, boot ID unchanged |
+
+## A11: independent-oracle AV1 syntax corpus (2026-11-11)
+
+Five 640x360 AV1 clips were generated on `sheng` with `libaom-av1` and
+decoded by an independent `libdav1d` software oracle (the VA driver did not
+generate the oracle). Each clip was then decoded through the installed
+package (`LIBVA_DRIVERS_PATH=/usr/lib64/dri`, `V4L2_VA_PUBLISH=import`) and
+compared by ordered framemd5 hashes. The run was wrapped in
+`scripts/iris-experiment-guard.sh` with `IRIS_EXPERIMENT_DIR` under
+`~/Lab/Bridge/tmp/av1-syntax-corpus/a11-guard`:
+`status=complete`, boot `7a26df99-f7ac-4148-9c80-135ba3adc661` unchanged,
+no reset, thermal zones 37600 millic, battery 85% Discharging, driver
+`323c07cbd42f5a152cfca4278a78d64d726534a85f95f0d0db22379e4317a37d`.
+
+| Case | Encoder syntax | Oracle / hardware frames | Session | Publish | framemd5 |
+| --- | --- | --- | --- | --- | --- |
+| baseline | `libaom-av1 -cpu-used 8 -crf 32` | 60 / 60 | `submitted=62 completed=62 errors=0 drops=0 timeouts=0 drains=1 misplaced=0` | `import=62 invisible=51` | EXACT |
+| tiles | `-tiles 2x2` | 60 / 60 | `submitted=62 completed=62 errors=0 drops=0 timeouts=0 drains=1 misplaced=0` | `import=62 invisible=51` | EXACT |
+| lookahead | `-lag-in-frames 12` | 60 / 60 | `submitted=60 completed=60 errors=0 drops=0 timeouts=0 drains=1 misplaced=0` | `import=60 invisible=51` | EXACT |
+| stillpicture | `-still-picture 1` (1 frame) | 1 / 1 | `submitted=1 completed=1 errors=0 drops=0 timeouts=0 drains=1 misplaced=0` | `import=1` | EXACT |
+| lossless | `-aom-params lossless=1` | 60 / 60 | `submitted=62 completed=62 errors=0 drops=0 timeouts=0 drains=1 misplaced=0` | `import=62 invisible=52` | EXACT |
+
+`A11_RESULT failures=0`. Two upstream case designs were excluded rather
+than reported as passing: frame super-resolution could not be expressed by
+the target's `libaom-av1` (all `superres-*` `aom-params` variants produced no
+packets), and `-enable-global-motion 1` produced a bitstream whose decoded
+framemd5 was identical to the baseline, so it gives no distinguishable
+syntax coverage. No new VA profile or capability entry is claimed from this
+corpus; it is evidence that the default translator handles these five syntax
+shapes on the installed package.

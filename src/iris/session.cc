@@ -448,6 +448,7 @@ void Session::submit(const uint8_t* data, size_t size, Target& target)
     target.pending = true;
     target.completed = false;
     target.error = false;
+    target.invisible = 0;
     target.frame.reset();
     pending_[token] = &target;
     ++stats_.submitted;
@@ -581,10 +582,17 @@ bool Session::handle_capture_returns()
             // follow decode order, so it belongs to the oldest target
             // submitted as hidden. Anything else is a real failure marker
             // with no token it could be trusted against.
+            if (noshow_shape && returned->last()) {
+                // A resolution-change boundary can use an unnamed NOSHOW
+                // slot as its empty LAST marker. It belongs to no picture.
+                trace_("capture index=%u flags=%#x publish=invisible", returned->index, returned->flags);
+                continue;
+            }
             auto hidden = pending_.end();
             if (noshow_shape) {
                 for (auto it = pending_.begin(); it != pending_.end(); ++it) {
-                    if (it->second->hidden) {
+                    if (it->second->hidden
+                        && (it->second->completions - it->second->invisible) == 1) {
                         hidden = it;
                         break;
                     }
@@ -617,22 +625,49 @@ bool Session::handle_capture_returns()
             // payload check below because an error completion carries none.
             auto it = pending_.find(returned->timestamp_us);
             if (it == pending_.end()) {
-                ++stats_.errors;
-                trace_("capture error index=%u flags=%#x token=%llu publish=drop", returned->index,
-                    returned->flags, static_cast<unsigned long long>(returned->timestamp_us));
+                if (noshow_shape) {
+                    // The invisible half of a two-completion unit whose target
+                    // was released before it returned. It never carried pixels
+                    // and was never a decode failure. One abandoned picture is
+                    // one drop, reported by its visible half below; counting
+                    // this half as well would charge the client twice for the
+                    // same picture and register a false decode error. Use
+                    // publish=invisible for the trace parser, which counts
+                    // one invisible publication per two-completion unit.
+                    trace_("capture token=%llu index=%u flags=%#x publish=invisible",
+                        static_cast<unsigned long long>(returned->timestamp_us), returned->index,
+                        returned->flags);
+                } else {
+                    ++stats_.errors;
+                    trace_("capture error index=%u flags=%#x token=%llu publish=drop", returned->index,
+                        returned->flags, static_cast<unsigned long long>(returned->timestamp_us));
+                }
                 continue;
             }
             Target& target = *it->second;
-            if (noshow_shape && !target.hidden) {
-                // A VP9 alt-ref is one VA picture the firmware decodes as
-                // two. The invisible frame completes first with ERROR, no
-                // picture-type bit and no payload, under the same token the
-                // visible frame will carry. Its pixels arrive on that second
-                // completion, so this one is not a failure: keep the target
-                // pending and let the next completion publish it. A picture
-                // the firmware really rejected carries a picture-type bit
-                // (0x4049 for the truncated HEVC in TEST-RESULTS) and falls
-                // through to the failure below.
+            if (noshow_shape && returned->last()) {
+                // A resolution-change boundary marks the end of the old
+                // segment with an empty LAST buffer. On this firmware the
+                // borrowed slot can also carry ERROR and a NOSHOW shape; it
+                // names no picture and must not fail the token the timestamp
+                // happens to point at. The following restart decodes the
+                // still-queued new-resolution access unit.
+                trace_("capture token=%llu index=%u flags=%#x publish=invisible",
+                    static_cast<unsigned long long>(returned->timestamp_us), returned->index, returned->flags);
+                continue;
+            }
+            if (noshow_shape && (target.completions - target.invisible) > 1) {
+                // A two-completion access unit starts with an invisible
+                // install/alt-ref half: ERROR, no picture-type bit and no
+                // payload, under the same token the client's picture will
+                // carry. Count it and keep the target pending. The next
+                // completion belongs to the client even when it is NOSHOW
+                // too (a show_frame=0 shown half); without this counter the
+                // shape alone makes both halves invisible and the client
+                // waits forever. A picture the firmware really rejected
+                // carries a picture-type bit (0x4049 for the truncated HEVC
+                // in TEST-RESULTS) and falls through to the failure below.
+                ++target.invisible;
                 trace_("capture token=%llu index=%u flags=%#x publish=invisible",
                     static_cast<unsigned long long>(returned->timestamp_us), returned->index, returned->flags);
                 continue;
@@ -662,7 +697,12 @@ bool Session::handle_capture_returns()
             }
             pending_.erase(it);
             target.pending = false;
-            if (noshow_shape && target.hidden) {
+            if (noshow_shape && (target.hidden || target.invisible > 0)) {
+                // A hidden client picture completes with no pixels. The
+                // second NOSHOW half of an install unit is that picture even
+                // when its own show_frame=0 made the target hidden; the
+                // counter above already consumed the internal install half.
+                // Publishing without pixels is what a hidden surface needs.
                 frame->layout().data_offset = returned->data_offset;
                 publish(target, frame, *returned, "capture noshow");
                 cold_ = false;

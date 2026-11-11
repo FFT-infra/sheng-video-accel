@@ -5,6 +5,8 @@
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
+#include <mutex>
+#include <vector>
 
 namespace iris {
 
@@ -25,12 +27,38 @@ public:
             return;
         va_list args;
         va_start(args, format);
-        std::vfprintf(stderr, format, args);
+        va_list sized;
+        va_copy(sized, args);
+        int length = std::vsnprintf(nullptr, 0, format, sized);
+        va_end(sized);
+        if (length < 0) {
+            va_end(args);
+            return;
+        }
+        // Size the record from the formatted length. A fixed buffer silently
+        // truncated long `import rejected: <why>` records and lost the tail
+        // of a trace vocabulary entry.
+        std::vector<char> body(static_cast<size_t>(length) + 1);
+        std::vsnprintf(body.data(), body.size(), format, args);
         va_end(args);
-        std::fprintf(stderr, " t=%lld\n", static_cast<long long>(now_ms()));
+        // One record is one write. Two fprintf() calls here let a concurrent
+        // context splice its own record between the body and the timestamp,
+        // which makes the checker see `publish=invisibleva end_picture` and
+        // silently loses a trace vocabulary entry.
+        std::lock_guard<std::mutex> lock(output_mutex());
+        std::fprintf(stderr, "%.*s t=%lld\n", length, body.data(),
+            static_cast<long long>(now_ms()));
     }
 
 private:
+    // All records go to the same stderr, so the lock is process-wide. Keeping
+    // it out of the object leaves Trace copyable: sessions and encoder take a
+    // Trace by value.
+    static std::mutex& output_mutex()
+    {
+        static std::mutex mutex;
+        return mutex;
+    }
     static int64_t now_ms()
     {
         static const auto start = std::chrono::steady_clock::now();

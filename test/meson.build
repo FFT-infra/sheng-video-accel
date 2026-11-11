@@ -15,6 +15,14 @@ annexb_test = executable(
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('annexb', annexb_test)
 
+# Concurrent trace writers must keep one record per line.
+trace_test = executable(
+  'trace-test',
+  'trace-test.cc',
+  dependencies: [iris_core_dep, threads_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+test('trace', trace_test)
+
 # Hardware probe, built but not registered as a meson test: it needs a
 # decode-order Iris node and arguments. Proves by content that picture k
 # lands in the k-th queued client DMA-BUF; the acceptance test
@@ -140,6 +148,27 @@ av1_translator_test = executable(
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('av1-translator', av1_translator_test)
+
+# A hidden reference-installation frame and a shown frame in one temporal
+# unit: structure, show_frame bits, and byte parity with the single-frame
+# builder. libdav1d decoding of a real two-frame fixture is checked by
+# av1-install-tu-roundtrip.sh, invoked from run-static-checks.sh.
+av1_install_tu_test = executable(
+  'av1-install-tu-test',
+  'av1-install-tu-test.cc',
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+test('av1-install-tu', av1_install_tu_test)
+
+# The default internal-DPB AV1 translator: no held picture, eight-slot
+# accounting, and a two-completion install unit when the DPB is full. Host
+# coverage for the hidden install path that Firefox 158 needs.
+av1_dpb_test = executable(
+  'av1-dpb-test',
+  'av1-dpb-test.cc',
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+test('av1-dpb', av1_dpb_test)
 
 # VA encode parameters -> V4L2 controls, both codecs, no hardware.
 encode_params_test = executable(

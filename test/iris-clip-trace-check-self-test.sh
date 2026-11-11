@@ -28,7 +28,7 @@ good_trace() {
     cat >"$trace" <<'EOF'
 va create_surfaces count=1 1280x720 fourcc=NV12 imported=0 fd=-1
 capture configure 1280x736 stride=1280 size=1413120 visible=1280x720 pool=32 memory=import
-va end_picture ctx=6 surface=2 deferred
+va end_picture ctx=6 surface=2 bytes=1556 seq_start=1
 submit token=1 bytes=19198 output=0
 capture token=1 index=0 flags=0x4011 publish=import
 capture token=2 index=0 flags=0x4011 publish=import

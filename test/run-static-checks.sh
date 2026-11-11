@@ -39,6 +39,12 @@ for script in "$test_dir"/*.sh "$test_dir"/remote/*.sh "$root"/scripts/*.sh; do
     run "syntax $(basename "$script")" sh -n "$script"
 done
 
+echo "== python syntax"
+for script in "$test_dir"/*.py "$test_dir"/remote/*.py; do
+    [ -f "$script" ] || continue
+    run "syntax $(basename "$script")" python3 -m py_compile "$script"
+done
+
 echo "== node resolution invariants"
 node_lib="$root/scripts/lib/iris-node.sh"
 run node-lib-syntax sh -n "$node_lib"
@@ -73,6 +79,8 @@ run iris-codec-matrix-check sh "$test_dir/iris-codec-matrix-check.sh" "$root"
 run iris-experiment-guard-self-test sh "$test_dir/iris-experiment-guard-self-test.sh" "$root"
 run iris-eos-check-self-test sh "$test_dir/iris-eos-check-self-test.sh" "$root"
 run iris-clip-trace-check-self-test sh "$test_dir/iris-clip-trace-check-self-test.sh" "$root"
+run av1-install-tu-roundtrip sh "$test_dir/av1-install-tu-roundtrip.sh" "$root"
+run av1-dpb-oracle sh "$test_dir/av1-dpb-oracle.sh" "$root"
 run iris-setup-path-check sh "$test_dir/iris-setup-path-check.sh" "$root"
 run iris-packaging-check sh "$test_dir/iris-packaging-check.sh" "$root"
 run iris-kernel-patch-check sh "$test_dir/iris-kernel-patch-check.sh" "$root"

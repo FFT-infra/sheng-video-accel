@@ -616,9 +616,14 @@ void av1_update_reference_gm(AV1ReferenceState& references, const VADecPicturePa
     }
 }
 
-bool av1_build_temporal_unit(std::vector<uint8_t>& out,
+// Build one OBU_FRAME payload (frame header plus tile group) from the VA
+// parameters. The temporal-unit builder calls this once or twice: a hidden
+// reference-installation frame can share one temporal delimiter and sequence
+// header with the shown frame, which is what a stateful decoder needs when a
+// picture is decoded for its reference state but has no client surface.
+bool av1_build_frame_obu(std::vector<uint8_t>& payload,
     const VADecPictureParameterBufferAV1& picture, const AV1SequenceState& sequence,
-    const AV1ReferenceState& references, bool emit_sequence_header, uint8_t refresh_frame_flags,
+    const AV1ReferenceState& references, uint8_t refresh_frame_flags,
     const uint8_t* tile_data, const std::vector<AV1TileEntry>& tiles, const char** reject_reason)
 {
     static const char* unused = nullptr;
@@ -634,8 +639,22 @@ bool av1_build_temporal_unit(std::vector<uint8_t>& out,
         *reject_reason = "only AV1 profile 0 is supported";
         return false;
     }
+    // VA-API film grain synthesis names two surfaces in the picture
+    // parameters: current_frame holds the ungrained picture for reference,
+    // current_display_picture holds the grained picture for display (FFmpeg
+    // vaapi_av1.c points vaBeginPicture at the former when apply_grain is
+    // set). This driver publishes one target per CAPTURE completion, the one
+    // named by vaBeginPicture, and does not map the completion to
+    // current_display_picture, so the client's display surface stays empty.
+    // Rebuilding the film_grain_params() syntax alone was tried on the
+    // target: libdav1d decoded the rebuilt OBU cleanly and the firmware has
+    // HFI_PROP_AV1_FILM_GRAIN_PRESENT, but the hardware run still ended in
+    // "getImage: surface has no decoded pixels". Supporting this needs a
+    // second-target publish path, not just OBU syntax. Clients that export
+    // film grain as side data (apply_grain=0) decode these streams in
+    // hardware without this restriction.
     if (picture.film_grain_info.film_grain_info_fields.bits.apply_grain) {
-        *reject_reason = "film grain parameters are not reconstructed";
+        *reject_reason = "AV1 film grain synthesis needs a separate display surface";
         return false;
     }
     if (picture.pic_info_fields.bits.large_scale_tile) {
@@ -878,7 +897,10 @@ bool av1_build_temporal_unit(std::vector<uint8_t>& out,
     if (!write_global_motion_params(writer, picture, references, frame_is_intra, reject_reason))
         return false;
 
-    // film_grain_params(): apply_grain was verified zero above.
+    // film_grain_params(): apply_grain was rejected above, so the only legal
+    // value is zero. When the sequence does not allow grain, or the frame is
+    // neither shown nor showable, the spec resets the parameters and no
+    // syntax is written.
     if (seq.film_grain_params_present && (pic.show_frame || pic.showable_frame))
         writer.bit(0);
 
@@ -897,7 +919,7 @@ bool av1_build_temporal_unit(std::vector<uint8_t>& out,
         writer.bit(0); // tile_start_and_end_present_flag
     writer.byte_align();
 
-    std::vector<uint8_t> payload = writer.data();
+    payload = writer.data();
     for (size_t i = 0; i < tiles.size(); ++i) {
         // Every tile but the last is length-prefixed. tile_info() above
         // declared tile_size_bytes_minus_1 = 3, so the prefix is four bytes
@@ -910,13 +932,54 @@ bool av1_build_temporal_unit(std::vector<uint8_t>& out,
         payload.insert(payload.end(), tile_data + tiles[i].offset,
             tile_data + tiles[i].offset + tiles[i].size);
     }
+    return true;
+}
 
-    if (emit_sequence_header) {
-        write_obu(out, OBU_TEMPORAL_DELIMITER, {});
+bool av1_build_temporal_unit(std::vector<uint8_t>& out,
+    const VADecPictureParameterBufferAV1& picture, const AV1SequenceState& sequence,
+    const AV1ReferenceState& references, bool emit_sequence_header, uint8_t refresh_frame_flags,
+    const uint8_t* tile_data, const std::vector<AV1TileEntry>& tiles, const char** reject_reason)
+{
+    std::vector<uint8_t> payload;
+    if (!av1_build_frame_obu(payload, picture, sequence, references, refresh_frame_flags,
+            tile_data, tiles, reject_reason))
+        return false;
+    write_obu(out, OBU_TEMPORAL_DELIMITER, {});
+    if (emit_sequence_header)
         write_obu(out, OBU_SEQUENCE_HEADER, build_sequence_header(picture, sequence));
-    } else {
-        write_obu(out, OBU_TEMPORAL_DELIMITER, {});
-    }
     write_obu(out, OBU_FRAME, payload);
+    return true;
+}
+
+// One temporal unit with a hidden reference-installation frame followed by
+// the shown frame. Both frames are built from VA parameters; the hidden one
+// must not be a patched shown frame, because show_frame=0 inserts a
+// showable_frame bit and shifts every following header field.
+//
+// The sequence header is built from the shown frame: the caller must pass a
+// hidden frame from the same sequence. A shown key frame refreshes all eight
+// slots implicitly; a hidden key frame with show_frame=0 does not, so the
+// writer emits hidden_refresh into its frame header as requested.
+bool av1_build_install_temporal_unit(std::vector<uint8_t>& out,
+    const VADecPictureParameterBufferAV1& hidden, const AV1SequenceState& hidden_sequence,
+    const AV1ReferenceState& hidden_references, uint8_t hidden_refresh,
+    const uint8_t* hidden_tile_data, const std::vector<AV1TileEntry>& hidden_tiles,
+    const VADecPictureParameterBufferAV1& shown, const AV1SequenceState& shown_sequence,
+    const AV1ReferenceState& shown_references, uint8_t shown_refresh,
+    const uint8_t* shown_tile_data, const std::vector<AV1TileEntry>& shown_tiles,
+    bool emit_sequence_header, const char** reject_reason)
+{
+    std::vector<uint8_t> hidden_frame, shown_frame;
+    if (!av1_build_frame_obu(hidden_frame, hidden, hidden_sequence, hidden_references,
+            hidden_refresh, hidden_tile_data, hidden_tiles, reject_reason))
+        return false;
+    if (!av1_build_frame_obu(shown_frame, shown, shown_sequence, shown_references,
+            shown_refresh, shown_tile_data, shown_tiles, reject_reason))
+        return false;
+    write_obu(out, OBU_TEMPORAL_DELIMITER, {});
+    if (emit_sequence_header)
+        write_obu(out, OBU_SEQUENCE_HEADER, build_sequence_header(shown, shown_sequence));
+    write_obu(out, OBU_FRAME, hidden_frame);
+    write_obu(out, OBU_FRAME, shown_frame);
     return true;
 }

@@ -19,7 +19,18 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             meson ninja-build pkg-config g++ \
             libva-dev libdrm-dev \
-            libegl-dev libgles-dev libgbm-dev
+            libegl-dev libgles-dev libgbm-dev \
+            ffmpeg
+
+      # The AV1 oracle checks in run-static-checks.sh skip themselves when
+      # ffmpeg lacks libdav1d; assert the decoder is present so a green CI
+      # always means the real software oracle ran, not an empty skip.
+      - name: Verify AV1 software oracle prerequisites
+        run: |
+          ffmpeg -hide_banner -decoders | grep -q libdav1d || {
+            echo "CI ffmpeg has no libdav1d decoder" >&2
+            exit 1
+          }
 
       - name: Configure
         run: meson setup build
@@ -45,6 +56,8 @@ jobs:
             hevc-parameter-sets \
             av1-obu \
             av1-translator \
+            av1-install-tu \
+            av1-dpb \
             encode-params \
             encode-session \
             prime-import \
