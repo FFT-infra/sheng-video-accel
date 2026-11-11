@@ -58,14 +58,20 @@ jobs:
             av1-translator \
             av1-install-tu \
             av1-dpb \
+            trace \
             encode-params \
             encode-session \
             prime-import \
+            iris-codec-matrix-check \
             static-checks \
             iris-source-invariants \
             iris-env-doc-check \
             iris-eos-check-self-test \
             iris-clip-trace-check-self-test \
+            iris-experiment-guard-self-test \
+            iris-packaging-check \
+            iris-install-manifest-check \
+            iris-node-check \
             iris-deploy-path-check \
             iris-setup-path-check \
             iris-kernel-patch-check \

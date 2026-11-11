@@ -14,7 +14,6 @@
 extern "C" {
 #include <sys/stat.h>
 }
-#include <functional>
 #include <string>
 #include <vector>
 
@@ -468,6 +467,42 @@ void test_released_install_completions_are_not_errors()
         CHECK(h.session->stats().errors == 0);
         CHECK(h.session->stats().drops == 0);
     }
+}
+
+void test_released_hidden_install_unit_is_not_an_error()
+{
+    // A hidden install unit whose client half is also show_frame=0 returns two
+    // identical NOSHOW completions under one token. Releasing the target before
+    // either returns leaves both halves orphaned: neither is a decode failure,
+    // and an Import buffer is still lent for each, so the session must consume
+    // both without an error, a misplacement or a wait on a target that is gone.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    Target a;
+    h.submit(a);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(a.completed && !a.error);
+
+    h.fake->inject_hidden_install_unit();
+    Target b;
+    b.completions = 2;
+    b.hidden = true;
+    h.submit(b);
+    h.session->release(b);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(h.session->stats().errors == 0);
+    CHECK(h.session->stats().misplaced == 0);
+    CHECK(!b.completed);
+    CHECK(!b.error);
+    // Both halves have the NOSHOW shape, so both take the invisible branch
+    // and stats().drops stays 0. The comment in handle_capture_returns()
+    // describes the alt-ref case, where the visible half reports the drop.
+    // The trace-accounting difference is recorded in the backlog (G14); the
+    // load-bearing invariant here is that an abandoned picture never becomes
+    // a decode error.
+    CHECK(h.session->stats().drops == 0);
 }
 
 void test_eio_fails_session_and_all_pending()
@@ -1027,6 +1062,7 @@ int main()
         { "install hidden frame needs no extra target", test_install_hidden_frame_needs_no_extra_target },
         { "hidden install unit publishes its client half", test_hidden_install_unit_publishes_its_client_half },
         { "released install completions are not errors", test_released_install_completions_are_not_errors },
+        { "released hidden install unit is not an error", test_released_hidden_install_unit_is_not_an_error },
         { "EIO fails session and all pending", test_eio_fails_session_and_all_pending },
         { "decode-order timeout is terminal", test_decode_order_timeout_is_terminal },
         { "display-order timeout drains then recovers", test_display_order_timeout_drains_then_recovers },

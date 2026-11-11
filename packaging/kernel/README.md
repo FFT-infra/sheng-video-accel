@@ -63,7 +63,10 @@ sudo depmod -a
 sudo systemctl reboot
 ```
 
-After reboot, verify active controls on the video nodes:
+After reboot, verify active controls on the decoded and encoded nodes:
 ```sh
-v4l2-ctl -d /dev/videoN --list-ctrls | grep -E 'display_delay|loop_filter|force_key_frame'
+iris-device-check
 ```
+The `[5] optional kernel controls` section resolves both nodes by the
+`iris_driver` name and reports `display_delay`, `min_number_of_capture_buffers`,
+`force_key_frame` and the loop-filter controls.

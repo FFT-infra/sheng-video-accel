@@ -2,7 +2,7 @@
 
 **English** | [中文](README.zh-CN.md)
 
-A libva driver for the Qualcomm Iris V4L2 video decoder and encoder, hardware-optimized for the Xiaomi Pad 6S Pro (sheng, SM8550) on ARM64 Linux. It provides hardware-accelerated video decode and encode for Google Chrome, Firefox, and FFmpeg, routing decoded frames directly into application buffers with zero copy.
+A libva driver for the Qualcomm Iris V4L2 video decoder and encoder, hardware-optimized for the Xiaomi Pad 6S Pro (sheng, SM8550) on ARM64 Linux. It provides hardware-accelerated video decode and encode for Google Chrome, Firefox, and FFmpeg, routing decoded frames directly into application buffers with zero copy on qualified pipelines.
 
 Kernel patches, diagnostic scripts, and packaging specs are provided in this repository as supporting assets for hardware validation and deployment.
 

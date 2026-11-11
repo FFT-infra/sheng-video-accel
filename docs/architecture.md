@@ -428,7 +428,7 @@ session open node=<path> mode=decode-order|display-order codec=<fourcc> <w>x<h> 
 submit token=<n> bytes=<n> output=<i>
 capture configure <w>x<h> stride=<n> size=<n> visible=<w>x<h> pool=<n> memory=mmap|import firmware-min=<n>
 capture token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu|import
-capture noshow token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu
+capture noshow token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu|import
                                                                      (AV1 hidden picture: the node
                                                                       returns it with no pixels, no
                                                                       picture-type bit and no payload;
@@ -436,7 +436,6 @@ capture noshow token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu
                                                                       timestamp when the kernel keeps
                                                                       one, else by decode order)
 capture token=<n> index=<i> flags=<hex> publish=drop                 (released target; not published)
-capture token=<n> index=<i> flags=<hex> publish=error                (firmware error; not published)
 capture token=<n> index=<i> flags=<hex> publish=invisible            (VP9 alt-ref or AV1 hidden install: first of two completions under one token, ERROR with no picture-type bit and no payload; Target::invisible counts it so the second NOSHOW half still publishes the client picture. A released target leaves this completion orphaned; it is still invisible, not a decode error, and its visible half is the one drop)
 capture index=<i> flags=<hex> publish=invisible                     (unnamed NOSHOW LAST marker at a DRC boundary; no picture of its own)
 capture token=<n> index=<i> flags=<hex> publish=misplaced slot_token=<n>
@@ -446,6 +445,11 @@ capture error index=<i> flags=<hex>                                  (error mark
                                                                       stock kernel zeroes the timestamp)
 capture error index=<i> flags=<hex> token=<n> publish=drop            (timestamped error whose token
                                                                       is no longer pending)
+capture error token=<n> index=<i> flags=<hex> publish=misplaced slot_token=<n>
+                                                                     (error completion in Import whose
+                                                                      buffer belongs to another token;
+                                                                      both surfaces fail)
+capture token=<n> index=<i> flags=<hex> publish=error                (firmware failure for its own token)
 capture empty index=<i> flags=<hex> last=0|1
 capture last
 capture format rejected wanted=<fourcc> granted=<fourcc> planes=<n> <w>x<h>
@@ -457,7 +461,6 @@ drc drain complete last=1
 restart
 sync timeout token=<n> pending=<n> queued=<n> held=<n> action=drain|fail
 session reconfigure <w>x<h> ->
-session reconfigure deferred held=<n>
 session reconfigure -> <w>x<h>
 session failed: <reason>
 session finish submitted=<n> completed=<n> errors=<n> drops=<n> timeouts=<n> drains=<n> misplaced=<n>
@@ -488,7 +491,7 @@ va destroy_context id=<n> entrypoint=encslice frames=<n>
 va begin_picture ctx=<n> surface=<n>
 va begin_picture ctx=<n> surface=<n> entrypoint=encslice
 va end_picture ctx=<n> surface=<n> bytes=<n> seq_start=0|1
-va end_picture ctx=<n> surface=<n> entrypoint=encslice bytes=<n>
+va end_picture ctx=<n> surface=<n> entrypoint=encslice submitted token=<n>
 encode open node=<path> codec=<fourcc> raw=<w>x<h> crop=<w>x<h> mode=cbr|vbr|cqp
             gop=<n> rate=<num>/<den>
 encode frame index=<n> bytes=<n> idr=0|1 promoted=0|1    (idr=1 covers both the
@@ -505,11 +508,25 @@ encode input fence fd=<n> waited=<ms>                 (only when the input's
 encode deblocking mode=<0|1|2> alpha=<n> beta=<n> via=default|V4L2
 encode idr lever=sync-frame|intra-period               (which requested-IDR
                                                        lever this kernel has)
-encode drain result=last|timeout
+encode drain result=complete
+encode drain result=timeout outstanding=<n>
+encode drain marker
+encode drain stop failed: <reason>
+encode drain failed: <reason>
+encode error completion index=<i> flags=<hex>
+encode completion timestamp=<n> expected=<n>
+encode streamoff failed: <reason>
+encode release failed: <reason>
 encode control missing name=<control> id=<hex>        (optional control absent;
-                                                       the session continues)
+                                                       the session continues;
+                                                       prepend-spspps-to-idr has no id)
 va export_surface id=<n> persistent=0|1 source=frame|stable fd=<n> pitch=<n>
 ```
+
+Three VA-side diagnostics are emitted but intentionally stay out of the
+checker-oriented list above: `va init node=<path>`, `va error where=<name>` and
+`va sync failed ...`. They name driver startup failures, not session completions.
+G7's proposed checker would encode these as accepted exceptions.
 
 ## 9. Phases and gates
 
@@ -652,9 +669,10 @@ below the first needs an MSM render node.
     and by the profile, not by the stream. The firmware reads the bit depth
     from the bitstream itself and then refuses any CAPTURE format but the
     matching one, so a session opened on NV12 for a 10-bit stream fails at
-    the first picture with nothing to retry. `p010_decode_profile()` is the
-    one place that answers this, and the capability table, the config
-    attributes, the surface attributes and the capture format all read it.
+    the first picture with nothing to retry. `p010_decode_profile()` in
+    `src/va/driver.cc` is the one place that answers this; the config
+    attributes, the surface attributes and the capture format read it. The
+    capability table lists the resulting P010 capture formats separately.
 20. Both publish paths copy the rectangle the source and the destination can
     both hold. A client surface may still carry the pre-change geometry when
     the first picture of a new coded size arrives, because FFmpeg's download

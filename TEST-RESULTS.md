@@ -4671,13 +4671,22 @@ Findings that changed this tree:
   `Status: resolved`: Chrome `156.0.8078.47`, 4K HEVC 8-bit, no workaround
   flags, `stale_repeats = 0/445`. It also warns that a launcher wrapper
   injecting `--disable-features=ExtendedVideoBitstreamValidation` makes an A/B
-  look fixed. Both READMEs now say 153 needs the flag or 152, 156+ needs
-  neither. The Chromium issue page itself was not fetched.
+  look fixed. The Chromium issue page itself was not fetched. The current
+  READMEs record only the browser matrix itself: Chromium 152 uses its built-in
+  software AV1 decoder for local files; Chrome 156 live pages and Firefox 158
+  are verified hardware decoders.
 - **Upstream now carries five kernel patches, not three.** `patches/` holds
   0001 decode-order, 0002 larger CAPTURE pools, 0003 deblocking, 0004
   error-buffer timestamps (2026-10-21) and 0005 recycle non-display decoder
   buffers for AV1 (2026-10-26). Our four still map to 0001+0002 / 0003 /
-  upstream `6f62dcefd249` / 0004; patch bodies were not diffed.
+  upstream `6f62dcefd249` / 0004. The patch bodies were compared against the
+  v1.1.1 tree on 2026-11-11: our 0004 and 0005 are byte-identical to upstream,
+  and 0001-0003 differ only because ours merges decode-order and the larger
+  CAPTURE pool into one patch, rebases onto `sheng-7.2.6` and adds two
+  domain/firmware guards (`docs/POST-MERGE-BACKLOG.md` §8, F3). Upstream's 0005
+  is required by their AV1 path, which replays a whole hidden picture; our
+  internal DPB consumes the NOSHOW completion instead, so 0005 stays
+  experimental here.
 
 Findings that did not change this tree:
 
@@ -5114,12 +5123,11 @@ the same batch.
 
 `src/va/driver.cc` continues to expose `VAProfileAV1Profile0`; the capability
 table's AV1 `production: supported` records FFmpeg and Chrome hardware
-evidence, not a per-client guarantee. The READMEs and
-`data/iris-codec-capabilities.json` now name the Firefox AV1 synchronous-sync
-boundary alongside the existing `vaDestroyContext` / no-flush-entry-point
-notes. A per-client AV1 fix needs either an explicit VA-API flush entry point
-or a client that does not block the next access unit on the current surface;
-both are outside a driver-only change.
+evidence, not a per-client guarantee. This section describes the older
+held-picture path: the default internal DPB has since removed it, and the
+current READMEs and `data/iris-codec-capabilities.json` describe the internal
+DPB instead of a Firefox synchronous-sync boundary. The 2026-11-11 installed
+package and browser gates below supersede the earlier per-client conclusion.
 
 ## Internal-DPB AV1 installed-package and browser gates (2026-11-11)
 
@@ -5450,3 +5458,23 @@ framemd5 was identical to the baseline, so it gives no distinguishable
 syntax coverage. No new VA profile or capability entry is claimed from this
 corpus; it is evidence that the default translator handles these five syntax
 shapes on the installed package.
+
+## Post-merge baseline (2026-11-12)
+
+PR #5 merged into `main` as `4125b1190c66ff7cf46e54c2b6d4076a01d7d1cd` on
+2026-11-11T13:19:36Z. PR #4 (`exp/av1-noshow-dpb`, head `a7e6d26`) was also
+merged two seconds later; its head is an ancestor of the PR #5 merge commit,
+so `main` carries one copy of the internal-DPB work and no duplicate commits.
+Both branches remain on the fork.
+
+`origin/main`, local `main` and the PR head `a0b7138` all have tree
+`2bae05f1c3dce17fa3c280862300e0019f7b08a7`; the worktree is clean. GitHub
+Actions `build-and-check` run `43028113058` completed `success` on the merge
+commit (13:19:43Z-13:20:59Z). Host gates re-run on 2026-11-12:
+`sh test/run-static-checks.sh` rc=0,
+`meson test -C build-local --print-errorlogs` 25/25, `git diff --check` clean.
+No target run, driver reinstall or kernel module swap accompanied the merge;
+the installed driver on `sheng` remains the one recorded at
+"Installed-package verification of the completion branch" above (source
+commit `a53963d6`, driver SHA-256 `323c07cb…`, boot
+`7a26df99-f7ac-4148-9c80-135ba3adc661`, 0001-0004 module).

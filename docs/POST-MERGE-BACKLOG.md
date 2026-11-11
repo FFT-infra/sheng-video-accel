@@ -129,7 +129,7 @@ frames. The default AV1 translator in `src/va/picture.cc` now selects
 | A10 | Firefox 158 live YouTube AV1 and live Bilibili, plus Chrome and FFmpeg controls, on the installed package | target | A7-A9, L1 | **done**: the 2026-11-11 17-case guarded browser matrix reports `failures=0`, `PASS AV1 browser matrix mode=all`; Firefox 9 cases `hw_log=True errors=0`, Chrome 8 cases `VaapiVideoDecoder platform=True dropped=0`, live YouTube/Bilibili and noav1 control included; FFmpeg framemd5 gates exact | do not claim Firefox AV1 hardware support; keep the current README/capability wording |
 | A11 | New regression corpus: tiles, superres, lossless, 10-bit, lookahead, 4K, dav1d/software pixel-exact, borrowed as *case design* from upstream `tests/decoder/av1.py` | host + target | A5 | **done with two documented exclusions**: five 640x360 clips (baseline, `tiles 2x2`, `lag-in-frames 12`, `still-picture`, `lossless`) generated on the target with `libaom-av1`, each with an independent `libdav1d` framemd5 oracle; guarded installed-package hardware decode gave 5/5 EXACT, all `publish=import`, `errors=0 drops=0 misplaced=0`, `A11_RESULT failures=0`. Super-resolution produced no packets from this `libaom-av1`, and `-enable-global-motion 1` decoded identically to baseline, so both were dropped rather than counted as coverage. See TEST-RESULTS.md "A11: independent-oracle AV1 syntax corpus" | drop the cases that cannot get an independent oracle |
 | A12 | Re-run all previously recorded evidence on the new baseline | target | A7-A11 | **done**: the 2026-11-11 installed-package gates re-ran 48/48 matrix, 120/120 real clip, DRC, 1080p 10-bit framemd5, 4K/10-bit/altref/tiles browser cases, the complete 17-case browser matrix with live YouTube/Bilibili, and the A11 syntax corpus, each with the §1.8 evidence fields and a separate guard (no thermal breach) | abandon the rewrite and keep `main` |
-| A13 | Documentation and capability sync, then a merge decision | docs | A12 | **ready for a merge decision**: capability table, both READMEs, `docs/architecture.md` §8/§10 and the experiment record describe the default internal-DPB path; all installed-package gate evidence is recorded in `TEST-RESULTS.md`; A12 is done. The decision itself is a maintainer action, not part of this branch | revert all A items |
+| A13 | Documentation and capability sync, then a merge decision | docs | A12 | **done**: PR #5 merged as `4125b11` on 2026-11-11; capability table, both READMEs, `docs/architecture.md` §8/§10 and the experiment record describe the default internal-DPB path, and `TEST-RESULTS.md` records the installed-package gates | revert all A items |
 | A14 | Explicit stop condition | decision | A2-A4 | **done**: A2 observed the kernel contract; 0005 is not needed; no reset or thermal breach occurred in the guarded probes; the Import invariant was re-derived on the target with `misplaced=0` | keep `main` unchanged if the installed-package gates fail |
 
 **Hazards recorded before A2; the first one did not survive the probe:**
@@ -235,19 +235,20 @@ runtime behaviour.
 
 | ID | Item | Exact location | Fix |
 | --- | --- | --- | --- |
-| G1 | Stale claim about patch diffs | `TEST-RESULTS.md` §"Sibling backends" says "patch bodies were not diffed" | replace with the F3 result: 0004/0005 blobs identical, 0001-0003 rebase-only differences, added-code comparison functionally equivalent |
-| G2 | Stale claim about Chrome 153 | `TEST-RESULTS.md` says "Both READMEs now say 153 needs the flag or 152, 156+ needs neither"; neither `README.md` nor `README.zh-CN.md` mentions 153, `ExtendedVideoBitstreamValidation` or 156 | either restore the compatibility note in both READMEs or correct the TEST-RESULTS sentence; one source of truth per fact |
+| G1 | Stale claim about patch diffs | `TEST-RESULTS.md` §"Sibling backends" said "patch bodies were not diffed" | **done**: the section now records the F3 result (0004/0005 byte-identical, 0001-0003 rebase-only) and why upstream's required 0005 stays experimental here |
+| G2 | Stale claim about Chrome 153 | `TEST-RESULTS.md` said "Both READMEs now say 153 needs the flag or 152, 156+ needs neither"; neither README mentions 153 or `ExtendedVideoBitstreamValidation` | **done**: corrected the sentence to the browser versions the READMEs actually record (152 local software, 156 live, Firefox 158) |
 | G3 | Browser window wording | `README.md:20` and `README.zh-CN.md:20` previously specified a rigid 30-second zero-drop window | **done**: aligned with the AGENTS.md rule requiring media-surface decoder identification and frame/drop counts over the test window |
-| G4 | Stale source paths | `docs/github-community-assets.md:38-41` names `src/h264.cc`, `src/vp9_stateful.cc`, `src/context.cc`, `src/surface.cc`; none exists | map to the current `src/codec/`, `src/va/`, `src/iris/` layout, or mark the section historical |
-| G5 | Stale capability boundary | `docs/github-community-assets.md:55` says "AV1 先走 native V4L2, unless a VA caller keeps OBUs" and keeps VP9/H.264/HEVC as the production boundary | update to the merged table: AV1 Profile 0 Import qualified, VP9 Copy, H.264/HEVC Import, encode H.264/HEVC |
-| G6 | Scratch root defaults | 9 tracked scripts still default to `${TMPDIR:-/tmp}`: `scripts/iris-experiment-guard.sh`, `test/iris-alloc-chain.sh`, `test/iris-deploy-path-check.sh`, `test/iris-eos-check-self-test.sh`, `test/iris-experiment-guard-self-test.sh`, `test/iris-install-manifest-check.sh`, `test/iris-node-check.sh`, `test/iris-setup-path-check.sh`, `test/provenance-self-test.sh`; `test/README.md:166-169` documents and uses `/tmp/iris-hardware-suite` | switch defaults to `$HOME/Lab/Bridge/tmp`, update the doc example, keep the env overrides, add a self-test that the default path is not `/tmp` |
-| G7 | Trace vocabulary drift | `docs/architecture.md` §8 has no checker; AGENTS.md calls this out | add a host check that every `trace(` format string in `src/` appears in §8, or explicitly list the accepted exceptions |
+| G4 | Stale source paths | local, gitignored `docs/github-community-assets.md:38-41` names `src/h264.cc`, `src/vp9_stateful.cc`, `src/context.cc`, `src/surface.cc`; none exists | **closed**: the file is not tracked in any ref and is a local scratch note, not a shipped doc |
+| G5 | Stale capability boundary | local, gitignored `docs/github-community-assets.md:55` keeps VP9/H.264/HEVC as the production boundary | **closed**: same untracked scratch note; the tracked capability table and both READMEs are the source of truth |
+| G6 | Scratch root defaults | 9 tracked scripts default to `${TMPDIR:-/tmp}`; `test/README.md:166-169` uses `/tmp/iris-hardware-suite` | **closed as intentional, no code change**: every guarded run passes an explicit `IRIS_EXPERIMENT_DIR` under `~/Lab/Bridge/tmp` (§15, L4); the default is left alone so existing `guard.state` semantics do not drift |
+| G7 | Trace vocabulary drift | `docs/architecture.md` §8 has no checker; AGENTS.md calls this out | partly done: §8 now matches the current emitters (`publish=import` on `capture noshow`, `encode drain result=complete|timeout outstanding`, `submitted token=`, error-side `publish=misplaced`/`publish=error`, plus the encode error records); the three VA startup diagnostics are named as accepted exceptions. Open: add the host checker itself |
 | G8 | License wording | `COPYING` says the project is released under LGPL-2.1 and MIT; all 54 SPDX-tagged source files are MIT, LGPL appears only in `COPYING.LGPL`, the Fedora spec and the Arch PKGBUILD; the spec's `MIT AND LGPL-2.1-or-later` is conservative | clarify `COPYING` and the spec comment as "derived work MIT; upstream LGPL text retained"; do not delete `COPYING.LGPL`; confirm the `/usr/share/licenses` install list still covers all three files |
 | G9 | Kernel patch licence headers | the six files in `packaging/kernel/` carry no SPDX header; they patch GPL-2.0 kernel files and are not compiled into the driver package | decide whether to add a header; confirm packaging licence fields need no change |
 | G10 | Merge commit identity | PR #2 merge commit author is `xinyang`, the local git user is `phxinyang` | note for release notes / author statistics; no code action |
-| G11 | `FIX-LOG.md` 待办 section | the checklist is all `[x]` and predates the merged work; no open items | either close the section as historical or point it at this backlog |
-| G12 | 4K lane discoverability | `IRIS_REAL_CLIP_SET=4k` is opt-in and not part of `all`; `test/README.md` records it | keep as-is, but state in the hardware-suite doc that a 4K lane is never a soak/power result |
-| G13 | CI required-test list | `.github/workflows/ci.yml:42-59` names 18 required tests; new tests must be added there | add every new test name in the same commit that adds the test |
+| G11 | `FIX-LOG.md` 待办 section | local, gitignored file; not tracked in any ref | **closed**: not a shipped checklist; this backlog is the tracked ledger |
+| G12 | 4K lane discoverability | `IRIS_REAL_CLIP_SET=4k` is opt-in and not part of `all`; `test/README.md` records it | **done**: `test/README.md:24` states a guarded 4K probe is not a thermal, power or long-window result |
+| G13 | CI required-test list | `.github/workflows/ci.yml` named 19 of the 25 Meson tests | **done**: all 25 names are now listed; `meson test` at `:85` already ran all of them, so this closed an inventory-guard gap, not a skipped-test gap |
+| G14 | Released hidden-install accounting | a released `inject_hidden_install_unit()` target emits two `publish=invisible` records and no `publish=drop`, while `session.cc` says one abandoned picture is one drop; `iris-clip-trace-check.sh` counts invisible records | host test `released hidden install unit is not an error` now covers the shape; open: decide whether the trace should carry an explicit per-picture drop marker |
 
 ## 10. Workstream H — encode backlog
 
@@ -289,8 +290,6 @@ Lower priority than decode. Ground each item in the capability table's
 
 ## 13. Explicit non-goals
 
-- Do not merge this backlog document into `main` while it is a draft; it is a
-  tracking PR.
 - Do not rebase the whole `src/` tree onto `radxa-pkg/qcom-va-driver`; the two
   backends have different memory models and different target SoCs.
 - Do not load 0005 or 0006 against the current userspace outside a guarded
@@ -305,16 +304,17 @@ Lower priority than decode. Ground each item in the capability table's
 - Do not perform a `git clean`, destructive reset, branch switch, or push
   without an explicit request in the same turn.
 
-## 14. Definition of done for this consolidated PR
+## 14. Definition of done for the consolidated work (PR #5)
 
-The work converges in PR #5 (consolidating PR #4). It is done when the default
-internal-DPB translator passes host gates, installed-package
-matrix/clip/DRC/EOS gates record every §1.8 field in `TEST-RESULTS.md`, browser
-runs report a media-surface decoder with frame/drop evidence, and the capability
-table, both READMEs, `docs/architecture.md` §8/§10, and required tests are
-updated in the same commit. Unfinished items stay open in §15; a short clip, a
-`DESTDIR` staging run, a mapped node, or a running GPU process is not a
-capability or browser-hardware claim.
+PR #5 (consolidating PR #4) merged as `4125b11` on 2026-11-11. It met its
+definition of done: the default internal-DPB translator passed host gates,
+installed-package matrix/clip/DRC/EOS gates recorded every §1.8 field in
+`TEST-RESULTS.md`, browser runs reported a media-surface decoder with
+frame/drop evidence, and the capability table, both READMEs,
+`docs/architecture.md` §8/§10 and the required tests were updated together.
+The remaining work is tracked as the explicitly open workstreams in §15 and
+the WP0-WP7 sequence in §16. A short clip, a `DESTDIR` staging run, a mapped
+node, or a running GPU process is not a capability or browser-hardware claim.
 
 ## 15. Completion ledger
 
@@ -323,13 +323,144 @@ capability or browser-hardware claim.
 | §2 Lab prerequisites | L1-L6 | L4 settled as "pass an explicit `IRIS_EXPERIMENT_DIR` under `~/Lab/Bridge/tmp` for every guarded run" (all recorded runs do); the default is left alone so existing `guard.state` semantics do not drift. L1 charger, L2 screen state, L3 guard precondition remain open; L5/L6 are per-run checks |
 | §3 AV1 held-picture removal | A1-A14 | done: internal DPB is the default, installed-package matrix/clip/DRC/EOS gates and Firefox/Chrome live-site browser gates pass on 2026-11-11; `TEST-RESULTS.md` records the run. Long corpus and 4K cost work remains in §6/§7 |
 | §4 Explicit refresh flags | B1-B8 | open / upstream-blocked; internal DPB removes the local need for an API change |
-| §5 Chrome VP9 Import | C1-C5 | open: session-side window is fixed (FFmpeg 515/515, misplaced=0); Chrome reuses a VP9 surface in `beginPicture`, which releases the still-in-flight picture, so 541 of 718 completions are dropped. The Copy baseline shows the same reuse (527 drops), and the project's acceptance rule refuses to count a re-presented frame as a pass. Qualifying this needs a retained-target ownership model, its own host regressions for the misplaced/detached case, and a fresh target gate — not a rename of `publish=drop` |
+| §5 Chrome VP9 Import | C1-C5 | open: session-side window is fixed (FFmpeg 515/515, misplaced=0); Chrome reuses a VP9 surface in `beginPicture`, which releases the still-in-flight picture. In the forced-Import run `submitted=718 completed=177 drops=541`, with 564 of 768 import queueings abandoned; the forced-Copy baseline completed 708 with `drops=1`. The H.264 control had 2 abandoned and 4 drops out of 670; the numbers are in `TEST-RESULTS.md` §"Why VP9 Import still is not qualified". Qualifying this needs a retained-target ownership model, its own host regressions for the misplaced/detached case, and a fresh target gate — not a rename of `publish=drop` |
 | §6 AV1 feature completeness | D1-D6 | D1 done for exact framemd5: 1920x1080 60-frame 10-bit clip `EXACT`, 60 Import, 0 errors/drops/misplaced on 2026-11-11. D2 settled as a user-space second-target publish gap, not a kernel limitation: scratch OBU writer was libdav1d-clean and the firmware carries the grain capability flag, but the display surface stayed empty; host guard keeps the refusal fail-closed. D4 partly covered by the A11 corpus (tiles, lookahead, still-picture, lossless exact; superres and global motion excluded with a recorded encoder reason). Still open: 10-bit browser pixel comparison, 12-bit, large-scale tile, D3 (128x128 SB / GStreamer), D5/D6 negative tests |
 | §7 Long-window, power, cost | E1-E5 | open / blocked on charger |
 | §8 Kernel and upstream sync | F1-F10 | open / decision recorded as "do not rebase"; 0005/0006 remain unbuilt and unloaded |
-| §9 Docs, consistency, hygiene | G1-G13 | open: only the AV1/default-path drift tied to PR #5 plus this branch's film-grain/10-bit evidence is fixed here |
+| §9 Docs, consistency, hygiene | G1-G13 | G1, G2, G3, G12 and G13 done; G4, G5, G6 and G11 closed (untracked scratch notes, intentional scratch default); G7 partly done (§8 vocabulary synced, host checker still open); G8 (licence wording), G9 (patch SPDX headers) and G10 (merge-commit identity note) remain open |
 | §10 Encode | H1-H4 | H1/H2/H3/H4 re-examined and recorded with evidence and explicit non-goals; no encode code, capability entry or profile changed in this branch. H1 has a reproducible A/B protocol, H2 is settled as out of scope, H3 has a host-side audit, H4 has a named test-coverage gap |
 | §11 CI, tests, release plumbing | I1-I7 | open: host tests (25/25), guarded installed-package gates and the repo-owned 17-case AV1 browser matrix are in PR #5; packaging/CI automation for those target gates remains open |
 | §12 Priority | ranking | updated for the settled 0005 question |
 | §13 Non-goals | list | recorded |
-| §14 Done criteria | check | PR #5 is the single delivery PR; installed-package and browser gates pass. Remaining items are the explicitly open workstreams above, not blockers for this PR |
+| §14 Done criteria | check | **met**: PR #5 merged as `4125b11`; installed-package and browser gates passed. §14 now records the merged state; the WP sequence in §16 and the open items above are the current work |
+| §15 Ledger | ledger | updated for the merged state; the stale PR #4 closure instruction is not applicable (see §16) |
+
+## 16. Work packages after the merge
+
+Baseline: `main` == `origin/main` == `4125b11`, re-verified 2026-11-12; the
+worktree is clean and `build-and-check` run `43028113058` is green. The
+qualified module is 0001-0004; 0005/0006 are experimental and have not been
+loaded on `sheng`. Each package gets one branch and one draft PR, no force
+push, no rewriting `main`, no deleting branches, and no AI attribution in
+commits or public text.
+
+Every package runs `sh test/run-static-checks.sh`,
+`meson test -C build-local --print-errorlogs`, `git diff --check`, and CI must
+be green. Every target experiment uses the guard in `docs/build-and-deploy.md`,
+records source commit, driver hash, boot ID, resolved node, decoder name, frame
+and drop counts, and whether it used the installed package or a build-tree
+override. A reset or thermal breach is a failed experiment. Only one
+experimental kernel patch may enter a validation run at a time. Stop after each
+package and report in this format:
+
+```
+WP: <number and name>
+branch/PR: <branch> / <PR link>
+commit: <commit>
+gates: <which ran, results>
+evidence: <TEST-RESULTS section and key numbers>
+decision: <keep / roll back / do not do, and why>
+open questions: <items needing a maintainer decision>
+```
+
+### WP0 baseline recheck — done
+
+No code change. Recorded in `TEST-RESULTS.md` §"Post-merge baseline
+(2026-11-12)": live `origin/main` `4125b11`, identical local trees, clean
+worktree, green merge-commit CI, host gates 25/25.
+
+### WP1 validate 0006 — next, before WP2/WP3
+
+Purpose: 0006 discards unmatched timestamp metadata instead of borrowing it;
+upstream saw a spurious LAST/EPIPE and 32 of 150 VP9 frames dropped on SM8750
+when CAPTURE consumption was slow. SM8550 has no recorded reproduction yet.
+
+Build and install **0001-0004 + 0006 only**. WP1 does not install 0005:
+`packaging/kernel/README.md` records that recycling NOSHOW buffers in the
+kernel loses frames with this userspace, so loading both at once would make
+any AV1 matrix failure unattributable. 0005 stays for WP3. Build per the
+module guide, checking `LOCALVERSION`, `Module.symvers` provenance and
+BTI/PAC-related build flags on the target first; keep the 0001-0004 and stock
+modules for rollback.
+
+Before loading 0006, reproduce the slow-CAPTURE defect on the 0001-0004
+baseline; the repo has no slow-consumer VP9 harness yet, so this needs either a
+new harness or a recorded proxy scenario. If no spurious LAST/EPIPE is
+reproduced, the verdict is "no regression" and not "fixed". Then run a long VP9
+clip, the VP9 matrix, the four-codec matrix, and EOS/DRC gates, and compare with
+the 0001-0004 baseline. Pass means no spurious LAST/EPIPE, exact framemd5,
+`misplaced` no worse, guard `status=complete`, no thermal breach, and no reset.
+Installation needs a reboot: record the planned before/after boot IDs, then
+start the guard only after the reboot so its "boot ID unchanged" rule measures
+the experiment, not the installation. On failure keep the record, roll the
+module back, stop and report.
+
+### WP2 measure the cost of 0005 — measurement only, no behaviour change
+
+On 0001-0004, using the existing AV1 clip, DRC clip and matrix, count the
+invisible completions per AV1 picture, their time cost (trace timestamp deltas
+or profiler), and the maximum Import backlog depth. Produce one cost table and
+one sentence: worth doing / not worth doing. That sentence is the decision gate
+for WP3. Do not tune the driver to make the numbers look better.
+
+### WP3 0005 dual path — only if WP2 says worth doing
+
+Probe for 0005 at configure time the way `sync_frame_control_` is probed. With
+0005: `AccessUnit::completions = 1`, no second borrowed client buffer, no
+`Target::invisible` accumulation. Without 0005: keep today's path. In the same
+commit update session NOSHOW attribution, `queue_import_next`, the §8 trace
+vocabulary and its consumers, invariant 17, the capability table `sync_note`
+and both READMEs. Re-run the four-codec matrix, 120-frame AV1 clip, DRC,
+10-bit probe and the Chrome/Firefox browser matrix. If WP2 says not worth it,
+write the reason in the backlog and do not implement WP3.
+
+### WP4 VPP feasibility spike — conclusion first
+
+We have no VPP. `radxa-pkg/qcom-va-driver` has optional CDSP and Vulkan VPP
+paths (scale, crop, rotate, bit-depth conversion, RGB overlay, HDR10 P010 to
+SDR NV12 tone mapping), but the piano spec disables both: CDSP needs a Hexagon
+compiler and the Vulkan path was not validated on the device. Check on `sheng`
+and Fedora 44 whether a CDSP FastRPC session is reachable and whether
+`vulkan-devel` plus `glslangValidator` are available. If a backend is viable,
+do the smallest slice: `VAProfileNone` plus one NV12 scale filter, verified on
+the target by per-pixel or PSNR baseline. If neither is viable, write the
+feasibility conclusion and stop. Do not advertise VPP without a working
+backend.
+
+### WP5 RGB import — depends on WP4
+
+First answer who consumes RGB import when there is no VPP. If WP4 lands,
+support linear single-buffer BGRA/RGBA through PRIME2 `vaCreateSurfaces2` and
+`vaDeriveImage`, with refusal cases. If WP4 does not land, record the conclusion
+only; no code change.
+
+### WP6 Debian packaging — independent
+
+Either provide `debian/` or write down why not. `docs/build-and-deploy.md`
+already records that `libgbm-dev` pins `libgbm1` and can downgrade a
+vendor-patched graphics stack; a package must not introduce a dependency that
+does that. Build and install must reproduce provenance, and no Debian/Ubuntu
+distribution is a qualified target.
+
+### WP7 SoC portability audit — docs only, no support claim
+
+List the SM8550-specific pieces: kernel patch hunks, `inst_fw_cap` platform
+data, packaging, defaults and validation records. Write what a new SoC must
+redo and which gates must be re-run. Do not change the capability table's
+`target` to hint at other SoCs.
+
+### Order and decision gates
+
+1. WP0 -> WP1 -> WP2, then decide WP3 from WP2's verdict.
+2. WP4 may run alongside WP1/WP2 as read-only feasibility research; WP5 waits
+   for WP4; WP6 and WP7 are independent.
+3. Stop after each package and wait for confirmation before opening the next.
+
+### Known state that does not match earlier drafts
+
+PR #4 is `MERGED` (not open, not closable) and its head `a7e6d26` is contained
+in PR #5's merge commit. No PR comment is needed unless one is explicitly
+authorised. `radxa-pkg/qcom-va-driver` v1.1.1 has no 0006; 0006 comes from
+`yzddmr6/linux-sm8750-piano` (F8). Upstream marks 0005 "required for AV1"
+because its AV1 path replays a whole hidden picture; our internal DPB consumes
+the NOSHOW completion instead, so the two designs are not interchangeable.
