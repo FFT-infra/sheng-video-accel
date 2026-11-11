@@ -10,16 +10,23 @@
 // Everything else here is the machinery those cases need: a node that grants
 // the encoder formats, accepts the controls a real SM8550 node carries, and
 // completes one picture per queued raw buffer.
+//
+// The last case is the other half of the same contract: how the access unit
+// leaves the session. A coded buffer's completion is claimed by whichever of
+// vaSyncSurface, vaSyncBuffer or vaMapBuffer arrives first, and the second
+// caller must find the bytes instead of overwriting them with an empty answer.
 
 #include "../../src/iris/encode.h"
 
 #include "../../src/util/error.h"
 #include "../../src/util/options.h"
 #include "../../src/util/trace.h"
+#include "../../src/va/driver.h"
 
 #include <algorithm>
 #include <climits>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <map>
@@ -707,7 +714,107 @@ void test_drain_resolves_outstanding_pictures()
     check(session.wait(ticket).bytes.size() == kPayload, "the drain kept the picture for its ticket");
 }
 
+// A coded buffer waiting for its access unit, in the shape vaCreateBuffer
+// makes it: the capacity is `size`, the bytes arrive in `payload`.
+std::shared_ptr<va::Buffer> coded_buffer(unsigned capacity)
+{
+    auto buffer = std::make_shared<va::Buffer>();
+    buffer->type = VAEncCodedBufferType;
+    buffer->size = capacity;
+    buffer->count = 1;
+    return buffer;
+}
+
+// Whichever of vaSyncSurface, vaSyncBuffer and vaMapBuffer arrives first
+// claims the picture; the others must return success with the bytes already
+// there. GStreamer's encoder calls both surfaces and buffers, and the old
+// behaviour — a second claim overwriting the access unit with the empty
+// answer of an already-claimed ticket — is a silently empty encoded frame.
+void test_coded_buffer_claim_contract()
+{
+    auto node = std::make_unique<FakeEncoderNode>(true);
+    FakeEncoderNode* raw = node.get();
+    iris::EncodeConfig config;
+    config.codec = V4L2_PIX_FMT_H264;
+    config.width = 1920;
+    config.height = 1080;
+    // Shared, because a Buffer keeps the session alive past vaDestroyContext.
+    auto session = std::make_shared<iris::EncoderSession>(
+        std::move(node), config, iris::Options {}, iris::Trace(false));
+
+    check(status_of([&] { session->configure(params(0, 0, 0), 1920, 1080); }) == -1, "configure");
+    raw->hold_completions();
+    const int fd = dmabuf();
+    check(fd >= 0, "memfd for the raw frame");
+    const iris::EncodeTicket first = session->submit(fd, kCaptureSlot, params(0, 0, 0));
+    const iris::EncodeTicket second = session->submit(fd, kCaptureSlot, params(0, 0, 0));
+
+    va::DriverData d;
+
+    // Nothing outstanding: another entry point already claimed the picture.
+    // That is success, not an empty access unit.
+    auto claimed = coded_buffer(kCaptureSlot);
+    check(va::claim_coded(d, claimed, 0) == VA_STATUS_SUCCESS, "a buffer with nothing outstanding is claimed");
+    check(claimed->payload.empty() && claimed->segment.buf == nullptr, "and nothing is invented for it");
+
+    // A coded buffer whose picture was submitted but which lost its session
+    // cannot be waited on, and must say so instead of reporting no bytes.
+    auto orphaned = coded_buffer(kCaptureSlot);
+    orphaned->ticket = iris::EncodeTicket { 1 };
+    check(status_of([&] { va::claim_coded(d, orphaned, 0); }) == VA_STATUS_ERROR_INVALID_CONTEXT,
+        "a coded buffer without its session is refused");
+
+    // The first claim waits for the completion and stores the access unit.
+    auto coded = coded_buffer(kCaptureSlot);
+    coded->ticket = first;
+    coded->coded_session = session;
+    raw->release(1);
+    check(va::claim_coded(d, coded, VA_TIMEOUT_INFINITE) == VA_STATUS_SUCCESS, "the first claim succeeds");
+    check(coded->payload.size() == kPayload, "the first claim stored the access unit");
+    check(coded->segment.size == kPayload && coded->segment.buf == coded->payload.data(),
+        "the segment describes those bytes");
+    check(!coded->ticket && !coded->coded_session, "the claim cleared the ticket");
+
+    // The second caller read the ticket before the first one cleared it, so
+    // its wait answers empty. The bytes stay.
+    const std::vector<uint8_t> answered = coded->payload;
+    coded->ticket = first;
+    coded->coded_session = session;
+    check(va::claim_coded(d, coded, VA_TIMEOUT_INFINITE) == VA_STATUS_SUCCESS, "a second claim succeeds");
+    check(coded->payload == answered, "an answered ticket does not overwrite the bytes");
+
+    // A buffer smaller than the access unit fails instead of truncating.
+    auto small = coded_buffer(kPayload - 1);
+    small->ticket = second;
+    small->coded_session = session;
+    raw->release(1);
+    check(status_of([&] { va::claim_coded(d, small, VA_TIMEOUT_INFINITE); }) == VA_STATUS_ERROR_ENCODING_ERROR,
+        "a buffer smaller than the access unit is refused");
+    check(small->payload.empty(), "and nothing is written into it");
+
+    session->finish();
+}
+
 } // namespace
+
+namespace va {
+
+// The two lookups src/va/buffer.cc needs that the coded buffer's claim never
+// reaches. Linking the real driver.cc for them would drag the whole VA glue,
+// and its init, into a host test.
+std::shared_ptr<Buffer> buffer(DriverData& d, VABufferID id)
+{
+    const auto it = d.buffers.find(id);
+    return it == d.buffers.end() ? nullptr : it->second;
+}
+
+iris::StableBuffer& ensure_stable(DriverData&, Surface&)
+{
+    std::fputs("ensure_stable is not part of the coded buffer's claim\n", stderr);
+    std::abort();
+}
+
+} // namespace va
 
 int main()
 {
@@ -719,6 +826,7 @@ int main()
     test_on_demand_idr_by_sync_frame();
     test_pipelined_pictures();
     test_drain_resolves_outstanding_pictures();
+    test_coded_buffer_claim_contract();
     if (failures) {
         std::cerr << failures << " encode session check(s) failed\n";
         return 1;

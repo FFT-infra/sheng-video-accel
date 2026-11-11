@@ -178,12 +178,13 @@ encode_params_test = executable(
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('encode-params', encode_params_test)
 
-# The encoder session's control contract on a scripted Iris encoder node:
-# which V4L2 writes a VA deblocking request produces, and what happens on a
-# kernel that has no loop-filter controls at all.
+# The encoder session's two contracts on a scripted Iris encoder node: which
+# V4L2 writes a VA deblocking request produces (and what happens on a kernel
+# that has no loop-filter controls at all), and how a coded buffer's access
+# unit is claimed once when three VA entry points can ask for it.
 encode_session_test = executable(
   'encode-session-test',
-  'unit/encode-session-test.cc',
+  ['unit/encode-session-test.cc', '../src/va/buffer.cc'],
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('encode-session', encode_session_test)

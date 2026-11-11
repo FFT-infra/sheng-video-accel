@@ -32,7 +32,10 @@ On the tablet, run the following verification gates:
 `annexb-test` covers the NAL splitting a requested IDR needs (both NAL
 layouts, the parameter sets a cut stream must carry);
 `encode-session-test` covers the session rules, including the on-demand
-IDR lever and the strictly rising timestamps.
+IDR lever and the strictly rising timestamps, and the coded buffer's claim:
+whichever of `vaSyncSurface`, `vaSyncBuffer` and `vaMapBuffer` arrives first
+takes the access unit, and the others succeed with those bytes rather than
+replacing them with an empty answer.
 
 Two probes build with the tree and run on the target only:
 
