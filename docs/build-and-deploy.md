@@ -272,8 +272,15 @@ when the native V4L2 node can decode it.
 For experiments that may reset firmware, wrap the bounded command with
 `scripts/iris-experiment-guard.sh -- ...`. It records the initial boot ID,
 thermal samples, pack state (`battery.log`: capacity, charging status, voltage,
-current and USB online) and command output, enforces a timeout, and refuses to
-reuse a running guard file until the previous run has been inspected. Battery
+current and USB online), the display and network boundary
+(`display.log`: connector state, `enabled`, `dpms`, preferred mode string,
+brightness and fbcon blank level; `network.log`: `up`/`down` per interface;
+`command.txt`: the run's own argv, one argument per line) and command output,
+enforces a timeout, and refuses to reuse a running guard file until the
+previous run has been inspected. A power run is only attributable to decode
+when those boundaries are recorded: the kernel does not expose the active
+refresh rate to an unprivileged reader, so the report states the refresh it
+measured under rather than implying it from `display.log`. Battery
 level is a recorded boundary, not a start gate: a discharging or low pack is
 valid lab state, and the report must say what the pack did. Classify a long
 run by the recorded start/end capacity; a shortened window is a shortened

@@ -15,10 +15,23 @@ printf 'Discharging\n' >"$work/power/qcom-battmgr-bat/status"
 printf '3800000\n' >"$work/power/qcom-battmgr-bat/voltage_now"
 printf -- '-2100000\n' >"$work/power/qcom-battmgr-bat/current_now"
 printf '0\n' >"$work/power/qcom-battmgr-usb/online"
+mkdir -p "$work/class/backlight/ktz8866-backlight" "$work/class/graphics/fb0" \
+    "$work/class/drm/card0-DSI-1" "$work/net/docker0" "$work/net/wlp1s0"
+printf '1474\n' >"$work/class/backlight/ktz8866-backlight/brightness"
+printf '2047\n' >"$work/class/backlight/ktz8866-backlight/max_brightness"
+printf '4\n' >"$work/class/graphics/fb0/blank"
+printf 'connected\n' >"$work/class/drm/card0-DSI-1/status"
+printf 'disabled\n' >"$work/class/drm/card0-DSI-1/enabled"
+printf 'Off\n' >"$work/class/drm/card0-DSI-1/dpms"
+printf '3048x2032\n3048x2032\n' >"$work/class/drm/card0-DSI-1/modes"
+printf 'down\n' >"$work/net/docker0/operstate"
+printf 'up\n' >"$work/net/wlp1s0/operstate"
 
 IRIS_EXPERIMENT_DIR="$work/artifacts" \
 IRIS_EXPERIMENT_THERMAL_ROOT="$work/thermal" \
 IRIS_EXPERIMENT_BATTERY_ROOT="$work/power" \
+IRIS_EXPERIMENT_DISPLAY_ROOT="$work/class" \
+IRIS_EXPERIMENT_NET_ROOT="$work/net" \
 IRIS_EXPERIMENT_TIMEOUT_SECONDS=10 \
 IRIS_EXPERIMENT_TEMPERATURE_INTERVAL_SECONDS=1 \
 sh "$root/scripts/iris-experiment-guard.sh" -- sh -c 'exit 0' >/dev/null
@@ -29,6 +42,16 @@ grep -q '^timestamp,gauge,capacity_percent,status,voltage_uv,current_ua,usb_onli
     "$work/artifacts/battery.log"
 grep -q 'qcom-battmgr-bat,19,Discharging,3800000,-2100000,0' \
     "$work/artifacts/battery.log"
+# The display boundary a power run is measured under: connector state, the
+# preferred mode string, brightness and the fbcon blank level.
+grep -q '^timestamp,status,enabled,dpms,mode,brightness,max_brightness,blank$' \
+    "$work/artifacts/display.log"
+grep -q ',connected,disabled,Off,3048x2032,1474,2047,4$' "$work/artifacts/display.log"
+grep -q '^timestamp,interfaces$' "$work/artifacts/network.log"
+grep -q ',docker0=down;wlp1s0=up$' "$work/artifacts/network.log"
+# The argv is the run's own identity; one argument per line keeps quoting.
+printf 'sh\n-c\nexit 0\n' >"$work/expected-command.txt"
+cmp -s "$work/expected-command.txt" "$work/artifacts/command.txt"
 # A low, discharging pack is recorded, not refused: this is the same 19 %
 # state with the guard still reaching complete.
 test "$(grep -c 'status=complete' "$work/artifacts/guard.state")" -eq 1
@@ -58,6 +81,21 @@ sh "$root/scripts/iris-experiment-guard.sh" -- sh -c 'exit 0' >/dev/null
 grep -Fxq 'status=complete' "$work/no-gauge/guard.state"
 grep -q ',unknown,unknown,unknown,unknown,unknown,unknown$' \
     "$work/no-gauge/battery.log"
+
+# A machine with no connector, backlight or network tree records unknown
+# rather than failing a run that the thermal and boot guards accept.
+IRIS_EXPERIMENT_DIR="$work/no-display" \
+IRIS_EXPERIMENT_THERMAL_ROOT="$work/thermal" \
+IRIS_EXPERIMENT_BATTERY_ROOT="$work/power" \
+IRIS_EXPERIMENT_DISPLAY_ROOT="$work/absent-class" \
+IRIS_EXPERIMENT_NET_ROOT="$work/absent-net" \
+IRIS_EXPERIMENT_TIMEOUT_SECONDS=10 \
+IRIS_EXPERIMENT_TEMPERATURE_INTERVAL_SECONDS=1 \
+sh "$root/scripts/iris-experiment-guard.sh" -- sh -c 'exit 0' >/dev/null
+grep -Fxq 'status=complete' "$work/no-display/guard.state"
+grep -q ',unknown,unknown,unknown,unknown,unknown,unknown,unknown$' \
+    "$work/no-display/display.log"
+grep -q ',unknown$' "$work/no-display/network.log"
 
 # The temperature ceiling is a runaway backstop, not a comfort line: a zone
 # in the firmware's own throttle band (90 C here, above the old 85000 default)

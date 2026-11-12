@@ -31,6 +31,8 @@ max_temperature=${IRIS_EXPERIMENT_MAX_TEMP_MILLIC:-100000}
 allow_stale=${IRIS_EXPERIMENT_ALLOW_STALE_GUARD:-0}
 thermal_root=${IRIS_EXPERIMENT_THERMAL_ROOT:-/sys/class/thermal}
 battery_root=${IRIS_EXPERIMENT_BATTERY_ROOT:-/sys/class/power_supply}
+display_root=${IRIS_EXPERIMENT_DISPLAY_ROOT:-/sys/class}
+net_root=${IRIS_EXPERIMENT_NET_ROOT:-/sys/class/net}
 boot_id_file=/proc/sys/kernel/random/boot_id
 
 case "$max_seconds:$interval:$max_temperature" in
@@ -101,6 +103,65 @@ battery_snapshot() {
         "$voltage" "$current" "$online"
 }
 
+# Record the display state a power run was measured under. The first connected
+# connector in name order is the panel on this target; the kernel exposes its
+# enabled/dpms state, the preferred mode string and the backlight, but not the
+# active refresh rate to an unprivileged reader, so the report has to state the
+# refresh itself. A missing tree writes "unknown" instead of failing the run,
+# the same rule battery_snapshot follows.
+display_snapshot() {
+    timestamp=$1
+    status=unknown
+    enabled=unknown
+    dpms=unknown
+    mode=unknown
+    for conn in "$display_root"/drm/card0-*; do
+        [ -r "$conn/status" ] || continue
+        [ "$(tr -d '\n' <"$conn/status")" = connected ] || continue
+        status=connected
+        enabled=$(tr -d '\n' <"$conn/enabled" 2>/dev/null || printf 'unknown')
+        dpms=$(tr -d '\n' <"$conn/dpms" 2>/dev/null || printf 'unknown')
+        mode=$(head -n 1 "$conn/modes" 2>/dev/null || true)
+        [ -n "${mode:-}" ] || mode=unknown
+        break
+    done
+    brightness=unknown
+    max_brightness=unknown
+    for bl in "$display_root"/backlight/*; do
+        [ -r "$bl/brightness" ] || continue
+        brightness=$(tr -d '\n' <"$bl/brightness" 2>/dev/null || printf 'unknown')
+        max_brightness=$(tr -d '\n' <"$bl/max_brightness" 2>/dev/null || printf 'unknown')
+        break
+    done
+    blank=unknown
+    for fb in "$display_root"/graphics/fb*/blank; do
+        [ -r "$fb" ] || continue
+        blank=$(tr -d '\n' <"$fb" 2>/dev/null || printf 'unknown')
+        break
+    done
+    printf '%s,%s,%s,%s,%s,%s,%s,%s\n' "$timestamp" "$status" "$enabled" "$dpms" "$mode" \
+        "$brightness" "$max_brightness" "$blank"
+}
+
+# Which interfaces were up changes the device's own draw, so it belongs in the
+# boundary beside the pack and the screen. Interfaces without an operstate
+# (tun devices) report "unknown" and are left out rather than guessed at.
+network_snapshot() {
+    timestamp=$1
+    list=''
+    for iface in "$net_root"/*; do
+        [ -r "$iface/operstate" ] || continue
+        state=$(tr -d '\n' <"$iface/operstate" 2>/dev/null || printf 'unknown')
+        case $state in
+            up|down|dormant|lowerlayerdown) ;;
+            *) continue ;;
+        esac
+        list="${list:+$list;}$(basename "$iface")=$state"
+    done
+    [ -n "$list" ] || list=unknown
+    printf '%s,%s\n' "$timestamp" "$list"
+}
+
 now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 initial_boot_id=$(tr -d '\n' <"$boot_id_file")
 if ! temperature_snapshot "$now" >"$root/temperature-initial.csv"; then
@@ -116,6 +177,15 @@ battery_snapshot "$now" >"$root/battery-initial.csv"
 printf 'timestamp,gauge,capacity_percent,status,voltage_uv,current_ua,usb_online\n' \
     >"$root/battery.log"
 cat "$root/battery-initial.csv" >>"$root/battery.log"
+display_snapshot "$now" >"$root/display-initial.csv"
+printf 'timestamp,status,enabled,dpms,mode,brightness,max_brightness,blank\n' >"$root/display.log"
+cat "$root/display-initial.csv" >>"$root/display.log"
+network_snapshot "$now" >"$root/network-initial.csv"
+printf 'timestamp,interfaces\n' >"$root/network.log"
+cat "$root/network-initial.csv" >>"$root/network.log"
+# The argv names the media and every switch the run used; the clip hashes stay
+# in the experiment record. One argument per line so quoting survives.
+for arg in "$@"; do printf '%s\n' "$arg"; done >"$root/command.txt"
 
 started_at=$now
 write_guard() {
@@ -173,6 +243,8 @@ while kill -0 "$pid" 2>/dev/null; do
     cat "$root/temperature-current.csv" >>"$root/temperature.log"
     battery_snapshot "$stamp" >"$root/battery-current.csv"
     cat "$root/battery-current.csv" >>"$root/battery.log"
+    display_snapshot "$stamp" >>"$root/display.log"
+    network_snapshot "$stamp" >>"$root/network.log"
     if [ "$hottest" -gt "$max_temperature" ]; then
         failure="temperature exceeded limit: $hottest > $max_temperature millidegrees C"
         echo "$failure" >"$root/failure"
@@ -189,6 +261,9 @@ else
 fi
 [ "$rc" -eq 124 ] && { echo "experiment timeout after ${max_seconds}s" >"$root/failure"; exit 1; }
 [ "$rc" -eq 0 ] || exit "$rc"
-battery_snapshot "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$root/battery.log"
+final_stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+battery_snapshot "$final_stamp" >>"$root/battery.log"
+display_snapshot "$final_stamp" >>"$root/display.log"
+network_snapshot "$final_stamp" >>"$root/network.log"
 completed=1
 echo "PASS experiment guard boot_id=$initial_boot_id root=$root"
