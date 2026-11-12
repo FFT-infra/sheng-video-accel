@@ -6427,3 +6427,31 @@ stands: the element is not registered at all, so a refusal attributed to the
 decoder was never a decoder result on this target. D3's GStreamer half and
 H4's encode half both need a plugin build that registers its elements before
 they mean anything. No driver behaviour and no capability entry changes here.
+
+## 4K AV1 with 32 tiles through Import (2026-11-12)
+
+The tile coverage in the record was four tiles at 1280x720 (the 2026-10-23
+loop-restoration run) and the A11 corpus' `tiles 2x2` at 640x360. This run
+decodes a 3840x2160 stream split into 32 tiles.
+
+Clip: 3840x2160, 30 frames, `yuv420p`, AV1 profile `Main`, `libsvtav1`
+`-preset 8 -crf 30` with `tile-columns=3:tile-rows=2`, SHA-256
+`3bb8e33fe60c5bd813c7a7081f54c8aafedcbf18ca498990b90db945fa0a31c8`; libdav1d
+reports `tiles 4x8` for it and `trace_headers` shows `tile_cols_log2 = 3`.
+
+Identity is the same boot as the 4K 10-bit probe: installed package
+`323c07cb...`, module `b90bd823...` (0001-0004 + 0006), kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot
+`b2f1de2f-b3da-4e24-9fa4-163e489d929f` unchanged, decoder `/dev/video17`.
+
+| Result | Value |
+| --- | --- |
+| framemd5 | 30/30 frame hashes equal to the libdav1d oracle |
+| session | `submitted=30 completed=30 errors=0 drops=0 timeouts=0 drains=1 misplaced=0` |
+| publish | `import=30 copy=0 invisible=1 drop=0 error=0`, `import rejected=0` |
+| guard | `status=complete`, 31 s window |
+
+The multi-tile frame header is rebuilt from VA's decode parameters, so this
+also exercises the writer's tile-count path beyond the four-tile case. 12-bit
+stays in the capability table's `rejected` list; no gate for it exists and
+none is claimed here.
