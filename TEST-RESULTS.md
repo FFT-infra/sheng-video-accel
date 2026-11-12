@@ -6457,3 +6457,26 @@ The multi-tile frame header is rebuilt from VA's decode parameters, so this
 also exercises the writer's tile-count path beyond the four-tile case. 12-bit
 stays in the capability table's `rejected` list; no gate for it exists and
 none is claimed here.
+
+## 12-bit AV1 is refused at the VA layer, not mis-decoded (2026-11-12)
+
+The capability table lists 12-bit as `rejected` with no hardware gate behind
+it. This run checks that the rejection is a refusal rather than a decode that
+returns wrong pixels.
+
+Clip: 640x360, 10 frames, `yuv420p12le`, AV1 profile `Professional`,
+`libaom-av1 -cpu-used 8 -crf 40`. The software oracle decoded all 10 frames
+with `libdav1d`. The same boot and driver as the 4K probes (installed package
+`323c07cb...`, module `b90bd823...`, boot `b2f1de2f...`, decoder
+`/dev/video17`).
+
+The VA attempt (`-vaapi_device /dev/dri/renderD128 -hwaccel vaapi
+-hwaccel_output_format vaapi`, `V4L2_VA_PUBLISH=import`, trace on) exited 69
+with `Your platform doesn't support hardware accelerated AV1 decoding`,
+`Failed to get pixel format`, and `Nothing was written into output file`. The
+trace stops after `va init` — no `va create_context`, no session, no
+publication.
+
+A 12-bit stream therefore fails where the profile is selected, before any
+surface is allocated, and the table's `rejected` entry stays as it is. This is
+negative evidence for the entry, not a hardware 12-bit gate.
