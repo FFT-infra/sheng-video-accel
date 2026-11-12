@@ -60,15 +60,15 @@ if [ -n "$bad" ]; then
     fail "recorded hash does not match: $bad"
 fi
 
-# Only the six patches may be listed, and every one of them must be.
+# Only the seven patches may be listed, and every one of them must be.
 listed=$(awk '{print $2}' "$sums")
-for name in 0001 0002 0003 0004 0005 0006; do
+for name in 0001 0002 0003 0004 0005 0006 0007; do
     printf '%s\n' "$listed" | grep -q "^$name-" \
         || fail "SHA256SUMS does not record $name"
 done
 count=$(printf '%s\n' "$listed" | grep -c '\.patch$' || true)
-[ "$count" -eq 6 ] \
-    || fail "SHA256SUMS must record exactly six patches, found $count"
+[ "$count" -eq 7 ] \
+    || fail "SHA256SUMS must record exactly seven patches, found $count"
 for name in $(printf '%s\n' "$listed" | grep '\.patch$'); do
     [ -f "$kernel_dir/$name" ] || fail "SHA256SUMS records a file that is not there: $name"
 done
@@ -111,6 +111,12 @@ expect_marker "$kernel_dir/0005-media-iris-recycle-decoder-buffers-for-non-displ
     '+	if (inst->domain == DECODER &&' 1
 expect_marker "$kernel_dir/0006-media-iris-discard-unmatched-timestamp-metadata.patch" \
     '+	memset(&vbuf->timecode, 0, sizeof(vbuf->timecode));' 1
+# 0007 is the completion-preserving form of 0005: the flag it stops setting and
+# the empty-payload rule it stops applying are both load bearing.
+expect_marker "$kernel_dir/0007-media-iris-complete-noshow-pictures-without-an-error.patch" \
+    '+	bool noshow = inst_hfi_gen2->hfi_frame_info.picture_type & HFI_GEN2_PICTURE_NOSHOW;' 1
+expect_marker "$kernel_dir/0007-media-iris-complete-noshow-pictures-without-an-error.patch" \
+    '+	if (!buf->data_size && inst->state == IRIS_INST_STREAMING && !noshow &&' 1
 
 # 0004's whole point is that the copy lands in the ERROR branch. Checking the
 # line order inside the hunk is what distinguishes that from a copy added to
@@ -194,4 +200,4 @@ if [ "$failures" -ne 0 ]; then
     printf 'FAIL kernel patches: %d problem(s)\n' "$failures" >&2
     exit 1
 fi
-printf 'PASS kernel patches: six files, recorded hashes, Iris-only paths\n'
+printf 'PASS kernel patches: seven files, recorded hashes, Iris-only paths\n'
