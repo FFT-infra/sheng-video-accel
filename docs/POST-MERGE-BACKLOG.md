@@ -455,8 +455,15 @@ when the kernel keeps the buffer instead of completing it:
 | --- | --- |
 | `session.cc` hidden attribution (`noshow_shape`) | clears a `Target` submitted with `show_frame=0`; without it the client's `vaSyncSurface` waits until the timeout |
 | `Target::invisible` counter | separates the install half of a two-completion unit from the client's picture; without it both halves look like the client's |
-| `queue_import_next` | an Import entry leaves the backlog only when `capture_queued_for(token)` reaches 0; a slot the kernel recycled still counts as queued, so the window never advances and the firmware starves |
+| `queue_import_next` | an Import entry leaves the backlog only when the slots lent for its token come back; a recycled slot is never dequeued by userspace, so the entry cannot be retired and the next completion lands in a slot lent for someone else |
 | `publish()` | the returned buffer is the target's pixels under Direct, and the slot's token is the client buffer under Import |
+
+The 720p traces from the target show both failures. Under Direct and Copy the
+drain ends in `drain lost token=2` through `5`: the hidden targets never
+complete. Under Import the backlog reaches 5 and the completion carrying
+token 7 arrives in the slot lent for token 2
+(`capture token=7 index=0 flags=0x4010 publish=misplaced slot_token=2`), which
+fails both pictures (`session finish ... errors=6 misplaced=1`).
 
 So "making 0005 work" is not polishing that patch. The only kernel form this
 driver could consume keeps the completion and drops just the false
