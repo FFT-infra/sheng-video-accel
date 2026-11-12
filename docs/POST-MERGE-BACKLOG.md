@@ -119,7 +119,7 @@ frames. The default AV1 translator in `src/va/picture.cc` now selects
 | --- | --- | --- | --- | --- | --- |
 | A1 | Read-through of upstream `src/av1.cpp`, `src/decoder.cpp`, `src/internal.hpp` and `tests/decoder/av1.py`; write a contract diff against our `src/codec/av1.cc`, `av1_obu.cc`, `src/iris/session.*`, `src/va/surface.cc` | host, read-only | none | a written list of every behaviour that differs, including DPB slot selection, hidden replay, sequence-header emission, tile layout and EOS | none needed |
 | A2 | Define the new V4L2 completion ledger on the 0001-0004 module | target probe | L1, L5, guard | **done**: `docs/experiments/av1-noshow-dpb-spike.md` records the two completions under one token (`ERROR`/no payload, then pixels), the empty LAST at drain, and the zero-timestamp single hidden picture path | none; no module swap happened |
-| A3 | Build and load 0001-0005 on `sheng`, reboot, confirm the module hash and active controls | target, can reset firmware | A2 design, L1, guard wrapped | **not applicable**: A2 settled that 0005 is not needed and would lose frames with this userspace | none; 0005 remains unbuilt and unloaded (0006 later had one separate guarded WP1 run) |
+| A3 | Build and load 0001-0005 on `sheng`, reboot, confirm the module hash and active controls | target, can reset firmware | A2 design, L1, guard wrapped | **measured, verdict "do not load"**: module `6ef2fce8...` (0001-0004 + 0006 + 0005) on boot `1edbadbe...` failed all three qualified AV1 clips under import, copy and direct (`submitted=7 completed=1` and worse, `misplaced=1` under import), while native `v4l2av1dec` reached EOS on the same node; `TEST-RESULTS.md` §"0005 on the target" records the traces and the mechanism | rollback copy `b90bd823...` written back with `depmod -a` and a reboot before the target went unreachable; 0005 stays unbuilt and unloaded |
 | A4 | Short AV1 decode against the new module with `V4L2_VA_TRACE=1` only to characterise suppressions | target | A3 | **done on 0001-0004**: guarded real VA-API sessions recorded `publish=invisible`, `publish=direct`/`publish=import`, `errors=0`, `misplaced=0` and bit-exact rebuilt OBUs | none; build-tree override only, installed driver untouched |
 | A5 | Rewrite the AV1 translator to emit one complete temporal unit per `vaEndPicture` with an explicit 8-slot DPB and hidden-reference replay | code | A1, A4 | **done**: `src/codec/av1_dpb.cc`, `av1_build_install_temporal_unit()`; host tests cover DPB-full install, pending-surface references, client hidden frames, sequence restart and no held EOS tail | revert `src/va/picture.cc` to `make_av1()` |
 | A6 | Rewrite the session / surface / EOS accounting for the completions | code | A4, A5 | **done**: `unsent`, `wait_for_release()`, `release_held_picture()` and the bounded-release tail are removed; orphaned invisible halves are consumed as `publish=invisible`; `test/iris-clip-trace-check.sh` still balances submitted/completed | revert `src/iris/` and `src/va/` changes |
@@ -234,7 +234,7 @@ to one of the items above.
 | F7 | `intel/libva`, Firefox `FFmpegVideoDecoder.cpp` | `va_dec_av1.h` last changed 2021; recent Firefox changes in that file are Vulkan Video / Android, the "send one frame, immediately receive" loop is unchanged | re-check before starting B work |
 | F8 | `yzddmr6/linux-sm8750-piano` v1.2.0 (2026-11-10) | camera, serial, audio; no new Iris commits; 0006's origin commit unchanged | no action |
 | F9 | `GhfunNiHe/sheng-fedora-packages` | last push 2026-10-25; pins patches against `iris-kernel-patches-v1` | re-check packaging pin only if a patch hash changes |
-| F10 | 0005/0006 experiment branch | no such branch exists; only `feat/vpu-zerocopy-ubwc` and its fork remote; 0006's WP1 build and guarded target run are recorded on `chore/post-merge-hygiene` | open a separate branch before any 0005 work; never enabled by default |
+| F10 | 0005/0006 experiment branch | no such branch exists; only `feat/vpu-zerocopy-ubwc` and its fork remote; 0006's WP1 build and 0005's WP2 build and target run are both recorded on `chore/post-merge-hygiene` | keep both patches out of the qualified module and out of any released build |
 
 ## 9. Workstream G — documentation, consistency and hygiene debt
 
@@ -335,7 +335,7 @@ node, or a running GPU process is not a capability or browser-hardware claim.
 | §5 Chrome VP9 Import | C1-C5 | **done 2026-11-12**: the retained-target model ships (retained `Target`, backlog-owned duplicate fd, client layout copied at submit), VP9 `publish_import` is `qualified` in the table and the driver. Gates on driver `0ef0f34c…`, boot `5feea1b5…`, `/dev/video17`: 48/48 four-codec matrix under Import, FFmpeg 1280x720 alt-ref clip 515/515 with framemd5 equal to software, Chrome 1705/1705 and 1588/1588 with `drops=0 misplaced=0`, Copy baseline 1702/1705 with 3 drops. The host regressions are the two retention unit cases plus a red check with the detach condition disabled. TEST-RESULTS.md §"VP9 Import qualified (2026-11-12)" |
 | §6 AV1 feature completeness | D1-D6 | D1 done for exact framemd5: 1920x1080 60-frame 10-bit clip `EXACT`, 60 Import, 0 errors/drops/misplaced on 2026-11-11. D2 settled as a user-space second-target publish gap, not a kernel limitation: scratch OBU writer was libdav1d-clean and the firmware carries the grain capability flag, but the display surface stayed empty; host guard keeps the refusal fail-closed. D4 partly covered by the A11 corpus (tiles, lookahead, still-picture, lossless exact; superres and global motion excluded with a recorded encoder reason). Still open: 10-bit browser pixel comparison, 12-bit, large-scale tile, D3 (128x128 SB / GStreamer), D5/D6 negative tests |
 | §7 Long-window, power, cost | E1-E5 | E1 done (both 7200 s windows, clean ledgers), E3 and E4 done (20-minute continuous 4K inside the guard; 3.07 ms per frame with the clocks pinned and the clock state recorded), E5 and L3 done (the guard records pack state); E2 closed on the relaxed ceiling with the A/B measured (about -4.4 W device-side, peaks 91-92 C) |
-| §8 Kernel and upstream sync | F1-F10 | open / decision recorded as "do not rebase"; 0005 is unbuilt and unloaded; 0006 was built, installed with 0001-0004, rebooted and run through one guarded WP1 gate on `sheng` with a "no regression" verdict, still experimental and outside the qualified baseline |
+| §8 Kernel and upstream sync | F1-F10 | open / decision recorded as "do not rebase"; 0005 was built and loaded once on `sheng` (2026-11-12) and failed all three qualified AV1 clips, so it is unloaded again; 0006 was built, installed with 0001-0004, rebooted and run through one guarded WP1 gate with a "no regression" verdict, still experimental and outside the qualified baseline |
 | §9 Docs, consistency, hygiene | G1-G14 | all closed: G1, G2, G3, G7, G8, G12, G13 and G14 done; G4, G5, G6, G9, G10 and G11 closed with explicit reasons (untracked scratch notes, intentional scratch default, kernel SPDX provenance, release-note identity fact, no new trace marker) |
 | §10 Encode | H1-H4 | H1 closed with a code fix: both translators now take `target_percentage` into the target, carry the client's maximum as `BITRATE_PEAK` for VBR, and keep the last configured target when a picture omits rate control; `vbr4` measured 8000 -> 3992 kbit/s. H2 is settled as out of scope, H3 has a host-side audit, H4's double-claim half is covered by `encode-session-test`, the GStreamer half stays blocked on a target that ships the VA plugins. No capability entry or profile changed |
 | §11 CI, tests, release plumbing | I1-I7 | host tests 26/26 and static checks green on every commit of PR #6; the guarded installed-package gates and the repo-owned 17-case AV1 browser matrix are in PR #5; I5 now verifies the synced tree on the target. Still open: packaging/CI automation for the target gates |
@@ -414,25 +414,40 @@ rollback path are in `TEST-RESULTS.md` §"WP1: 0006 loaded on sheng".
 **Decision**: keep the module installed. The verdict is "no regression", not
 "fixed"; 0006 remains experimental and outside the qualified 0001-0004
 baseline. No codec, VA profile or publish policy is advertised from this run,
-and the VA driver, capability table and trace vocabulary are unchanged. 0005
-was not built or loaded. The verified rollback copy and `wp1-rollback.sh`
-restore the qualified module with `depmod -a` and a reboot if needed.
+and the VA driver, capability table and trace vocabulary are unchanged. That
+WP1 build did not include 0005; the separate 0005 run is WP2 below. The
+verified rollback copy and `wp1-rollback.sh` restore the qualified module with
+`depmod -a` and a reboot if needed.
 
-### WP2 measure the cost of 0005 — done, verdict "not worth doing"
+### WP2 measure the cost of 0005 — done, verdict "do not load"
 
-Measured from the existing timestamped traces, with no new target run and no
-driver change (`TEST-RESULTS.md` §"WP2: cost of one extra NOSHOW completion").
-The extra completion costs one Import queue event and one borrowed client
-buffer per hidden install picture; trace-level delay is 1-2 ms median, 11 ms
-worst case, and the Import backlog stayed at 3-4. The 120-frame and DRC clip
-traces were not retained, so those contribute counts (42 and 63 invisible)
-only. Change the shipped userspace for 0005 only if a future measurement
-shows a real target-level cost; the current evidence does not.
+Measured twice. The trace-level cost of the extra NOSHOW completion is one
+Import queue event and one borrowed client buffer per hidden install picture
+(`TEST-RESULTS.md` §"WP2: cost of one extra NOSHOW completion"): 1-2 ms median,
+11 ms worst case, Import backlog 3-4.
 
-### WP3 0005 dual path — not implemented (WP2 verdict "not worth doing")
+The target run then showed the cost is not a slowdown but a stop. With the
+0005 module loaded (`6ef2fce8...`, boot `1edbadbe...`) all three qualified AV1
+clips failed under import, copy and direct, the copy/direct traces ending in
+`sync timeout` and `drain lost token=`, the import traces in
+`publish=misplaced` (`TEST-RESULTS.md` §"0005 on the target"). The completion
+0005 recycles in the kernel is the one this driver uses to clear a hidden
+pending target, so the cost of removing it is a userspace contract change, not
+a queue event.
+
+### WP3 0005 dual path — not implemented, and not probeable as designed
+
+The probe this design depends on does not exist. 0005 adds no V4L2 control,
+no QUERYCAP flag and no extended control, only the internal
+`output_stopping` field in `iris_hfi_gen2.h`, so userspace cannot tell which
+contract the kernel implements and the configure-time switch below would have
+to guess. A dual path also needs the full DPB-slot rewrite, because the
+current accounting clears a hidden pending target from the completion 0005
+recycles (`TEST-RESULTS.md` §"0005 on the target").
 
 The following design is retained for the record only. Do not implement it
-without a new measured cost and an explicit decision.
+without a kernel-visible capability signal, a new measured cost and an
+explicit decision.
 
 Probe for 0005 at configure time the way `sync_frame_control_` is probed. With
 0005: `AccessUnit::completions = 1`, no second borrowed client buffer, no

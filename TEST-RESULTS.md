@@ -6247,3 +6247,102 @@ E2 is closed: the hardware-versus-software battery-side increment is about
 4.4 W in favour of the VA path on this device, measured twice in the same
 shape. It is not a per-package power figure and it is not a thermal
 qualification of the software arm.
+
+## 0005 on the target: the kernel recycles completions this driver consumes (2026-11-12)
+
+Patch 0005 was built into the module for the first time and run against the
+installed driver. The result is not a refinement of the current AV1 path: with
+0005 loaded, AV1 decode stops after a handful of pictures under every publish
+policy, and the driver's own accounting names the reason.
+
+Identity: module
+`6ef2fce835eb5aca52546482058511874c883e908b024f39f61e2775682d8099`
+(0001-0004 + 0006 + 0005, built with `packaging/kernel/build-module.sh`),
+installed at `/lib/modules/7.2.6-sm8550-g42f3b40-iris1/.../qcom-iris.ko.zst`,
+one reboot, boot `1edbadbe-f61b-4c7a-b229-a94b71e8539e`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, installed package
+`323c07cbd42f5a152cfca4278a78d64d726534a85f95f0d0db22379e4317a37d` (no
+`LIBVA_DRIVERS_PATH` override), decoder and encoder as the driver's own
+`va init node=/dev/video0 encoder=/dev/video1` line reports them, battery
+unplugged, no thermal breach and no reset. One experimental patch was added at
+a time; the module before and after the experiment is
+`b90bd823fdab98957739ad2196eb4016f5a264f2280d22735963e40c8488c715`
+(0001-0004 + 0006), kept as a verified rollback copy.
+
+Client: `ffmpeg -hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -pix_fmt
+yuv420p -f framemd5`, `V4L2_VA_SYNC_TIMEOUT_MS=1000`, `V4L2_VA_TRACE=1`,
+`LIBVA_DRIVER_NAME=msm`, one process per clip per policy. The clips are the
+ones the qualified gate decodes exactly (`av1-720.webm` 120 frames,
+`resize-av1.mkv` 80 frames, `av1-4k.mkv` 30 frames).
+
+| Clip | `V4L2_VA_PUBLISH` | Session finish | Exit |
+| --- | --- | --- | --- |
+| `av1-720.webm` | import | `submitted=7 completed=1 errors=6 drops=0 timeouts=0 drains=1 misplaced=1` | 251 |
+| `av1-720.webm` | copy | `submitted=7 completed=2 errors=4 drops=0 timeouts=1 drains=1 misplaced=0` | 251 |
+| `av1-720.webm` | direct | `submitted=7 completed=2 errors=4 drops=0 timeouts=1 drains=1 misplaced=0` | 251 |
+| `resize-av1.mkv` | import | `submitted=6 completed=1 errors=5 drops=0 timeouts=0 drains=1 misplaced=1` | 251 |
+| `resize-av1.mkv` | copy | `submitted=7 completed=3 errors=3 drops=0 timeouts=1 drains=1 misplaced=0` | 251 |
+| `resize-av1.mkv` | direct | `submitted=7 completed=3 errors=3 drops=0 timeouts=1 drains=1 misplaced=0` | 251 |
+| `av1-4k.mkv` | import | `submitted=6 completed=1 errors=5 drops=0 timeouts=0 drains=1 misplaced=1` | 251 |
+| `av1-4k.mkv` | copy | `submitted=6 completed=2 errors=3 drops=0 timeouts=1 drains=1 misplaced=0` | 251 |
+| `av1-4k.mkv` | direct | `submitted=6 completed=2 errors=3 drops=0 timeouts=1 drains=1 misplaced=0` | 251 |
+
+No run produced a framemd5 file. The native control on the same boot decoded
+the identical clip through the identical node: `matroskademux ! av1parse !
+v4l2av1dec` reached `Got EOS` with exit 0.
+
+### Why this module cannot serve this driver
+
+0005 removes the ERROR flag from NOSHOW completions
+(`iris_hfi_gen2_get_driver_buffer_flags`) and then, for a decoder NOSHOW
+picture with no error and no LAST flag, calls
+`iris_hfi_gen2_requeue_output_buffer()` instead of completing the buffer to
+vb2. The completion the driver receives is recycled inside the kernel, so
+userspace never dequeues it.
+
+That completion is load-bearing here. `Session::handle_capture_returns()`
+attributing a hidden picture (`capture noshow`) is how the pending target
+submitted for `show_frame=0` is cleared, how `Target::invisible` is counted,
+and — in Import — how a second borrowed client buffer per install unit is
+returned. Without the completion, `pending_` never empties: the copy and
+direct traces show tokens 2-6 with no return at all, the sync bound expires
+(`sync timeout token=6 pending=5 queued=32`), and the drain reports
+`drain lost token=`, followed by an early `capture empty ... last=1`.
+
+Import fails earlier and more loudly. The pool maps a CAPTURE index to the
+token that was lent for it; a recycled buffer comes back later for a different
+picture, and the session's neighbour check refuses to publish it —
+`capture token=7 index=0 flags=0x4010 publish=misplaced slot_token=2`, then
+`va sync failed surface status=23: target decode failed`. The Import invariant
+did what it was written to do: a completion that lands in a neighbour's buffer
+failed both surfaces instead of publishing wrong pixels.
+
+### What a complete 0005 would have to be
+
+Not a patch refinement. It changes the decoder-to-userspace contract from
+"one completion per submitted picture" to "displayed pictures only", so it
+needs a userspace DPB-slot model that never expects a completion for a hidden
+picture, a rewrite of the `AccessUnit::completions` / `Target::invisible`
+accounting, the §8 trace vocabulary and its consumers, invariant 17, and the
+capability table's `sync_note`. It also needs a way for userspace to learn
+which contract the kernel implements: 0005 adds no V4L2 control, no QUERYCAP
+flag and no `VIDIOC_QUERY_EXT_CTRL` entry, only the internal
+`output_stopping` field, so one `v4l2_drv_video.so` cannot serve both kernels.
+What it would buy is the removal of a fake `V4L2_BUF_FLAG_ERROR` on NOSHOW
+completions, which `src/iris/session.cc` already recognises by shape
+(no picture-type bit, no payload, zero timestamp) and publishes as a hidden
+picture without treating it as a failure.
+
+### Scope of this record
+
+The control arm in the same session was not run: after the rollback copy was
+written back (`rollback_to_module=b90bd823...` verified on disk) and the tablet
+rebooted, it did not come back on its network, so no post-rollback boot ID or
+module hash could be read. The comparison therefore rests on the recorded
+qualified runs on the same clips and the same installed driver —
+`submitted=120 completed=120 errors=0` (2026-11-10) and the 4K clip under
+pinned clocks (2026-11-12) — plus the native decode control above. No codec,
+profile or publish policy is advertised or withdrawn by this run; the
+qualified baseline module remains `b90bd823` (0001-0004 + 0006) with the
+shipped driver unchanged. A same-session control arm is the first thing to run
+when the target is reachable again.
