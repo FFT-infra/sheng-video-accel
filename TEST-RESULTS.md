@@ -6412,3 +6412,18 @@ P010 surfaces were allocated at 3840x2160 from the first picture
 first access unit here as well. This adds no VA profile and no capability
 entry: it fills D4's "4K 10-bit" line with exact pixels, and the browser
 10-bit pixel comparison stays open.
+
+## GStreamer VA plugin on sheng registers no elements (2026-11-12)
+
+`gst-inspect-1.0 va` on `sheng` reports the plugin but `0 features`:
+`libgstva.so`, version 1.28.8, source module `gst-plugins-bad`, linking
+`libva.so.2` and `libva-drm.so.2`. `gst-inspect-1.0 vaav1dec` fails, and the
+full element list contains no `va*dec` or `va*enc`, only the `v4l2*`
+decoders and encoders (`v4l2av1dec`, `v4l2h264dec`, `v4l2h265dec`,
+`v4l2vp9dec`).
+
+This is where D3's "GStreamer `vaav1dec` refuses the codec" line actually
+stands: the element is not registered at all, so a refusal attributed to the
+decoder was never a decoder result on this target. D3's GStreamer half and
+H4's encode half both need a plugin build that registers its elements before
+they mean anything. No driver behaviour and no capability entry changes here.
