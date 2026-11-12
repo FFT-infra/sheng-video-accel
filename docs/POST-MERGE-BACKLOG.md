@@ -444,9 +444,9 @@ The probe this design depends on does not exist. 0005 adds no V4L2 control,
 no QUERYCAP flag and no extended control, only the internal
 `output_stopping` field in `iris_hfi_gen2.h`, so userspace cannot tell which
 contract the kernel implements and the configure-time switch below would have
-to guess. A dual path also needs the full DPB-slot rewrite, because the
-current accounting clears a hidden pending target from the completion 0005
-recycles (`TEST-RESULTS.md` §"0005 on the target").
+to guess. A dual path for 0005 as written also needs the full DPB-slot
+rewrite, because the current accounting clears a hidden pending target from
+the completion it recycles (`TEST-RESULTS.md` §"0005 on the target").
 
 Four places in the session read that completion, and each one loses something
 when the kernel keeps the buffer instead of completing it:
