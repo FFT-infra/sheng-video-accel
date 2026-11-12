@@ -75,7 +75,7 @@
       ],
       "fallback": "software",
       "rejected": [
-        "long-term references (generated parameter sets cannot describe them)",
+        "long-term references whose POC MSB cycles do not ascend",
         "interlaced",
         "12-bit"
       ],

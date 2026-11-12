@@ -6567,3 +6567,65 @@ QP offsets or a reference count. Mapping the table's `rejected` list onto that:
 driver sets the raw format to `NV12` and refuses the context if the node does
 not accept it. No capability entry changes; what changes is that the reasons
 are now recorded instead of implied.
+
+## Decode rejections: two are the client's caps, one hangs at the node, one was not real (2026-11-12)
+
+The capability table also keeps `interlaced`, `non-8-bit or non-4:2:0` and
+`12-bit` in the decode `rejected` lists, and HEVC keeps `long-term
+references`. Each was measured on the node instead of read off the code.
+
+Identity for every run below: driver `323c07cbd42f5a15…` (installed package),
+module `b90bd823fdab9895…` (0001-0004), kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot
+`b2f1de2f-b3da-4e24-9fa4-163e489d929f`, decoder `/dev/video17` resolved by the
+`iris_driver` QUERYCAP name. The GStreamer decoder elements expose `device` as
+read-only, so each probe compares the element default with the resolved node
+and refuses to run when they differ.
+
+The node enumerates `H264`, `HEVC`, `VP90` and `AV01` on OUTPUT, and `NV12`,
+`Q08C`, `P010`, `Q10C` on CAPTURE. Every CAPTURE format is 4:2:0, none carries
+more than 10 bits, and that is the format space all of these streams land in.
+
+| Run | Stream | Guard | Reached the node | Outcome |
+| --- | --- | --- | --- | --- |
+| H.264 control | High, 4:2:0 progressive, sha256 `f19fd692…` | `complete` | yes | 62 CAPTURE dequeues, src caps, EOS, `drm-format=NV12` |
+| H.264 interlaced | High, `interlace-mode=interleaved`, `field-order=bottom-field-first`, `coded-picture-structure=field`, sha256 `e1ea1883…` | `interrupted` | no | the element refuses: `Device '/dev/video17' does not support interleaved interlacing`; zero buffers |
+| H.264 High 4:2:2 | 4:2:2, Annex-B, sha256 `f8156193…` | `interrupted` | no | `not-negotiated (-4)` at the parser's source link; zero buffers |
+| H.264 High 10 | 10-bit 4:2:0, Annex-B, sha256 `fe1cfbcf…` | `interrupted` | no | `not-negotiated (-4)`; zero buffers |
+| HEVC Main 12 | `yuv420p12le` Rext, sha256 `4035f7d4…` | `interrupted` | no | `not-negotiated (-4)`; zero buffers |
+| VP9 control | profile 0, 8-bit, sha256 `310a6b92…` | `complete` | yes | 10 buffers, src caps, EOS |
+| VP9 profile 2 | 12-bit `yuv420p12le`, sha256 `beb375fd…` | `interrupted` | yes | 10 access units accepted, no source-change, no CAPTURE dequeue, `Waiting for decoder stop` until the guard expired |
+
+The 4:2:2, High 10 and Main 12 refusals happen at the decoder element's sink
+caps: `gst_v4l2_video_dec_sink_getcaps` returns H.264 profiles
+`{baseline, constrained-baseline, main, high, constrained-high}` with no
+`chroma-format` or `bit-depth` fields, so `high-4:2:2` and `high-10` never
+negotiate and no buffer is queued. That is the client's template, not a
+measurement of the node. The node-level half is the CAPTURE enumeration
+above: a 4:2:2 or 12-bit picture has no format here to be delivered in. Both
+halves say the same thing, and no stream can upgrade either entry.
+
+VP9 profile 2 is the stream that does reach the node with 12-bit content, and
+it does not fail cleanly. The node takes all ten access units (`Passing buffer
+with system frame number 0` … `9`), never signals a source change, never
+returns a CAPTURE buffer, and the element sits in `Waiting for decoder stop`
+until the guard budget expires; the first attempt used the full 180 s. The
+8-bit control runs the same pipeline, node and debug domain to EOS, so the
+pipeline is sound. The entry stays, and what is new is that a 12-bit VP9
+client on this node hangs instead of being told no.
+
+Long-term references were the entry that did not survive. The table said
+"generated parameter sets cannot describe them", which the slice writer
+contradicts: `src/codec/hevc.cc` writes an explicit `st_ref_pic_set(0)` plus
+the long-term section with `delta_poc_msb_present_flag=1` into every slice
+header, and that writer landed on 2026-09-21, one day after the table entry.
+The JCT-VC conformance stream `LTRPSPS_A_Qualcomm_1.bit` (416x240 Main,
+sha256 `8f8e50fa…`, from the `fate-suite` mirror of the conformance set) has
+`long_term_ref_pics_present_flag=1` and `num_long_term_ref_pics_sps=8` in the
+SPS and `num_long_term_pics=1` in 161 of its slice headers, per
+`trace_headers`. Through this driver it decodes 500/500 frames with framemd5
+identical to libavcodec, and a locally encoded 20-frame control decodes 20/20
+identical. `data/iris-codec-capabilities.json` now records the boundary that
+does exist — long-term pictures whose POC MSB cycles do not ascend, which
+`write_rps` refuses with `VA_STATUS_ERROR_UNIMPLEMENTED` — instead of the
+stale claim.
