@@ -6080,3 +6080,26 @@ from a soak with generated media is not a decode temperature.
 Nothing in either window was shortened, no boot ID changed, and no reset or
 thermal breach occurred. Together with E3/E4 below this covers the decode side
 of the E-series; E2 remains open on the software arm's thermal boundary.
+
+## E3: twenty minutes of continuous 4K decode (2026-11-12)
+
+The 4K Import probe above is 30 frames; E3 asks for a window long enough for
+the thermal steady state. One guarded run decoded the same clip, real-time
+paced, for 1200 s under `scripts/iris-experiment-guard.sh` with a 30 s
+temperature interval and the 85000 millic ceiling:
+
+| Field | Value |
+| --- | --- |
+| Guard | `guard-20261112T013054Z`, `status=complete`, timeout 1500 s |
+| Decode | 36000 frames, `fps=30.01`, exit 0, no error or drop record |
+| Boot ID | `17928711-7fd8-4f87-a024-9bf6b5bc44b6`, unchanged, no reset |
+| Peak SoC | 43400 millic over 1840 zone samples; last sample 34700 |
+| Pack | 19 % -> 15 %, discharging, 3.69 V x 0.67-0.72 A (~2.5 W) |
+| Driver | installed `323c07cbd42f…`, decoder `/dev/video5`, 0001-0004 + 0006 |
+
+The ceiling was never approached, the pack stayed above the point where the
+device protects itself, and the rate held at the clip's own 30 fps for the
+whole window, so a 4K AV1 Import stream runs at real time indefinitely on this
+target rather than degrading. This is a thermal and continuity result only:
+no power ratio is claimed from it, and it is not a peak-throughput figure —
+that is the 3.07 ms per frame in the section above.
