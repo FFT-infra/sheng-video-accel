@@ -724,6 +724,35 @@ bool Session::handle_capture_returns()
             continue;
         }
         if (!payload) {
+            // A kernel can return a non-display completion without
+            // V4L2_BUF_FLAG_ERROR: the completion-preserving form of
+            // packaging/kernel/0005-*. The shape and the timestamp still name
+            // the picture, so it is attributed like the ERROR form above: an
+            // invisible half is counted and the target stays pending, a
+            // hidden picture is published without pixels, and an empty LAST
+            // boundary marker names no picture.
+            auto hidden = noshow_shape && !returned->last() ? pending_.find(returned->timestamp_us)
+                                                            : pending_.end();
+            if (hidden != pending_.end()) {
+                Target& target = *hidden->second;
+                if (target.completions - target.invisible > 1) {
+                    ++target.invisible;
+                    trace_("capture token=%llu index=%u flags=%#x publish=invisible",
+                        static_cast<unsigned long long>(returned->timestamp_us), returned->index,
+                        returned->flags);
+                    continue;
+                }
+                if (target.hidden || target.invisible > 0) {
+                    forget(hidden);
+                    target.pending = false;
+                    frame->layout().data_offset = returned->data_offset;
+                    publish(target, frame, *returned, "capture noshow");
+                    cold_ = false;
+                    ++stats_.completed;
+                    ++progress_;
+                    continue;
+                }
+            }
             trace_("capture empty index=%u flags=%#x last=%d", returned->index, returned->flags, last ? 1 : 0);
             if (last)
                 trace_("capture last");

@@ -326,6 +326,79 @@ void test_timestamped_hidden_picture_is_published_not_failed()
     CHECK(h.session->stats().errors == 0);
 }
 
+void test_unflagged_hidden_completion_is_published()
+{
+    // The completion-preserving form of packaging/kernel/0005-*: the kernel
+    // returns the non-display picture and clears only the false ERROR flag,
+    // keeping its timestamp. Nothing in the VA layer may depend on ERROR
+    // being set for a picture the client asked for, or such a kernel fails
+    // every hidden AV1 reference behind a sync timeout.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    Target a;
+    h.submit(a);
+    h.fake->tick(1);
+    h.session->service();
+    h.fake->set_noshow_error_flag(false);
+    h.fake->inject_timestamped_errors(1);
+    Target b;
+    b.hidden = true;
+    h.submit(b);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(b.completed && !b.error);
+    CHECK(h.session->stats().errors == 0);
+    CHECK(h.session->stats().drops == 0);
+}
+
+void test_unflagged_invisible_half_does_not_fail_the_picture()
+{
+    // Same kernel on a two-completion unit: the invisible alt-ref half
+    // arrives without ERROR and the visible half follows under the same
+    // token. The first must be counted as invisible, not published or failed.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    Target a;
+    h.submit(a);
+    h.fake->tick(1);
+    h.session->service();
+    h.fake->set_noshow_error_flag(false);
+    h.fake->inject_altref_superframe();
+    Target b;
+    b.completions = 2;
+    h.submit(b);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(b.completed && !b.error);
+    CHECK(b.invisible == 1);
+    CHECK(h.session->stats().errors == 0);
+    CHECK(h.session->stats().drops == 0);
+}
+
+void test_unflagged_hidden_install_unit_is_published()
+{
+    // Both halves NOSHOW and neither marked ERROR: the install frame is the
+    // invisible half, the client's show_frame=0 picture is the second.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    Target a;
+    h.submit(a);
+    h.fake->tick(1);
+    h.session->service();
+    h.fake->set_noshow_error_flag(false);
+    h.fake->inject_hidden_install_unit();
+    Target b;
+    b.completions = 2;
+    b.hidden = true;
+    h.submit(b);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(b.completed && !b.error);
+    CHECK(b.invisible == 1);
+    CHECK(h.session->stats().errors == 0);
+    CHECK(h.session->stats().drops == 0);
+}
+
 void test_noshow_completion_never_lands_on_a_shown_surface()
 {
     // Invariant 18, in the direction the hidden-picture case does not cover:
@@ -1104,6 +1177,38 @@ void test_import_install_hidden_frame_lends_one_buffer_twice()
     CHECK(h.session->capture_queued() == 0);
 }
 
+void test_import_unflagged_superframe_keeps_the_window()
+{
+    // The same two-completion picture on a kernel that clears the false
+    // ERROR flag: the window rule reads completions, not flags, so the
+    // client buffer must still be lent twice and come back twice.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    const Layout layout = capture_layout_of({});
+    ClientBuffer a(layout), b(layout);
+    Target ta, tb;
+    ta.publish = tb.publish = Publish::Import;
+    ta.destination = a.stable.get();
+    tb.destination = b.stable.get();
+    h.submit(ta);
+    h.fake->tick(1);
+    h.session->wait(ta);
+
+    h.fake->set_noshow_error_flag(false);
+    h.fake->inject_altref_superframe();
+    tb.completions = 2;
+    h.submit(tb);
+    CHECK(h.session->capture_queued() == 2);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(tb.completed && !tb.error);
+    CHECK(tb.invisible == 1);
+    CHECK(h.session->stats().errors == 0);
+    CHECK(h.session->stats().drops == 0);
+    CHECK(h.session->stats().misplaced == 0);
+    CHECK(h.session->capture_queued() == 0);
+}
+
 void test_import_altref_does_not_stall_the_next_picture()
 {
     // With one buffer lent per picture, an alt-ref held the window: the next
@@ -1165,6 +1270,10 @@ int main()
         { "timestamped corrupt completion fails target at once",
             test_timestamped_corrupt_completion_fails_target_at_once },
         { "timestamped hidden picture is published", test_timestamped_hidden_picture_is_published_not_failed },
+        { "unflagged hidden completion is published", test_unflagged_hidden_completion_is_published },
+        { "unflagged invisible half does not fail the picture",
+            test_unflagged_invisible_half_does_not_fail_the_picture },
+        { "unflagged hidden install unit is published", test_unflagged_hidden_install_unit_is_published },
         { "noshow completion never lands on a shown surface",
             test_noshow_completion_never_lands_on_a_shown_surface },
         { "VP9 alt-ref superframe is one picture", test_vp9_altref_superframe_is_one_picture },
@@ -1198,6 +1307,7 @@ int main()
         { "import install hidden frame lends one buffer twice",
             test_import_install_hidden_frame_lends_one_buffer_twice },
         { "import alt-ref does not stall the next picture", test_import_altref_does_not_stall_the_next_picture },
+        { "import unflagged superframe keeps the window", test_import_unflagged_superframe_keeps_the_window },
     };
     int ran = 0;
     for (const auto& c : cases) {

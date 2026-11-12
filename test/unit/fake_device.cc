@@ -432,7 +432,7 @@ void FakeDevice::complete_one()
         capture_queue_.pop_front();
         Dequeued corrupt;
         corrupt.index = slot;
-        corrupt.flags = V4L2_BUF_FLAG_ERROR | timestamped_error_flags_;
+        corrupt.flags = (noshow_error_flag_ ? V4L2_BUF_FLAG_ERROR : 0) | timestamped_error_flags_;
         corrupt.timestamp_us = au.timestamp;
         corrupt.bytesused = 0;
         capture_done_.push_back(corrupt);
@@ -493,7 +493,7 @@ void FakeDevice::complete_one()
         hidden_install_unit_ = false;
         Dequeued invisible;
         invisible.index = slot;
-        invisible.flags = V4L2_BUF_FLAG_ERROR;
+        invisible.flags = noshow_error_flag_ ? V4L2_BUF_FLAG_ERROR : 0;
         invisible.timestamp_us = au.timestamp;
         invisible.bytesused = 0;
         capture_done_.push_back(invisible);

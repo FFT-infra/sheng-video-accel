@@ -60,6 +60,12 @@ public:
         timestamped_errors_ = count;
         timestamped_error_flags_ = extra_flags;
     }
+    // Whether a non-display completion carries V4L2_BUF_FLAG_ERROR. On
+    // today's kernel it does, which is how the session recognises the shape.
+    // A kernel that keeps the completion and clears only that flag models the
+    // completion-preserving form of packaging/kernel/0005-*; set false to
+    // script it. Every other field of the shape stays the same.
+    void set_noshow_error_flag(bool on) { noshow_error_flag_ = on; }
     // Model a VP9 alt-ref superframe: the next picture completes twice under
     // one token, first as an ERROR completion with no picture-type bit and no
     // payload, then normally. The firmware does this for the invisible frame
@@ -186,6 +192,7 @@ private:
     unsigned output_errors_ = 0, error_markers_ = 0, start_busy_ = 0;
     unsigned timestamped_errors_ = 0;
     uint32_t timestamped_error_flags_ = 0;
+    bool noshow_error_flag_ = true;
     bool altref_superframe_ = false;
     bool hidden_install_unit_ = false;
     bool hidden_install_done_ = false;
