@@ -272,8 +272,13 @@ reuse a running guard file until the previous run has been inspected. Battery
 level is a recorded boundary, not a start gate: a discharging or low pack is
 valid lab state, and the report must say what the pack did. Classify a long
 run by the recorded start/end capacity; a shortened window is a shortened
-result, not a cancelled experiment. A reset or thermal breach is a failed
-experiment, not evidence of codec support.
+result, not a cancelled experiment. Temperature works the same way at the top
+end: the ceiling (`IRIS_EXPERIMENT_MAX_TEMP_MILLIC`, default 100000) is a
+runaway backstop 10 K under the zones' 110000 critical trip, not a comfort
+line, and the firmware's own passive throttle band (90000/95000) is inside it.
+a record whose peak lands above 95000 must say so. A reset, a boot-ID change
+or a trip past the ceiling is a failed experiment, not evidence of codec
+support.
 
 Run the dedicated H.264 reconfiguration gate on the target:
 
@@ -322,7 +327,7 @@ as possible. Before the soak starts, every selected codec must pass an exact
 software/VA frame-MD5 oracle. During the run the script records progress,
 driver traces, boot ID, uptime and every readable thermal zone. It terminates
 workers and fails on a boot-ID change, an unreadable thermal inventory, a
-temperature above 85000 millidegrees Celsius, a driver timeout/timestamp
+temperature above 100000 millidegrees Celsius, a driver timeout/timestamp
 error, incomplete stateful teardown, too few decoded frames, or any worker
 failure.
 

@@ -59,4 +59,31 @@ grep -Fxq 'status=complete' "$work/no-gauge/guard.state"
 grep -q ',unknown,unknown,unknown,unknown,unknown,unknown$' \
     "$work/no-gauge/battery.log"
 
+# The temperature ceiling is a runaway backstop, not a comfort line: a zone
+# in the firmware's own throttle band (90 C here, above the old 85000 default)
+# must not cost the run, while a zone past the default still stops it.
+mkdir -p "$work/hot/thermal_zone0" "$work/too-hot/thermal_zone0"
+printf 'test\n' >"$work/hot/thermal_zone0/type"
+printf '90000\n' >"$work/hot/thermal_zone0/temp"
+printf 'test\n' >"$work/too-hot/thermal_zone0/type"
+printf '101000\n' >"$work/too-hot/thermal_zone0/temp"
+IRIS_EXPERIMENT_DIR="$work/hot-run" \
+IRIS_EXPERIMENT_THERMAL_ROOT="$work/hot" \
+IRIS_EXPERIMENT_BATTERY_ROOT="$work/power" \
+IRIS_EXPERIMENT_TIMEOUT_SECONDS=10 \
+IRIS_EXPERIMENT_TEMPERATURE_INTERVAL_SECONDS=1 \
+sh "$root/scripts/iris-experiment-guard.sh" -- sh -c 'sleep 2' >/dev/null
+grep -Fxq 'status=complete' "$work/hot-run/guard.state"
+grep -q '^max_temperature_millic=100000$' "$work/hot-run/guard.state"
+
+if IRIS_EXPERIMENT_DIR="$work/too-hot-run" \
+    IRIS_EXPERIMENT_THERMAL_ROOT="$work/too-hot" \
+    IRIS_EXPERIMENT_BATTERY_ROOT="$work/power" \
+    IRIS_EXPERIMENT_TIMEOUT_SECONDS=10 \
+    IRIS_EXPERIMENT_TEMPERATURE_INTERVAL_SECONDS=1 \
+    sh "$root/scripts/iris-experiment-guard.sh" -- sh -c 'exit 0' >/dev/null 2>&1; then
+    echo 'FAIL the guard accepted a zone past its ceiling' >&2
+    exit 1
+fi
+
 echo 'PASS experiment guard completion and evidence recording'

@@ -44,7 +44,8 @@ SoC until its own hardware gate passes and `TEST-RESULTS.md` records the run.
 5. **Defaults and guards.** `src/iris/session.cc` uses 2000 ms LAST/fence
    waits, `src/util/options.cc` defaults `V4L2_VA_SYNC_TIMEOUT_MS` to 2000
    with a 30000 ms cold start, and `scripts/iris-experiment-guard.sh` defaults
-   to 7200 s and 85000 millidegrees Celsius. These were chosen for this
+   to 7200 s and 100000 millidegrees Celsius (10 K below this tablet's
+   critical trip; the firmware throttles passively at 90000/95000). These were chosen for this
    tablet's firmware; a slower device needs its own guarded measurement, not a
    global knob change.
 6. **Packaging.** `packaging/fedora/libva-v4l2-iris.spec` and

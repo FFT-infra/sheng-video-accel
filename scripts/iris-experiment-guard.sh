@@ -22,7 +22,12 @@ root=${IRIS_EXPERIMENT_DIR:-${TMPDIR:-/tmp}/iris-experiment}
 guard_file=${IRIS_EXPERIMENT_GUARD_FILE:-$root/guard.state}
 max_seconds=${IRIS_EXPERIMENT_TIMEOUT_SECONDS:-7200}
 interval=${IRIS_EXPERIMENT_TEMPERATURE_INTERVAL_SECONDS:-30}
-max_temperature=${IRIS_EXPERIMENT_MAX_TEMP_MILLIC:-85000}
+# A runaway catch, not a comfort line. These zones' own trip points are
+# passive at 90000/95000 and critical at 110000 millidegrees, so the default
+# stops the run 10 K below critical instead of refusing every workload that
+# reaches the firmware's throttle band. A peak above 95000 is recorded, not
+# hidden: it belongs in the experiment record.
+max_temperature=${IRIS_EXPERIMENT_MAX_TEMP_MILLIC:-100000}
 allow_stale=${IRIS_EXPERIMENT_ALLOW_STALE_GUARD:-0}
 thermal_root=${IRIS_EXPERIMENT_THERMAL_ROOT:-/sys/class/thermal}
 battery_root=${IRIS_EXPERIMENT_BATTERY_ROOT:-/sys/class/power_supply}
