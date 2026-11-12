@@ -202,6 +202,26 @@ Validate Google
 Chrome; Fedora's Chromium decodes through its own native V4L2 stack and its
 result says nothing about this driver.
 
+### Recording a target run
+
+A gate result means nothing without the boot, module and driver it ran
+against, and those were being copied out of the target by hand for every
+claim. `test/remote/gate.sh` runs one command inside the remote checkout
+under `scripts/iris-experiment-guard.sh` and writes the identity, the exit
+status, the guard state and the source commit next to the command's output:
+
+```sh
+IRIS_REMOTE_HOST=sheng test/remote/gate.sh --out ~/Lab/Bridge/tmp/run-$$
+    -- sh test/iris-gstreamer-gate.sh --clip CLIP
+```
+
+The record is `summary.json` with schema `qualcomm-iris-vaapi/target-run-v1`,
+plus `identity.txt`, `command.stdout`, `command.stderr` and the guard
+directory copied back from the target. The runner does not deploy: it reports
+the driver and module hashes the target holds, so a run against a stale
+install is visible in the record instead of being remembered. A guard that
+stopped the run exits 3, and its state says why.
+
 ## Distribution packaging
 
 `scripts/install-system.sh` is enough for a lab target, but it needs a build
