@@ -6629,3 +6629,61 @@ identical. `data/iris-codec-capabilities.json` now records the boundary that
 does exist — long-term pictures whose POC MSB cycles do not ascend, which
 `write_rps` refuses with `VA_STATUS_ERROR_UNIMPLEMENTED` — instead of the
 stale claim.
+
+## The completion-preserving 0005 form on the target (2026-11-12)
+
+0005 as written recycles the NOSHOW CAPTURE buffer inside the kernel. The
+form this driver could consume is a different patch — 0007: keep the
+completion, attach no `V4L2_BUF_FLAG_ERROR`, no picture-type flag and no
+payload, keep the timestamp 0004 preserves. It was built, installed and
+measured instead of staying a prediction.
+
+Six stages over three boots, all on `7.2.6-sm8550-g42f3b40-iris1`:
+
+| Stage | Boot | Module | Driver | What it measures |
+| --- | --- | --- | --- | --- |
+| A | `b2f1de2f…` | `b90bd823…` (0001-0004, qualified) | installed `323c07cb…` | baseline |
+| B0 | `b2f1de2f…` | `b90bd823…` | chore build `6c554692…`, no tolerance | driver lineage |
+| B | `b2f1de2f…` | `b90bd823…` | tolerance build `7260ff05…` | the tolerance on a kernel that sets the flag |
+| C | `e48243b8…` | `f070ae18…` (0001-0004 + 0007) | installed `323c07cb…` | the kernel variant alone |
+| D | `e48243b8…` | `f070ae18…` | tolerance build `7260ff05…` | the variant with the userspace half |
+| E | `31424f69…` | `b90bd823…` | installed `323c07cb…` | rollback, target restored |
+
+Every stage ran the same nine guarded gates: 1280x720 AV1 (120 frames),
+1280x720 AV1 with an in-context resolution change (80), 3840x2160 AV1 (30)
+and a 1280x720 VP9 alt-ref clip (240), each under `import` and `copy`, plus
+the 720p clip under `direct`. A gate passes when its framemd5 matches the
+software decode and `publish=error`, `publish=drop` and `publish=misplaced`
+are all zero.
+
+| Stage | AV1 gates | VP9 alt-ref | Counters on the AV1 clips |
+| --- | --- | --- | --- |
+| A | 7/7 identical | 2/2 | `invisible` 42 / 63 / 1, `capture noshow` 59 / 36 / 14, no errors or drops |
+| B0 | 7/7 identical | 2/2 | same as A |
+| B | 7/7 identical | 2/2 | same as A |
+| C | 0/7: `ffmpeg` exits 251 after 2, 3 and 2 frames of 120, 80 and 30 | 2/2 | `capture empty` 6 / 5 / 5, `publish=invisible` 0 |
+| D | 7/7 identical | 2/2 | same as A |
+| E | 7/7 identical | 2/2 | same as A |
+
+Stage C is what 0007 was built to find out. With the completion kept and the
+error flag gone, the installed driver drops the unflagged empty completions
+(`capture empty`), never counts an invisible half, and the client's pictures
+stay pending until the sync bound: 2 of 120 frames on the 720p clip, 3 of 80
+on the resolution change, 2 of 30 at 4K. Stage D runs the same kernel with
+the tolerance build and matches stage A field for field, including
+`invisible=42` and `capture noshow=59`.
+
+Two things are settled. The host model predicted this split, and on the
+target it is the observed split. The tolerance is not a fix for anything in
+the field: stages B and B0 are identical, because a kernel that sets
+`V4L2_BUF_FLAG_ERROR` never reaches the new branch. 0007 therefore buys
+nothing the qualified module does not already do — it is tracked as an
+experiment with that verdict, and the userspace tolerance stays on
+`exp/0005-keep-tolerance` instead of being merged.
+
+The VP9 alt-ref clip completes in every stage including C, because its
+alt-ref superframe is published through Copy here (`publish=copy` 240) and
+never exercises the hidden-completion path the patch removes. Stages B and
+B0 publish it through Import instead (240 `publish=import`), which belongs to
+the driver lineage between the installed package and the chore branch, not to
+the tolerance: on the same kernel the two builds are identical.

@@ -336,7 +336,7 @@ node, or a running GPU process is not a capability or browser-hardware claim.
 | §5 Chrome VP9 Import | C1-C5 | **done 2026-11-12**: the retained-target model ships (retained `Target`, backlog-owned duplicate fd, client layout copied at submit), VP9 `publish_import` is `qualified` in the table and the driver. Gates on driver `0ef0f34c…`, boot `5feea1b5…`, `/dev/video17`: 48/48 four-codec matrix under Import, FFmpeg 1280x720 alt-ref clip 515/515 with framemd5 equal to software, Chrome 1705/1705 and 1588/1588 with `drops=0 misplaced=0`, Copy baseline 1702/1705 with 3 drops. The host regressions are the two retention unit cases plus a red check with the detach condition disabled. TEST-RESULTS.md §"VP9 Import qualified (2026-11-12)" |
 | §6 AV1 feature completeness | D1-D6 | D1 done for exact framemd5: 1920x1080 60-frame 10-bit clip `EXACT`, 60 Import, 0 errors/drops/misplaced on 2026-11-11. D2 settled as a user-space second-target publish gap, not a kernel limitation: scratch OBU writer was libdav1d-clean and the firmware carries the grain capability flag, but the display surface stayed empty; host guard keeps the refusal fail-closed. D4 covered by the A11 corpus (tiles, lookahead, still-picture, lossless exact; superres and global motion excluded with a recorded encoder reason) plus 3840x2160 10-bit Import, 30/30 exact against libdav1d on 2026-11-12. 12-bit is answered negatively at the node (no 12-bit CAPTURE format, refusal proven on the native decoder as well as the VA profile path); D3's GStreamer half stays open on this target's packages. The browser pixel comparison is settled as not a gate (D1); D5's large-scale tile and D6's two negative directions are covered |
 | §7 Long-window, power, cost | E1-E5 | E1 done (both 7200 s windows, clean ledgers), E3 and E4 done (20-minute continuous 4K inside the guard; 3.07 ms per frame with the clocks pinned and the clock state recorded), E5 and L3 done (the guard records pack state); E2 closed on the relaxed ceiling with the A/B measured (about -4.4 W device-side, peaks 91-92 C) |
-| §8 Kernel and upstream sync | F1-F10 | open / decision recorded as "do not rebase"; 0005 was built and loaded once on `sheng` (2026-11-12) and failed all three qualified AV1 clips, so it is unloaded again; 0006 was built, installed with 0001-0004, rebooted and run through one guarded WP1 gate with a "no regression" verdict, still experimental and outside the qualified baseline |
+| §8 Kernel and upstream sync | F1-F10 | open / decision recorded as "do not rebase"; 0005 was built and loaded once on `sheng` (2026-11-12) and failed all three qualified AV1 clips, so it is unloaded again; 0006 was built, installed with 0001-0004, rebooted and run through one guarded WP1 gate with a "no regression" verdict; 0007 (the completion-preserving form of 0005) was built, installed, booted and run through nine AV1/VP9 gates before the qualified module was restored, with a "do not ship" verdict. All three stay experimental and outside the qualified baseline |
 | §9 Docs, consistency, hygiene | G1-G15 | all closed: G1, G2, G3, G7, G8, G12, G13, G14 and G15 done; G4, G5, G6, G9, G10 and G11 closed with explicit reasons (untracked scratch notes, intentional scratch default, kernel SPDX provenance, release-note identity fact, no new trace marker). G15 is the one entry that changed a capability line: the HEVC long-term rejection was stale and is now the narrower boundary the code enforces |
 | §10 Encode | H1-H4 | H1 closed with a code fix: both translators now take `target_percentage` into the target, carry the client's maximum as `BITRATE_PEAK` for VBR, and keep the last configured target when a picture omits rate control; `vbr4` measured 8000 -> 3992 kbit/s. H2 is settled as out of scope, H3 has a host-side audit plus a 2026-11-12 inventory of the encoder node's formats and controls that gives every rejected entry its reason, H4's double-claim half is covered by `encode-session-test`, the GStreamer half stays blocked on a target that ships the VA plugins. No capability entry or profile changed |
 | §11 CI, tests, release plumbing | I1-I7 | host tests 26/26 and static checks green on every commit of PR #6; the guarded installed-package gates and the repo-owned 17-case AV1 browser matrix are in PR #5; I5 now verifies the synced tree on the target. Still open: packaging/CI automation for the target gates |
@@ -439,7 +439,7 @@ completion 0005 recycles in the kernel is the one this driver uses to clear a
 hidden pending target, so the cost of removing it is a userspace contract
 change, not a queue event.
 
-### WP3 0005 dual path — not implemented; a "perfect" 0005 is a different patch, and it buys nothing
+### WP3 0005 dual path — not implemented; the "perfect" form was built and measured, and it buys nothing
 
 The probe this design depends on does not exist. 0005 adds no V4L2 control,
 no QUERYCAP flag and no extended control, only the internal
@@ -468,16 +468,15 @@ fails both pictures (`session finish ... errors=6 misplaced=1`).
 
 So "making 0005 work" is not polishing that patch. The only kernel form this
 driver could consume keeps the completion and drops just the false
-`V4L2_BUF_FLAG_ERROR` while keeping the timestamp. That form was modelled on
-the host (scratch branch, not published) with a `FakeDevice` knob that clears
-the flag: four scripted cases — an unflagged hidden picture, an unflagged
-invisible half, an unflagged hidden install unit, and the Import window on a
-two-completion picture — all fail on today's code, three of them by leaving
-the client picture pending, and a 29-line attribution in
-`handle_capture_returns` makes the suite green (44 session cases, 0 failures;
-dropping the 29 lines reproduces all four failures). Import needs no DPB
-rewrite in that form: the completion still comes back, so the window rule is
-unchanged.
+`V4L2_BUF_FLAG_ERROR` while keeping the timestamp. That form was first
+modelled on the host with a `FakeDevice` knob that clears the flag: four
+scripted cases — an unflagged hidden picture, an unflagged invisible half, an
+unflagged hidden install unit, and the Import window on a two-completion
+picture — all fail on today's code, three of them by leaving the client
+picture pending, and a 29-line attribution in `handle_capture_returns` makes
+the suite green (44 session cases, 0 failures; dropping the 29 lines
+reproduces all four failures). Import needs no DPB rewrite in that form: the
+completion still comes back, so the window rule is unchanged.
 
 That form is still not better than today's route. The flag it removes is not
 observable by any client in this project's gates: the VA path republishes
@@ -486,6 +485,21 @@ and the one raw-V4L2 client, GStreamer's `v4l2av1dec`, does not use this
 driver and already reaches EOS without losing frames on this target. The
 upside is therefore zero measured change for a client, against a kernel patch
 that has to be carried and 29 lines of tolerance no shipped kernel exercises.
+
+That form was then built and run, not left as a prediction. `0007-*` keeps
+the completion, attaches no error, no picture-type flag and no payload, with
+`0004`'s timestamp; the userspace half is `exp/0005-keep-tolerance`. On
+`e48243b8…` with module `f070ae18…`, the installed driver failed all seven
+AV1 gates (2 of 120 frames on the 720p clip, `capture empty` six times, no
+invisible halves), and the tolerance build decoded every clip byte-identical
+to software with the qualified baseline's counters (`invisible=42`,
+`capture noshow=59`). On the qualified module the tolerance build and the
+untoleranted build are identical, because a kernel that sets the flag never
+reaches the new branch. Six stages over three boots, including the rollback
+to `b90bd823…` and a re-run that reproduced stage A exactly
+(`TEST-RESULTS.md` §"The completion-preserving 0005 form on the target").
+The patch is tracked with a "do not ship" verdict; the tolerance branch is
+not merged.
 
 The following design is retained for the record only. Do not implement it
 without a kernel-visible capability signal, a new measured cost and an
