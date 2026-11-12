@@ -6307,9 +6307,10 @@ attributing a hidden picture (`capture noshow`) is how the pending target
 submitted for `show_frame=0` is cleared, how `Target::invisible` is counted,
 and — in Import — how a second borrowed client buffer per install unit is
 returned. Without the completion, `pending_` never empties: the copy and
-direct traces show tokens 2-6 with no return at all, the sync bound expires
-(`sync timeout token=6 pending=5 queued=32`), and the drain reports
-`drain lost token=`, followed by an early `capture empty ... last=1`.
+direct runs complete 2 or 3 of the 6-7 submitted pictures and never return
+the rest, the sync bound expires (`sync timeout token=6 pending=5 queued=32`
+in the `av1-720.webm` copy run), and the drain reports `drain lost token=`,
+followed by an early `capture empty ... last=1`.
 
 Import fails earlier and more loudly. The pool maps a CAPTURE index to the
 token that was lent for it; a recycled buffer comes back later for a different
