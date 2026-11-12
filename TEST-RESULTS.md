@@ -5353,6 +5353,9 @@ This is a capability probe, not a new VA profile: `va_profiles` stays
 
 ### Encode rate control: reproducible A/B protocol (recorded 2026-11-11)
 
+Superseded by "Encode rate control: the target was programmed as the maximum"
+below: the observation in this section was a translator defect and is fixed.
+
 The table above is unchanged: this driver follows the CBR request and
 libva-v4l2 stays near 700-900 kbit/s. The one unisolated observation is VBR
 4 Mbit/s producing 9780 kbit/s (about 2.4x the target) while CBR at the same
