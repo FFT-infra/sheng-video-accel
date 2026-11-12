@@ -6036,3 +6036,47 @@ now end in a slash (`build*/`), and both files arrive.
 What is still unproven: the earlier session's mismatch was not reproduced
 from the current tree, so it is recorded as unexplained and now gated by
 measurement rather than by inspection.
+
+## E1: two-hour concurrency soak, both scenarios (2026-11-12)
+
+Two full 7200 s windows on the installed package
+`323c07cbd42f5a152cfca4278a78d64d726534a85f95f0d0db22379e4317a37d` (no
+`LIBVA_DRIVERS_PATH` override), boot `17928711-7fd8-4f87-a024-9bf6b5bc44b6`
+unchanged across both, decoder `/dev/video5` resolved by the `iris_driver`
+QUERYCAP name, kernel `7.2.6-sm8550-g42f3b40-iris1` with 0001-0004 + 0006,
+production profile, ceiling 85000 millic. Both ran on the pack, unplugged.
+
+| Scenario | Guard | Contexts | Ledger | Peak SoC | Pack |
+| --- | --- | --- | --- | --- | --- |
+| `dual-h264` | `212101Z`, `status=complete` | 2 x H.264 640x360 @ 24 fps | 172809/172809 each, `errors=0 drops=0 timeouts=0 misplaced=0` | 41.0 C while decoding (56.8 C for the whole run) | 74 % -> 48 % |
+| `mixed` | `232127Z`, `status=complete` | H.264 and HEVC 640x360 @ 24 fps | 172809/172809 and 172800/172800, `errors=0 drops=0 timeouts=0 misplaced=0` | 47.7 C while decoding (78.9 C for the whole run) | 48 % -> 19 % |
+
+The media is the repo's own 48-frame 640x360 clip looped, so this is a
+stability and concurrency window, not a resolution or power test: the trace
+reports `capture configure 640x384 stride=640 pool=32 memory=mmap`, 172809
+`publish=direct` records and no Import. The trace counts access units
+(172809 submitted here) while the harness counts output frames (172800); the
+ledger's two sides agree in both files, which is the property that matters.
+
+Both sessions ended with `drains=1` and `output_queued=0`, and the preflight
+frame-MD5 comparison passed for H.264 and HEVC before each window, so the
+decode path was correct going in, not merely quiet. The two peak columns are not the same measurement, and the difference is the
+fixture. Each peak is the maximum over every thermal-zone sample in the run's
+environment CSV (11139 rows, 30 s interval); the single-snapshot
+`temperature-current.csv` is overwritten each interval and is not a maximum —
+reading it after the fact reports the last sample (37.8 C and 37.2 C). The
+whole-run figures are set by media generation, not by decode: `mixed` writes a
+451 MB HEVC fixture with x265 through all cores at 23:30:27Z and the 78.9 C
+sample is 23:30:34Z, seven seconds later. Restricted to the decode window, the
+two scenarios sit at 41.0 C and 47.7 C. Both stay well under the 85 C ceiling
+either way, and the guard's own pre-scenario cooldown check reported 40.6 C
+before `dual-h264` and 58.8 C before `mixed`, the second because the windows
+ran back to back.
+
+This is the same boundary the power sampler records: fixture generation is
+load the soak's ceiling covers but does not attribute, so a temperature number
+from a soak with generated media is not a decode temperature.
+
+Nothing in either window was shortened, no boot ID changed, and no reset or
+thermal breach occurred. Together with E3/E4 below this covers the decode side
+of the E-series; E2 remains open on the software arm's thermal boundary.
