@@ -18,8 +18,10 @@
 # Usage:
 #   IRIS_REMOTE_HOST=sheng test/remote/gate.sh [--out DIR] -- command [args ...]
 #
-# The command runs on the target inside the remote checkout, written to its
-# shell on stdin. Nothing is copied to the target.
+# The command runs on the target inside the remote checkout. It is landed in a
+# per-run script under the run directory and read by the guard's child from
+# there, because a backgrounded `sh -s` would get /dev/null for stdin and
+# silently run nothing. Only the command text is copied to the target.
 #
 # Environment:
 #   IRIS_REMOTE_HOST   ssh destination (required)
@@ -96,12 +98,22 @@ cat "$out/identity.txt"
 
 ssh -o ConnectTimeout=10 "$host" "mkdir -p ~/$remote_run/guard" || fail "cannot create ~/$remote_run/guard"
 
+# Land the command in a file rather than feeding it to `sh -s` on stdin. The
+# guard backgrounds its child (timeout ... &), and a backgrounded async list
+# in a non-interactive POSIX shell gets /dev/null for stdin: the heredoc was
+# silently dropped, nothing ran, and the guard still reported exit 0. A
+# command file gives the child a real script to read and keeps the quoting-safe
+# heredoc transport. Verified with an echo marker, which must appear in
+# guard/command.stdout for a run to be real.
+remote_cmd="$remote_run/command.sh"
+ssh -o ConnectTimeout=10 "$host" "cat > \"\$HOME/$remote_cmd\"" <<EOF || fail "cannot write command file on $host"
+$*
+EOF
+
 started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 rc=0
 ssh -o ConnectTimeout=10 "$host" "cd ~/$remote_root && IRIS_EXPERIMENT_DIR=\"\$HOME/$remote_run/guard\" \
-    sh scripts/iris-experiment-guard.sh -- sh -s" >"$out/command.stdout" 2>"$out/command.stderr" <<EOF || rc=$?
-$*
-EOF
+    sh scripts/iris-experiment-guard.sh -- sh \"\$HOME/$remote_cmd\"" >"$out/command.stdout" 2>"$out/command.stderr" || rc=$?
 finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 guard_status=absent

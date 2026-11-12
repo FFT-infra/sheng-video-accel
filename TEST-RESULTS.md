@@ -6809,3 +6809,54 @@ clip set here once the kernel provides it.
 Scope: one sibling tree at one commit, one device, three clips. Nothing in
 `data/iris-codec-capabilities.json` changes, the qualified module stays
 `b90bd823`, and 0005 stays out of every module this project ships.
+
+## Vulkan VPP prerequisites on the target (2026-11-13)
+
+The WP4 verdict of 2026-11-12 was "no proven viable backend": `vulkaninfo`
+and `glslangValidator` are absent on the tablet, and no runtime import test
+had been done. Those two tools are diagnostics and a shader compiler, not the
+runtime contract, and `glslangValidator` runs on the host while the tablet has
+`libvulkan`, freedreno, Vulkan headers and libdrm. A userspace probe now
+measures the two facts a zero-copy Vulkan video processor needs: that a SPIR-V
+compute pipeline runs with exact output, and that a DMA-BUF fd imports as
+Vulkan external memory and is read by that pipeline.
+
+`test/vulkan-vpp/prereq.sh` runs `test/vulkan-vpp/probe.c` on the target. The
+shader (`copy.comp`) is a byte copy-plus-one, so 256 output words are fully
+predictable. The checked-in `copy.spv` is pinned by `SHA256SUMS` and verified
+at run time; `make-spv.sh` regenerates it on a host. The probe allocates its
+DMA-BUF both ways `src/iris/alloc.cc:allocate_stable` does: MSM GEM
+(cached-coherent with a write-combined fallback, mirroring
+`src/iris/msm_alloc.c`) exported as a PRIME fd, and the system DMA heap. Both
+origins import through `VK_KHR_external_memory_fd` with dedicated allocation.
+
+Recorded run `run-20261112T195132Z` (`test/remote/gate.sh -- sh
+test/vulkan-vpp/prereq.sh`), guard `complete`, exit 0:
+
+| origin | device | result |
+| --- | --- | --- |
+| system DMA heap | Turnip Adreno 740, Vulkan 1.4.354 | `PASS compute=256/256 dma-buf-import=exact` |
+| MSM GEM PRIME fd | Turnip Adreno 740, Vulkan 1.4.354 | `PASS compute=256/256 dma-buf-import=exact` |
+
+Identity is the installed-package arm: kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot
+`3356e00e-5a48-4718-8dc1-868fa5cc559d`, module `b90bd823`, installed driver
+`323c07cbd42f5a152cfca4278a78d64d726534a85f95f0d0db22379e4317a37d`, with the
+decoder and encoder nodes resolved by their `iris_driver` QUERYCAP names
+(`/dev/video17` and `/dev/video18` on this boot). The gate needs no driver
+rebuild, deploy or V4L2 node; it is a pure userspace probe. SPIR-V sha256
+`fa6c588297f62454db4b2e88775d81341891c4f216fff7e2257fc007dfe4e764`, render node
+`/dev/dri/renderD128`. The run record's child output holds both PASS lines.
+
+`test/remote/gate.sh` gained a command-file transport in the same commit. Its
+heredoc was fed to `sh -s`, but the guard backgrounds that child, so a
+non-interactive shell gave it `/dev/null` for stdin: the earlier VPP run
+`run-20261112T193045Z` and the earlier GStreamer record `run-gst-20261112`
+both have empty child stdout and an exit 0 that ran nothing. The GStreamer
+frame-hash results above were collected independently of `gate.sh` and do not
+come from that empty record; the I8 ledger row in `POST-MERGE-BACKLOG.md`
+records the correction. A marker test (`echo VPP_GATE_MARKER_FIXED`) now
+appears in the child's captured stdout, and `run-static-checks.sh` asserts the
+transport stays a command file. This is a prerequisite result only: no
+`VAProfileNone` / `VAEntrypointVideoProc` capability is advertised, and no VPP
+filter exists yet.

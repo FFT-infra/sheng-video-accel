@@ -34,10 +34,26 @@ run() {
 # of the trace checkers shipped broken for a while because a typo made it grep
 # a path instead of a file, so parse every script we own on every run.
 echo "== shell syntax"
-for script in "$test_dir"/*.sh "$test_dir"/remote/*.sh "$root"/scripts/*.sh "$root"/packaging/kernel/*.sh; do
+for script in "$test_dir"/*.sh "$test_dir"/remote/*.sh "$test_dir"/vulkan-vpp/*.sh \
+    "$root"/scripts/*.sh "$root"/packaging/kernel/*.sh; do
     [ -f "$script" ] || continue
     run "syntax $(basename "$script")" sh -n "$script"
 done
+
+echo "== VPP SPIR-V pin"
+# The Vulkan prerequisite gate runs only on the target (CI has no GPU), so the
+# checked-in SPIR-V binary is pinned by hash here. A stale or hand-edited
+# copy.spv must fail a host check rather than silently change what the target
+# gate measures.
+run vpp-spv-pin sh -c 'cd "$1" && sha256sum -c SHA256SUMS' sh "$test_dir/vulkan-vpp"
+
+echo "== remote gate command transport"
+# The guard backgrounds its child. A `sh -s` child fed by a heredoc reads
+# /dev/null in a non-interactive shell, so the command never runs while the
+# guard still reports exit 0 -- a run record that proves nothing. gate.sh must
+# land the command in a per-run file and read it by path.
+run gate-command-file grep -Fq 'remote_cmd' "$test_dir/remote/gate.sh"
+run gate-no-stdin-child sh -c '! grep -Fq "guard.sh -- sh -s" "$1"' sh "$test_dir/remote/gate.sh"
 
 echo "== python syntax"
 for script in "$test_dir"/*.py "$test_dir"/remote/*.py; do

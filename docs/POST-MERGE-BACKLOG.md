@@ -283,7 +283,7 @@ Lower priority than decode. Ground each item in the capability table's
 | I5 | Provenance: source commit, tracked-source SHA-256, dirty flag, artifact hash; CI must stay clean (`source_dirty=0`) | CI "Generate and verify provenance" step passes. **2026-11-12 update**: `deploy.sh` now re-hashes every tracked path on the target with `sha256sum -c` before the rebuild, so the digest in the manifest is measured where the build happens instead of injected from the sender; a controlled probe (marker file, same-size corruption, tampered file) confirmed the sync repairs content and the check rejects a tree that does not match. The same edit fixed an exclude pattern that had been silently withholding the two tracked files whose names begin with `build` |
 | I6 | `ldd -r` rejects undefined symbols in `v4l2_drv_video.so` | unchanged |
 | I7 | Distribution layers are reported separately: source, build, staged `DESTDIR`, installed package, target runtime, registry/release | never say "installed" or "released" from a source or CI check alone |
-| I8 | Target gates had no runner and no run record; identity was re-collected by hand for every claim | **done 2026-11-12**: `test/remote/gate.sh -- command` runs one gate inside the remote checkout under the experiment guard and writes `summary.json` (schema `qualcomm-iris-vaapi/target-run-v1`) with source commit, dirty flag, boot, kernel, module hash, driver hash, decoder and encoder names resolved by driver name, exit status and guard state, plus the command's output and the guard directory copied back. It does not deploy, so a run against a stale install shows the hashes it actually used. A guard that stopped the run exits 3. First record: the GStreamer gate on boot `31424f69`, module `b90bd823`, driver `323c07cb`, exit 0, guard `complete` |
+| I8 | Target gates had no runner and no run record; identity was re-collected by hand for every claim | **done 2026-11-12, runner fixed 2026-11-13**: `test/remote/gate.sh -- command` runs one gate inside the remote checkout under the experiment guard and writes `summary.json` (schema `qualcomm-iris-vaapi/target-run-v1`) with source commit, dirty flag, boot, kernel, module hash, driver hash, decoder and encoder names resolved by driver name, exit status and guard state, plus the command's output in `guard/command.stdout`. It does not deploy, so a run against a stale install shows the hashes it actually used. A guard that stopped the run exits 3. The original `sh -s` heredoc transport was a false pass: the guard's backgrounded child read `/dev/null`, so its "first record" (`run-gst-20261112`, boot `31424f69`, exit 0) captured no command output. The command is now landed in a per-run file; the GStreamer results in `TEST-RESULTS.md` were collected independently and are not derived from that empty record. First real command-output record: `run-20261112T195132Z` (VPP prereq, boot `3356e00e`, module `b90bd823`, driver `323c07cb`, guard `complete`) |
 
 ## 12. Priority, prerequisites and cost
 
@@ -515,34 +515,36 @@ vocabulary and its consumers, invariant 17, the capability table `sync_note`
 and both READMEs. Re-run the four-codec matrix, 120-frame AV1 clip, DRC,
 10-bit probe and the Chrome/Firefox browser matrix.
 
-### WP4 VPP feasibility spike — done, verdict "do not implement VPP"
+### WP4 VPP feasibility spike — prereq gate passed, VPP still unimplemented
 
-Read-only inventory on 2026-11-12 (`TEST-RESULTS.md` §"PR #6 tablet read-only
-survey"): `/dev/fastrpc-cdsp` and `libcdsprpc.so.1` exist but there is no
-Hexagon compiler; Vulkan 1.4.341, `libvulkan.so` and the freedreno ICD exist
-but `vulkaninfo`/`glslangValidator` are absent. Neither backend is
-buildable/verifiable as-is, and no CDSP session was opened. The current
-verdict is "no proven viable backend", subject to a runtime CDSP probe and
-package availability checks.
+The 2026-11-12 read-only survey concluded "no proven viable backend" because
+`vulkaninfo` and `glslangValidator` are absent on the tablet and no CDSP
+session was opened. Those two tools are diagnostics and a host shader
+compiler, not the runtime contract. A userspace probe now settles the
+question on `sheng`: `test/vulkan-vpp/prereq.sh` builds a SPIR-V compute
+pipeline, imports a DMA-BUF fd as Vulkan external memory, and checks the
+shader's exact output for both DMA-BUF origins the driver allocates (MSM GEM
+PRIME fd and system DMA heap). Both pass on Turnip Adreno 740; the run record
+is `run-20261112T195132Z` (guard `complete`, exit 0), recorded in
+`TEST-RESULTS.md` §"Vulkan VPP prerequisites on the target". The CDSP/FastRPC
+path is not needed for this backend and was not probed.
 
-We have no VPP. `radxa-pkg/qcom-va-driver` has optional CDSP and Vulkan VPP
-paths (scale, crop, rotate, bit-depth conversion, RGB overlay, HDR10 P010 to
-SDR NV12 tone mapping), but the piano spec disables both: CDSP needs a Hexagon
-compiler and the Vulkan path was not validated on the device. Check on `sheng`
-and Fedora 44 whether a CDSP FastRPC session is reachable and whether
-`vulkan-devel` plus `glslangValidator` are available. If a backend is viable,
-do the smallest slice: `VAProfileNone` plus one NV12 scale filter, verified on
-the target by per-pixel or PSNR baseline. If neither is viable, write the
-feasibility conclusion and stop. Do not advertise VPP without a working
-backend.
+This reverses the "no viable backend" verdict: a Vulkan compute backend is
+viable on this device. It does **not** make VPP exist. No `VAProfileNone`,
+`VAEntrypointVideoProc`, VPP vtable hooks or filters are implemented, and the
+capability table is unchanged. The prerequisite gate is the load-bearing
+evidence; implementing the smallest slice (`VAProfileNone` plus one NV12 scale
+filter with a per-pixel target baseline) is a separate step. Do not advertise
+VPP before that slice is verified on the target.
 
 ### WP5 RGB import — done, verdict "no RGB import code"
 
-WP4 did not produce a viable backend, and no VA client in this project's
-recorded gates needs BGRA/RGBA. The current NV12/P010 CAPTURE-layout contract
-is what the decode and encode gates exercise. Keep the capability table's RGB
-rejection entries. `radxa-pkg/qcom-va-driver` is the reference implementation
-if a real consumer appears (`TEST-RESULTS.md` §"WP4/WP5/WP6 decisions").
+WP4's Vulkan backend is now proven viable on `sheng` (prereq gate), but no VA
+client in this project's recorded gates needs BGRA/RGBA and no VPP filter
+consumes them yet. The current NV12/P010 CAPTURE-layout contract is what the
+decode and encode gates exercise. Keep the capability table's RGB rejection
+entries. `radxa-pkg/qcom-va-driver` is the reference implementation if a real
+consumer appears (`TEST-RESULTS.md` §"WP4/WP5/WP6 decisions").
 
 ### WP6 Debian packaging — done, verdict "do not add debian/"
 
