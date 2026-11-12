@@ -158,6 +158,11 @@ and the driver resolves its own node.
 env -u LIBVA_DRIVERS_PATH -u LIBVA_DRIVER_NAME -u LIBVA_V4L2_VIDEO_PATH vainfo
 ```
 
+Unset the variable; an empty `LIBVA_DRIVERS_PATH=` is not the same thing. libva
+takes the empty string as "search no directory" and `vaInitialize` fails with
+`unknown libva error` even though the installed driver is fine, which is how a
+2026-11-12 probe lost its first run.
+
 There is no launcher and no desktop entry. An earlier revision shipped both,
 and the launcher exported `LIBVA_DRIVER_NAME`, both node paths, and an isolated
 `--user-data-dir`. A desktop start then behaved differently from a terminal
