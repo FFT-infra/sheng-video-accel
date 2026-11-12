@@ -6392,7 +6392,7 @@ Identity: installed package
 `7.2.6-sm8550-g42f3b40-iris1`, boot
 `b2f1de2f-b3da-4e24-9fa4-163e489d929f` unchanged across the run, decoder and
 encoder as the driver's own `va init node=/dev/video17 encoder=/dev/video18`
-line reports them, pack 64 % discharging.
+line reports them, pack 64 % when the boot came up.
 
 Oracle: `ffmpeg -c:v libdav1d ... -pix_fmt yuv420p10le -f framemd5` on the
 target. VA run: `-vaapi_device /dev/dri/renderD128 -hwaccel vaapi
@@ -6410,8 +6410,10 @@ on, wrapped in the experiment guard (900 s, ceiling 100000 millic).
 P010 surfaces were allocated at 3840x2160 from the first picture
 (`va create_surfaces ... fourcc=P010`), so the depth is decided before the
 first access unit here as well. This adds no VA profile and no capability
-entry: it fills D4's "4K 10-bit" line with exact pixels, and the browser
-10-bit pixel comparison stays open.
+entry: it fills D4's "4K 10-bit" line with exact pixels. The browser 10-bit
+pixel comparison is settled as not a gate in the backlog's D1 row, for the
+same reason the project counts a browser decode only from media-surface
+evidence.
 
 ## GStreamer VA plugin on sheng registers no elements (2026-11-12)
 
