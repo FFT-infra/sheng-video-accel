@@ -6185,8 +6185,12 @@ exactly as before, and any run where the client layout does not match the
 CAPTURE layout degrades to Copy with the recorded `import rejected` trace.
 
 The browser evidence is one 720p clip with alt-refs and one 640x360 clip; the
-10-bit path (Profile 2) is a separate FFmpeg row above, exact at 120 frames but
-without a browser window of its own.
+10-bit path (Profile 2) is a separate FFmpeg row above, exact at 120 frames.
+Chrome 156 has no 10-bit window on this build: offered the same clip, it
+selected `VpxVideoDecoder` and never opened the Iris node (45 s, 1073 frames,
+0 dropped, `is_platform_video_decoder=false`). The refusal is Chrome's, not the
+driver's — `vainfo` lists `VAProfileVP9Profile2` and FFmpeg decodes the clip
+through VA-API — so the 10-bit browser path has no evidence either way.
 If a later run shows drops beyond the Copy baseline or a non-zero `misplaced`,
 the table returns to `fallback` before any claim.
 
