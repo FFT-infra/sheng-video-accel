@@ -6287,9 +6287,11 @@ ones the qualified gate decodes exactly (`av1-720.webm` 120 frames,
 | `av1-4k.mkv` | copy | `submitted=6 completed=2 errors=3 drops=0 timeouts=1 drains=1 misplaced=0` | 251 |
 | `av1-4k.mkv` | direct | `submitted=6 completed=2 errors=3 drops=0 timeouts=1 drains=1 misplaced=0` | 251 |
 
-No run produced a framemd5 file. The native control on the same boot decoded
-the identical clip through the identical node: `matroskademux ! av1parse !
-v4l2av1dec` reached `Got EOS` with exit 0.
+Every run failed with exit 251 after one to three pictures, so the gate's
+frame-for-frame comparison against software is not available for this module:
+the client never reached the end of a clip. The native control on the same boot
+decoded the identical clip through the identical node: `matroskademux !
+av1parse ! v4l2av1dec` reached `Got EOS` with exit 0.
 
 ### Why this module cannot serve this driver
 
