@@ -438,7 +438,7 @@ completion 0005 recycles in the kernel is the one this driver uses to clear a
 hidden pending target, so the cost of removing it is a userspace contract
 change, not a queue event.
 
-### WP3 0005 dual path — not implemented, and not probeable as designed
+### WP3 0005 dual path — not implemented; a "perfect" 0005 is a different patch, and it buys nothing
 
 The probe this design depends on does not exist. 0005 adds no V4L2 control,
 no QUERYCAP flag and no extended control, only the internal
@@ -447,6 +447,37 @@ contract the kernel implements and the configure-time switch below would have
 to guess. A dual path also needs the full DPB-slot rewrite, because the
 current accounting clears a hidden pending target from the completion 0005
 recycles (`TEST-RESULTS.md` §"0005 on the target").
+
+Four places in the session read that completion, and each one loses something
+when the kernel keeps the buffer instead of completing it:
+
+| Site | What the completion carries |
+| --- | --- |
+| `session.cc` hidden attribution (`noshow_shape`) | clears a `Target` submitted with `show_frame=0`; without it the client's `vaSyncSurface` waits until the timeout |
+| `Target::invisible` counter | separates the install half of a two-completion unit from the client's picture; without it both halves look like the client's |
+| `queue_import_next` | an Import entry leaves the backlog only when `capture_queued_for(token)` reaches 0; a slot the kernel recycled still counts as queued, so the window never advances and the firmware starves |
+| `publish()` | the returned buffer is the target's pixels under Direct, and the slot's token is the client buffer under Import |
+
+So "making 0005 work" is not polishing that patch. The only kernel form this
+driver could consume keeps the completion and drops just the false
+`V4L2_BUF_FLAG_ERROR` while keeping the timestamp. That form was modelled on
+the host (scratch branch, not published) with a `FakeDevice` knob that clears
+the flag: four scripted cases — an unflagged hidden picture, an unflagged
+invisible half, an unflagged hidden install unit, and the Import window on a
+two-completion picture — all fail on today's code, three of them by leaving
+the client picture pending, and a 29-line attribution in
+`handle_capture_returns` makes the suite green (44 session cases, 0 failures;
+dropping the 29 lines reproduces all four failures). Import needs no DPB
+rewrite in that form: the completion still comes back, so the window rule is
+unchanged.
+
+That form is still not better than today's route. The flag it removes is not
+observable by any client in this project's gates: the VA path republishes
+pixels through libva and never exposes V4L2 buffer flags to FFmpeg or Chrome,
+and the one raw-V4L2 client, GStreamer's `v4l2av1dec`, does not use this
+driver and already reaches EOS without losing frames on this target. The
+upside is therefore zero measured change for a client, against a kernel patch
+that has to be carried and 29 lines of tolerance no shipped kernel exercises.
 
 The following design is retained for the record only. Do not implement it
 without a kernel-visible capability signal, a new measured cost and an
