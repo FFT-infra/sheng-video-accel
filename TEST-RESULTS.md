@@ -6494,3 +6494,36 @@ publication.
 A 12-bit stream therefore fails where the profile is selected, before any
 surface is allocated, and the table's `rejected` entry stays as it is. This is
 negative evidence for the entry, not a hardware 12-bit gate.
+
+## 12-bit AV1 has no format at the node, so no hardware gate can exist (2026-11-12)
+
+The VA-layer refusal above left one question open: does the platform decode
+12-bit and only this driver refuse it, or is there no 12-bit path at all? The
+native V4L2 decoder answers it without touching the VA driver.
+
+Identity: driver `323c07cbd42f5a15…` (installed package), module
+`b90bd823fdab9895…` (0001-0004), kernel `7.2.6-sm8550-g42f3b40-iris1`, boot
+`b2f1de2f-b3da-4e24-9fa4-163e489d929f`, decoder `/dev/video17` resolved by the
+`iris_driver` QUERYCAP name. The `v4l2av1dec` element's `device` property is
+read-only and defaults to `/dev/video17`; the probe compares that default with
+the resolved node and refuses to run if they differ, so no node literal is
+used.
+
+Two guarded runs of the same pipeline
+(`filesrc ! matroskademux ! av1parse ! v4l2av1dec ! fakesink`, `-e -v`):
+
+| Run | Clip | Guard | Output caps | EOS | CAPTURE dequeues |
+| --- | --- | --- | --- | --- | --- |
+| control | 640x360 8-bit `libaom-av1`, 5 frames, sha256 `9dc7cec4…` | `status=complete` | `video/x-raw(memory:DMABuf), format=DMA_DRM, drm-format=NV12, 640x360` | yes | 16 |
+| 12-bit | 640x360 `yuv420p12le`, profile `Professional`, sha256 `69bbce35…` | `status=interrupted` (child rc=1) | none | no | 0 |
+
+The control decodes on the same node and pipeline, so the pipeline is sound.
+The 12-bit run fails at caps negotiation with `not-negotiated (-4)` before any
+buffer exists: `av1parse` supplies `bit-depth-luma=12, profile=professional`,
+and the decoder has no CAPTURE format to offer it. `VIDIOC_ENUM_FMT` on the
+node lists `NV12`, `Q08C`, `P010` and `Q10C`; none carries 12 bits.
+
+The firmware may still decode 12-bit internally, but there is no format to
+deliver it in, so no buffer-level gate exists for this platform and the
+capability table's `rejected` entry cannot be upgraded by any stream. The
+entry stays as it is; this run adds the reason, not a capability.
