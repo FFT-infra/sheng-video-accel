@@ -6152,6 +6152,8 @@ decoder resolved at runtime to `/dev/video17`. Every run below is guarded
 | Chrome 156, 1280x720 clip, 60 s, Import, run C (driver above) | 1705 `submit`, 1705 `publish=import`, 0 `publish=drop`, 0 `publish=error`, 0 `publish=misplaced`, 1154 `target detached`; 1440 decoded / 0 dropped |
 | Chrome 156, same clip and window, Copy baseline (installed `323c07cb…`, `memory=mmap`) | `submitted=1705 completed=1702 drops=3`; 1440 decoded / 0 dropped |
 | `test/iris-real-clip-gate.sh`, `IRIS_REAL_CLIP_SET=drc` (session-change regression) | 80/80 exact framemd5, `submitted=84 completed=84 import=42 copy=42 invisible=63` — the AV1 resolution-change record unchanged |
+| `test/iris-dynamic-resolution.sh`, `IRIS_DYNAMIC_CODECS=vp9`, Import | native baseline and VA both 202 frames over 100 switches, 101 contexts, `drops=0 timeouts=0`; fresh-context transitions 100/100 at 2/2, pixels equal to software |
+| FFmpeg over the same 100-switch VP9 stream, Import | 202/202 exact framemd5, 202 `publish=import`, 101 sessions each `memory=import`, `import rejected=0` |
 | FFmpeg, 1280x720 VP9 Profile 2 (10-bit, `yuv420p10le`), Import | `submitted=120 completed=120 errors=0 drops=0 misplaced=0`, 120 `publish=import`, P010 stride 2560, framemd5 identical to the software decode |
 
 The Copy baseline is the number the Import path has to beat: it dropped 3 of
@@ -6191,6 +6193,15 @@ selected `VpxVideoDecoder` and never opened the Iris node (45 s, 1073 frames,
 0 dropped, `is_platform_video_decoder=false`). The refusal is Chrome's, not the
 driver's — `vainfo` lists `VAProfileVP9Profile2` and FFmpeg decodes the clip
 through VA-API — so the 10-bit browser path has no evidence either way.
+
+Resolution changes are covered across decoder contexts, not inside one:
+FFmpeg reopens the VA context at each VP9 geometry change (101 sessions,
+`reconfigures=0` over the 100-switch stream), so a VP9 in-context reconfigure
+cannot be driven from it. That path is exercised by the AV1 clip gate above,
+which runs the same `Session::reconfigure` with an Import pool; the VP9
+in-context case is a recorded boundary, not a passing gate. The script's
+header comment still claimed VP9 was refused — it was withdrawn on the old
+tree and Phase 5 re-enabled it — and now says what the code does.
 If a later run shows drops beyond the Copy baseline or a non-zero `misplaced`,
 the table returns to `fallback` before any claim.
 
