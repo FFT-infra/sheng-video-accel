@@ -41,11 +41,16 @@ for script in "$test_dir"/*.sh "$test_dir"/remote/*.sh "$test_dir"/vulkan-vpp/*.
 done
 
 echo "== VPP SPIR-V pin"
-# The Vulkan prerequisite gate runs only on the target (CI has no GPU), so the
-# checked-in SPIR-V binary is pinned by hash here. A stale or hand-edited
-# copy.spv must fail a host check rather than silently change what the target
-# gate measures.
+# Both Vulkan gates run only on the target (CI has no GPU), so the checked-in
+# SPIR-V binaries are pinned by hash here. A stale or hand-edited .spv must
+# fail a host check rather than silently change what the target gate measures.
+# SHA256SUMS lists copy.spv (flat read/write prereq) and nv12_scale.spv (the
+# 2x NV12 scale primitive); sha256sum -c verifies every entry.
 run vpp-spv-pin sh -c 'cd "$1" && sha256sum -c SHA256SUMS' sh "$test_dir/vulkan-vpp"
+run vpp-spv-scale-pinned grep -Fq 'nv12_scale.spv' "$test_dir/vulkan-vpp/SHA256SUMS"
+# The scale gate must stay a per-pixel oracle, not a spot check: a stride or
+# chroma-offset bug can otherwise hide behind a handful of sampled bytes.
+run vpp-scale-pixel-oracle grep -Fq 'check_pixels(src, dst, &g)' "$test_dir/vulkan-vpp/nv12_scale_probe.c"
 
 echo "== remote gate command transport"
 # The guard backgrounds its child. A `sh -s` child fed by a heredoc reads

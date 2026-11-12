@@ -533,10 +533,29 @@ path is not needed for this backend and was not probed.
 This reverses the "no viable backend" verdict: a Vulkan compute backend is
 viable on this device. It does **not** make VPP exist. No `VAProfileNone`,
 `VAEntrypointVideoProc`, VPP vtable hooks or filters are implemented, and the
-capability table is unchanged. The prerequisite gate is the load-bearing
-evidence; implementing the smallest slice (`VAProfileNone` plus one NV12 scale
-filter with a per-pixel target baseline) is a separate step. Do not advertise
-VPP before that slice is verified on the target.
+capability table is unchanged.
+
+A second gate closes the gap between "compute can read/write a flat DMA-BUF"
+and a real scaled frame: `test/vulkan-vpp/nv12_scale_gate.sh` runs
+`nv12_scale.spv` over two imported NV12 DMA-BUFs in the exact Iris CAPTURE
+layout (128-byte stride, chroma behind luma, 2x subsampling) and checks every
+destination byte against a 2x nearest-neighbour CPU oracle, for both DMA-BUF
+origins. Both pass byte-exact (12288/12288 pixels) on run
+`run-20261112T220313Z` (guard `complete`, boot `3356e00e`, module `b90bd823`,
+driver `323c07cb`), recorded in `TEST-RESULTS.md` §"NV12 scale primitive on the
+target". The filter kernel now has a per-pixel target baseline, which is the
+load-bearing evidence WP4 asked for before advertising VPP.
+
+What remains before VPP can be advertised is the VA plumbing, not the pixel
+math: wire `ctx->vtable_vpp` (three query hooks), `VAProfileNone` +
+`VAEntrypointVideoProc` config/context, `VAProcPipelineParameterBufferType`
+(41) / `VAProcFilterParameterBufferType` (42) in createBuffer/renderPicture,
+dispatch this proven kernel from a VPP context, and pass an end-to-end client
+gate (FFmpeg `scale_vaapi` + `hwdownload`, per-pixel framemd5 against a
+software scale) with identity recorded. Vulkan must stay an optional meson
+dependency (CI has no Vulkan/glslang); the checked-in SPIR-V + host
+`make-spv.sh` pattern already fits. Keep `data/iris-codec-capabilities.json`
+and both README decode tables unchanged until that target gate passes.
 
 ### WP5 RGB import — done, verdict "no RGB import code"
 

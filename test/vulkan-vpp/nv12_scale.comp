@@ -1,0 +1,49 @@
+// SPDX-License-Identifier: MIT
+//
+// NV12 2x nearest-neighbour upscale for the VPP target gate. The two DMA-BUFs
+// are bound as flat uint[] storage buffers and every address (stride, luma and
+// chroma offsets, geometry) comes from push constants, so this is the same
+// kernel a VA video processor would dispatch, not a shader with one test size
+// baked in. Each invocation owns a disjoint 4x2 destination-luma block (two
+// whole 32-bit words) plus one 32-bit chroma word: no two invocations write
+// the same word, which is what makes a per-pixel oracle meaningful instead of
+// a race that happens to pass. No 16-bit storage extension is needed.
+
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0, std430) readonly buffer Src { uint s[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Dst { uint d[]; };
+layout(push_constant) uniform Params {
+    uint src_stride, src_uv, dst_stride, dst_uv;
+    uint src_y, dst_y;
+    uint width, height; // destination visible size
+} p;
+
+uint src_byte(uint off)
+{
+    uint w = s[off >> 2];
+    return (w >> ((off & 3u) << 3)) & 255u;
+}
+
+void main()
+{
+    uint gx = gl_GlobalInvocationID.x;
+    uint gy = gl_GlobalInvocationID.y;
+    uint dx = gx * 4u; // first destination luma column of this block
+    uint dy = gy * 2u; // first destination luma row
+    if (dx >= p.width || dy >= p.height)
+        return;
+    // Two source luma samples, each duplicated into two destination columns.
+    uint so = p.src_y + gy * p.src_stride + gx * 2u;
+    uint a = src_byte(so);
+    uint b = src_byte(so + 1u);
+    uint luma = a | (a << 8) | (b << 16) | (b << 24);
+    d[(p.dst_y + dy * p.dst_stride + dx) >> 2] = luma;
+    d[(p.dst_y + (dy + 1u) * p.dst_stride + dx) >> 2] = luma;
+    // One source UV pair, duplicated into two destination chroma pairs.
+    uint suo = p.src_uv + (gy >> 1) * p.src_stride + gx * 2u;
+    uint u = src_byte(suo);
+    uint v = src_byte(suo + 1u);
+    uint uv = u | (v << 8);
+    d[(p.dst_uv + gy * p.dst_stride + gx * 4u) >> 2] = uv | (uv << 16);
+}
