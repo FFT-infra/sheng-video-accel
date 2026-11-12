@@ -5875,10 +5875,15 @@ ceiling, stricter than the firmware's, and it was not raised for this
 measurement: a run that needs a higher ceiling to finish is a different
 experiment, not a longer one.
 
-E2 therefore stays open with a narrower question: the software half needs a
-workload or a cooling design that stays under 85 C at saturation, or an
-explicit decision to measure a different (and therefore not directly
-comparable) software configuration.
+E2 therefore stayed open at the time with a narrower question: the software
+half needs a workload that stays under 85 C at saturation, or an explicit
+decision about the ceiling. That decision was taken on 2026-11-12 — the
+guard's ceiling is a runaway backstop below the zones' 110 C critical trip,
+not a comfort line — and the A/B ran; see "E2 closed" at the end of this file.
+
+The attempts above are retained as they happened, under the 85000 default
+that was in force then. The hardware-arm increments are whole-device
+increments over their own baselines.
 
 ## Encode rate control: the target was programmed as the maximum (2026-11-12)
 
@@ -6187,3 +6192,43 @@ the table returns to `fallback` before any claim.
 
 Artifacts on the target: `~/Lab/Bridge/tmp/vp9final-{matrix,ffmpeg,chrome}`,
 `~/Lab/Bridge/tmp/vp9retain-{b,c,d}`, `~/Lab/Bridge/tmp/vp9copy-{a,b}`.
+
+## E2 closed: the battery-side A/B runs under the new ceiling (2026-11-12)
+
+The guard's default ceiling moved from 85000 to 100000 millidegrees
+(`guard: make the temperature ceiling a runaway backstop`): these zones trip
+passively at 90/95 C and critically at 110 C, so the old default stopped runs
+inside the firmware's own throttle band. The peak is still sampled every
+interval and still belongs in the record, and a reset, a boot-ID change or a
+trip past the ceiling still fails the experiment.
+
+Two full A/B runs on the installed package `323c07cbd42f...`, boot
+`5feea1b5-94ff-4793-94d2-689b3cdb23ca`, decoder resolved to `/dev/video17`,
+unplugged, backlight 0 for the window and restored afterwards, pack
+77 % -> 75 % discharging:
+
+| Run | VA arm | Software arm | Delta | Peak zone |
+| --- | --- | --- | --- | --- |
+| `e2-temp-c` | 1.53 W (+/- 0.64, n=4) | 6.01 W (+/- 0.69, n=4) | -4.48 W | 91.1 C, `thermal_zone14` |
+| `e2-temp-d` | 1.47 W (+/- 0.41, n=4) | 5.84 W (+/- 0.47, n=4) | -4.37 W | 92.3 C, `thermal_zone8` |
+
+The temperature column is the highest 30 s sample, not a continuous maximum.
+
+Both guards are `status=complete`, boot ID unchanged, no thermal breach and no
+reset. The software arm reached 91-92 C during its windows without the
+kernel's critical trip; that is the condition the old 85 C default refused to
+allow, and it is recorded rather than filtered.
+
+Identity and boundaries: clip `testsrc2` 1920x1080 High profile, 300 frames,
+the stream reports 60 fps (the aborted attempts above used a 30 fps source, so
+the two workloads are not directly comparable; both arms here use the same
+clip). The gauge is the whole device, so every number is an increment over the
+10 s baselines either side, never decoder-package power. Round 1 of the VA arm
+is the low outlier in both runs (0.93 W and 1.10 W against 1.6-1.7 W in rounds
+2-4) — the first decode window is still warming the clocks. The means above
+include it.
+
+E2 is closed: the hardware-versus-software battery-side increment is about
+4.4 W in favour of the VA path on this device, measured twice in the same
+shape. It is not a per-package power figure and it is not a thermal
+qualification of the software arm.
