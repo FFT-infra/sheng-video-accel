@@ -119,7 +119,7 @@ frames. The default AV1 translator in `src/va/picture.cc` now selects
 | --- | --- | --- | --- | --- | --- |
 | A1 | Read-through of upstream `src/av1.cpp`, `src/decoder.cpp`, `src/internal.hpp` and `tests/decoder/av1.py`; write a contract diff against our `src/codec/av1.cc`, `av1_obu.cc`, `src/iris/session.*`, `src/va/surface.cc` | host, read-only | none | a written list of every behaviour that differs, including DPB slot selection, hidden replay, sequence-header emission, tile layout and EOS | none needed |
 | A2 | Define the new V4L2 completion ledger on the 0001-0004 module | target probe | L1, L5, guard | **done**: `docs/experiments/av1-noshow-dpb-spike.md` records the two completions under one token (`ERROR`/no payload, then pixels), the empty LAST at drain, and the zero-timestamp single hidden picture path | none; no module swap happened |
-| A3 | Build and load 0001-0005 on `sheng`, reboot, confirm the module hash and active controls | target, can reset firmware | A2 design, L1, guard wrapped | **measured, verdict "do not load"**: module `6ef2fce8...` (0001-0004 + 0006 + 0005) on boot `1edbadbe...` failed all three qualified AV1 clips under import, copy and direct (`submitted=7 completed=1` and worse, `misplaced=1` under import), while native `v4l2av1dec` reached EOS on the same node; `TEST-RESULTS.md` §"0005 on the target" records the traces and the mechanism | rollback copy `b90bd823...` written back with `depmod -a` and a reboot before the target went unreachable; 0005 stays unbuilt and unloaded |
+| A3 | Build and load 0001-0005 on `sheng`, reboot, confirm the module hash and active controls | target, can reset firmware | A2 design, L1, guard wrapped | **measured, verdict "do not load"**: module `6ef2fce8...` (0001-0004 + 0006 + 0005) on boot `1edbadbe...` failed all three qualified AV1 clips under import, copy and direct (`submitted=7 completed=1` and worse, `misplaced=1` under import), while native `v4l2av1dec` reached EOS on the same node; `TEST-RESULTS.md` §"0005 on the target" records the traces and the mechanism | rollback copy `b90bd823...` written back with `depmod -a` and a reboot; the control arm on that module then decoded 120/120, 80/80 and 30/30 bit-exact with `errors=0 misplaced=0`. 0005 stays unbuilt and unloaded |
 | A4 | Short AV1 decode against the new module with `V4L2_VA_TRACE=1` only to characterise suppressions | target | A3 | **done on 0001-0004**: guarded real VA-API sessions recorded `publish=invisible`, `publish=direct`/`publish=import`, `errors=0`, `misplaced=0` and bit-exact rebuilt OBUs | none; build-tree override only, installed driver untouched |
 | A5 | Rewrite the AV1 translator to emit one complete temporal unit per `vaEndPicture` with an explicit 8-slot DPB and hidden-reference replay | code | A1, A4 | **done**: `src/codec/av1_dpb.cc`, `av1_build_install_temporal_unit()`; host tests cover DPB-full install, pending-surface references, client hidden frames, sequence restart and no held EOS tail | revert `src/va/picture.cc` to `make_av1()` |
 | A6 | Rewrite the session / surface / EOS accounting for the completions | code | A4, A5 | **done**: `unsent`, `wait_for_release()`, `release_held_picture()` and the bounded-release tail are removed; orphaned invisible halves are consumed as `publish=invisible`; `test/iris-clip-trace-check.sh` still balances submitted/completed | revert `src/iris/` and `src/va/` changes |
@@ -430,10 +430,13 @@ The target run then showed the cost is not a slowdown but a stop. With the
 0005 module loaded (`6ef2fce8...`, boot `1edbadbe...`) all three qualified AV1
 clips failed under import, copy and direct, the copy/direct traces ending in
 `sync timeout` and `drain lost token=`, the import traces in
-`publish=misplaced` (`TEST-RESULTS.md` §"0005 on the target"). The completion
-0005 recycles in the kernel is the one this driver uses to clear a hidden
-pending target, so the cost of removing it is a userspace contract change, not
-a queue event.
+`publish=misplaced` (`TEST-RESULTS.md` §"0005 on the target"). The control arm
+on the same-module-family baseline (`b90bd823...`) decoded the same clips with
+the same client command to 120/120, 80/80 and 30/30 exact and
+`errors=0 misplaced=0`, so the difference is the module and nothing else. The
+completion 0005 recycles in the kernel is the one this driver uses to clear a
+hidden pending target, so the cost of removing it is a userspace contract
+change, not a queue event.
 
 ### WP3 0005 dual path — not implemented, and not probeable as designed
 

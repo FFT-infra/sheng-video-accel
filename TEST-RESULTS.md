@@ -6263,8 +6263,10 @@ one reboot, boot `1edbadbe-f61b-4c7a-b229-a94b71e8539e`, kernel
 `7.2.6-sm8550-g42f3b40-iris1`, installed package
 `323c07cbd42f5a152cfca4278a78d64d726534a85f95f0d0db22379e4317a37d` (no
 `LIBVA_DRIVERS_PATH` override), decoder and encoder as the driver's own
-`va init node=/dev/video0 encoder=/dev/video1` line reports them, battery
-unplugged, no thermal breach and no reset. One experimental patch was added at
+`va init node=/dev/video0 encoder=/dev/video1` line reports them. The nine
+runs are seconds long and were not wrapped in the experiment guard; none of
+them changed the boot ID, and none was a thermal window. One experimental
+patch was added at
 a time; the module before and after the experiment is
 `b90bd823fdab98957739ad2196eb4016f5a264f2280d22735963e40c8488c715`
 (0001-0004 + 0006), kept as a verified rollback copy.
@@ -6336,16 +6338,35 @@ completions, which `src/iris/session.cc` already recognises by shape
 (no picture-type bit, no payload, zero timestamp) and publishes as a hidden
 picture without treating it as a failure.
 
-### Scope of this record
+### Control arm on the module 0005 was built from
 
-The control arm in the same session was not run: after the rollback copy was
-written back (`rollback_to_module=b90bd823...` verified on disk) and the tablet
-rebooted, it did not come back on its network, so no post-rollback boot ID or
-module hash could be read. The comparison therefore rests on the recorded
-qualified runs on the same clips and the same installed driver —
-`submitted=120 completed=120 errors=0` (2026-11-10) and the 4K clip under
-pinned clocks (2026-11-12) — plus the native decode control above. No codec,
-profile or publish policy is advertised or withdrawn by this run; the
-qualified baseline module remains `b90bd823` (0001-0004 + 0006) with the
-shipped driver unchanged. A same-session control arm is the first thing to run
-when the target is reachable again.
+After the rollback copy was written back (`rollback_to_module=b90bd823...`
+verified on disk) the tablet did not return on its network, so the control arm
+ran on the next boot instead of the same one: boot
+`b2f1de2f-b3da-4e24-9fa4-163e489d929f`, module
+`b90bd823fdab98957739ad2196eb4016f5a264f2280d22735963e40c8488c715`
+(0001-0004 + 0006, exactly the module the 0005 build added to), installed
+package `323c07cb...` again, same kernel and same client command as the 0005
+arm, each clip wrapped in the experiment guard.
+
+| Clip | Guard | Framemd5 | Session finish | Publish |
+| --- | --- | --- | --- | --- |
+| `av1-720.webm` | `complete` | 120/120 exact | `submitted=120 completed=120 errors=0 drops=0 timeouts=0 drains=1 misplaced=0` | 120 import, 42 invisible |
+| `resize-av1.mkv` | `complete` | 80/80 exact | `submitted=84 completed=84 errors=0 drops=0 timeouts=0 drains=2 misplaced=0` | 42 import, 42 copy-gpu, 63 invisible, 1 layout-mismatch rejection |
+| `av1-4k.mkv` | `complete` | 30/30 exact | `submitted=30 completed=30 errors=0 drops=0 timeouts=0 drains=1 misplaced=0` | 30 import, 1 invisible |
+
+`IRIS_REAL_CLIP_DIR=... IRIS_REAL_CLIP_SET=all sh test/iris-real-clip-gate.sh`
+on the same boot: `PASS av1-720 frames=120 import=120 invisible=42`,
+`PASS resize-av1 frames=80 import=42 copy=42 invisible=63`, `PASS real AV1 clip
+gate set=all publish=import`.
+
+The two arms differ in one variable, the kernel module. Same clips, same
+client command, same installed driver SHA-256, same node resolution, and the
+control reproduces the qualified counts exactly. The 0005 arm completed one to
+three pictures per clip; the control completed every submitted picture with
+bit-exact output.
+
+No codec, profile or publish policy is advertised or withdrawn by this run.
+The qualified baseline module stays `b90bd823` (0001-0004 + 0006) with the
+shipped driver unchanged, and 0005 stays out of every module this project
+builds.
