@@ -6257,7 +6257,8 @@ policy, and the driver's own accounting names the reason.
 
 Identity: module
 `6ef2fce835eb5aca52546482058511874c883e908b024f39f61e2775682d8099`
-(0001-0004 + 0006 + 0005, built with `packaging/kernel/build-module.sh`),
+(0001-0005, built with `packaging/kernel/build-module.sh`; its build log lists
+the five applies and no 0006),
 installed at `/lib/modules/7.2.6-sm8550-g42f3b40-iris1/.../qcom-iris.ko.zst`,
 one reboot, boot `1edbadbe-f61b-4c7a-b229-a94b71e8539e`, kernel
 `7.2.6-sm8550-g42f3b40-iris1`, installed package
@@ -6359,7 +6360,7 @@ on disk) and the tablet rebooted. The control arm ran on the boot that
 followed: boot
 `b2f1de2f-b3da-4e24-9fa4-163e489d929f`, module
 `b90bd823fdab98957739ad2196eb4016f5a264f2280d22735963e40c8488c715`
-(0001-0004 + 0006, exactly the module the 0005 build added to), installed
+(0001-0004 + 0006), installed
 package `323c07cb...` again, same kernel and same client command as the 0005
 arm, each clip wrapped in the experiment guard.
 
@@ -6374,9 +6375,14 @@ on the same boot: `PASS av1-720 frames=120 import=120 invisible=42`,
 `PASS resize-av1 frames=80 import=42 copy=42 invisible=63`, `PASS real AV1 clip
 gate set=all publish=import`.
 
-The two arms differ in one variable, the kernel module. Same clips, same
-client command, same installed driver SHA-256, same node resolution, and the
-control reproduces the qualified counts exactly. The 0005 arm completed one to
+Same clips, same client command, same installed driver SHA-256, same node
+resolution, and the control reproduces the qualified counts exactly. The arms
+are two modules, not one patch apart: the 0005 build was made without 0006, so
+the arm that completes nothing is the arm without the timestamp patch. That
+direction rules 0006 out as an explanation for the failure — the arm that has
+it fails, the arm that lacks it is exact — and 0006 only stops copying flags
+and timecode from the timestamp ring onto a dequeued buffer, so it adds and
+removes no completion. The 0005 arm completed one to
 three pictures per clip; the control completed every submitted picture with
 bit-exact output.
 
@@ -6742,3 +6748,64 @@ therefore says nothing about the decoder, and the gate uses the muxed path.
 the identity block. It is a client-side gate: the driver is the same one the
 FFmpeg and browser gates exercise, and no capability entry changes because of
 it.
+
+## The sibling backend goes exact on AV1 only with a kernel contract this driver cannot use (2026-11-13)
+
+The piano recipe builds its backend from `radxa-pkg/qcom-va-driver` v1.1.1
+(`0980a1d`), and that tree's README makes its AV1 path depend on kernel patch
+0005. Comparing patch text cannot settle what that means on this device, so
+both user-space drivers were run against both kernel modules with the clips,
+the node and the hash harness held fixed.
+
+| | 0001-0004 + 0006 | 0001-0005 |
+| --- | --- | --- |
+| this driver (installed package) | AV1 720p 120/120 exact, 4K 30/30 exact | 2 of 120 pictures, then `syncSurface: surface sync timeout` |
+| `radxa-pkg/qcom-va-driver` v1.1.1 | AV1 720p 78/120 (42 differ, first at frame 33), 4K 29/30 (frame 25), VP9 10-bit 120/120 | AV1 720p 120/120, 4K 30/30, VP9 10-bit 120/120 |
+
+The sibling backend was built on the target at
+`~/Lab/Bridge/tmp/radxa-v111/src` (`meson setup build --buildtype=release
+-Dcdsp_vpp=disabled -Dvulkan_vpp=disabled`, `ninja -C build`) and reached
+through `LIBVA_DRIVERS_PATH` plus `LIBVA_DRIVER_NAME=qcom`. It was never
+installed, so the system driver stayed
+`323c07cbd42f5a152cfca4278a78d64d726534a85f95f0d0db22379e4317a37d`. Every
+cell is `ffmpeg -hwaccel vaapi -hwaccel_device <render node>` with
+`-hwaccel_output_format vaapi` and `-vf
+hwdownload,format=<nv12|p010>,format=<pix fmt>` into `-f framemd5`, compared
+line for line against the software decode of the same clip. Clips:
+`av1-720.webm` (120 frames, 1280x720), `av1-4k-tiles.mkv` (30 frames, 32
+tiles), and a 10-bit VP9 clip (120 frames, downloaded as P010). Every command
+ran under `scripts/iris-experiment-guard.sh` with its own
+`IRIS_EXPERIMENT_DIR`; every guard ended `status=complete`, the pack sat
+between 22% and 26% and discharging, and no thermal zone came near the
+ceiling.
+
+Identity: kernel `7.2.6-sm8550-g42f3b40-iris1` on both arms; module
+`b90bd823fdab98957739ad2196eb4016f5a264f2280d22735963e40c8488c715`
+(0001-0004 + 0006) on boot
+`3356e00e-5a48-4718-8dc1-868fa5cc559d`; module
+`6ef2fce835eb5aca52546482058511874c883e908b024f39f61e2775682d8099`
+(0001-0005) on boot `17b22f21-5e3d-4888-a891-a87a53cc5247`; both built by
+`packaging/kernel/build-module.sh` from `42f3b40c702a`. Each arm was run
+twice with the same result. The 0005 module was built without 0006, so the
+arms differ by two patches rather than one. That does not weaken the AV1
+result: 0006 is absent from the arm that decodes exactly, so its presence
+cannot be what makes the other arm fail, and its own WP1 arm recorded no
+frame effect.
+
+The frames that differ are not out of order. None of the 42 AV1 hashes that
+differ appears anywhere else in the software sequence, and the same holds for
+the single 4K frame, so the sibling backend wrote different pixels at those
+positions instead of the right pictures in the wrong order; its first 33
+pictures match.
+
+Both drivers are exact on one kernel and not the other, and the two kernels
+ask userspace for different things. This driver counts one completion per
+submitted picture and consumes the NOSHOW completion, which 0005 removes
+before it reaches userspace; that is why its arm stops after two pictures and
+why `src/iris/session.cc` reports the sync bound instead of a decode error.
+The sibling backend is built for the opposite contract and is exact on the
+clip set here once the kernel provides it.
+
+Scope: one sibling tree at one commit, one device, three clips. Nothing in
+`data/iris-codec-capabilities.json` changes, the qualified module stays
+`b90bd823`, and 0005 stays out of every module this project ships.
