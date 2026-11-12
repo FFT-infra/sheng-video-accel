@@ -14,7 +14,7 @@ Kernel patches, diagnostic scripts, and packaging specs are provided in this rep
 | --- | --- | --- | --- |
 | H.264 | Constrained Baseline, Main, High | Import (zero-copy) | Bit-exact MD5, Fluster 72/135 |
 | HEVC | Main, Main 10 | Import (zero-copy) | Bit-exact MD5, Fluster 141/147 |
-| VP9 | Profile 0, Profile 2 | Copy (GPU blit) | Bit-exact MD5 |
+| VP9 | Profile 0, Profile 2 | Import (zero-copy) | Bit-exact MD5, 2026-11-12 Chrome alt-ref runs |
 | AV1 | Profile 0 | Import (zero-copy, decode-order kernel) | Bit-exact MD5, 2026-11-11 installed-package and browser runs |
 
 Hardware decode verification requires a media surface that reports the selected hardware decoder (for Chrome, `VaapiVideoDecoder` with `kIsPlatformVideoDecoder=true`; for Firefox, successful VA-API initialization) together with decoded and dropped frame counts over the test window.

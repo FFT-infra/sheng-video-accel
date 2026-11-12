@@ -31,7 +31,7 @@ invalidates the whole list.
 | Decoder | resolved at runtime by `iris_driver` QUERYCAP, card `Iris Decoder` |
 | Qualified AV1 Import evidence | 48/48 four-codec matrix; real 1280x720 AV1 clip 120/120 exact framemd5, 120 `publish=import`, 0 errors/drops; in-context DRC 1280x720 -> 854x480 80/80 exact framemd5, 84 completions (42 import, 42 copy-gpu); guarded 3840x2160 AV1 probe 30/30 exact framemd5, 30 `publish=import`, hottest 39.8 C, no reset/thermal breach |
 | Browser evidence | Chrome live YouTube AV1 250/0, 725 `publish=import`; Chrome live Bilibili HEVC 251/0, 761 `publish=import`; Firefox 158 live Bilibili HEVC 251/0, live YouTube with `media.av1.enabled=false` VP9 250/0; Firefox AV1 fails closed on the held-picture sync contract and falls back to software, reproduced twice |
-| Known-unqualified | VP9 Import (`publish_import: fallback`), AV1 film grain, AV1 12-bit, AV1 large-scale tile, Firefox AV1 hardware decode, long-window soak, power measurement |
+| Known-unqualified | AV1 film grain, AV1 12-bit, AV1 large-scale tile, Firefox AV1 hardware decode, long-window soak, power measurement |
 
 `src/` at `main` is byte-identical to the PR head that the installed build was
 qualified on. Any change under `src/` requires a new installed-package run before
@@ -174,19 +174,27 @@ kernel completion contract.
 
 ## 5. Workstream C — Chrome VP9 Import
 
-Current state: `data/iris-codec-capabilities.json` has VP9
-`publish_import: fallback`. FFmpeg is clean (515/515, `misplaced=0`, framemd5
-equal to software) with one picture one buffer per completion. Chrome releases a
-VP9 surface before its picture completes: 564 of 768 queueings abandoned, 541
-completions dropped, against 2 and 4 for the H.264 control.
+Current state: **closed 2026-11-12**. The session retains a released Import
+target and completes it, so Chrome's early surface release no longer costs the
+picture. `data/iris-codec-capabilities.json` has VP9 `publish_import:
+qualified`, the driver advertises `V4L2_PIX_FMT_VP9` in `import_formats`, and
+both READMEs say Import. Evidence: 48/48 four-codec matrix, FFmpeg 515/515
+identical framemd5, two guarded Chrome windows (1705/1705 and 1588/1588,
+`drops=0`, `misplaced=0`) against a Copy baseline of 1702/1705 with 3 drops.
+TEST-RESULTS.md section "VP9 Import qualified (2026-11-12)".
+
+History: FFmpeg was clean (515/515, `misplaced=0`, framemd5 equal to software)
+with one picture one buffer per completion; Chrome released a VP9 surface
+before its picture completed (564 of 768 queueings abandoned, 541 completions
+dropped, against 2 and 4 for the H.264 control).
 
 | ID | Item | Pass condition |
 | --- | --- | --- |
-| C1 | Re-measure Chrome's early surface release on the merged baseline with CDP frame/drop deltas and `abandoned=` trace counts; separate "surface released" from "picture completed" | a per-surface timeline with no ambiguous attribution |
-| C2 | Decide the ownership model: retained/duplicated DMA-BUF fd after `destroySurfaces`, or a copy window; write it down before code | one written model, no half-state |
+| C1 | Re-measure Chrome's early surface release on the merged baseline with CDP frame/drop deltas and `abandoned=` trace counts; separate "surface released" from "picture completed" | **done 2026-11-12**: 1154 of 1705 pictures carried `target detached` in one 60 s window, every one of them completed; the `retained=` counter on `session finish` is the per-window total |
+| C2 | Decide the ownership model: retained/duplicated DMA-BUF fd after `destroySurfaces`, or a copy window; write it down before code | **done**: the backlog's duplicate fd plus a retained `Target` copy; the retained copy carries the client layout and a null destination, so nothing follows the freed surface |
 | C3 | Kernel patch 0006 (`7c28b27`, unmatched timestamp metadata ring) — decide whether it is needed at all on SM8550 | **WP1 settled the local kernel question**: the slow-CAPTURE defect was not reproduced on 0001-0004, and one guarded 0001-0004 + 0006 run passed with "no regression". 0006 stays experimental and out of the qualified baseline; no VP9 Import qualification follows from it. Chrome's early surface release (C1/C2) is still open. |
-| C4 | Target run: one-buffer vs two-buffer window; known bad case 153/609 misplaced must stay a regression test | FFmpeg 515/515 clean, Chrome no drops, `misplaced=0`, exact framemd5 |
-| C5 | Only after C4: qualify VP9 `publish_import` in the table, both READMEs, §8 trace vocabulary, TEST-RESULTS.md and CI | evidence-before-capability satisfied; otherwise Copy stays |
+| C4 | Target run: one-buffer vs two-buffer window; known bad case 153/609 misplaced must stay a regression test | **done 2026-11-12**: FFmpeg 515/515 exact framemd5, Chrome 1705/1705 and 1588/1588 with `drops=0 misplaced=0`, Copy baseline 1702/1705 with 3 drops |
+| C5 | Only after C4: qualify VP9 `publish_import` in the table, both READMEs, §8 trace vocabulary, TEST-RESULTS.md and CI | **done 2026-11-12**: table, driver `import_formats`, both READMEs, TEST-RESULTS.md and the backlog updated together; the trace vocabulary already carries `target detached` and `retained=` |
 
 ## 6. Workstream D — AV1 feature completeness
 
@@ -324,7 +332,7 @@ node, or a running GPU process is not a capability or browser-hardware claim.
 | §2 Lab prerequisites | L1-L6 | L4 settled as "pass an explicit `IRIS_EXPERIMENT_DIR` under `~/Lab/Bridge/tmp` for every guarded run" (all recorded runs do); the default is left alone so existing `guard.state` semantics do not drift. L1 charger, L2 screen state, L3 guard precondition remain open; L5/L6 are per-run checks |
 | §3 AV1 held-picture removal | A1-A14 | done: internal DPB is the default, installed-package matrix/clip/DRC/EOS gates and Firefox/Chrome live-site browser gates pass on 2026-11-11; `TEST-RESULTS.md` records the run. Long corpus and 4K cost work remains in §6/§7 |
 | §4 Explicit refresh flags | B1-B8 | open / upstream-blocked; internal DPB removes the local need for an API change |
-| §5 Chrome VP9 Import | C1-C5 | open: session-side window is fixed (FFmpeg 515/515, misplaced=0); Chrome reuses a VP9 surface in `beginPicture`, which releases the still-in-flight picture. In the forced-Import run `submitted=718 completed=177 drops=541`, with 564 of 768 import queueings abandoned; the forced-Copy baseline completed 708 with `drops=1`. The H.264 control had 2 abandoned and 4 drops out of 670; the numbers are in `TEST-RESULTS.md` §"Why VP9 Import still is not qualified". Qualifying this needs a retained-target ownership model, its own host regressions for the misplaced/detached case, and a fresh target gate — not a rename of `publish=drop` |
+| §5 Chrome VP9 Import | C1-C5 | **done 2026-11-12**: the retained-target model ships (retained `Target`, backlog-owned duplicate fd, client layout copied at submit), VP9 `publish_import` is `qualified` in the table and the driver. Gates on driver `0ef0f34c…`, boot `5feea1b5…`, `/dev/video17`: 48/48 four-codec matrix under Import, FFmpeg 1280x720 alt-ref clip 515/515 with framemd5 equal to software, Chrome 1705/1705 and 1588/1588 with `drops=0 misplaced=0`, Copy baseline 1702/1705 with 3 drops. The host regressions are the two retention unit cases plus a red check with the detach condition disabled. TEST-RESULTS.md §"VP9 Import qualified (2026-11-12)" |
 | §6 AV1 feature completeness | D1-D6 | D1 done for exact framemd5: 1920x1080 60-frame 10-bit clip `EXACT`, 60 Import, 0 errors/drops/misplaced on 2026-11-11. D2 settled as a user-space second-target publish gap, not a kernel limitation: scratch OBU writer was libdav1d-clean and the firmware carries the grain capability flag, but the display surface stayed empty; host guard keeps the refusal fail-closed. D4 partly covered by the A11 corpus (tiles, lookahead, still-picture, lossless exact; superres and global motion excluded with a recorded encoder reason). Still open: 10-bit browser pixel comparison, 12-bit, large-scale tile, D3 (128x128 SB / GStreamer), D5/D6 negative tests |
 | §7 Long-window, power, cost | E1-E5 | E1 done (both 7200 s windows, clean ledgers), E3 and E4 done (20-minute continuous 4K inside the guard; 3.07 ms per frame with the clocks pinned and the clock state recorded), E5 and L3 done (the guard records pack state); E2 stays open on the software arm's thermal boundary, which is recorded as a boundary rather than a cancelled run |
 | §8 Kernel and upstream sync | F1-F10 | open / decision recorded as "do not rebase"; 0005 is unbuilt and unloaded; 0006 was built, installed with 0001-0004, rebooted and run through one guarded WP1 gate on `sheng` with a "no regression" verdict, still experimental and outside the qualified baseline |

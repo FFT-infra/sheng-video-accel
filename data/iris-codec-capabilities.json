@@ -128,8 +128,8 @@
         "12-bit",
         "RGB"
       ],
-      "publish_import": "fallback",
-      "import_note": "an alt-ref access unit decodes as two pictures: a one-buffer window stalls ~500 ms per alt-ref, a two-buffer window lets the firmware choose the buffer (153/609 misplaced). The session lends one picture one buffer per completion (the same client buffer queued twice) and that runs clean on the target for FFmpeg (515/515, misplaced=0, framemd5 equal to the software decode), but Chrome releases a VP9 surface before its picture completes: 564 of 768 queueings abandoned, 541 completions dropped, against 2 and 4 for the H.264 control. Copy stays until the browser path is clean",
+      "publish_import": "qualified",
+      "import_note": "an alt-ref access unit decodes as two pictures, so the session lends one picture one buffer per completion (the same client buffer queued twice). Chrome destroys a VP9 surface as soon as it has composited the frame, often while the picture is still with the firmware: on 2026-11-11 that released 564 of 768 queueings and dropped 541 completions. The session now retains such a target and completes it (`target detached`), and the 2026-11-12 gates qualified Import: 48/48 four-codec matrix, FFmpeg 1280x720 alt-ref clip 515/515 with framemd5 equal to the software decode, and two guarded Chrome 156 windows at submitted=1705 completed=1705 drops=0 retained=1161 and submitted=1588 completed=1588 drops=0; the Copy baseline over the same clip and window dropped 3 of 1705. TEST-RESULTS.md records each run",
       "encode": {
         "production": "absent",
         "va_profiles": [],

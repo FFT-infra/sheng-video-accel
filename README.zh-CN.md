@@ -14,7 +14,7 @@
 | --- | --- | --- | --- |
 | H.264 | Constrained Baseline, Main, High | Import（零拷贝） | 逐帧 MD5 一致，Fluster 72/135 |
 | HEVC | Main, Main 10 | Import（零拷贝） | 逐帧 MD5 一致，Fluster 141/147 |
-| VP9 | Profile 0, Profile 2 | Copy（GPU 复制） | 逐帧 MD5 一致 |
+| VP9 | Profile 0, Profile 2 | Import（零拷贝） | 逐帧 MD5 一致，2026-11-12 Chrome 含 alt-ref 实机验证 |
 | AV1 | Profile 0 | Import（零拷贝，解码顺序内核） | 逐帧 MD5 一致，2026-11-11 安装包与浏览器实机验证 |
 
 硬件解码的判定标准：媒体表面报告选中了硬件解码器（Chrome 为 `VaapiVideoDecoder` 且 `kIsPlatformVideoDecoder=true`，Firefox 为 VA-API 初始化成功），并给出测试窗口内的解码帧数与丢帧数。

@@ -4174,6 +4174,10 @@ load-bearing: the stall is gone and `misplaced` is 0 everywhere.
 
 ### Why VP9 Import still is not qualified
 
+Superseded 2026-11-12 by the section "VP9 Import qualified" at the end of this
+file: the released-surface drops measured here are the defect that change
+removes.
+
 Chrome releases the surface of a VP9 picture before that picture completes
 far more often than it does for H.264. In the forced-Import run 564 of 768
 import queueings carried `abandoned=1` and 541 completions were dropped as
@@ -6106,3 +6110,77 @@ whole window, so a 4K AV1 Import stream runs at real time indefinitely on this
 target rather than degrading. This is a thermal and continuity result only:
 no power ratio is claimed from it, and it is not a peak-throughput figure —
 that is the 3.07 ms per frame in the section above.
+
+## VP9 Import qualified (2026-11-12)
+
+The 2026-11-11 record (section "Why VP9 Import still is not qualified" above)
+left VP9 at `publish_import: fallback` for one measured reason: Chrome destroys
+a VP9 surface as soon as it has composited the frame, so 541 of 718 completions
+arrived for a target the client had already released and were counted as
+drops. The session now retains such a target and completes it — the client's
+buffer is already in the firmware's hands and the backlog holds its own
+duplicate of the fd, so the picture is delivered and the surface is never
+touched (`session: complete an Import picture whose surface the client
+dropped`). A retained target outlives its `StableBuffer`, so the backlog entry
+carries a copy of the client layout taken at submit; the resolution-change
+comparison reads that copy instead of the freed buffer
+(`session: keep a retained target's geometry with its picture`).
+
+### Runs
+
+Source commit `966a7df` (host tree clean), build-tree override, driver
+`0ef0f34cc6eb8ccd468f431d71485d64230d0e14fd918e6340e0cd9230caceb8` built from
+`~/Lab/Bridge/tmp/fix1-tree` on the target, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot `5feea1b5-94ff-4793-94d2-689b3cdb23ca`,
+decoder resolved at runtime to `/dev/video17`. Every run below is guarded
+(`scripts/iris-experiment-guard.sh`, 85000 millic ceiling); all guards reported
+`status=complete` with the boot ID unchanged, no reset and no thermal breach
+(hottest zone during the Chrome windows 48.9 C, pack 80 % discharging).
+
+| Gate | Result |
+| --- | --- |
+| Host | `sh test/run-static-checks.sh` PASS, `meson test -C build-local` 26/26, `git diff --check` clean |
+| `test/iris-matrix.sh`, `V4L2_VA_PUBLISH=import` | H.264, VP9, HEVC, AV1 48/48 exact frame MD5; `import=48`, `submitted=48 completed=48 errors=0 drops=0 misplaced=0 retained=0` for each codec |
+| FFmpeg, 1280x720 VP9 with alt-refs (`lag720.webm`, 480 frames), Import | `submitted=515 completed=515 errors=0 drops=0 misplaced=0`, 515 `publish=import`, `memory=import`; frame MD5 identical to the software decode |
+| Chrome 156, same clip, 60 s, Import, run A (`e1d0585b…`) | `submitted=1705 completed=1705 errors=0 drops=0 misplaced=0 retained=1161`; `VaapiVideoDecoder`, platform=true, 1440 decoded / 0 dropped |
+| Chrome 156, 640x360 alt-ref clip, 60 s, Import, run B | `submitted=1588 completed=1588 errors=0 drops=0 misplaced=0 retained=12`; 1439 decoded / 0 dropped |
+| Chrome 156, 1280x720 clip, 60 s, Import, run C (driver above) | 1705 `submit`, 1705 `publish=import`, 0 `publish=drop`, 0 `publish=error`, 0 `publish=misplaced`, 1154 `target detached`; 1440 decoded / 0 dropped |
+| Chrome 156, same clip and window, Copy baseline (installed `323c07cb…`, `memory=mmap`) | `submitted=1705 completed=1702 drops=3`; 1440 decoded / 0 dropped |
+
+The Copy baseline is the number the Import path has to beat: it dropped 3 of
+1705 and completed 1702, while Import completed every submitted picture and
+dropped none. Chrome's own counters (1440 decoded, 0 dropped) are identical in
+both, which is why the session counters, not the page's, are the evidence.
+
+`framemd5` needs matching output formats on both sides: this clip decodes as
+NV12 under VA and yuv420p under libvpx, so the first comparison hashed
+different byte layouts. With `-pix_fmt yuv420p` on both, all 480 frames match;
+the raw planes are byte-identical frame by frame, not merely close. The matrix
+and the FFmpeg rows use the normalised form.
+
+The 1161 retained targets in run A are the measurement that motivated this
+work: nearly 70 % of the pictures Chrome composited had their surface destroyed
+before the completion arrived. Under the previous code those were drops.
+
+Two unit cases pin the behaviour: a released Import target completes instead of
+dropping, and a two-completion (alt-ref) picture released before either half
+returns retires both halves with no drop, no error and no slot left queued.
+Both fail with the detach condition disabled.
+
+### What the capability flip changes
+
+`data/iris-codec-capabilities.json` now has VP9 `publish_import: qualified`,
+`src/va/driver.cc` advertises `V4L2_PIX_FMT_VP9` in `import_formats`, and both
+README capability tables say Import. A pre-exporting client (Chrome, or
+`V4L2_VA_PUBLISH=import`) therefore writes VP9 frames straight into its own
+exported buffers. A client that does not pre-export still gets Direct or Copy
+exactly as before, and any run where the client layout does not match the
+CAPTURE layout degrades to Copy with the recorded `import rejected` trace.
+
+The qualification is one 720p clip with alt-refs, one 640x360 clip, and the
+synthetic matrix; VP9 Profile 2 (10-bit) Import was not measured separately.
+If a later run shows drops beyond the Copy baseline or a non-zero `misplaced`,
+the table returns to `fallback` before any claim.
+
+Artifacts on the target: `~/Lab/Bridge/tmp/vp9final-{matrix,ffmpeg,chrome}`,
+`~/Lab/Bridge/tmp/vp9retain-{b,c,d}`, `~/Lab/Bridge/tmp/vp9copy-{a,b}`.
