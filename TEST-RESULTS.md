@@ -6443,6 +6443,9 @@ stands: the element is not registered at all, so a refusal attributed to the
 decoder was never a decoder result on this target. D3's GStreamer half and
 H4's encode half both need a plugin build that registers its elements before
 they mean anything. No driver behaviour and no capability entry changes here.
+The filter that refuses this driver is libgstva's vendor allowlist, and
+`GST_VA_ALL_DRIVERS=1` bypasses it; see "GStreamer VA elements register once
+libgstva's vendor allowlist is bypassed" below.
 
 ## 4K AV1 with 32 tiles through Import (2026-11-12)
 
@@ -6687,3 +6690,53 @@ never exercises the hidden-completion path the patch removes. Stages B and
 B0 publish it through Import instead (240 `publish=import`), which belongs to
 the driver lineage between the installed package and the chore branch, not to
 the tolerance: on the same kernel the two builds are identical.
+
+## GStreamer VA elements register once libgstva's vendor allowlist is bypassed (2026-11-12)
+
+The 0-features result recorded on this page has a cause: `libgstva.so` filters
+VA drivers by vendor string in `_gst_va_display_filter_driver` before it
+builds any element. With `GST_DEBUG='va*:7'` the plugin logs
+
+```
+vadisplay gstvadisplay.c:176:_gst_va_display_filter_driver: VA-API driver vendor: Qualcomm Iris V4L2 stateful (libva-v4l2)
+vadisplay gstvadisplay.c:186:_gst_va_display_filter_driver: Unsupported driver: Qualcomm Iris V4L2 stateful (libva-v4l2)
+```
+
+and stops, so `gst-inspect-1.0 va` reports `0 features` and `vaav1dec` is not
+an element at all. The filter accepts `Mesa Gallium dri`, `Intel i965 drive`
+and `Intel iHD driv`; `GST_VA_ALL_DRIVERS=1` is its supported override and
+registers seven elements. No `LIBVA_*` variable is set for any run below:
+libva reaches this driver through its `msm_drv_video.so` alias, the same way
+the browser gate reaches it.
+
+Identity for every run in this section: installed driver `323c07cb...`,
+module `b90bd823...` (0001-0004 + 0006), kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot `31424f69-910a-48ac-8385-8f77428e082c`,
+`libgstva` 1.28.8, VA-API 1.23.0.
+
+| Check | Result |
+| --- | --- |
+| `gst-inspect-1.0 va` without the override | `0 features` |
+| with `GST_VA_ALL_DRIVERS=1` | 7 elements, including `vaav1dec`, `vah264enc`, `vah265enc` |
+| `vaav1dec` decode, 120-frame 1280x720 AV1 clip | 120/120 frame hashes equal to the software decode |
+| `vah264enc`, 60 frames 1280x720 NV12 | 60 frames back after the stream is decoded, 1,283,801 bytes |
+| `vah265enc`, 60 frames 1280x720 NV12 | 60 frames back, 3,100,049 bytes |
+
+The decode comparison needed a measurement fix before it meant anything. A
+first pass piped `vaav1dec ! videoconvert ! video/x-raw,format=NV12 ! fdsink`
+into the hasher and differed on all 120 frames at the right size — mean
+absolute difference 93/255 on the luma plane, with an unchanged luma average
+(125.18 against 125.22) and no shift or chroma swap explaining it. Rendering
+one frame through `pngenc` gave a picture identical to the software decode,
+and the raw dump matched the software decode only after a per-frame circular
+shift (best roll per frame, mean absolute difference 0.25, six bytes above 8
+once rolled). `fdsink` writes from the buffer base and ignores
+`GstVideoMeta`'s plane offset; `pngenc` maps through `GstVideoFrame` and does
+not. Muxing the element's own I420 output and hashing that file after a
+software decode is exact: 120/120. A raw dump that disagrees with software
+therefore says nothing about the decoder, and the gate uses the muxed path.
+
+`test/iris-gstreamer-gate.sh --clip PATH` runs all of the above and prints
+the identity block. It is a client-side gate: the driver is the same one the
+FFmpeg and browser gates exercise, and no capability entry changes because of
+it.

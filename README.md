@@ -88,3 +88,11 @@ Imported DMA-BUF surfaces must match native CAPTURE layout (single linear object
 | `V4L2_VA_COPY` | gpu | Copy engine selection (`gpu` or `cpu`) |
 | `V4L2_VA_PUBLISH` | auto | Force publication mode (`auto`, `direct`, `import`, `copy`) |
 | `V4L2_VA_DUMP` | off | Directory path to dump submitted access units |
+
+GStreamer's VA plugin (`libgstva`) filters VA drivers by vendor string before
+it registers any element, and this driver's vendor string is not on its list:
+`gst-inspect-1.0 va` reports `0 features` and `vaav1dec` does not exist.
+`GST_VA_ALL_DRIVERS=1` is the plugin's own override and registers the
+elements; libva still resolves this driver through its `msm_drv_video.so`
+alias, so no `LIBVA_*` variable is involved. `test/iris-gstreamer-gate.sh`
+checks both states on the target.
