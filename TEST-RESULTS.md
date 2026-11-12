@@ -6370,3 +6370,45 @@ No codec, profile or publish policy is advertised or withdrawn by this run.
 The qualified baseline module stays `b90bd823` (0001-0004 + 0006) with the
 shipped driver unchanged, and 0005 stays out of every module this project
 builds.
+
+## 4K 10-bit AV1 through Import, exact against libdav1d (2026-11-12)
+
+The 10-bit record was one 1080p clip and the 4K record was 8-bit; the two had
+never met. This run decodes a 3840x2160 10-bit AV1 clip through the Import
+policy and compares every frame against an independent software decoder on
+the same machine.
+
+Clip: 3840x2160, 30 frames, `yuv420p10le`, AV1 profile `Main`, encoded with
+`libsvtav1` (`-preset 8 -crf 30`) on the lab host, SHA-256
+`83ea2997a9feb88b6db3ab820499580d64ba9d92ce8e446b52778e1bec3e41f6`. The
+source is `testsrc2`, so this is a depth-and-geometry probe, not real-content
+quality evidence.
+
+Identity: installed package
+`323c07cbd42f5a152cfca4278a78d64d726534a85f95f0d0db22379e4317a37d` with no
+`LIBVA_DRIVERS_PATH` override, module
+`b90bd823fdab98957739ad2196eb4016f5a264f2280d22735963e40c8488c715`
+(0001-0004 + 0006, the installed experimental module), kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot
+`b2f1de2f-b3da-4e24-9fa4-163e489d929f` unchanged across the run, decoder and
+encoder as the driver's own `va init node=/dev/video17 encoder=/dev/video18`
+line reports them, pack 64 % discharging.
+
+Oracle: `ffmpeg -c:v libdav1d ... -pix_fmt yuv420p10le -f framemd5` on the
+target. VA run: `-vaapi_device /dev/dri/renderD128 -hwaccel vaapi
+-hwaccel_output_format vaapi -vf hwdownload,format=p010le,format=yuv420p10le
+-f framemd5`, `V4L2_VA_PUBLISH=import`, `V4L2_VA_SYNC_TIMEOUT_MS=5000`, trace
+on, wrapped in the experiment guard (900 s, ceiling 100000 millic).
+
+| Result | Value |
+| --- | --- |
+| framemd5 | 30/30 frame hashes equal to the libdav1d oracle |
+| session | `submitted=30 completed=30 errors=0 drops=0 timeouts=0 drains=1 misplaced=0` |
+| publish | `import=30 copy=0 invisible=1 drop=0 error=0`, `import rejected=0` |
+| guard | `status=complete`, boot ID unchanged, 31 s window |
+
+P010 surfaces were allocated at 3840x2160 from the first picture
+(`va create_surfaces ... fourcc=P010`), so the depth is decided before the
+first access unit here as well. This adds no VA profile and no capability
+entry: it fills D4's "4K 10-bit" line with exact pixels, and the browser
+10-bit pixel comparison stays open.
