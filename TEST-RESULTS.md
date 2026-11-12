@@ -6727,10 +6727,12 @@ first pass piped `vaav1dec ! videoconvert ! video/x-raw,format=NV12 ! fdsink`
 into the hasher and differed on all 120 frames at the right size — mean
 absolute difference 93/255 on the luma plane, with an unchanged luma average
 (125.18 against 125.22) and no shift or chroma swap explaining it. Rendering
-one frame through `pngenc` gave a picture identical to the software decode,
-and the raw dump matched the software decode only after a per-frame circular
-shift (best roll per frame, mean absolute difference 0.25, six bytes above 8
-once rolled). `fdsink` writes from the buffer base and ignores
+one frame through `pngenc` showed the same picture as the software decode —
+that render checks geometry, not hashes, because each tool applies its own
+NV12-to-RGB conversion and the two PNGs sit at 24 dB apart for that reason
+alone — and the raw dump matched the software decode only after a per-frame
+circular shift (best roll per frame, mean absolute difference 0.25, six bytes
+above 8 once rolled). `fdsink` writes from the buffer base and ignores
 `GstVideoMeta`'s plane offset; `pngenc` maps through `GstVideoFrame` and does
 not. Muxing the element's own I420 output and hashing that file after a
 software decode is exact: 120/120. A raw dump that disagrees with software
