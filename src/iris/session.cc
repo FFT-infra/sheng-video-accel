@@ -287,9 +287,9 @@ void Session::enter_streaming()
         for (const auto& [token, target] : pending_) {
             const bool queued = std::any_of(import_backlog_.begin(), import_backlog_.end(),
                 [&](const ImportEntry& e) { return e.token == token; });
-            if (!queued && target->destination)
+            if (!queued && !target->detached && target->destination)
                 import_backlog_.push_back({ token, fcntl(target->destination->fd(), F_DUPFD_CLOEXEC, 0),
-                    target->completions, 0 });
+                    target->completions, 0, target->destination->layout() });
         }
         queue_import_next();
     } else {
@@ -325,7 +325,9 @@ void Session::queue_import_next()
         return; // fully lent; the firmware still holds one of them
     auto it = pending_.find(entry.token);
     Target* target = it == pending_.end() ? nullptr : it->second;
-    if (target && (target->publish == Publish::Direct || !target->destination)) {
+    // A retained target has no destination to check: its surface, and with
+    // it the buffer, is gone, and the entry holds the duplicate of that fd.
+    if (target && !target->detached && (target->publish == Publish::Direct || !target->destination)) {
         // The client never gave this picture a buffer; nothing to decode
         // into. (An Import session requires every surface exported.) This
         // check has to come before the fd test below: a Direct target is
@@ -350,7 +352,7 @@ void Session::queue_import_next()
         queue_import_next();
         return;
     }
-    if (target && !import_compatible(target->destination->layout(), pool_.capture_layout()))
+    if (target && !import_compatible(entry.client_layout, pool_.capture_layout()))
         // The first picture of a resolution change: its buffer fits the
         // geometry the firmware is about to announce, not the current one.
         // Leave it at the head; enter_streaming() queues it after the pool
@@ -459,7 +461,8 @@ void Session::submit(const uint8_t* data, size_t size, Target& target)
         // duplicated so the entry survives a released (or destroyed)
         // surface: its picture still needs a buffer.
         const int fd = target.destination ? fcntl(target.destination->fd(), F_DUPFD_CLOEXEC, 0) : -1;
-        import_backlog_.push_back({ token, fd, target.completions, 0 });
+        import_backlog_.push_back(
+            { token, fd, target.completions, 0, target.destination ? target.destination->layout() : Layout {} });
         queue_import_next();
     }
     trace_("submit token=%llu bytes=%zu output=%u", static_cast<unsigned long long>(token), size, slot->index);
@@ -896,6 +899,11 @@ void Session::release_locked(Target& target)
             Target& kept = retained_[target.token];
             kept = target;
             kept.detached = true;
+            // The buffer outlives the surface only as this entry's duplicate
+            // fd. Null the pointer so no later path can read a freed
+            // StableBuffer; every Import decision uses the entry's copy of
+            // the layout instead.
+            kept.destination = nullptr;
             kept.pending = true;
             pending_[target.token] = &kept;
             ++retained_total_;

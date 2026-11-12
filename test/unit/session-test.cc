@@ -817,6 +817,44 @@ void test_import_released_target_completes_instead_of_dropping()
     CHECK(h.session->stats().completed == 1);
 }
 
+void test_import_released_superframe_completes_its_halves()
+{
+    // The released target may be a picture the firmware decodes as two (a
+    // VP9 alt-ref superframe). Both halves were lent at submit, so the
+    // retained target has to answer for both: dropping the first and
+    // keeping the second, or the reverse, leaves a slot queued for a token
+    // that no longer exists and stalls the next picture.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    const Layout layout = capture_layout_of({});
+    Target t;
+    t.publish = Publish::Import;
+    t.completions = 2;
+    h.fake->inject_altref_superframe();
+    {
+        ClientBuffer a(layout);
+        t.destination = a.stable.get();
+        h.submit(t);
+        CHECK(h.session->capture_queued() == 2);
+        CHECK(same_buffer(h.fake->capture_fd(0), a.fd));
+        CHECK(same_buffer(h.fake->capture_fd(1), a.fd));
+        // The surface, and with it the buffer, is gone before either half
+        // returns.
+        h.session->release(t);
+        CHECK(!t.pending);
+    }
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(h.session->stats().errors == 0);
+    CHECK(h.session->stats().drops == 0);
+    CHECK(h.session->stats().misplaced == 0);
+    // The invisible half is consumed, not published; the client picture is
+    // the second completion and the only one counted.
+    CHECK(h.session->stats().completed == 1);
+    CHECK(h.session->capture_queued() == 0);
+    CHECK(h.session->capture_held() == 0);
+}
+
 void test_import_misplaced_completion_is_an_error()
 {
     Harness h;
@@ -1115,6 +1153,8 @@ int main()
         { "import queues the client buffer per picture", test_import_queues_client_buffer_per_picture },
         { "import released target completes instead of dropping",
             test_import_released_target_completes_instead_of_dropping },
+        { "import released superframe completes its halves",
+            test_import_released_superframe_completes_its_halves },
         { "import misplaced completion is an error", test_import_misplaced_completion_is_an_error },
         { "import rejected on a display-order kernel", test_import_rejected_on_display_order_kernel },
         { "import rejected for an unqualified codec", test_import_rejected_for_an_unqualified_codec },

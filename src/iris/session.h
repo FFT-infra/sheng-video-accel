@@ -245,6 +245,12 @@ private:
         int fd = -1;
         unsigned completions = 1;
         unsigned lent = 0;
+        // The client layout, copied while the target's buffer was still
+        // alive. A retained target outlives its StableBuffer, so the entry
+        // cannot ask the target's `destination` after a detach; a resolution
+        // change still has to compare the buffer's geometry with the new
+        // CAPTURE layout before queueing it.
+        Layout client_layout;
     };
     std::deque<ImportEntry> import_backlog_;
     void clear_import_backlog();
