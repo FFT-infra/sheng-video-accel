@@ -6322,6 +6322,20 @@ picture, and the session's neighbour check refuses to publish it —
 did what it was written to do: a completion that lands in a neighbour's buffer
 failed both surfaces instead of publishing wrong pixels.
 
+### The upstream symptom does not reproduce on this target
+
+0005 exists because a client that treats a NOSHOW ERROR completion as a failed
+picture drops the pending frame with it (the patch cites 48 of 60 frames from
+GStreamer on X1E80100). GStreamer 1.28.8 here does not: with
+`GST_DEBUG=v4l2allocator:6` on `av1-720.webm` through `v4l2av1dec`, the decoder
+dequeues all 180 CAPTURE buffers — 120 with payload and 60 empty NOSHOW ones —
+and `fakesink` receives every pictured frame.
+
+The same pipeline writing to `filesink` lands 89 of 120 frames in the file, but
+the decoder still logged 180 dequeues with the same 120/60 split in that run,
+so what is missing was lost downstream of the decoder, in how fast the sink
+drains. Reading a frame count off that pipeline says nothing about NOSHOW.
+
 ### What a complete 0005 would have to be
 
 Not a patch refinement. It changes the decoder-to-userspace contract from
@@ -6340,9 +6354,9 @@ picture without treating it as a failure.
 
 ### Control arm on the module 0005 was built from
 
-After the rollback copy was written back (`rollback_to_module=b90bd823...`
-verified on disk) the tablet did not return on its network, so the control arm
-ran on the next boot instead of the same one: boot
+The rollback copy was written back (`rollback_to_module=b90bd823...` verified
+on disk) and the tablet rebooted. The control arm ran on the boot that
+followed: boot
 `b2f1de2f-b3da-4e24-9fa4-163e489d929f`, module
 `b90bd823fdab98957739ad2196eb4016f5a264f2280d22735963e40c8488c715`
 (0001-0004 + 0006, exactly the module the 0005 build added to), installed
