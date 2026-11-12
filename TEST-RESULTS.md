@@ -6817,26 +6817,31 @@ and `glslangValidator` are absent on the tablet, and no runtime import test
 had been done. Those two tools are diagnostics and a shader compiler, not the
 runtime contract, and `glslangValidator` runs on the host while the tablet has
 `libvulkan`, freedreno, Vulkan headers and libdrm. A userspace probe now
-measures the two facts a zero-copy Vulkan video processor needs: that a SPIR-V
-compute pipeline runs with exact output, and that a DMA-BUF fd imports as
-Vulkan external memory and is read by that pipeline.
+measures the three facts a zero-copy Vulkan video processor needs: a SPIR-V
+compute pipeline runs with exact output, an imported DMA-BUF can be read by
+that pipeline (VPP source), and a second imported DMA-BUF can be written by it
+with the bytes visible through a coherent CPU mmap (VPP destination). Reading
+an imported fd alone was the first version of this gate; writing one is what a
+video processor actually does to its output surface.
 
 `test/vulkan-vpp/prereq.sh` runs `test/vulkan-vpp/probe.c` on the target. The
 shader (`copy.comp`) is a byte copy-plus-one, so 256 output words are fully
 predictable. The checked-in `copy.spv` is pinned by `SHA256SUMS` and verified
-at run time; `make-spv.sh` regenerates it on a host. The probe allocates its
-DMA-BUF both ways `src/iris/alloc.cc:allocate_stable` does: MSM GEM
-(cached-coherent with a write-combined fallback, mirroring
+at run time; `make-spv.sh` regenerates it on a host. The probe allocates both
+its source and destination DMA-BUFs each way `src/iris/alloc.cc:allocate_stable`
+does: MSM GEM (cached-coherent with a write-combined fallback, mirroring
 `src/iris/msm_alloc.c`) exported as a PRIME fd, and the system DMA heap. Both
-origins import through `VK_KHR_external_memory_fd` with dedicated allocation.
+fds import through `VK_KHR_external_memory_fd` with dedicated allocation; the
+shader reads one and writes the other, and the CPU mmap of the destination is
+checked after an implicit-fence wait.
 
-Recorded run `run-20261112T195132Z` (`test/remote/gate.sh -- sh
+Recorded run `run-20261112T205511Z` (`test/remote/gate.sh -- sh
 test/vulkan-vpp/prereq.sh`), guard `complete`, exit 0:
 
 | origin | device | result |
 | --- | --- | --- |
-| system DMA heap | Turnip Adreno 740, Vulkan 1.4.354 | `PASS compute=256/256 dma-buf-import=exact` |
-| MSM GEM PRIME fd | Turnip Adreno 740, Vulkan 1.4.354 | `PASS compute=256/256 dma-buf-import=exact` |
+| system DMA heap | Turnip Adreno 740, Vulkan 1.4.354 | `PASS read-import=exact write-import=exact cpu-coherent=256/256` |
+| MSM GEM PRIME fd | Turnip Adreno 740, Vulkan 1.4.354 | `PASS read-import=exact write-import=exact cpu-coherent=256/256` |
 
 Identity is the installed-package arm: kernel
 `7.2.6-sm8550-g42f3b40-iris1`, boot

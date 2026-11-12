@@ -283,7 +283,7 @@ Lower priority than decode. Ground each item in the capability table's
 | I5 | Provenance: source commit, tracked-source SHA-256, dirty flag, artifact hash; CI must stay clean (`source_dirty=0`) | CI "Generate and verify provenance" step passes. **2026-11-12 update**: `deploy.sh` now re-hashes every tracked path on the target with `sha256sum -c` before the rebuild, so the digest in the manifest is measured where the build happens instead of injected from the sender; a controlled probe (marker file, same-size corruption, tampered file) confirmed the sync repairs content and the check rejects a tree that does not match. The same edit fixed an exclude pattern that had been silently withholding the two tracked files whose names begin with `build` |
 | I6 | `ldd -r` rejects undefined symbols in `v4l2_drv_video.so` | unchanged |
 | I7 | Distribution layers are reported separately: source, build, staged `DESTDIR`, installed package, target runtime, registry/release | never say "installed" or "released" from a source or CI check alone |
-| I8 | Target gates had no runner and no run record; identity was re-collected by hand for every claim | **done 2026-11-12, runner fixed 2026-11-13**: `test/remote/gate.sh -- command` runs one gate inside the remote checkout under the experiment guard and writes `summary.json` (schema `qualcomm-iris-vaapi/target-run-v1`) with source commit, dirty flag, boot, kernel, module hash, driver hash, decoder and encoder names resolved by driver name, exit status and guard state, plus the command's output in `guard/command.stdout`. It does not deploy, so a run against a stale install shows the hashes it actually used. A guard that stopped the run exits 3. The original `sh -s` heredoc transport was a false pass: the guard's backgrounded child read `/dev/null`, so its "first record" (`run-gst-20261112`, boot `31424f69`, exit 0) captured no command output. The command is now landed in a per-run file; the GStreamer results in `TEST-RESULTS.md` were collected independently and are not derived from that empty record. First real command-output record: `run-20261112T195132Z` (VPP prereq, boot `3356e00e`, module `b90bd823`, driver `323c07cb`, guard `complete`) |
+| I8 | Target gates had no runner and no run record; identity was re-collected by hand for every claim | **done 2026-11-12, runner fixed 2026-11-13**: `test/remote/gate.sh -- command` runs one gate inside the remote checkout under the experiment guard and writes `summary.json` (schema `qualcomm-iris-vaapi/target-run-v1`) with source commit, dirty flag, boot, kernel, module hash, driver hash, decoder and encoder names resolved by driver name, exit status and guard state, plus the command's output in `guard/command.stdout`. It does not deploy, so a run against a stale install shows the hashes it actually used. A guard that stopped the run exits 3. The original `sh -s` heredoc transport was a false pass: the guard's backgrounded child read `/dev/null`, so its "first record" (`run-gst-20261112`, boot `31424f69`, exit 0) captured no command output. The command is now landed in a per-run file; the GStreamer results in `TEST-RESULTS.md` were collected independently and are not derived from that empty record. An echo-marker run and every later VPP prereq run carry real child output; the current VPP record is `run-20261112T205511Z` (boot `3356e00e`, module `b90bd823`, driver `323c07cb`, guard `complete`) |
 
 ## 12. Priority, prerequisites and cost
 
@@ -522,10 +522,11 @@ The 2026-11-12 read-only survey concluded "no proven viable backend" because
 session was opened. Those two tools are diagnostics and a host shader
 compiler, not the runtime contract. A userspace probe now settles the
 question on `sheng`: `test/vulkan-vpp/prereq.sh` builds a SPIR-V compute
-pipeline, imports a DMA-BUF fd as Vulkan external memory, and checks the
-shader's exact output for both DMA-BUF origins the driver allocates (MSM GEM
-PRIME fd and system DMA heap). Both pass on Turnip Adreno 740; the run record
-is `run-20261112T195132Z` (guard `complete`, exit 0), recorded in
+pipeline, imports two DMA-BUF fds as Vulkan external memory (one read, one
+written with coherent CPU read-back), and checks exact output for both
+DMA-BUF origins the driver allocates (MSM GEM PRIME fd and system DMA heap).
+Both pass on Turnip Adreno 740; the run record
+is `run-20261112T205511Z` (guard `complete`, exit 0), recorded in
 `TEST-RESULTS.md` §"Vulkan VPP prerequisites on the target". The CDSP/FastRPC
 path is not needed for this backend and was not probed.
 

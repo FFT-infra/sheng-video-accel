@@ -1,26 +1,33 @@
 // SPDX-License-Identifier: MIT
 //
 // VPP prerequisite gate. Before a zero-copy Vulkan video processor can read a
-// decoded surface, two facts must hold on the target:
+// decoded surface and write an output surface, three facts must hold on the
+// target:
 //
 //   1. A compute pipeline from a SPIR-V module runs and its result is exact.
-//   2. A DMA-BUF fd -- the form surfaces are exported as -- can be imported
-//      as Vulkan external memory and read by that pipeline.
+//   2. A DMA-BUF fd -- the form surfaces are exported as -- imports as Vulkan
+//      external memory and can be READ by that pipeline (VPP source).
+//   3. A second DMA-BUF fd imports the same way and can be WRITTEN by the
+//      pipeline, with the bytes visible through a coherent CPU mmap (VPP
+//      destination).
 //
 // The driver allocates stable surfaces from MSM GEM first and falls back to
 // the system DMA heap (src/iris/alloc.cc:allocate_stable). Both origins are
-// gated here, because import support can differ between the two allocators.
-// The GEM ioctl sequence mirrors src/iris/msm_alloc.c; the shader is a byte
+// gated because import support can differ between the two allocators. The GEM
+// ioctl sequence mirrors src/iris/msm_alloc.c; the shader is a byte
 // copy-plus-one so the result is fully predictable and measures the ICD's
-// external-memory contract, not colour maths.
+// external-memory contract, not colour maths. Both the source and destination
+// are imported DMA-BUFs: a gate that wrote to a private Vulkan buffer would
+// prove nothing about writing a client surface.
 //
 // Usage: probe <shader.spv> <heap|msm> [render-node]
-//   heap  allocate from /dev/dma_heap/system
-//   msm   allocate an MSM GEM object on <render-node> and export its PRIME fd
+//   heap  allocate both DMA-BUFs from /dev/dma_heap/system
+//   msm   allocate both as MSM GEM objects on <render-node>, export PRIME fds
 //
 // One invocation gates one origin; the gate script runs the binary twice.
-// Exit 0 only when compute runs, the fd imports, and all 256 words match.
-// This is a hardware gate: build and run it on the target, never in CI.
+// Exit 0 only when compute runs, both fds import, the destination reads back
+// all 256 words, and the source is unchanged. Build and run on the target,
+// never in CI (CI has no GPU).
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -119,6 +126,35 @@ static int msm_alloc(size_t size, const char* node)
     return prime_fd;
 }
 
+// Import one DMA-BUF as dedicated Vulkan memory bound to a storage buffer.
+// The fd is duplicated first: the original stays with the CPU mmap and its
+// DMA_BUF_IOCTL_SYNC, so fd-ownership rules of the import cannot close it.
+static VkDeviceMemory import_dmabuf(VkDevice dev, uint32_t mtype, VkMemoryRequirements mr, int fd, VkBuffer buffer)
+{
+    int owned = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+    if (owned < 0) {
+        perror("dup dma-buf for import");
+        exit(2);
+    }
+    VkImportMemoryFdInfoKHR import = { .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+        .fd = owned };
+    VkMemoryDedicatedAllocateInfo ded
+        = { .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, .pNext = &import, .buffer = buffer };
+    VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = &ded,
+        .allocationSize = mr.size,
+        .memoryTypeIndex = mtype };
+    VkDeviceMemory memory;
+    VkResult r = vkAllocateMemory(dev, &mai, NULL, &memory);
+    if (r != VK_SUCCESS) {
+        fprintf(stderr, "FAIL vkAllocateMemory(import dma-buf): VkResult=%d\n", (int)r);
+        exit(1);
+    }
+    vkBindBufferMemory(dev, buffer, memory, 0);
+    return memory;
+}
+
 #define CHECK(r, what)                                                                                                 \
     do {                                                                                                               \
         if ((r) != VK_SUCCESS) {                                                                                       \
@@ -136,29 +172,34 @@ int main(int argc, char** argv)
     const char* origin = argv[2];
     const size_t bytes = 256 * sizeof(uint32_t);
 
-    int dmabuf;
-    if (strcmp(origin, "heap") == 0) {
-        dmabuf = heap_alloc(bytes);
-    } else if (strcmp(origin, "msm") == 0) {
-        if (argc < 4) {
-            fprintf(stderr, "FAIL msm origin needs a render node\n");
-            return 2;
-        }
-        dmabuf = msm_alloc(bytes, argv[3]);
-    } else {
+    int (*alloc)(size_t, const char*);
+    const char* node = argc >= 4 ? argv[3] : "/dev/dri/renderD128";
+    if (strcmp(origin, "heap") == 0)
+        alloc = NULL;
+    else if (strcmp(origin, "msm") == 0)
+        alloc = msm_alloc;
+    else {
         fprintf(stderr, "FAIL unknown origin: %s\n", origin);
         return 2;
     }
 
-    volatile uint32_t* src_cpu = (volatile uint32_t*)mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, dmabuf, 0);
-    if (src_cpu == MAP_FAILED) {
+    // Two DMA-BUFs from the same origin: source and destination surfaces.
+    int src_fd = alloc ? alloc(bytes, node) : heap_alloc(bytes);
+    int dst_fd = alloc ? alloc(bytes, node) : heap_alloc(bytes);
+    volatile uint32_t* src_cpu = (volatile uint32_t*)mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, src_fd, 0);
+    volatile uint32_t* dst_cpu = (volatile uint32_t*)mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, dst_fd, 0);
+    if (src_cpu == MAP_FAILED || dst_cpu == MAP_FAILED) {
         perror("mmap dma-buf");
         return 1;
     }
-    sync_cpu(dmabuf, DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE);
-    for (uint32_t i = 0; i < 256; i++)
+    sync_cpu(src_fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE);
+    sync_cpu(dst_fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE);
+    for (uint32_t i = 0; i < 256; i++) {
         src_cpu[i] = 0x11111111u;
-    sync_cpu(dmabuf, DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE);
+        dst_cpu[i] = 0xdeadbeefu;
+    }
+    sync_cpu(src_fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE);
+    sync_cpu(dst_fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE);
 
     uint32_t words = 0;
     uint32_t* code = read_spv(argv[1], &words);
@@ -246,8 +287,8 @@ int main(int argc, char** argv)
     VkPipeline pipe;
     CHECK(vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpci, NULL, &pipe), "vkCreateComputePipelines");
 
-    // src is the imported DMA-BUF, dst is an internal host-visible buffer whose
-    // mapping is read back after the fence.
+    // Both storage buffers are external (DMA-BUF backed): binding 0 is read by
+    // the shader, binding 1 is written by it.
     VkExternalMemoryBufferCreateInfo embci = { .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
         .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT };
     VkBufferCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -257,8 +298,7 @@ int main(int argc, char** argv)
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
     VkBuffer src, dst;
     CHECK(vkCreateBuffer(dev, &bci, NULL, &src), "vkCreateBuffer(external src)");
-    bci.pNext = NULL;
-    CHECK(vkCreateBuffer(dev, &bci, NULL, &dst), "vkCreateBuffer(internal dst)");
+    CHECK(vkCreateBuffer(dev, &bci, NULL, &dst), "vkCreateBuffer(external dst)");
 
     VkMemoryRequirements mr;
     vkGetBufferMemoryRequirements(dev, src, &mr);
@@ -271,28 +311,9 @@ int main(int argc, char** argv)
             mtype = i;
             break;
         }
-
-    VkImportMemoryFdInfoKHR import = { .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
-        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
-        .fd = dmabuf };
-    VkMemoryDedicatedAllocateInfo ded
-        = { .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, .pNext = &import, .buffer = src };
-    VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .pNext = &ded,
-        .allocationSize = mr.size,
-        .memoryTypeIndex = mtype };
-    VkDeviceMemory msrc;
-    CHECK(vkAllocateMemory(dev, &mai, NULL, &msrc), "vkAllocateMemory(import dma-buf)");
-    vkBindBufferMemory(dev, src, msrc, 0);
-    VkDeviceMemory mdst;
-    VkMemoryAllocateInfo mai2
-        = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = mtype };
-    CHECK(vkAllocateMemory(dev, &mai2, NULL, &mdst), "vkAllocateMemory(internal dst)");
-    vkBindBufferMemory(dev, dst, mdst, 0);
-    volatile uint32_t* dst_cpu;
-    vkMapMemory(dev, mdst, 0, mr.size, 0, (void**)&dst_cpu);
-    for (uint32_t i = 0; i < 256; i++)
-        dst_cpu[i] = 0xdeadbeefu;
+    VkDeviceMemory msrc = import_dmabuf(dev, mtype, mr, src_fd, src);
+    VkDeviceMemory mdst = import_dmabuf(dev, mtype, mr, dst_fd, dst);
+    printf("ok   imported two dma-bufs (read+write) mtype=%u\n", mtype);
 
     VkDescriptorPoolSize dps = { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 2 };
     VkDescriptorPoolCreateInfo dpci = {
@@ -345,18 +366,27 @@ int main(int argc, char** argv)
     CHECK(vkQueueSubmit(queue, 1, &si, fence), "vkQueueSubmit");
     CHECK(vkWaitForFences(dev, 1, &fence, VK_TRUE, 5000000000ull), "vkWaitForFences");
 
-    uint32_t bad = 0;
-    for (uint32_t i = 0; i < 256; i++)
+    // The destination DMA-BUF must show the shader's writes through a coherent
+    // CPU mmap; the source must be unchanged.
+    sync_cpu(dst_fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ);
+    sync_cpu(src_fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ);
+    uint32_t bad_dst = 0, bad_src = 0;
+    for (uint32_t i = 0; i < 256; i++) {
         if (dst_cpu[i] != 0x11111112u) {
-            if (bad < 4)
-                fprintf(stderr, "  word %u: got 0x%08x want 0x11111112\n", i, dst_cpu[i]);
-            bad++;
+            if (bad_dst < 4)
+                fprintf(stderr, "  dst word %u: got 0x%08x want 0x11111112\n", i, dst_cpu[i]);
+            bad_dst++;
         }
-    if (bad) {
-        fprintf(stderr, "FAIL origin=%s %u/256 words wrong\n", origin, bad);
+        if (src_cpu[i] != 0x11111111u)
+            bad_src++;
+    }
+    sync_cpu(dst_fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
+    sync_cpu(src_fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
+    if (bad_dst || bad_src) {
+        fprintf(stderr, "FAIL origin=%s dst_wrong=%u src_changed=%u\n", origin, bad_dst, bad_src);
         return 1;
     }
-    printf("PASS origin=%s compute=256/256 dma-buf-import=exact\n", origin);
+    printf("PASS origin=%s read-import=exact write-import=exact cpu-coherent=256/256\n", origin);
 
     vkDestroyFence(dev, fence, NULL);
     vkFreeCommandBuffers(dev, cmdp, 1, &cb);
@@ -373,7 +403,9 @@ int main(int argc, char** argv)
     vkDestroyDevice(dev, NULL);
     vkDestroyInstance(inst, NULL);
     munmap((void*)src_cpu, bytes);
-    close(dmabuf);
+    munmap((void*)dst_cpu, bytes);
+    close(src_fd);
+    close(dst_fd);
     free(code);
     free(devs);
     free(qf);
