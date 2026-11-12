@@ -6146,6 +6146,7 @@ decoder resolved at runtime to `/dev/video17`. Every run below is guarded
 | Chrome 156, 640x360 alt-ref clip, 60 s, Import, run B | `submitted=1588 completed=1588 errors=0 drops=0 misplaced=0 retained=12`; 1439 decoded / 0 dropped |
 | Chrome 156, 1280x720 clip, 60 s, Import, run C (driver above) | 1705 `submit`, 1705 `publish=import`, 0 `publish=drop`, 0 `publish=error`, 0 `publish=misplaced`, 1154 `target detached`; 1440 decoded / 0 dropped |
 | Chrome 156, same clip and window, Copy baseline (installed `323c07cb…`, `memory=mmap`) | `submitted=1705 completed=1702 drops=3`; 1440 decoded / 0 dropped |
+| `test/iris-real-clip-gate.sh`, `IRIS_REAL_CLIP_SET=drc` (session-change regression) | 80/80 exact framemd5, `submitted=84 completed=84 import=42 copy=42 invisible=63` — the AV1 resolution-change record unchanged |
 
 The Copy baseline is the number the Import path has to beat: it dropped 3 of
 1705 and completed 1702, while Import completed every submitted picture and
