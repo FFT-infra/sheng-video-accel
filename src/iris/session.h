@@ -72,6 +72,13 @@ struct Target {
     unsigned invisible = 0;
     Publish publish = Publish::Direct;
     StableBuffer* destination = nullptr; // Copy / Import: where pixels go
+    // The client destroyed the surface while this picture was still with the
+    // firmware. Under Import the picture already has its buffer in the
+    // firmware's hands, so it completes normally and the pixels stay where
+    // the client put them; `destination` is never touched on that path, which
+    // is what makes it safe to keep a copy of the target here after the
+    // surface is gone.
+    bool detached = false;
     unsigned width = 0, height = 0;
     // VA fourcc of the target surface (NV12 or P010). The first submitted
     // target fixes the session's CAPTURE format: a VA client may create its
@@ -147,6 +154,9 @@ public:
     // token so a late completion is dropped, never published.
     void release(Target& target);
     void release_locked(Target& target);
+    // Erases a token from `pending_` together with any retained copy.
+    void forget(std::map<uint64_t, Target*>::iterator it);
+    void forget_token(uint64_t token);
 
     // Finish the stream: flush, STOP, wait LAST. After this no submit is
     // accepted. Called from destroyContext.
@@ -203,6 +213,12 @@ private:
     // Live tokens -> targets. A token leaves the map when it completes,
     // errors, or its target is released.
     std::map<uint64_t, Target*> pending_;
+    // Storage for targets whose surface outlived the client's interest: an
+    // Import picture the firmware still owns. The map owns the copy so the
+    // pointer in `pending_` stays valid until the completion is handled; the
+    // entry is erased with the token, never later.
+    std::map<uint64_t, Target> retained_;
+    unsigned retained_total_ = 0;
     bool source_change_ = false;
     bool saw_last_ = false;
     bool cold_ = true; // no completion yet in this session

@@ -777,6 +777,46 @@ void test_import_queues_client_buffer_per_picture()
     CHECK(h.session->stats().misplaced == 0);
 }
 
+void test_import_released_target_completes_instead_of_dropping()
+{
+    // Chrome destroys a surface as soon as it has composited the frame, often
+    // while the picture is still with the firmware. Under Import the client's
+    // buffer is already in the firmware's hands and the backlog holds its own
+    // duplicate of the fd, so the picture is delivered rather than lost: the
+    // session keeps a copy of the target and publishes the completion. A
+    // Chrome session read `completed=177 drops=541` because it counted these
+    // as drops instead.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    const Layout layout = capture_layout_of({});
+    Target t;
+    t.publish = Publish::Import;
+    {
+        ClientBuffer a(layout);
+        t.destination = a.stable.get();
+        h.submit(t);
+        CHECK(h.session->capture_queued() == 1);
+        CHECK(same_buffer(h.fake->capture_fd(0), a.fd));
+        // The client drops the surface and its buffer mid-flight. Nothing may
+        // read that memory after this point: `destination` is a dangling
+        // pointer from here on and the Import path must not touch it.
+        h.session->release(t);
+        CHECK(!t.pending);
+    }
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(h.session->stats().drops == 0);
+    CHECK(h.session->stats().completed == 1);
+    CHECK(h.session->stats().errors == 0);
+    CHECK(h.session->stats().misplaced == 0);
+    CHECK(h.session->capture_queued() == 0);
+    CHECK(h.session->capture_held() == 0);
+    // The copy of the target dies with its token, so a second release of the
+    // same (now reused) Target is a no-op rather than a second completion.
+    h.session->release(t);
+    CHECK(h.session->stats().completed == 1);
+}
+
 void test_import_misplaced_completion_is_an_error()
 {
     Harness h;
@@ -1073,6 +1113,8 @@ int main()
         { "visible rectangle prefers sane kernel compose", test_visible_rectangle_prefers_kernel_compose_when_sane },
         { "stable layout", test_stable_layout },
         { "import queues the client buffer per picture", test_import_queues_client_buffer_per_picture },
+        { "import released target completes instead of dropping",
+            test_import_released_target_completes_instead_of_dropping },
         { "import misplaced completion is an error", test_import_misplaced_completion_is_an_error },
         { "import rejected on a display-order kernel", test_import_rejected_on_display_order_kernel },
         { "import rejected for an unqualified codec", test_import_rejected_for_an_unqualified_codec },

@@ -445,6 +445,11 @@ capture error index=<i> flags=<hex>                                  (error mark
                                                                       stock kernel zeroes the timestamp)
 capture error index=<i> flags=<hex> token=<n> publish=drop            (timestamped error whose token
                                                                       is no longer pending)
+target detached token=<n>
+                                                     (Import target released by the client while
+                                                      its picture was still with the firmware; the
+                                                      session keeps the target until the completion
+                                                      so the picture is published, not dropped)
 capture error token=<n> index=<i> flags=<hex> publish=misplaced slot_token=<n>
                                                                      (error completion in Import whose
                                                                       buffer belongs to another token;
@@ -463,7 +468,11 @@ sync timeout token=<n> pending=<n> queued=<n> held=<n> action=drain|fail
 session reconfigure <w>x<h> ->
 session reconfigure -> <w>x<h>
 session failed: <reason>
-session finish submitted=<n> completed=<n> errors=<n> drops=<n> timeouts=<n> drains=<n> misplaced=<n>
+session finish submitted=<n> completed=<n> errors=<n> drops=<n> timeouts=<n> drains=<n> misplaced=<n> retained=<n>
+                                                     (retained counts Import targets the client
+                                                      destroyed while their picture was still with
+                                                      the firmware: the picture completes into the
+                                                      buffer the client exported and is not a drop)
 event source-change state=<n>
 output error token=<n> output=<i>
 import token=<n> index=<i> fd=<n> backlog=<n> abandoned=0|1 lent=<n>/<n>
