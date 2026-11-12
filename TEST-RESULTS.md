@@ -6527,3 +6527,43 @@ The firmware may still decode 12-bit internally, but there is no format to
 deliver it in, so no buffer-level gate exists for this platform and the
 capability table's `rejected` entry cannot be upgraded by any stream. The
 entry stays as it is; this run adds the reason, not a capability.
+
+## Encoder rejections: which are the format space and which are this driver (2026-11-12)
+
+H3 asks whether every rejected encode feature is a hardware limit or a policy
+entry. The encoder node answers most of it without encoding anything.
+
+Identity: driver `323c07cbd42f5a15…`, module `b90bd823fdab9895…`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot `b2f1de2f-b3da-4e24-9fa4-163e489d929f`.
+The encoder node is `/dev/video18`, resolved by `iris_resolve_encoder`
+(QUERYCAP `iris_driver`, compressed format on CAPTURE).
+
+Raw input (OUTPUT) formats: `NV12`, `Q08C`. Coded (CAPTURE) formats: `H264`,
+`HEVC`. Relevant controls, read with `v4l2-ctl --list-ctrls-menus`:
+
+| Control | Range / menu | What it means here |
+| --- | --- | --- |
+| `video_b_frames` | 0..1, default 0 | the node accepts one B-frame |
+| `hevc_profile` | `Main`, `Main Still Picture`, `Main 10` | Main 10 is listed |
+| `h264_profile` | `Baseline`, `Constrained Baseline`, `Main`, `High`, `Constrained High` | the node accepts five; the table exposes three (Baseline and Constrained High are not exposed, which is a profile decision outside H3's list) |
+| `enable_h264_hierarchical_coding`, `h264_hierarchical_coding_type`, layer bitrates | 0..1, 0..5 layers | temporal layers exist |
+| `ltr_count`, `frame_ltr_index`, `use_ltr_frames` | 0..2, -1..1, bitmask 0x3 | long-term references exist |
+| `prepend_sps_and_pps_to_idr` | 0..1 | the node's own header mechanism |
+
+No control exists for multi-slice, weighted prediction, scaling lists, chroma
+QP offsets or a reference count. Mapping the table's `rejected` list onto that:
+
+| Rejected entry | Node-level fact | Verdict |
+| --- | --- | --- |
+| B-frames | `video_b_frames` accepts 1 | **this driver pins it to 0** (`src/iris/encode.cc:176`); VA's encode interface has no field to request B-frames, so the entry stays as the surface's behaviour, not as a hardware limit |
+| packed headers | no V4L2 equivalent; `prepend_sps_and_pps_to_idr` is the node's own mechanism | interface-level, unchanged |
+| multi-slice | no control | not requestable through V4L2 |
+| weighted prediction, scaling lists, chroma QP offsets | no controls | not requestable; the firmware default applies |
+| more than one reference index | no reference-count control (LTR and temporal layers are different knobs and stay at 0) | not requestable through V4L2 |
+| 10-bit or non-4:2:0 | the raw port accepts `NV12` and `Q08C` only | hardware-backed: no input format carries 10 bits or another chroma layout |
+| HEVC Main10 | `hevc_profile` lists `Main 10`, but the raw port has no `P010` | the profile is advertised and the input format space is not; the entry stays rejected and this is the reason |
+
+`src/iris/encode.cc:140` is where the second-to-last row is enforced: the
+driver sets the raw format to `NV12` and refuses the context if the node does
+not accept it. No capability entry changes; what changes is that the reasons
+are now recorded instead of implied.
