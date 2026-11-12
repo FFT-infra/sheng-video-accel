@@ -295,6 +295,9 @@ void test_timestamped_corrupt_completion_fails_target_at_once()
     h.session->service();
     CHECK(!b.pending && b.error);
     CHECK(h.session->stats().errors == 1);
+    // Invariant 18, the other direction: a corrupt shown picture is failed,
+    // never published as a hidden one, so `completed` does not move.
+    CHECK(h.session->stats().completed == 1);
     // The target is failed before any drain: a wait reports the decode error,
     // not a timeout, and no STOP was needed to get there.
     CHECK_THROWS(h.session->wait(b), VA_STATUS_ERROR_DECODING_ERROR);
@@ -321,6 +324,33 @@ void test_timestamped_hidden_picture_is_published_not_failed()
     h.session->service();
     CHECK(b.completed && !b.error);
     CHECK(h.session->stats().errors == 0);
+}
+
+void test_noshow_completion_never_lands_on_a_shown_surface()
+{
+    // Invariant 18, in the direction the hidden-picture case does not cover:
+    // a NOSHOW completion that names a shown picture must fail that picture.
+    // Its token comes from the error-timestamp patch, its shape (ERROR, no
+    // picture-type bit, no payload) says alt-ref, and the target was
+    // submitted with one completion and no invisible half to explain the
+    // extra one. Publishing it would put a decoded-but-never-shown frame on
+    // the surface the client asked to display.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    Target a;
+    h.submit(a);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(a.completed && !a.error);
+    h.fake->inject_timestamped_errors(1);
+    Target b;
+    h.submit(b);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(!b.completed && b.error);
+    CHECK(h.session->stats().errors == 1);
+    CHECK(h.session->stats().completed == 1);
+    CHECK_THROWS(h.session->wait(b), VA_STATUS_ERROR_DECODING_ERROR);
 }
 
 void test_vp9_altref_superframe_is_one_picture()
@@ -1135,6 +1165,8 @@ int main()
         { "timestamped corrupt completion fails target at once",
             test_timestamped_corrupt_completion_fails_target_at_once },
         { "timestamped hidden picture is published", test_timestamped_hidden_picture_is_published_not_failed },
+        { "noshow completion never lands on a shown surface",
+            test_noshow_completion_never_lands_on_a_shown_surface },
         { "VP9 alt-ref superframe is one picture", test_vp9_altref_superframe_is_one_picture },
         { "install hidden frame needs no extra target", test_install_hidden_frame_needs_no_extra_target },
         { "hidden install unit publishes its client half", test_hidden_install_unit_publishes_its_client_half },
