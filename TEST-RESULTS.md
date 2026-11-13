@@ -7447,6 +7447,24 @@ touches the shared `run_vpp` path: `tonemap_gate.sh`,
 `run-20261113T092854Z`, `run-20261113T092931Z`, `run-20261113T093009Z`,
 `run-20261113T093046Z`).
 
+The artifact above is what `/usr/lib64/dri` now serves, so the decode, encode and
+browser paths were re-run on it with `LIBVA_DRIVERS_PATH` unset:
+
+| gate | run | result |
+| --- | --- | --- |
+| `iris-matrix.sh` | `run-20261113T093608Z` | H.264, HEVC, VP9, AV1: 48/48 frames exact, `drops=0` |
+| `iris-real-clip-gate.sh` | `run-20261113T094012Z` | AV1 120/120 `import=120 copy=0`; DRC 80 frames `import=42 copy=42` |
+| `iris-encode-quality.sh` | `run-20261113T093721Z` | 120 frames each, IRQ +238 H.264 / +239 HEVC, SSIM 0.9986 / 0.9968 |
+| `iris-browser-acceptance.sh` | `run-20261113T094050Z` | Chrome 156 `VaapiVideoDecoder`, `platform=True`, 477 frames, 0 dropped |
+| `iris-av1-browser-matrix.sh local-only` | `run-20261113T094128Z` | Firefox 485 decoded / 9 dropped `hw_log=True`; Chrome 477 / 0 |
+
+All five at commit `2817112`, `source_dirty=0`, guard `complete`, exit 0; battery
+54 % discharging through the set, thermal peak 46.1 °C, boot `4b73926c…`
+unchanged from the first run to the last. Three earlier attempts in this set are
+recorded `interrupted` because the gates were invoked without
+`IRIS_REAL_CLIP_DIR` and the browser clip arguments and exited 2 before doing
+any work; they are a record of the mis-invocation, not of the driver.
+
 ### The real client
 
 The probe mirrors what the code says a client sends; FFmpeg says what it
