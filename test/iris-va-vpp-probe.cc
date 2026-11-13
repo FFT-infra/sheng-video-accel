@@ -825,6 +825,9 @@ int run_overlay(int argc, char** argv)
     main_params.output_color_standard = VAProcColorStandardBT709;
     VAProcPipelineParameterBuffer overlay_params = main_params;
     overlay_params.surface = overlay_surface;
+    // FFmpeg clears the overlay's region even though it copies the main pass:
+    // the overlay surface is scaled into its output region as a whole.
+    overlay_params.surface_region = nullptr;
     overlay_params.output_region = &region;
     overlay_params.blend_state = &blend;
 
