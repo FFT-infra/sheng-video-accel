@@ -19,7 +19,8 @@
 #
 # The refusals are part of the contract: premultiplied alpha, luma keying, a
 # third pass, a blend before the pass it blends onto, an odd or out-of-bounds
-# rectangle and an alpha outside 0..1 are all refused rather than approximated.
+# rectangle, a crop of the main surface and an alpha outside 0..1 are all
+# refused rather than approximated.
 # So is the whole entrypoint without V4L2_VA_VPP.
 
 set -eu
@@ -164,6 +165,7 @@ refuse third-pass 128 72 64 48 16 16 64 48 0.50 --third
 refuse blend-first 128 72 64 48 16 16 64 48 0.50 --blend-first
 refuse outside 128 72 64 48 112 16 32 48 0.50
 refuse odd-region 128 72 64 48 17 16 32 48 0.50
+refuse main-crop 128 72 64 48 16 16 64 48 0.50 --main-crop
 refuse alpha-range 128 72 64 48 16 16 64 48 1.50
 
 echo "== opt-in is required: the same client is refused without V4L2_VA_VPP"
@@ -184,4 +186,4 @@ printf 'driver_sha256=%s\n' "$driver_hash"
 printf 'decoder=%s\n' "$device"
 printf 'cases=%s\n' "$(echo "$cases" | wc -w)"
 printf 'oracle=the documented mix in double precision, plus both endpoint frames byte for byte\n'
-echo "PASS va-vpp-overlay cases=5 endpoints=2 refused=7 driver=$driver_hash"
+echo "PASS va-vpp-overlay cases=5 endpoints=2 refused=8 driver=$driver_hash"

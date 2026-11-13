@@ -654,8 +654,8 @@ then the two endpoints against the input frames themselves — an alpha of 0 ove
 the whole surface must reproduce the main frame byte for byte and an alpha of 1
 the overlay frame, which a kernel that read the wrong plane or ignored the alpha
 cannot do. Premultiplied alpha, luma keying, a third pass, a blend before its
-base pass, an odd or out-of-bounds rectangle and an alpha outside 0..1 are
-required to be refused. The SPIR-V the driver embeds is
+base pass, an odd or out-of-bounds rectangle, a crop of the main surface and an
+alpha outside 0..1 are required to be refused. The SPIR-V the driver embeds is
 regenerated from the pinned module and compared by `test/run-static-checks.sh`.
 
 ## 10. Invariants (the ones tests exist for)

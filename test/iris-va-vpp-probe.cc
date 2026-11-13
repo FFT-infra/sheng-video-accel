@@ -28,7 +28,7 @@
 //   iris-va-vpp-probe overlay <render-node> <W> <H> <ovW> <ovH> <x> <y>
 //                     <rw> <rh> <alpha> <out.raw>
 //                     [--p010] [--premultiplied] [--luma-key] [--third]
-//                     [--blend-first] [--expect-refusal]
+//                     [--blend-first] [--main-crop] [--expect-refusal]
 //
 // The third mode submits two pipeline buffers in one picture, the way
 // overlay_vaapi does: the main surface over the whole output, then the
@@ -671,6 +671,7 @@ void overlay_usage(const char* argv0)
     std::fprintf(stderr,
         "usage: %s overlay <render-node> <W> <H> <ovW> <ovH> <x> <y> <rw> <rh> <alpha> <out.raw>\n"
         "                 [--p010] [--premultiplied] [--luma-key] [--third] [--blend-first]\n"
+        "                 [--main-crop]\n"
         "                 [--expect-refusal]\n",
         argv0);
 }
@@ -693,7 +694,7 @@ int run_overlay(int argc, char** argv)
     const double alpha = std::atof(argv[9]);
     const char* out_path = argv[10];
     bool p010 = false, premultiplied = false, luma_key = false, third = false, blend_first = false;
-    bool expect_refusal = false;
+    bool main_crop = false, expect_refusal = false;
     for (int i = 11; i < argc; ++i) {
         if (std::strcmp(argv[i], "--p010") == 0)
             p010 = true;
@@ -705,6 +706,8 @@ int run_overlay(int argc, char** argv)
             third = true;
         else if (std::strcmp(argv[i], "--blend-first") == 0)
             blend_first = true;
+        else if (std::strcmp(argv[i], "--main-crop") == 0)
+            main_crop = true;
         else if (std::strcmp(argv[i], "--expect-refusal") == 0)
             expect_refusal = true;
         else {
@@ -811,6 +814,12 @@ int run_overlay(int argc, char** argv)
     // that same buffer with its own surface, region and blend state.
     VAProcPipelineParameterBuffer main_params = {};
     main_params.surface = main_surface;
+    // FFmpeg names the main frame's whole region even though it covers the
+    // pass, and leaves the overlay's region null; both shapes are exercised.
+    VARectangle half = {};
+    half.width = static_cast<uint16_t>(width / 2);
+    half.height = static_cast<uint16_t>(height / 2);
+    main_params.surface_region = main_crop ? &half : &full;
     main_params.output_region = &full;
     main_params.surface_color_standard = VAProcColorStandardBT709;
     main_params.output_color_standard = VAProcColorStandardBT709;

@@ -259,8 +259,6 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         iris::require(!tone_map, "a blended picture does not tone map", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
         iris::require(blend->filters == 0, "the blending pass carries no filter",
             VA_STATUS_ERROR_UNSUPPORTED_FILTER);
-        iris::require(!job.region_set, "a blended picture does not crop the main surface",
-            VA_STATUS_ERROR_UNSUPPORTED_FILTER);
         iris::require(job.rotation == VA_ROTATION_NONE, "a blended picture does not rotate",
             VA_STATUS_ERROR_UNSUPPORTED_FILTER);
         // The overlay is mixed in the main pass's coded values, so naming a
@@ -357,6 +355,13 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
             // size is the output's, and draws the overlay into one rectangle.
             iris::require(source->width == target->width && source->height == target->height,
                 "a blended picture keeps the main surface's size", VA_STATUS_ERROR_INVALID_PARAMETER);
+            // FFmpeg names the main frame's whole region on every pass, crop or
+            // not, so that region is accepted; a smaller one would mean a crop
+            // the kernel does not do.
+            iris::require(!job.region_set
+                    || (job.region.x == 0 && job.region.y == 0 && job.region.width == source->width
+                        && job.region.height == source->height),
+                "a blended picture reads the whole main surface", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
             iris::require(!blend->region_set, "the overlay samples its whole surface",
                 VA_STATUS_ERROR_UNSUPPORTED_FILTER);
             iris::require(blend->output_region_set, "the blending pass needs an output region",
