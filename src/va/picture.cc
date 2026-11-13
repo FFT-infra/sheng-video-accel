@@ -176,14 +176,20 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
     iris::require(p.output_hdr_metadata == nullptr, "VPP HDR metadata is not supported",
         VA_STATUS_ERROR_UNSUPPORTED_FILTER);
     // The blend state is copied: the client's pointer dies with vaEndPicture.
-    // Per-pixel alpha (premultiplied) and luma keying are separate kernels
-    // that do not exist here, so naming either is refused rather than ignored.
+    // A global alpha and a premultiplied source are the two blend flags the
+    // kernels implement; luma keying is a third mode that does not exist here,
+    // so naming it is refused rather than ignored.
     VABlendState blend = {};
     if (blending) {
         blend = *p.blend_state;
-        iris::require((blend.flags & ~static_cast<unsigned>(VA_BLEND_GLOBAL_ALPHA)) == 0,
-            "only global-alpha blending is supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
-        iris::require(blend.global_alpha >= 0.0f && blend.global_alpha <= 1.0f,
+        iris::require((blend.flags
+                          & ~static_cast<unsigned>(VA_BLEND_GLOBAL_ALPHA | VA_BLEND_PREMULTIPLIED_ALPHA))
+                == 0,
+            "only global and premultiplied alpha blending is supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+        // A blend state without VA_BLEND_GLOBAL_ALPHA uses no global alpha at
+        // all, so its alpha field is not read.
+        iris::require((blend.flags & VA_BLEND_GLOBAL_ALPHA) == 0
+                || (blend.global_alpha >= 0.0f && blend.global_alpha <= 1.0f),
             "blend alpha is outside 0..1", VA_STATUS_ERROR_INVALID_PARAMETER);
     }
     iris::require(p.rotation_state <= VA_ROTATION_270, "invalid VPP rotation",
@@ -221,7 +227,8 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
     job.input_standard = input_standard;
     job.output_standard = output_standard;
     job.explicit_colour_properties_equal = colour_properties_equal;
-    job.global_alpha = blend.global_alpha;
+    job.global_alpha = (blend.flags & VA_BLEND_GLOBAL_ALPHA) ? blend.global_alpha : 1.0f;
+    job.premultiplied = (blend.flags & VA_BLEND_PREMULTIPLIED_ALPHA) != 0;
     if (p.surface_region) {
         job.region = *p.surface_region;
         job.region_set = true;
@@ -328,6 +335,9 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
     Pixels src, dst, ov;
     VARectangle crop = {};
     VARectangle rect = {};
+    // The overlay surface is either the output's Y'CbCr format or one of the
+    // packed RGB formats the processor converts while it mixes.
+    bool overlay_rgb = false;
     // Keep the sources alive across the dispatch: the fd captured below is
     // closed when its Surface dies, and a client that destroys a source
     // while this picture is running must not pull the buffer out from under
@@ -401,8 +411,13 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
             overlay_surface = surface(d, blend->source);
             iris::require(overlay_surface.get() != target.get() && overlay_surface.get() != source.get(),
                 "the overlay is a third surface", VA_STATUS_ERROR_INVALID_PARAMETER);
-            iris::require(overlay_surface->fourcc == target->fourcc,
-                "the overlay shares the output's format", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+            const uint32_t ov_fourcc = overlay_surface->fourcc;
+            overlay_rgb = ov_fourcc == VA_FOURCC_BGRA || ov_fourcc == VA_FOURCC_RGBA;
+            iris::require(overlay_rgb
+                    ? target->fourcc == VA_FOURCC_NV12 || target->fourcc == VA_FOURCC_P010
+                    : ov_fourcc == target->fourcc,
+                "the overlay is the output's format or a packed RGBA/BGRA surface",
+                VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
             iris::require(overlay_surface->target.pending || overlay_surface->target.frame
                     || overlay_surface->stable,
                 "the overlay surface holds no pixels", VA_STATUS_ERROR_OPERATION_FAILED);
@@ -416,8 +431,11 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
             // each chroma cell, which this kernel does not do.
             iris::require(!((rect.x | rect.y | rect.width | rect.height) & 1),
                 "the overlay region must be even", VA_STATUS_ERROR_INVALID_PARAMETER);
+            // A packed RGB overlay is sampled per pixel, so no subsampling
+            // constraint reaches its own geometry; the rectangle still has
+            // one, because the output's chroma cells do.
             iris::require(overlay_surface->width && overlay_surface->height
-                    && !((overlay_surface->width | overlay_surface->height) & 1u),
+                    && (overlay_rgb || !((overlay_surface->width | overlay_surface->height) & 1u)),
                 "the overlay needs an even, non-empty geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
         }
 
@@ -490,7 +508,47 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         tj.source_peak_nits = *c.vpp_peak_nits;
         ran = iris::vpp::tonemap_hdr10_to_sdr(tj);
     }
-    if (ran && blend) {
+    if (ran && blend && overlay_rgb) {
+        iris::vpp::OverlayRgbJob oj;
+        oj.main_fd = base.fd;
+        oj.overlay_fd = ov.fd;
+        oj.dst_fd = dst.fd;
+        oj.main_size = base.size;
+        oj.overlay_size = ov.size;
+        oj.dst_size = dst.size;
+        oj.main_stride = base.layout.stride;
+        oj.overlay_stride = ov.layout.stride;
+        oj.dst_stride = dst.layout.stride;
+        oj.main_uv = base.layout.chroma_offset();
+        oj.dst_uv = dst.layout.chroma_offset();
+        oj.main_y = base.layout.data_offset;
+        oj.main_x = static_cast<uint32_t>(crop.x);
+        oj.main_row = static_cast<uint32_t>(crop.y);
+        oj.overlay_y = ov.layout.data_offset;
+        oj.dst_y = dst.layout.data_offset;
+        oj.overlay_width = overlay_surface->width;
+        oj.overlay_height = overlay_surface->height;
+        oj.x = static_cast<uint32_t>(rect.x);
+        oj.y = static_cast<uint32_t>(rect.y);
+        oj.width = rect.width;
+        oj.height = rect.height;
+        oj.dst_width = target->width;
+        oj.dst_height = target->height;
+        oj.bytes = base.layout.fourcc == VA_FOURCC_P010 ? 2 : 1;
+        oj.bgra = overlay_surface->fourcc == VA_FOURCC_BGRA;
+        oj.premultiplied = blend->premultiplied;
+        // The matrix is the output frame's. A tone-mapped picture has already
+        // converted to BT.709 and names that or nothing, so this is the same
+        // standard the main surface carries in every supported picture.
+        if (job.output_standard == VAProcColorStandardBT601)
+            oj.standard = 1;
+        else if (job.output_standard == VAProcColorStandardBT2020)
+            oj.standard = 2;
+        else
+            oj.standard = 0;
+        oj.alpha = blend->global_alpha;
+        ran = iris::vpp::overlay_rgb(oj);
+    } else if (ran && blend) {
         iris::vpp::OverlayJob oj;
         oj.main_fd = base.fd;
         oj.overlay_fd = ov.fd;
@@ -522,6 +580,7 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         // Both sides of the mix are the same format: the tone-mapped
         // scratch is NV12 and the overlay was checked against the output.
         oj.bytes = base.layout.fourcc == VA_FOURCC_P010 ? 2 : 1;
+        oj.premultiplied = blend->premultiplied;
         oj.alpha = blend->global_alpha;
         ran = iris::vpp::overlay(oj);
     } else if (ran && (!tone_map || tonemap_to_scratch)) {
@@ -562,10 +621,15 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
     target->failed = false;
     // The trailing field is the trace vocabulary docs/architecture.md §8
     // defines: which operation this picture ran beyond the scale.
-    char extra[96] = "";
-    if (blend)
-        std::snprintf(extra, sizeof(extra), " overlay=%u %ux%u+%d,%d alpha=%.2f", blend->source, rect.width,
-            rect.height, rect.x, rect.y, blend->global_alpha);
+    char extra[128] = "";
+    if (blend && overlay_rgb)
+        std::snprintf(extra, sizeof(extra), " overlay=%u %ux%u+%d,%d alpha=%.2f source=%s%s", blend->source,
+            rect.width, rect.height, rect.x, rect.y, blend->global_alpha,
+            overlay_surface->fourcc == VA_FOURCC_BGRA ? "bgra" : "rgba",
+            blend->premultiplied ? " premultiplied" : "");
+    else if (blend)
+        std::snprintf(extra, sizeof(extra), " overlay=%u %ux%u+%d,%d alpha=%.2f%s", blend->source, rect.width,
+            rect.height, rect.x, rect.y, blend->global_alpha, blend->premultiplied ? " premultiplied" : "");
     else if (tone_map)
         std::snprintf(extra, sizeof(extra), " tonemap=hdr10");
     d.trace("va end_picture ctx=%u surface=%u entrypoint=videoproc src=%u %ux%u->%ux%u%s", ctx_id, dst_id,

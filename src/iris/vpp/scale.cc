@@ -25,6 +25,7 @@
 #ifdef IRIS_HAVE_VULKAN_VPP
 
 #include "nv12_scale_spv.h"
+#include "overlay_rgb_spv.h"
 #include "overlay_spv.h"
 #include "p010_scale_spv.h"
 #include "tonemap_spv.h"
@@ -58,6 +59,20 @@ struct PushParams {
     uint32_t src_width, src_height, dst_width, dst_height;
     uint32_t rotation;
     uint32_t mirror;
+};
+
+// Must mirror the push-constant block in test/vulkan-vpp/overlay_rgb.comp.
+struct OverlayRgbParams {
+    uint32_t m_stride, m_uv, m_y;
+    uint32_t m_x, m_row;
+    uint32_t o_stride, o_y;
+    uint32_t d_stride, d_uv, d_y;
+    uint32_t o_width, o_height;
+    uint32_t r_x, r_y, r_w, r_h;
+    uint32_t dst_width, dst_height;
+    uint32_t bytes, bgra, premult;
+    uint32_t standard;
+    float alpha;
 };
 
 // Must mirror the push-constant block in test/vulkan-vpp/tonemap.comp.
@@ -102,6 +117,7 @@ struct OverlayParams {
     uint32_t dst_width, dst_height;
     uint32_t bytes;
     float alpha;
+    uint32_t premult;
 };
 
 // PQ (SMPTE ST 2084) code for a luminance in cd/m², and the BT.2390
@@ -577,6 +593,7 @@ bool overlay(const OverlayJob& job)
     push.dst_height = job.dst_height;
     push.bytes = job.bytes;
     push.alpha = job.alpha;
+    push.premult = job.premultiplied ? 1u : 0u;
 
     const PlaneBuffers buffers = { job.main_fd, job.overlay_fd, job.dst_fd, job.main_size, job.overlay_size,
         job.dst_size };
@@ -588,6 +605,64 @@ bool overlay(const OverlayJob& job)
     if (ok) {
         // One invocation per destination word, over the luma rows and the
         // half-height chroma plane.
+        const uint32_t words = (job.dst_width * job.bytes + 3) / 4;
+        const uint32_t rows = job.dst_height + job.dst_height / 2;
+        ok = dispatch(j, &push, sizeof(push), (words + 7) / 8, (rows + 7) / 8, family);
+    }
+    return ok;
+}
+
+bool overlay_rgb(const OverlayRgbJob& job)
+{
+    if (job.main_fd < 0 || job.overlay_fd < 0 || job.dst_fd < 0)
+        return false;
+    if (!job.dst_width || !job.dst_height || !job.overlay_width || !job.overlay_height || !job.width || !job.height)
+        return false;
+    if (job.bytes != 1 && job.bytes != 2)
+        return false;
+    // The destination word covers four luma samples (NV12) or two (P010), and
+    // an even rectangle keeps every chroma cell wholly inside it or wholly
+    // outside it.
+    if ((job.dst_width | job.dst_height | job.x | job.y | job.width | job.height | job.main_x | job.main_row) & 1u)
+        return false;
+    if (job.x + job.width > job.dst_width || job.y + job.height > job.dst_height)
+        return false;
+    if (!(job.alpha >= 0.0f && job.alpha <= 1.0f) || job.standard > 2)
+        return false;
+
+    OverlayRgbParams push = {};
+    push.m_stride = job.main_stride;
+    push.m_uv = job.main_uv;
+    push.m_y = job.main_y;
+    push.m_x = job.main_x;
+    push.m_row = job.main_row;
+    push.o_stride = job.overlay_stride;
+    push.o_y = job.overlay_y;
+    push.d_stride = job.dst_stride;
+    push.d_uv = job.dst_uv;
+    push.d_y = job.dst_y;
+    push.o_width = job.overlay_width;
+    push.o_height = job.overlay_height;
+    push.r_x = job.x;
+    push.r_y = job.y;
+    push.r_w = job.width;
+    push.r_h = job.height;
+    push.dst_width = job.dst_width;
+    push.dst_height = job.dst_height;
+    push.bytes = job.bytes;
+    push.bgra = job.bgra ? 1u : 0u;
+    push.premult = job.premultiplied ? 1u : 0u;
+    push.standard = job.standard;
+    push.alpha = job.alpha;
+
+    const PlaneBuffers buffers = { job.main_fd, job.overlay_fd, job.dst_fd, job.main_size, job.overlay_size,
+        job.dst_size };
+    Job j;
+    VkPhysicalDevice physical = VK_NULL_HANDLE;
+    uint32_t family = 0, memory_type = 0;
+    bool ok = make_job(j, buffers, kOverlayRgbSpv, kOverlayRgbSpvWords, sizeof(OverlayRgbParams), &physical, &family,
+        &memory_type);
+    if (ok) {
         const uint32_t words = (job.dst_width * job.bytes + 3) / 4;
         const uint32_t rows = job.dst_height + job.dst_height / 2;
         ok = dispatch(j, &push, sizeof(push), (words + 7) / 8, (rows + 7) / 8, family);
@@ -619,6 +694,11 @@ bool tonemap_hdr10_to_sdr(const ToneMapJob&)
 }
 
 bool overlay(const OverlayJob&)
+{
+    return false;
+}
+
+bool overlay_rgb(const OverlayRgbJob&)
 {
     return false;
 }

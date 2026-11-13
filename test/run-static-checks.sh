@@ -93,6 +93,9 @@ run vpp-spv-tonemap-header sh -c 'python3 "$1" "$2" | cmp -s - "$3"' sh \
 run vpp-spv-overlay-header sh -c 'python3 "$1" "$2" | cmp -s - "$3"' sh \
     "$test_dir/vulkan-vpp/spv-to-header.py" "$test_dir/vulkan-vpp/overlay.spv" \
     "$root/src/iris/vpp/overlay_spv.h"
+run vpp-spv-overlay-rgb-header sh -c 'python3 "$1" "$2" | cmp -s - "$3"' sh \
+    "$test_dir/vulkan-vpp/spv-to-header.py" "$test_dir/vulkan-vpp/overlay_rgb.spv" \
+    "$root/src/iris/vpp/overlay_rgb_spv.h"
 
 echo "== remote gate command transport"
 # The guard backgrounds its child. A `sh -s` child fed by a heredoc reads

@@ -34,6 +34,8 @@ VAStatus guarded(VADriverContextP ctx, const char* where, auto&& body)
 
 uint32_t fourcc_for(uint32_t rt_format)
 {
+    if (rt_format & VA_RT_FORMAT_RGB32)
+        return VA_FOURCC_BGRA;
     return (rt_format & VA_RT_FORMAT_YUV420_10) ? VA_FOURCC_P010 : VA_FOURCC_NV12;
 }
 
@@ -109,9 +111,11 @@ VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, 
     return guarded(ctx, "createSurfaces", [&] {
         auto& d = data(ctx);
         iris::require(width && height && count, "invalid surface geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
-        iris::require(format & (VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10), "unsupported RT format",
-            VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
-        const uint32_t fourcc = fourcc_for(format);
+        iris::require(format & (VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10 | VA_RT_FORMAT_RGB32),
+            "unsupported RT format", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+        iris::require(!(format & VA_RT_FORMAT_RGB32) || format == VA_RT_FORMAT_RGB32,
+            "RGB32 is the whole format, not a bit beside a YUV one", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+        uint32_t fourcc = fourcc_for(format);
         unsigned memory_type = VA_SURFACE_ATTRIB_MEM_TYPE_VA;
         const void* external = nullptr;
         for (unsigned i = 0; i < attribute_count; ++i) {
@@ -119,11 +123,20 @@ VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, 
             if (!(attribute.flags & VA_SURFACE_ATTRIB_SETTABLE))
                 continue;
             switch (attribute.type) {
-            case VASurfaceAttribPixelFormat:
+            case VASurfaceAttribPixelFormat: {
+                // A packed surface has two byte orders, so the client picks
+                // one; the YUV formats have exactly one fourcc each.
+                const uint32_t requested = attribute.value.type == VAGenericValueTypeInteger
+                    ? static_cast<uint32_t>(attribute.value.value.i) : 0;
+                const bool rgb = format == VA_RT_FORMAT_RGB32;
                 iris::require(attribute.value.type == VAGenericValueTypeInteger
-                        && static_cast<uint32_t>(attribute.value.value.i) == fourcc,
+                        && (rgb ? (requested == VA_FOURCC_BGRA || requested == VA_FOURCC_RGBA)
+                                : requested == fourcc),
                     "surface pixel format does not match the RT format", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+                if (rgb)
+                    fourcc = requested;
                 break;
+            }
             case VASurfaceAttribMemoryType:
                 memory_type = static_cast<unsigned>(attribute.value.value.i);
                 break;
@@ -335,7 +348,7 @@ VAStatus querySurfaceAttributes(VADriverContextP ctx, VAConfigID config, VASurfa
     auto it = d.configs.find(config);
     if (it == d.configs.end())
         return VA_STATUS_ERROR_INVALID_CONFIG;
-    VASurfaceAttrib list[8] = {};
+    VASurfaceAttrib list[10] = {};
     unsigned n = 0;
     auto add = [&](VASurfaceAttribType type, int value, unsigned flags) {
         list[n].type = type;
@@ -359,6 +372,14 @@ VAStatus querySurfaceAttributes(VADriverContextP ctx, VAConfigID config, VASurfa
     const bool vpp = profile == VAProfileNone && it->second.entrypoint == VAEntrypointVideoProc;
     if (!encoding && d.capabilities.p010 && (p010_decode_profile(profile) || vpp))
         add(VASurfaceAttribPixelFormat, VA_FOURCC_P010, VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
+    // Packed surfaces exist for the processor's overlay input only: a client
+    // uploads BGRA or RGBA and asks for it to be composited onto a YUV frame.
+    if (vpp) {
+        add(VASurfaceAttribPixelFormat, VA_FOURCC_BGRA,
+            VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
+        add(VASurfaceAttribPixelFormat, VA_FOURCC_RGBA,
+            VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
+    }
     const unsigned min_geometry = vpp ? kVppMinGeometry : d.capabilities.min_width;
     add(VASurfaceAttribMinWidth, static_cast<int>(min_geometry), VA_SURFACE_ATTRIB_GETTABLE);
     add(VASurfaceAttribMaxWidth, static_cast<int>(d.capabilities.max_width), VA_SURFACE_ATTRIB_GETTABLE);

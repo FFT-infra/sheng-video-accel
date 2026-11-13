@@ -1,0 +1,206 @@
+// SPDX-License-Identifier: MIT
+//
+// Global-alpha compositing of a packed-RGB overlay onto a Y'CbCr frame: the
+// main surface is copied into the output at its own scale, the packed overlay
+// surface is scaled into one rectangle of the output, and every pixel inside
+// that rectangle becomes
+//
+//     out = alpha * overlay + (1 - alpha) * main          (straight alpha)
+//     out = overlay + (1 - alpha) * main                  (premultiplied)
+//
+// The straight-alpha mix happens in one space. RGBA and Y'CbCr are both
+// affine functions of RGB, but the chroma pair of the YUV side carries an
+// offset (128) that a premultiplied RGB triple does not, so the kernel
+// normalises all three components to Y', Cb', Cr' in [-0.5, 0.5], mixes
+// there, and encodes once at the end. For the straight-alpha case that is the
+// same picture as mixing the codes.
+//
+// The conversion is a limited-range matrix chosen by the `standard` push
+// constant from the colour standard the picture names: BT.709 (the default,
+// kr = 0.2126, kb = 0.0722), BT.601 (0.299 / 0.114) or BT.2020
+// (0.2627 / 0.0593).
+//
+//     Y'  = kr R + (1 - kr - kb) G + kb B
+//     Cb' = (B - Y') / (2 (1 - kb))
+//     Cr' = (R - Y') / (2 (1 - kr))
+//
+// The RGB sample is read as a 32-bit word. VA names the fourcc in memory
+// order, so VA_FOURCC_BGRA (DRM_FORMAT_ARGB8888 on a little-endian host) is
+// B in the low byte and VA_FOURCC_RGBA (DRM_FORMAT_ABGR8888) is R there; the
+// `bgra` push constant selects. The alpha byte is not read: VA's blend state
+// carries one global alpha, and per-pixel alpha is not a blend flag this
+// driver advertises.
+//
+// The overlay sample position is the same swscale point map the scale kernel
+// uses, over the rectangle instead of the whole output. Each invocation owns
+// one 32-bit destination word: four luma samples and two chroma pairs for
+// NV12, two luma samples and one chroma pair for P010. The rectangle is even
+// on both axes, so every 2x2 luma block is wholly inside it or wholly
+// outside, and a destination chroma cell is never half blended.
+
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0, std430) readonly buffer Main { uint s[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Overlay { uint o[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer Dst { uint d[]; };
+layout(push_constant) uniform Params {
+    uint m_stride, m_uv, m_y;
+    // Where the main pass's rectangle starts inside its surface.
+    uint m_x, m_row;
+    // Overlay surface: row pitch in bytes, first pixel, and its size.
+    uint o_stride, o_y;
+    uint d_stride, d_uv, d_y;
+    uint o_width, o_height;
+    uint r_x, r_y, r_w, r_h;
+    uint dst_width, dst_height;
+    // Sample width of the Y'CbCr side (1 for NV12, 2 for P010), the overlay
+    // byte order (1 = BGRA, 0 = RGBA) and whether its colours are already
+    // multiplied by their alpha.
+    uint bytes, bgra, premult;
+    // Colour standard of the Y'CbCr side: 0 BT.709, 1 BT.601, 2 BT.2020.
+    uint standard;
+    float alpha;
+} p;
+
+// One Y'CbCr sample as its own code value: 0..255 for NV12, 0..1023 for P010.
+float code(uint off)
+{
+    uint w = s[off >> 2];
+    uint shift = (off & 3u) << 3;
+    return p.bytes == 1u ? float((w >> shift) & 255u) : float((w >> shift) & 0xffffu) / 64.0;
+}
+
+// The code as the bits of the destination word.
+uint code_bits(float v)
+{
+    float top = p.bytes == 1u ? 255.0 : 1023.0;
+    uint u = uint(clamp(floor(v + 0.5), 0.0, top));
+    return p.bytes == 1u ? u : (u << 6);
+}
+
+// 16.16 source step per destination sample, rounded to nearest like swscale.
+uint step(uint src, uint dst)
+{
+    return ((src << 16) + (dst >> 1)) / dst;
+}
+
+uint pick(uint i, uint inc)
+{
+    return (i * inc + (inc >> 1)) >> 16;
+}
+
+// The overlay pixel as RGB in 0..1.
+vec3 rgb_at(uint px, uint py)
+{
+    uint w = o[(p.o_y + py * p.o_stride + px * 4u) >> 2];
+    float r = float(p.bgra != 0u ? (w >> 16) & 255u : w & 255u);
+    float b = float(p.bgra != 0u ? w & 255u : (w >> 16) & 255u);
+    float g = float((w >> 8) & 255u);
+    return vec3(r, g, b) / 255.0;
+}
+
+// Normalised luma and the two chroma offsets for the picture's standard.
+vec3 to_ycbcr(vec3 rgb)
+{
+    float kr = 0.2126, kb = 0.0722;
+    if (p.standard == 1u) {
+        kr = 0.299;
+        kb = 0.114;
+    } else if (p.standard == 2u) {
+        kr = 0.2627;
+        kb = 0.0593;
+    }
+    float y = kr * rgb.r + (1.0 - kr - kb) * rgb.g + kb * rgb.b;
+    return vec3(y, (rgb.b - y) / (2.0 * (1.0 - kb)), (rgb.r - y) / (2.0 * (1.0 - kr)));
+}
+
+vec3 blend(vec3 overlay, vec3 main)
+{
+    if (p.premult != 0u)
+        return overlay + (1.0 - p.alpha) * main;
+    return p.alpha * overlay + (1.0 - p.alpha) * main;
+}
+
+// The code that carries zero and the distance to 1.0, per bit depth: the
+// 8-bit limited range is 16..235 and 128 +- 112, the 10-bit one is the same
+// range scaled by four.
+float luma_zero()
+{
+    return p.bytes == 1u ? 16.0 : 64.0;
+}
+
+float luma_span()
+{
+    return p.bytes == 1u ? 219.0 : 876.0;
+}
+
+float chroma_zero()
+{
+    return p.bytes == 1u ? 128.0 : 512.0;
+}
+
+float chroma_span()
+{
+    return p.bytes == 1u ? 224.0 : 896.0;
+}
+
+bool inside(uint x, uint y)
+{
+    return x >= p.r_x && x < p.r_x + p.r_w && y >= p.r_y && y < p.r_y + p.r_h;
+}
+
+void main()
+{
+    uint per_word = 4u / p.bytes;
+    uint words = (p.dst_width * p.bytes + 3u) / 4u;
+    uint word = gl_GlobalInvocationID.x;
+    if (word >= words)
+        return;
+    uint row = gl_GlobalInvocationID.y;
+    if (row >= p.dst_height + (p.dst_height >> 1))
+        return;
+
+    if (row < p.dst_height) {
+        uint hx = step(p.o_width, p.r_w);
+        uint hy = step(p.o_height, p.r_h);
+        uint packed = 0u;
+        for (uint k = 0u; k < per_word; ++k) {
+            uint dx = min(word * per_word + k, p.dst_width - 1u);
+            float m = (code(p.m_y + (row + p.m_row) * p.m_stride + (dx + p.m_x) * p.bytes) - luma_zero())
+                / luma_span();
+            if (inside(dx, row)) {
+                uint ox = pick(dx - p.r_x, hx);
+                uint oy = pick(row - p.r_y, hy);
+                m = blend(to_ycbcr(rgb_at(ox, oy)), vec3(m, 0.0, 0.0)).x;
+            }
+            packed |= code_bits(luma_zero() + luma_span() * m) << (k * 8u * p.bytes);
+        }
+        d[(p.d_y + row * p.d_stride + word * 4u) >> 2] = packed;
+    } else {
+        uint cy = row - p.dst_height;
+        uint cells = 2u / p.bytes;
+        uint cw = p.dst_width >> 1;
+        // The rectangle is even, so a chroma cell is inside exactly when its
+        // own half-scale coordinates are.
+        uint rx = p.r_x >> 1, ry = p.r_y >> 1;
+        uint rw = p.r_w >> 1, rh = p.r_h >> 1;
+        uint ow = p.o_width >> 1, oh = p.o_height >> 1;
+        uint hx = step(ow, rw);
+        uint hy = step(oh, rh);
+        uint packed = 0u;
+        for (uint k = 0u; k < cells; ++k) {
+            uint cx = min(word * cells + k, cw - 1u);
+            uint m_off = p.m_uv + (cy + (p.m_row >> 1)) * p.m_stride + (cx + (p.m_x >> 1)) * 2u * p.bytes;
+            vec2 m = (vec2(code(m_off), code(m_off + p.bytes)) - chroma_zero()) / chroma_span();
+            if (cx >= rx && cx < rx + rw && cy >= ry && cy < ry + rh) {
+                uint ox = pick(cx - rx, hx);
+                uint oy = pick(cy - ry, hy);
+                m = blend(to_ycbcr(rgb_at(ox, oy)), vec3(0.0, m)).yz;
+            }
+            float u = chroma_zero() + chroma_span() * m.x;
+            float v = chroma_zero() + chroma_span() * m.y;
+            packed |= (code_bits(u) | (code_bits(v) << (8u * p.bytes))) << (k * 16u);
+        }
+        d[(p.d_uv + cy * p.d_stride + word * 4u) >> 2] = packed;
+    }
+}

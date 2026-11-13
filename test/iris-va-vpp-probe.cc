@@ -96,7 +96,8 @@ bool write_file(const char* path, const uint8_t* bytes, size_t size)
 }
 
 // Packed NV12 (or P010, `bytes` = 2) rows into the surface's own layout,
-// through a derived image.
+// through a derived image; `bytes` = 4 is a packed BGRA/RGBA overlay, which
+// has one plane.
 bool upload(VADisplay display, VASurfaceID surface, const std::vector<uint8_t>& frame, unsigned width,
     unsigned height, unsigned bytes)
 {
@@ -112,10 +113,11 @@ bool upload(VADisplay display, VASurfaceID surface, const std::vector<uint8_t>& 
     for (unsigned y = 0; y < height; ++y)
         std::memcpy(base + image.offsets[0] + static_cast<size_t>(y) * image.pitches[0],
             frame.data() + static_cast<size_t>(y) * width * bytes, width * bytes);
-    for (unsigned y = 0; y < (height + 1) / 2; ++y)
-        std::memcpy(base + image.offsets[1] + static_cast<size_t>(y) * image.pitches[1],
-            frame.data() + static_cast<size_t>(width) * height * bytes + static_cast<size_t>(y) * width * bytes,
-            width * bytes);
+    if (bytes != 4)
+        for (unsigned y = 0; y < (height + 1) / 2; ++y)
+            std::memcpy(base + image.offsets[1] + static_cast<size_t>(y) * image.pitches[1],
+                frame.data() + static_cast<size_t>(width) * height * bytes + static_cast<size_t>(y) * width * bytes,
+                width * bytes);
     vaUnmapBuffer(display, image.buf);
     vaDestroyImage(display, image.image_id);
     return true;
@@ -745,17 +747,57 @@ void set_code(std::vector<uint8_t>& frame, size_t sample, unsigned bytes, unsign
 
 struct Mix {
     std::vector<uint8_t> main;
+    // The overlay frame: three planes packed as NV12/P010, or four bytes per
+    // pixel when `rgb` is set.
     std::vector<uint8_t> overlay;
     unsigned width = 0, height = 0;
     unsigned overlay_width = 0, overlay_height = 0;
     unsigned x = 0, y = 0, rect_width = 0, rect_height = 0;
     unsigned bytes = 1;
     double alpha = 1.0;
+    bool rgb = false;
+    bool bgra = true;
+    bool premultiplied = false;
+    // 0 BT.709, 1 BT.601, 2 BT.2020: the matrix the RGB kernel converts with.
+    unsigned standard = 0;
 };
 
 double mixed(double m, double o, double alpha)
 {
     return alpha * o + (1.0 - alpha) * m;
+}
+
+// The mix around the plane's neutral code: a premultiplied source already
+// carries its alpha, so only the main term is scaled and the offset comes off
+// it. The kernel does the same in overlay.comp.
+double mixed_codes(const Mix& mix, double m, double o, double neutral)
+{
+    if (mix.premultiplied)
+        return o + (1.0 - mix.alpha) * (m - neutral);
+    return mixed(m, o, mix.alpha);
+}
+
+// A premultiplied Y'CbCr frame: every sample moves toward its plane's neutral
+// by the global alpha, which is the data VA_BLEND_PREMULTIPLIED_ALPHA names.
+void premultiply_pattern(std::vector<uint8_t>& frame, unsigned width, unsigned height, unsigned bytes,
+    double alpha)
+{
+    const double luma = bytes == 2 ? 64.0 : 16.0;
+    const double chroma = bytes == 2 ? 512.0 : 128.0;
+    for (unsigned y = 0; y < height; ++y)
+        for (unsigned x = 0; x < width; ++x) {
+            const size_t i = static_cast<size_t>(y) * width + x;
+            set_code(frame, i, bytes,
+                static_cast<unsigned>(std::lround(luma + alpha * (code_at(frame, i, bytes) - luma))));
+        }
+    for (unsigned y = 0; y < height / 2; ++y)
+        for (unsigned x = 0; x < width / 2; ++x) {
+            const size_t cell = static_cast<size_t>(width) * height + static_cast<size_t>(y) * width + x * 2;
+            for (unsigned k = 0; k < 2; ++k)
+                set_code(frame, cell + k, bytes,
+                    static_cast<unsigned>(
+                        std::lround(chroma + alpha * (code_at(frame, cell + k, bytes) - chroma))));
+        }
 }
 
 void expected_composite(const Mix& mix, std::vector<uint8_t>& out)
@@ -767,7 +809,8 @@ void expected_composite(const Mix& mix, std::vector<uint8_t>& out)
         for (unsigned dx = 0; dx < mix.rect_width; ++dx) {
             const size_t m = static_cast<size_t>(mix.y + dy) * mix.width + mix.x + dx;
             const size_t o = static_cast<size_t>(pick16(dy, hy)) * mix.overlay_width + pick16(dx, hx);
-            const double v = mixed(code_at(out, m, mix.bytes), code_at(mix.overlay, o, mix.bytes), mix.alpha);
+            const double v = mixed_codes(mix, code_at(out, m, mix.bytes), code_at(mix.overlay, o, mix.bytes),
+                mix.bytes == 2 ? 64.0 : 16.0);
             set_code(out, m, mix.bytes, static_cast<unsigned>(std::lround(v)));
         }
     // Chroma cells cover 2x2 luma pixels, and the rectangle is even, so a cell
@@ -781,9 +824,144 @@ void expected_composite(const Mix& mix, std::vector<uint8_t>& out)
             const size_t o = static_cast<size_t>(mix.overlay_width) * mix.overlay_height
                 + static_cast<size_t>(pick16(cy, hy_c)) * mix.overlay_width + pick16(cx, hx_c) * 2;
             for (unsigned k = 0; k < 2; ++k) {
-                const double v = mixed(code_at(out, m + k, mix.bytes), code_at(mix.overlay, o + k, mix.bytes),
-                    mix.alpha);
+                const double v = mixed_codes(mix, code_at(out, m + k, mix.bytes),
+                    code_at(mix.overlay, o + k, mix.bytes), mix.bytes == 2 ? 512.0 : 128.0);
                 set_code(out, m + k, mix.bytes, static_cast<unsigned>(std::lround(v)));
+            }
+        }
+}
+
+// A packed RGB overlay that differs on every row, column and channel, with an
+// alpha byte the kernel must never read (the blend state carries the only
+// alpha). A premultiplied frame stores each colour already scaled by the
+// global alpha, which is the picture VA_BLEND_PREMULTIPLIED_ALPHA describes.
+void make_rgb_pattern(unsigned width, unsigned height, bool bgra, double premultiply,
+    std::vector<uint8_t>& frame)
+{
+    frame.assign(static_cast<size_t>(width) * height * 4, 0);
+    for (unsigned y = 0; y < height; ++y)
+        for (unsigned x = 0; x < width; ++x) {
+            double rgb[3] = { static_cast<double>((x * 3 + y * 5 + 7) & 0xff) / 255.0,
+                static_cast<double>((x * 11 + y * 7 + 40) & 0xff) / 255.0,
+                static_cast<double>((x * 5 + y * 13 + 90) & 0xff) / 255.0 };
+            for (double& c : rgb)
+                c = static_cast<double>(std::lround(c * premultiply * 255.0)) / 255.0;
+            uint8_t* p = &frame[(static_cast<size_t>(y) * width + x) * 4];
+            const uint8_t r = static_cast<uint8_t>(std::lround(rgb[0] * 255.0));
+            const uint8_t g = static_cast<uint8_t>(std::lround(rgb[1] * 255.0));
+            const uint8_t b = static_cast<uint8_t>(std::lround(rgb[2] * 255.0));
+            const uint8_t a = static_cast<uint8_t>((x * 17 + y * 3 + 200) & 0xff);
+            if (bgra) {
+                p[0] = b;
+                p[1] = g;
+                p[2] = r;
+            } else {
+                p[0] = r;
+                p[1] = g;
+                p[2] = b;
+            }
+            p[3] = a;
+        }
+}
+
+// The RGB pixel at (px, py) as 0..1 channels.
+void rgb_at(const Mix& mix, unsigned px, unsigned py, double rgb[3])
+{
+    const uint8_t* p = &mix.overlay[(static_cast<size_t>(py) * mix.overlay_width + px) * 4];
+    rgb[0] = (mix.bgra ? p[2] : p[0]) / 255.0;
+    rgb[1] = p[1] / 255.0;
+    rgb[2] = (mix.bgra ? p[0] : p[2]) / 255.0;
+}
+
+// The conversion overlay_rgb.comp documents, in double precision: normalised
+// luma and the two chroma offsets for the picture's matrix.
+void to_ycbcr(const Mix& mix, const double rgb[3], double out[3])
+{
+    double kr = 0.2126, kb = 0.0722;
+    if (mix.standard == 1) {
+        kr = 0.299;
+        kb = 0.114;
+    } else if (mix.standard == 2) {
+        kr = 0.2627;
+        kb = 0.0593;
+    }
+    const double y = kr * rgb[0] + (1.0 - kr - kb) * rgb[1] + kb * rgb[2];
+    out[0] = y;
+    out[1] = (rgb[2] - y) / (2.0 * (1.0 - kb));
+    out[2] = (rgb[0] - y) / (2.0 * (1.0 - kr));
+}
+
+// One channel normalised onto the destination's own scale: `neutral` is the
+// code that carries zero (16 luma, 128 chroma for NV12; 64 and 512 for the
+// 10-bit range), `span` the distance to 1.0.
+double normalise(unsigned code, double neutral, double span)
+{
+    return (static_cast<double>(code) - neutral) / span;
+}
+
+// The limited-range constants for the destination's bit depth.
+double luma_zero(const Mix& mix)
+{
+    return mix.bytes == 2 ? 64.0 : 16.0;
+}
+
+double luma_span(const Mix& mix)
+{
+    return mix.bytes == 2 ? 876.0 : 219.0;
+}
+
+double chroma_zero(const Mix& mix)
+{
+    return mix.bytes == 2 ? 512.0 : 128.0;
+}
+
+double chroma_span(const Mix& mix)
+{
+    return mix.bytes == 2 ? 896.0 : 224.0;
+}
+
+double mixed_norm(const Mix& mix, double main_norm, double overlay_norm)
+{
+    if (mix.premultiplied)
+        return overlay_norm + (1.0 - mix.alpha) * main_norm;
+    return mix.alpha * overlay_norm + (1.0 - mix.alpha) * main_norm;
+}
+
+void expected_composite_rgb(const Mix& mix, std::vector<uint8_t>& out)
+{
+    out = mix.main;
+    const unsigned hx = step16(mix.overlay_width, mix.rect_width);
+    const unsigned hy = step16(mix.overlay_height, mix.rect_height);
+    for (unsigned dy = 0; dy < mix.rect_height; ++dy)
+        for (unsigned dx = 0; dx < mix.rect_width; ++dx) {
+            const size_t m = static_cast<size_t>(mix.y + dy) * mix.width + mix.x + dx;
+            double rgb[3], ycbcr[3];
+            rgb_at(mix, pick16(dx, hx), pick16(dy, hy), rgb);
+            to_ycbcr(mix, rgb, ycbcr);
+            const double v = mixed_norm(mix,
+                normalise(code_at(out, m, mix.bytes), luma_zero(mix), luma_span(mix)), ycbcr[0]);
+            set_code(out, m, mix.bytes,
+                static_cast<unsigned>(std::lround(luma_zero(mix) + luma_span(mix) * v)));
+        }
+    // Chroma: the rectangle is even, so a cell is inside it exactly when its
+    // own half-scale coordinates are, and the sample is the same point map at
+    // half scale.
+    const unsigned x0 = mix.x / 2, y0 = mix.y / 2;
+    const unsigned hx_c = step16(mix.overlay_width / 2, mix.rect_width / 2);
+    const unsigned hy_c = step16(mix.overlay_height / 2, mix.rect_height / 2);
+    for (unsigned cy = 0; cy < mix.rect_height / 2; ++cy)
+        for (unsigned cx = 0; cx < mix.rect_width / 2; ++cx) {
+            const size_t m = static_cast<size_t>(mix.width) * mix.height
+                + static_cast<size_t>(y0 + cy) * mix.width + (x0 + cx) * 2;
+            double rgb[3], ycbcr[3];
+            rgb_at(mix, pick16(cx, hx_c), pick16(cy, hy_c), rgb);
+            to_ycbcr(mix, rgb, ycbcr);
+            for (unsigned k = 0; k < 2; ++k) {
+                const double v = mixed_norm(mix,
+                    normalise(code_at(out, m + k, mix.bytes), chroma_zero(mix), chroma_span(mix)),
+                    ycbcr[1 + k]);
+                set_code(out, m + k, mix.bytes,
+                    static_cast<unsigned>(std::lround(chroma_zero(mix) + chroma_span(mix) * v)));
             }
         }
 }
@@ -794,7 +972,7 @@ void overlay_usage(const char* argv0)
         "usage: %s overlay <render-node> <W> <H> <ovW> <ovH> <x> <y> <rw> <rh> <alpha> <out.raw>\n"
         "                 [--p010] [--premultiplied] [--luma-key] [--third] [--blend-first]\n"
         "                 [--main-crop] [--pad=<columns>] [--tonemap=<peak-nits>]\n"
-        "                 [--expect-refusal]\n",
+        "                 [--rgb[=rgba]] [--standard=601|709|2020] [--expect-refusal]\n",
         argv0);
 }
 
@@ -817,11 +995,28 @@ int run_overlay(int argc, char** argv)
     const char* out_path = argv[10];
     bool p010 = false, premultiplied = false, luma_key = false, third = false, blend_first = false;
     bool main_crop = false, expect_refusal = false;
+    // The overlay surface is packed BGRA (default with --rgb) or RGBA.
+    bool rgb = false, bgra = true;
+    unsigned standard = 0;
     unsigned pad = 0;
     double tonemap_peak = 0.0;
     for (int i = 11; i < argc; ++i) {
         if (std::strcmp(argv[i], "--p010") == 0)
             p010 = true;
+        else if (std::strcmp(argv[i], "--rgb") == 0)
+            rgb = true;
+        else if (std::strcmp(argv[i], "--rgb=rgba") == 0) {
+            rgb = true;
+            bgra = false;
+        } else if (std::strncmp(argv[i], "--standard=", 11) == 0) {
+            const char* name = argv[i] + 11;
+            standard = std::strcmp(name, "601") == 0 ? 1 : std::strcmp(name, "2020") == 0 ? 2 : 0;
+            if (std::strcmp(name, "601") != 0 && std::strcmp(name, "709") != 0
+                && std::strcmp(name, "2020") != 0) {
+                overlay_usage("iris-va-vpp-probe");
+                return 2;
+            }
+        }
         else if (std::strncmp(argv[i], "--tonemap=", 10) == 0)
             tonemap_peak = std::atof(argv[i] + 10);
         else if (std::strcmp(argv[i], "--premultiplied") == 0)
@@ -872,6 +1067,10 @@ int run_overlay(int argc, char** argv)
     mix.rect_height = rh;
     mix.bytes = bytes;
     mix.alpha = alpha;
+    mix.rgb = rgb;
+    mix.bgra = bgra;
+    mix.premultiplied = premultiplied;
+    mix.standard = standard;
     // The main surface is `pad` columns wider than the picture, as a decoder
     // allocates it; the picture is the left `width` columns.
     std::vector<uint8_t> main_surface_frame;
@@ -885,7 +1084,15 @@ int run_overlay(int argc, char** argv)
         else
             mix.main = main_surface_frame;
     }
-    make_pattern(ov_w, ov_h, bytes, 2, mix.overlay);
+    if (rgb)
+        // A premultiplied frame stores each colour already multiplied by the
+        // global alpha, which is the data VA_BLEND_PREMULTIPLIED_ALPHA names.
+        make_rgb_pattern(ov_w, ov_h, bgra, premultiplied ? alpha : 1.0, mix.overlay);
+    else {
+        make_pattern(ov_w, ov_h, bytes, 2, mix.overlay);
+        if (premultiplied)
+            premultiply_pattern(mix.overlay, ov_w, ov_h, bytes, alpha);
+    }
 
     const int fd = open(argv[0], O_RDWR | O_CLOEXEC);
     if (fd < 0) {
@@ -914,7 +1121,15 @@ int run_overlay(int argc, char** argv)
     check(vaCreateSurfaces(display, main_rt, width + pad, height, &main_surface, 1, nullptr, 0)
             == VA_STATUS_SUCCESS,
         "create the main surface");
-    check(vaCreateSurfaces(display, rt_format, ov_w, ov_h, &overlay_surface, 1, nullptr, 0)
+    // A packed overlay is a VA_RT_FORMAT_RGB32 surface, and the byte order the
+    // client wants is the pixel-format attribute.
+    VASurfaceAttrib pixel_format = {};
+    pixel_format.type = VASurfaceAttribPixelFormat;
+    pixel_format.flags = VA_SURFACE_ATTRIB_SETTABLE;
+    pixel_format.value.type = VAGenericValueTypeInteger;
+    pixel_format.value.value.i = static_cast<int>(bgra ? VA_FOURCC_BGRA : VA_FOURCC_RGBA);
+    check(vaCreateSurfaces(display, rgb ? VA_RT_FORMAT_RGB32 : rt_format, ov_w, ov_h, &overlay_surface, 1,
+              rgb ? &pixel_format : nullptr, rgb ? 1 : 0)
             == VA_STATUS_SUCCESS,
         "create the overlay surface");
     check(vaCreateSurfaces(display, rt_format, width, height, &dst_surface, 1, nullptr, 0)
@@ -933,15 +1148,19 @@ int run_overlay(int argc, char** argv)
         check(vaQueryVideoProcPipelineCaps(display, context, nullptr, 0, &caps) == VA_STATUS_SUCCESS
                 && (caps.blend_flags & VA_BLEND_GLOBAL_ALPHA) != 0,
             "the pipeline caps offer global-alpha blending");
-        check((caps.blend_flags & (VA_BLEND_PREMULTIPLIED_ALPHA | VA_BLEND_LUMA_KEY)) == 0,
-            "no per-pixel alpha and no luma key are advertised");
+        // The stored-alpha form of the same mix is implemented; luma keying,
+        // which is a different kind of masking, is not.
+        check((caps.blend_flags & VA_BLEND_PREMULTIPLIED_ALPHA) != 0,
+            "the pipeline caps offer premultiplied alpha");
+        check((caps.blend_flags & VA_BLEND_LUMA_KEY) == 0, "no luma key is advertised");
     }
 
     if (main_surface != VA_INVALID_ID)
         check(upload(display, main_surface, main_surface_frame, width + pad, height, main_bytes),
             "upload the main frame");
     if (overlay_surface != VA_INVALID_ID)
-        check(upload(display, overlay_surface, mix.overlay, ov_w, ov_h, bytes), "upload the overlay frame");
+        check(upload(display, overlay_surface, mix.overlay, ov_w, ov_h, rgb ? 4u : bytes),
+            "upload the overlay frame");
 
     VABlendState blend = {};
     blend.flags = VA_BLEND_GLOBAL_ALPHA;
@@ -971,8 +1190,11 @@ int run_overlay(int argc, char** argv)
     half.height = static_cast<uint16_t>(height / 2);
     main_params.surface_region = main_crop ? &half : &full;
     main_params.output_region = &full;
-    main_params.surface_color_standard = VAProcColorStandardBT709;
-    main_params.output_color_standard = VAProcColorStandardBT709;
+    const VAProcColorStandardType named = standard == 1   ? VAProcColorStandardBT601
+        : standard == 2                                   ? VAProcColorStandardBT2020
+                                                          : VAProcColorStandardBT709;
+    main_params.surface_color_standard = named;
+    main_params.output_color_standard = named;
     VABufferID filter_buffer = VA_INVALID_ID;
     if (tonemap_peak > 0.0) {
         VAHdrMetaDataHDR10 metadata = {};
@@ -1054,7 +1276,10 @@ int run_overlay(int argc, char** argv)
             check(download(display, dst_surface, output, width, height, fourcc), "download the output frame");
         if (status == VA_STATUS_SUCCESS && output.size() == mix.main.size()) {
             std::vector<uint8_t> expected;
-            expected_composite(mix, expected);
+            if (rgb)
+                expected_composite_rgb(mix, expected);
+            else
+                expected_composite(mix, expected);
             unsigned max_diff = 0;
             size_t worst = 0;
             for (size_t i = 0; i < expected.size(); ++i) {
@@ -1073,7 +1298,9 @@ int run_overlay(int argc, char** argv)
             // 0, 1/2 and 1 are exact in binary, so all but the last code of
             // slack is float32 against double; an alpha that is not dyadic
             // may round a tie either way.
-            check(max_diff <= (tonemap_peak > 0.0 ? 2u : 1u),
+            // The RGB path converts per sample before it mixes, so its model
+            // is longer than the YUV one and keeps the tone mapper's slack.
+            check(max_diff <= (tonemap_peak > 0.0 || rgb ? 2u : 1u),
                 "every byte within the documented mix's tolerance");
             // Inside the rectangle the output has to differ from the main
             // frame whenever alpha and the two frames differ: a kernel that

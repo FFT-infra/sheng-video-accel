@@ -17,10 +17,21 @@
 # A kernel that copied the wrong plane, transposed a sample or ignored the
 # alpha fails one of those three comparisons, not just the tolerance.
 #
-# The refusals are part of the contract: premultiplied alpha, luma keying, a
-# third pass, a blend before the pass it blends onto, an odd or out-of-bounds
-# rectangle, a crop of the main surface and an alpha outside 0..1 are all
-# refused rather than approximated.
+# Two more shapes run the same mix. A premultiplied source stores its colours
+# already scaled by the global alpha, so only the main surface is scaled by
+# (1 - alpha); the gate proves that by running the same picture twice, once
+# with a premultiplied frame and once with the straight one, and requiring the
+# two outputs to agree. A packed BGRA/RGBA overlay is a surface of a different
+# format: the kernel converts each sampled pixel to the output's Y'CbCr matrix
+# before mixing, and the model in the probe does the same conversion, so a
+# swapped channel, a wrong byte order or a wrong matrix fails as a pixel
+# difference. The straight-alpha premultiplied equivalence is the check that
+# does not come from the model.
+#
+# The refusals are part of the contract: luma keying, a third pass, a blend
+# before the pass it blends onto, an odd or out-of-bounds rectangle, a crop of
+# the main surface and an alpha outside 0..1 are all refused rather than
+# approximated.
 # So is the whole entrypoint without V4L2_VA_VPP.
 
 set -eu
@@ -70,36 +81,59 @@ run_probe() {
         timeout 300 "$probe" overlay "$render" "$@" >"$work/$tag.log" 2>"$work/$tag.trace"
 }
 
-# Outsize, overlay size, rectangle, alpha, then any probe flags.
-#   half   128x72 main, a same-size overlay at half alpha: the mix everywhere
-#   opaque 160x96 main, 64x48 overlay at 1:1 into a 64x48 rectangle
-#   scale  128x72 main, a 64x48 overlay halved into 32x24, and an alpha that
-#          is not a dyadic fraction, so the mix rounds a tie in float32
-#   p010   the 10-bit path, overlay and output both P010
-#   ragged 318x178: a row whose last destination word carries two columns the
-#          output does not cover
-#   padded the main surface 16 columns wider than the picture, as a decoder
-#          allocates it, so the main pass copies a rectangle rather than the
-#          whole surface
-cases="half:128x72:128x72:0:0:128:72:0.50 \
-opaque:160x96:64x48:16:16:64:48:1.00 \
-scale:128x72:64x48:34:12:32:24:0.60 \
-p010:128x72:32x24:64:48:32:24:0.50:--p010 \
-ragged:318x178:64x48:100:50:64:48:0.25 \
-padded:128x72:64x48:16:16:64:48:0.35:--pad=16 \
-tonemap:128x72:64x48:32:8:64:48:0.50:--tonemap=1000"
+# Main size, overlay size, rectangle, alpha, then any probe flags; one case
+# per line so a case may name more than one flag.
+#   half    128x72 main, a same-size overlay at half alpha: the mix everywhere
+#   opaque  160x96 main, 64x48 overlay at 1:1 into a 64x48 rectangle
+#   scale   128x72 main, a 64x48 overlay halved into 32x24, and an alpha that
+#           is not a dyadic fraction, so the mix rounds a tie in float32
+#   p010    the 10-bit path, overlay and output both P010
+#   ragged  318x178: a row whose last destination word carries two columns the
+#           output does not cover
+#   padded  the main surface 16 columns wider than the picture, as a decoder
+#           allocates it, so the main pass copies a rectangle rather than the
+#           whole surface
+#   tonemap the main pass is an HDR10 P010 surface the tone mapper converts
+#           into the NV12 the overlay is mixed into
+#   premult*, rgbpremult  the stored-alpha form of the same mix, on both bit
+#           depths and on the packed overlay
+#   rgb, rgba  a packed BGRA and a packed RGBA overlay, so the two byte orders
+#           are each read the way VA names them
+#   rgb601  the same composite with the BT.601 matrix the picture names
+#   rgbtonemap  a packed overlay onto a tone-mapped main surface
+cat > "$work/cases" <<'EOF'
+half:128x72:128x72:0:0:128:72:0.50
+opaque:160x96:64x48:16:16:64:48:1.00
+scale:128x72:64x48:34:12:32:24:0.60
+p010:128x72:32x24:64:48:32:24:0.50:--p010
+ragged:318x178:64x48:100:50:64:48:0.25
+padded:128x72:64x48:16:16:64:48:0.35:--pad=16
+tonemap:128x72:64x48:32:8:64:48:0.50:--tonemap=1000
+premult:128x72:64x48:16:16:64:48:0.50:--premultiplied
+premult-p010:128x72:32x24:64:48:32:24:0.50:--p010 --premultiplied
+rgb:128x72:64x48:32:8:64:48:0.50:--rgb
+rgba:128x72:64x48:32:8:64:48:0.50:--rgb=rgba
+rgbpremult:128x72:64x48:32:8:64:48:0.50:--rgb --premultiplied
+rgbp010:128x72:32x24:64:48:32:24:0.50:--rgb --p010
+rgb601:128x72:64x48:32:8:64:48:0.50:--rgb --standard=601
+rgbtonemap:128x72:64x48:32:8:64:48:0.50:--rgb --tonemap=1000
+EOF
 
 failed=0
 count=0
-for entry in $cases; do
+while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
     tag=${entry%%:*}
     spec=${entry#*:}
-    set -- $(echo "$spec" | tr ':' ' ')
+    # The fields are positional and colon-separated; everything after the
+    # alpha is a probe flag, one or more of them. Globbing is off so a flag
+    # that contains `=` or `*` is not expanded on the way in.
+    set -f
+    set -- $(printf '%s\n' "$spec" | tr ':' ' ')
+    set +f
     w=${1%x*} h=${1#*x}
     ow=${2%x*} oh=${2#*x}
     rx=$3 ry=$4 rw=$5 rh=$6 alpha=$7
-    # Everything after the alpha is a probe flag. A flag that takes a value
-    # spells it --name=value, so a case stays one field in the list above.
     shift 7
     flags="$*"
     count=$((count + 1))
@@ -119,7 +153,7 @@ for entry in $cases; do
         "$alpha" "$rc" "$(sha256sum "$work/$tag.raw" 2>/dev/null | cut -d' ' -f1)" \
         "$(sed -n 's/.*max_diff=\([0-9]*\).*/\1/p' "$work/$tag.log" | tail -1)"
     [ "$rc" -eq 0 ] || failed=1
-done
+done < "$work/cases"
 [ "$failed" -eq 0 ] || fail "a composited frame differs from the documented mix"
 
 echo "== the endpoints are the input frames, not a plausible approximation"
@@ -139,6 +173,30 @@ if cmp -s "$work/half.raw" "$work/half.raw.main" || cmp -s "$work/half.raw" "$wo
     fail "alpha 0.5 produced one of its inputs; the mix did not happen"
 fi
 echo "copy=byte-exact over=byte-exact half=neither-input"
+
+# A premultiplied frame is the straight frame's colours already scaled by the
+# global alpha, so the two runs have to land on the same picture. This is the
+# one composite check whose answer does not come from the probe's model.
+echo "== stored alpha is the same picture as straight alpha"
+run_probe premult-straight 128 72 64 48 32 8 64 48 0.50 "$work/premult-straight.raw" --rgb \
+    || fail "straight-alpha composite failed"
+if ! cmp -s "$work/rgbpremult.raw" "$work/premult-straight.raw"; then
+    differ=$(cmp -l "$work/rgbpremult.raw" "$work/premult-straight.raw" | awk '
+        function oct(s, i, c, v) { v = 0; for (i = 1; i <= length(s); i++) { c = substr(s, i, 1); v = v * 8 + c } return v }
+        { d = oct($3) - oct($2); if (d < 0) d = -d; if (d > m) m = d }
+        END { print m + 0 }')
+    [ "$differ" -le 2 ] || fail "a premultiplied overlay differs from the same picture at straight alpha by $differ codes"
+    echo "premultiplied=straight-within-$differ"
+else
+    echo "premultiplied=straight-byte-exact"
+fi
+
+# A packed overlay that never reached the kernel would leave the main frame in
+# place, which is what an alpha of 0 looks like; the two have to differ inside
+# the rectangle.
+if cmp -s "$work/rgb.raw" "$work/rgb.raw.main"; then
+    fail "the packed overlay did not change the output; the frame is the main surface"
+fi
 
 echo "== refusals"
 refuse() {
@@ -169,7 +227,6 @@ refuse() {
     fi
     printf 'refused=%s\n' "$what"
 }
-refuse premultiplied 128 72 64 48 16 16 64 48 0.50 --premultiplied
 refuse luma-key 128 72 64 48 16 16 64 48 0.50 --luma-key
 refuse third-pass 128 72 64 48 16 16 64 48 0.50 --third
 refuse blend-first 128 72 64 48 16 16 64 48 0.50 --blend-first
@@ -195,5 +252,5 @@ printf 'driver_source=%s\n' "$([ -n "$driver_env" ] && echo build-tree || echo i
 printf 'driver_sha256=%s\n' "$driver_hash"
 printf 'decoder=%s\n' "$device"
 printf 'cases=%s\n' "$count"
-printf 'oracle=the documented mix in double precision, plus both endpoint frames byte for byte\n'
-echo "PASS va-vpp-overlay cases=$count endpoints=2 refused=8 driver=$driver_hash"
+printf 'oracle=the documented mix in double precision, both endpoint frames byte for byte, and straight against stored alpha\n'
+echo "PASS va-vpp-overlay cases=$count endpoints=2 refused=7 driver=$driver_hash"

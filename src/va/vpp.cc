@@ -28,6 +28,11 @@ VAProcColorStandardType kStandards[] = { VAProcColorStandardNone, VAProcColorSta
 // P010 is listed only when the decoder node reported 10-bit capture formats.
 uint32_t kPixelFormatsNv12[] = { VA_FOURCC_NV12 };
 uint32_t kPixelFormatsNv12P010[] = { VA_FOURCC_NV12, VA_FOURCC_P010 };
+// Inputs include the packed overlay sources: the blend pass accepts a BGRA or
+// RGBA surface next to a Y'CbCr one. Outputs stay Y'CbCr, because the
+// composite writes the main surface's format.
+uint32_t kPixelFormatsNv12Rgb[] = { VA_FOURCC_NV12, VA_FOURCC_BGRA, VA_FOURCC_RGBA };
+uint32_t kPixelFormatsNv12P010Rgb[] = { VA_FOURCC_NV12, VA_FOURCC_P010, VA_FOURCC_BGRA, VA_FOURCC_RGBA };
 
 // The tone mapper reads a 10-bit HDR10 surface, so it is offered only when
 // the node reported a 10-bit capture format.
@@ -111,10 +116,10 @@ VAStatus queryVideoProcPipelineCaps(VADriverContextP ctx, VAContextID id, VABuff
     // All three clockwise quarter turns.
     caps->rotation_flags = (1u << VA_ROTATION_NONE) | (1u << VA_ROTATION_90) | (1u << VA_ROTATION_180)
         | (1u << VA_ROTATION_270);
-    // What `overlay_vaapi` refuses to run without. Per-pixel (premultiplied)
-    // alpha and luma keying are separate kernels that do not exist here, so
-    // only the global alpha is advertised.
-    caps->blend_flags = VA_BLEND_GLOBAL_ALPHA;
+    // What `overlay_vaapi` refuses to run without, plus the stored-alpha form
+    // of the same mix. Luma keying is a separate mode that does not exist
+    // here, so it is not advertised.
+    caps->blend_flags = VA_BLEND_GLOBAL_ALPHA | VA_BLEND_PREMULTIPLIED_ALPHA;
     // Both axes, together with their combination: the flag word is the value a
     // client puts in mirror_state, and FFmpeg tests `mirror_flags &
     // mirror_state`, so the `|` of the two bits has to be set for a client that
@@ -122,8 +127,8 @@ VAStatus queryVideoProcPipelineCaps(VADriverContextP ctx, VAContextID id, VABuff
     caps->mirror_flags = VA_MIRROR_HORIZONTAL | VA_MIRROR_VERTICAL;
     caps->num_additional_outputs = 0;
     const bool p010 = d.capabilities.p010;
-    caps->num_input_pixel_formats = p010 ? 2 : 1;
-    caps->input_pixel_format = p010 ? kPixelFormatsNv12P010 : kPixelFormatsNv12;
+    caps->num_input_pixel_formats = p010 ? 4 : 3;
+    caps->input_pixel_format = p010 ? kPixelFormatsNv12P010Rgb : kPixelFormatsNv12Rgb;
     caps->num_output_pixel_formats = p010 ? 2 : 1;
     caps->output_pixel_format = p010 ? kPixelFormatsNv12P010 : kPixelFormatsNv12;
     // A pipeline that names the tone mapper is a different processor: P010 in

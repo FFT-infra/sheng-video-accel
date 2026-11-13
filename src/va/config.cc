@@ -85,8 +85,9 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
                 attributes[i].value = VA_RT_FORMAT_YUV420;
             } else if (vpp) {
                 // The processor scales either width; a picture whose two ends
-                // disagree on bit depth is refused at endPicture.
-                attributes[i].value = VA_RT_FORMAT_YUV420;
+                // disagree on bit depth is refused at endPicture. RGB32 is the
+                // blended overlay source, which is a surface of its own config.
+                attributes[i].value = VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_RGB32;
                 if (d.capabilities.p010)
                     attributes[i].value |= VA_RT_FORMAT_YUV420_10;
             } else {
@@ -220,7 +221,7 @@ VAStatus createConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entr
             // One bit per config: the client names the depth of the surfaces it
             // will create, and the picture refuses a mismatch.
             iris::require((rt_format & (VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10)) != 0
-                    && !(rt_format & ~(VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10)),
+                    && !(rt_format & ~(VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10 | VA_RT_FORMAT_RGB32)),
                 "VPP needs YUV420 or YUV420_10", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
         } else if (entrypoint == VAEntrypointEncSlice) {
             // One bit, chosen by the client from what getConfigAttributes

@@ -396,10 +396,15 @@ converts P010 BT.2020/PQ to NV12 BT.709 at the surface's own size; a picture
 whose second pipeline buffer names a `VABlendState` runs
 `iris::vpp::overlay` over three DMA-BUFs, keeping the main surface in place and
 mixing the overlay into an even rectangle of it on the coded values of both
-planes; every other pipeline operation (per-pixel alpha, luma keying, a third
-pass, any second filter, any colour conversion outside that one filter, and a
-mirror or a rotation in a tone-mapped or blended picture) fails the picture
-instead of being dropped. The decode lives on the
+planes — or, when the overlay surface is a packed `VA_RT_FORMAT_RGB32` surface
+(`VA_FOURCC_BGRA` or `VA_FOURCC_RGBA`, the shape `overlay_vaapi` builds),
+`iris::vpp::overlay_rgb`, which converts every sampled overlay pixel to the
+output frame's Y'CbCr matrix before mixing; every other pipeline operation
+(luma keying, a third pass, any second filter, any colour conversion outside
+that one filter, and a mirror or a rotation in a tone-mapped or blended
+picture) fails the picture instead of being dropped. Both blends implement the
+global alpha of `VABlendState` and `VA_BLEND_PREMULTIPLIED_ALPHA`, which
+FFmpeg sets whenever its overlay input carries an alpha channel. The decode lives on the
 V4L2 node and the kernel on Vulkan, so `vaEndPicture` waits for each source
 surface's pending decode before it reads that surface — a client that issues
 the processor's picture straight behind the decode (FFmpeg's `overlay_vaapi`
@@ -553,14 +558,21 @@ va end_picture ctx=<n> surface=<n> entrypoint=videoproc src=<n> <w>x<h>-><w>x<h>
                                                       [ tonemap=hdr10]
                                                       [ overlay=<src>
                                                         <w>x<h>+<x>,<y>
-                                                        alpha=<0..1>]
+                                                        alpha=<0..1>
+                                                        [source=bgra|rgba]
+                                                        [premultiplied]]
                                                       (the suffix names the
                                                        one operation beyond
                                                        the scale: the tone
                                                        mapper, or the blended
                                                        overlay surface and
                                                        the rectangle it was
-                                                       drawn into)
+                                                       drawn into. `source=`
+                                                       marks a packed overlay
+                                                       and names its byte
+                                                       order; `premultiplied`
+                                                       marks a stored-alpha
+                                                       blend.)
 encode open node=<path> codec=<fourcc> raw=<w>x<h> crop=<w>x<h> mode=cbr|vbr|cqp
             gop=<n> rate=<num>/<den>
 encode frame index=<n> bytes=<n> idr=0|1 promoted=0|1    (idr=1 covers both the
@@ -657,16 +669,27 @@ monotone ramp). It also proves the curve follows the metadata by running two
 mastering peaks over one frame, and requires an NV12 source, a filter without
 its parameters and a rotation in a tone-mapped picture to be refused.
 `test/vulkan-vpp/overlay_gate.sh` drives `iris-va-vpp-probe overlay`, which
-submits the two pipeline buffers overlay_vaapi submits: six geometries across
-both sample widths — including a main surface padded wider than its picture, as
-a decoder allocates one — against the mix `overlay.comp` documents, within 1
-code, then the two endpoints against the input frames themselves — an alpha of
-0 over the whole surface must reproduce the main frame byte for byte and an
-alpha of 1 the overlay frame, which a kernel that read the wrong plane or
-ignored the alpha cannot do. Premultiplied alpha, luma keying, a third pass, a blend before its
-base pass, an odd or out-of-bounds rectangle, a crop of the main surface and an
-alpha outside 0..1 are required to be refused. The SPIR-V the driver embeds is
-regenerated from the pinned module and compared by `test/run-static-checks.sh`.
+submits the two pipeline buffers overlay_vaapi submits: fifteen geometries
+across both sample widths — including a main surface padded wider than its
+picture, as a decoder allocates one, packed BGRA and RGBA overlays, the BT.601
+matrix, and a packed overlay over a tone-mapped main surface — against the mix
+`overlay.comp` and `overlay_rgb.comp` document, within 2 codes, then the two
+endpoints against the input frames themselves — an alpha of 0 over the whole
+surface must reproduce the main frame byte for byte and an alpha of 1 the
+overlay frame, which a kernel that read the wrong plane or ignored the alpha
+cannot do. Stored alpha gets one check that does not come from the model: the
+same picture run with a premultiplied frame and with the straight one has to
+land within 1 code. Luma keying, a third pass, a blend before its base pass, an
+odd or out-of-bounds rectangle, a crop of the main surface and an alpha outside
+0..1 are required to be refused. `test/vulkan-vpp/overlay_vaapi_gate.sh` then
+drives `overlay_vaapi` itself over a BGRA upload, because two things about the
+real client are invisible from the probe: FFmpeg asks for
+`VA_BLEND_PREMULTIPLIED_ALPHA` whenever its overlay input carries an alpha
+channel, and the overlay surface is a `VA_RT_FORMAT_RGB32` surface FFmpeg
+fills through the image path. Its frames are single colours, so the expected
+output is one BT.709 triple computed in the gate — exact, not within a code —
+plus the main frame byte for byte at alpha 0. The SPIR-V the driver embeds is
+regenerated from the pinned modules and compared by `test/run-static-checks.sh`.
 
 ## 10. Invariants (the ones tests exist for)
 

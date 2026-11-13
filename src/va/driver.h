@@ -37,7 +37,10 @@ constexpr const char* kVendor = "Qualcomm Iris V4L2 stateful (libva-v4l2)";
 constexpr unsigned kMaxProfiles = 16;
 constexpr unsigned kMaxEntrypoints = 2;
 constexpr unsigned kMaxAttributes = 8;
-constexpr unsigned kMaxImageFormats = 2;
+// What vaMaxNumImageFormats reports, and therefore the largest list
+// queryImageFormats may fill: a client sizes its array from this number.
+// NV12 and P010 for the codecs, BGRA and RGBA for the processor's overlays.
+constexpr unsigned kMaxImageFormats = 4;
 constexpr unsigned kMaxSubpictureFormats = 1;
 constexpr unsigned kMaxDisplayAttributes = 1;
 
@@ -180,10 +183,12 @@ struct Context {
         int input_standard = VAProcColorStandardNone;
         int output_standard = VAProcColorStandardNone;
         bool explicit_colour_properties_equal = true;
-        // The global alpha of the VABlendState this buffer named. Only the
-        // second (overlay) pass carries one, and it is the only blend flag the
-        // driver runs.
+        // The blend state of the VABlendState this buffer named. Only the
+        // second (overlay) pass carries one, and its two flags are the only
+        // blending the driver runs: a global alpha, and whether the overlay's
+        // colours are premultiplied by it.
         float global_alpha = 1.0f;
+        bool premultiplied = false;
     };
     std::optional<VppJob> vpp;
     // The blending pass, when the picture has one. It names the overlay

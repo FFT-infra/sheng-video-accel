@@ -78,6 +78,36 @@ struct OverlayJob {
     uint32_t x = 0, y = 0, width = 0, height = 0;
     uint32_t dst_width = 0, dst_height = 0;
     uint32_t bytes = 1;
+    // VA_BLEND_PREMULTIPLIED_ALPHA: the overlay's codes already carry alpha,
+    // so only the main surface is scaled by (1 - alpha).
+    bool premultiplied = false;
+    float alpha = 1.0f;
+};
+
+// The same composite with a packed RGB overlay: main and destination are
+// still NV12 or P010, the overlay surface is BGRA or RGBA (one 32-bit word per
+// pixel), and the kernel converts it to BT.709 limited-range Y'CbCr before
+// mixing. The main rectangle is the destination's size, as in OverlayJob, so
+// main_width/main_height are implied by dst_width/dst_height. `bgra` names the
+// overlay's byte order as VA does (VA_FOURCC_BGRA vs VA_FOURCC_RGBA), and
+// `premultiplied` selects out = overlay + (1 - alpha) * main for a source
+// whose colours are already multiplied by their alpha.
+struct OverlayRgbJob {
+    int main_fd = -1, overlay_fd = -1, dst_fd = -1;
+    uint32_t main_size = 0, overlay_size = 0, dst_size = 0;
+    uint32_t main_stride = 0, overlay_stride = 0, dst_stride = 0;
+    uint32_t main_uv = 0, dst_uv = 0;
+    uint32_t main_y = 0, overlay_y = 0, dst_y = 0;
+    uint32_t main_x = 0, main_row = 0;
+    uint32_t overlay_width = 0, overlay_height = 0;
+    uint32_t x = 0, y = 0, width = 0, height = 0;
+    uint32_t dst_width = 0, dst_height = 0;
+    uint32_t bytes = 1;
+    bool bgra = true;
+    bool premultiplied = false;
+    // Matrix for the RGB-to-Y'CbCr step, from the picture's colour standard:
+    // 0 BT.709 (also what an unnamed standard means), 1 BT.601, 2 BT.2020.
+    uint32_t standard = 0;
     float alpha = 1.0f;
 };
 
@@ -100,6 +130,9 @@ bool tonemap_hdr10_to_sdr(const ToneMapJob& job);
 // Dispatch the compositing kernel (overlay.spv) over the three imported
 // DMA-BUFs. Same failure contract again.
 bool overlay(const OverlayJob& job);
+
+// Dispatch the packed-RGB composite (overlay_rgb.spv). Same failure contract.
+bool overlay_rgb(const OverlayRgbJob& job);
 
 } // namespace vpp
 } // namespace iris

@@ -164,6 +164,6 @@ printf 'driver_path=%s\n' "$driver_path"
 printf 'driver_source=%s\n' "$([ -n "$driver_env" ] && echo build-tree || echo installed-package)"
 printf 'driver_sha256=%s\n' "$driver_hash"
 printf 'decoder=%s\n' "$device"
-printf 'cases=%s\n' "$(echo "$cases" | wc -w)"
+printf 'cases=%s\n' "$(grep -c . "$work/cases")"
 printf 'oracle=the documented pipeline in double precision, plus black, peak and monotonicity\n'
 echo "PASS va-vpp-tonemap peaks=2 sizes=2 refused=3 driver=$driver_hash"

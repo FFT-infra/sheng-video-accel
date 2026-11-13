@@ -6,6 +6,15 @@
 //
 //     out = alpha * overlay + (1 - alpha) * main
 //
+// and, when the blend state sets VA_BLEND_PREMULTIPLIED_ALPHA,
+//
+//     out = overlay + (1 - alpha) * main
+//
+// because the source already carries its alpha. The premultiplied form is
+// mixed around the plane's neutral code (16 for luma, 128 for chroma): a
+// fully transparent premultiplied sample is that neutral, so the mix has to
+// take the offset off the main term rather than off the source.
+//
 // The main pass is an offset copy rather than a plain one because a decoded
 // frame's surface is wider than its picture — 3048 columns in a 3056-column
 // stride, say — so the rectangle the client names is the picture, and the
@@ -58,6 +67,8 @@ layout(push_constant) uniform Params {
     // Bytes per sample: 1 for NV12, 2 for P010. Both ends share it.
     uint bytes;
     float alpha;
+    // Non-zero when the overlay's colours are already multiplied by alpha.
+    uint premult;
 } p;
 
 // One sample as its own code value: 0..255 for NV12, 0..1023 for P010.
@@ -95,8 +106,10 @@ uint pick(uint i, uint inc)
     return (i * inc + (inc >> 1)) >> 16;
 }
 
-float mix_codes(float main_code, float overlay_code)
+float mix_codes(float main_code, float overlay_code, float neutral)
 {
+    if (p.premult != 0u)
+        return overlay_code + (1.0 - p.alpha) * (main_code - neutral);
     return p.alpha * overlay_code + (1.0 - p.alpha) * main_code;
 }
 
@@ -129,7 +142,8 @@ void main()
             if (inside(dx, row)) {
                 uint ox = pick(dx - p.r_x, hx);
                 uint oy = pick(row - p.r_y, hy);
-                m = mix_codes(m, code_overlay(p.o_y + oy * p.o_stride + ox * p.bytes));
+                m = mix_codes(m, code_overlay(p.o_y + oy * p.o_stride + ox * p.bytes),
+                    p.bytes == 1u ? 16.0 : 64.0);
             }
             packed |= code_bits(m) << (k * 8u * p.bytes);
         }
@@ -155,8 +169,9 @@ void main()
                 uint ox = pick(cx - rx, hx);
                 uint oy = pick(cy - ry, hy);
                 uint o_off = p.o_uv + oy * p.o_stride + ox * 2u * p.bytes;
-                u = mix_codes(u, code_overlay(o_off));
-                v = mix_codes(v, code_overlay(o_off + p.bytes));
+                const float neutral = p.bytes == 1u ? 128.0 : 512.0;
+                u = mix_codes(u, code_overlay(o_off), neutral);
+                v = mix_codes(v, code_overlay(o_off + p.bytes), neutral);
             }
             packed |= (code_bits(u) | (code_bits(v) << (8u * p.bytes))) << (k * 16u);
         }

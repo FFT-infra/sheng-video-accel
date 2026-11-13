@@ -28,15 +28,54 @@ VAStatus guarded(VADriverContextP ctx, const char* where, auto&& body)
     }
 }
 
-// Packed NV12/P010 layout for a VAImage of the given size.
+bool rgb_fourcc(uint32_t fourcc)
+{
+    return fourcc == VA_FOURCC_BGRA || fourcc == VA_FOURCC_RGBA;
+}
+
+unsigned bytes_of(uint32_t fourcc)
+{
+    if (fourcc == VA_FOURCC_P010)
+        return 2;
+    return rgb_fourcc(fourcc) ? 4 : 1;
+}
+
+// The packed BGRA/RGBA surface the processor composes from is one plane of
+// 32-bit words; VA names the bytes in memory order.
+void fill_masks(VAImageFormat& format)
+{
+    if (format.fourcc == VA_FOURCC_BGRA) {
+        format.red_mask = 0x00ff0000;
+        format.green_mask = 0x0000ff00;
+        format.blue_mask = 0x000000ff;
+    } else if (format.fourcc == VA_FOURCC_RGBA) {
+        format.red_mask = 0x000000ff;
+        format.green_mask = 0x0000ff00;
+        format.blue_mask = 0x00ff0000;
+    }
+    if (rgb_fourcc(format.fourcc))
+        format.alpha_mask = 0xff000000;
+}
+
+// Packed layout for a VAImage of the given size.
 void fill_image(VAImage& image, uint32_t fourcc, unsigned width, unsigned height)
 {
-    const unsigned bytes = fourcc == VA_FOURCC_P010 ? 2 : 1;
+    const unsigned bytes = bytes_of(fourcc);
     image.format.fourcc = fourcc;
     image.format.byte_order = VA_LSB_FIRST;
-    image.format.bits_per_pixel = bytes == 2 ? 24 : 12;
+    image.format.bits_per_pixel = rgb_fourcc(fourcc) ? 32 : (bytes == 2 ? 24 : 12);
+    fill_masks(image.format);
     image.width = static_cast<uint16_t>(width);
     image.height = static_cast<uint16_t>(height);
+    if (rgb_fourcc(fourcc)) {
+        image.num_planes = 1;
+        image.pitches[0] = width * bytes;
+        image.offsets[0] = 0;
+        image.data_size = image.pitches[0] * height;
+        image.num_palette_entries = 0;
+        image.entry_bytes = 0;
+        return;
+    }
     image.num_planes = 2;
     image.pitches[0] = width * bytes;
     image.pitches[1] = ((width + 1) & ~1u) * bytes;
@@ -51,20 +90,25 @@ void fill_image(VAImage& image, uint32_t fourcc, unsigned width, unsigned height
 // and size come from the DMA-BUF layout, not from a packed copy.
 void view_image(VAImage& image, uint32_t fourcc, unsigned width, unsigned height, const iris::Layout& layout)
 {
-    const unsigned bytes = fourcc == VA_FOURCC_P010 ? 2 : 1;
+    const unsigned bytes = bytes_of(fourcc);
     image.format.fourcc = fourcc;
     image.format.byte_order = VA_LSB_FIRST;
-    image.format.bits_per_pixel = bytes == 2 ? 24 : 12;
+    image.format.bits_per_pixel = rgb_fourcc(fourcc) ? 32 : (bytes == 2 ? 24 : 12);
+    fill_masks(image.format);
     image.width = static_cast<uint16_t>(width);
     image.height = static_cast<uint16_t>(height);
-    image.num_planes = 2;
     image.pitches[0] = layout.stride;
-    image.pitches[1] = layout.stride;
     image.offsets[0] = layout.data_offset;
-    image.offsets[1] = layout.chroma_offset();
     image.data_size = layout.size;
     image.num_palette_entries = 0;
     image.entry_bytes = 0;
+    if (rgb_fourcc(fourcc)) {
+        image.num_planes = 1;
+        return;
+    }
+    image.num_planes = 2;
+    image.pitches[1] = layout.stride;
+    image.offsets[1] = layout.chroma_offset();
 }
 
 // Copy the visible width x height from a surface's current pixels (held
@@ -86,7 +130,7 @@ void copy_pixels(DriverData& d, Surface& s, const VAImage& image, uint8_t* desti
     }
     iris::require(layout.fourcc == image.format.fourcc, "image format does not match the surface",
         VA_STATUS_ERROR_INVALID_IMAGE_FORMAT);
-    const unsigned bytes = layout.fourcc == VA_FOURCC_P010 ? 2 : 1;
+    const unsigned bytes = bytes_of(layout.fourcc);
     const unsigned width = std::min<unsigned>(image.width, layout.width);
     const unsigned height = std::min<unsigned>(image.height, layout.height);
     (void)d;
@@ -94,6 +138,10 @@ void copy_pixels(DriverData& d, Surface& s, const VAImage& image, uint8_t* desti
     for (unsigned row = 0; row < height; ++row)
         std::memcpy(destination + image.offsets[0] + static_cast<size_t>(row) * image.pitches[0],
             source + layout.data_offset + static_cast<size_t>(row) * layout.stride, width * bytes);
+    if (rgb_fourcc(layout.fourcc)) {
+        iris::dma_buf_cpu_sync(fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
+        return;
+    }
     for (unsigned row = 0; row < (height + 1) / 2; ++row)
         std::memcpy(destination + image.offsets[1] + static_cast<size_t>(row) * image.pitches[1],
             source + layout.chroma_offset() + static_cast<size_t>(row) * layout.stride, ((width + 1) & ~1u) * bytes);
@@ -105,20 +153,36 @@ void copy_pixels(DriverData& d, Surface& s, const VAImage& image, uint8_t* desti
 VAStatus queryImageFormats(VADriverContextP ctx, VAImageFormat* formats, int* count)
 {
     auto& d = data(ctx);
+    // count is in/out: on entry it is the caller's list size, and the driver
+    // may write at most that many entries. FFmpeg sizes its array from
+    // vaMaxNumImageFormats (kMaxImageFormats) and hands that number back, so
+    // writing more entries than the driver advertised overflows the client's
+    // heap instead of returning an error.
+    VAImageFormat list[kMaxImageFormats] = {};
     int n = 0;
-    formats[n] = {};
-    formats[n].fourcc = VA_FOURCC_NV12;
-    formats[n].byte_order = VA_LSB_FIRST;
-    formats[n].bits_per_pixel = 12;
+    list[n].fourcc = VA_FOURCC_NV12;
+    list[n].byte_order = VA_LSB_FIRST;
+    list[n].bits_per_pixel = 12;
     ++n;
     if (d.capabilities.p010) {
-        formats[n] = {};
-        formats[n].fourcc = VA_FOURCC_P010;
-        formats[n].byte_order = VA_LSB_FIRST;
-        formats[n].bits_per_pixel = 24;
+        list[n].fourcc = VA_FOURCC_P010;
+        list[n].byte_order = VA_LSB_FIRST;
+        list[n].bits_per_pixel = 24;
         ++n;
     }
-    *count = n;
+    // The processor's packed overlay sources; a client uploads one and asks
+    // for it to be composited onto a YUV frame.
+    for (uint32_t fourcc : { VA_FOURCC_BGRA, VA_FOURCC_RGBA }) {
+        list[n].fourcc = fourcc;
+        list[n].byte_order = VA_LSB_FIRST;
+        list[n].bits_per_pixel = 32;
+        fill_masks(list[n]);
+        ++n;
+    }
+    if (formats != nullptr && count != nullptr && *count > 0)
+        std::copy_n(list, std::min(n, *count), formats);
+    if (count != nullptr)
+        *count = n;
     return VA_STATUS_SUCCESS;
 }
 
@@ -126,7 +190,9 @@ VAStatus createImage(VADriverContextP ctx, VAImageFormat* format, int width, int
 {
     return guarded(ctx, "createImage", [&] {
         auto& d = data(ctx);
-        iris::require(format && (format->fourcc == VA_FOURCC_NV12 || format->fourcc == VA_FOURCC_P010),
+        iris::require(format
+                && (format->fourcc == VA_FOURCC_NV12 || format->fourcc == VA_FOURCC_P010
+                    || rgb_fourcc(format->fourcc)),
             "image format not supported", VA_STATUS_ERROR_INVALID_IMAGE_FORMAT);
         iris::require(width > 0 && height > 0, "image geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
         *image = {};
@@ -295,8 +361,9 @@ VAStatus putImage(VADriverContextP ctx, VASurfaceID id, VAImageID image_id, int 
                 && static_cast<uint64_t>(sy) + sh <= image.height
                 && static_cast<uint64_t>(dx) + dw <= s->width && static_cast<uint64_t>(dy) + dh <= s->height,
             "vaPutImage region outside the image or the surface", VA_STATUS_ERROR_INVALID_PARAMETER);
-        iris::require(!((sx | sy | dx | dy | sw | sh) & 1u),
-            "vaPutImage regions are even for 4:2:0", VA_STATUS_ERROR_INVALID_PARAMETER);
+        if (!rgb_fourcc(image.format.fourcc))
+            iris::require(!((sx | sy | dx | dy | sw | sh) & 1u),
+                "vaPutImage regions are even for 4:2:0", VA_STATUS_ERROR_INVALID_PARAMETER);
         iris::require(image.format.fourcc == s->fourcc, "image format does not match the surface",
             VA_STATUS_ERROR_INVALID_IMAGE_FORMAT);
         if (s->rendering())
@@ -321,7 +388,7 @@ VAStatus putImage(VADriverContextP ctx, VASurfaceID id, VAImageID image_id, int 
         iris::require(destination != nullptr && layout.fourcc == image.format.fourcc,
             "surface memory does not match the image", VA_STATUS_ERROR_INVALID_IMAGE_FORMAT);
 
-        const unsigned bytes = layout.fourcc == VA_FOURCC_P010 ? 2 : 1;
+        const unsigned bytes = bytes_of(layout.fourcc);
         const uint8_t* source = b->data.data();
         iris::dma_buf_cpu_sync(fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE);
         for (unsigned row = 0; row < sh; ++row)
@@ -330,6 +397,13 @@ VAStatus putImage(VADriverContextP ctx, VASurfaceID id, VAImageID image_id, int 
                 source + image.offsets[0] + static_cast<size_t>(sy + row) * image.pitches[0]
                     + static_cast<size_t>(sx) * bytes,
                 static_cast<size_t>(sw) * bytes);
+        if (rgb_fourcc(layout.fourcc)) {
+            iris::dma_buf_cpu_sync(fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE);
+            std::lock_guard<std::recursive_mutex> lock(d.mutex);
+            s->client_pixels = true;
+            s->failed = false;
+            return VA_STATUS_SUCCESS;
+        }
         for (unsigned row = 0; row < sh / 2; ++row)
             std::memcpy(destination + layout.chroma_offset() + static_cast<size_t>(dy / 2 + row) * layout.stride
                     + static_cast<size_t>(dx) * bytes,

@@ -18,14 +18,24 @@ struct Shape {
     uint32_t chroma;
     unsigned bytes_per_sample;
     unsigned pitch_alignment;
+    bool single_plane;
 };
 
 Shape shape(uint32_t fourcc)
 {
     if (fourcc == VA_FOURCC_NV12)
-        return { DRM_FORMAT_NV12, DRM_FORMAT_R8, DRM_FORMAT_GR88, 1, 128 };
-    require(fourcc == VA_FOURCC_P010, "imported surfaces are NV12 or P010", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
-    return { DRM_FORMAT_P010, DRM_FORMAT_R16, DRM_FORMAT_GR1616, 2, 256 };
+        return { DRM_FORMAT_NV12, DRM_FORMAT_R8, DRM_FORMAT_GR88, 1, 128, false };
+    if (fourcc == VA_FOURCC_P010)
+        return { DRM_FORMAT_P010, DRM_FORMAT_R16, DRM_FORMAT_GR1616, 2, 256, false };
+    // Packed BGRA/RGBA surfaces: the video processor's overlay sources. VA's
+    // FourCC names the bytes in memory order, DRM's names the little-endian
+    // word, so BGRA is ARGB8888 and RGBA is ABGR8888.
+    if (fourcc == VA_FOURCC_BGRA)
+        return { DRM_FORMAT_ARGB8888, DRM_FORMAT_ARGB8888, 0, 4, 128, true };
+    if (fourcc == VA_FOURCC_RGBA)
+        return { DRM_FORMAT_ABGR8888, DRM_FORMAT_ABGR8888, 0, 4, 128, true };
+    require(false, "surfaces are NV12, P010, BGRA or RGBA", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+    return {};
 }
 
 // The pitch, row count and plane bytes both codecs' CAPTURE buffers use; the
@@ -61,8 +71,11 @@ PlaneLayout plane_layout(uint32_t fourcc, unsigned width, unsigned height)
     layout.stride = (width * s.bytes_per_sample + s.pitch_alignment - 1) & ~(s.pitch_alignment - 1);
     layout.storage_height = (height + 31) & ~31u;
     layout.chroma_offset = layout.stride * layout.storage_height;
-    const unsigned chroma_rows = (((height + 1) / 2) + 15) & ~15u;
-    const uint64_t total = static_cast<uint64_t>(layout.chroma_offset) + static_cast<uint64_t>(layout.stride) * chroma_rows;
+    uint64_t total = static_cast<uint64_t>(layout.chroma_offset);
+    if (!s.single_plane) {
+        const unsigned chroma_rows = (((height + 1) / 2) + 15) & ~15u;
+        total += static_cast<uint64_t>(layout.stride) * chroma_rows;
+    }
     require(width && height && total <= 0xffffffffu, "surface geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
     layout.size = static_cast<unsigned>(total);
     return layout;
@@ -81,6 +94,17 @@ PlaneLayout validate_prime2(const VADRMPRIMESurfaceDescriptor& descriptor, unsig
 
     unsigned pitches[2] = {};
     unsigned offsets[2] = {};
+    if (s.single_plane) {
+        // One packed layer, one plane, nothing to place after it.
+        require(descriptor.num_layers == 1 && descriptor.layers[0].drm_format == s.composed
+                && descriptor.layers[0].num_planes == 1 && !descriptor.layers[0].object_index[0],
+            "the imported layer must be one packed BGRA/RGBA plane", VA_STATUS_ERROR_INVALID_PARAMETER);
+        const PlaneLayout layout = plane_layout(fourcc, width, height);
+        require(descriptor.layers[0].pitch[0] == layout.stride && descriptor.layers[0].offset[0] == 0,
+            "the packed layer must start at offset 0 with the aligned pitch", VA_STATUS_ERROR_INVALID_PARAMETER);
+        check_size(layout, descriptor.objects[0].size, allocation);
+        return layout;
+    }
     if (descriptor.num_layers == 1) {
         const auto& layer = descriptor.layers[0];
         require(layer.drm_format == s.composed && layer.num_planes == 2 && !layer.object_index[0]
@@ -120,10 +144,11 @@ PlaneLayout validate_prime1(const VASurfaceAttribExternalBuffers& buffers, unsig
         "import requires a linear DMA-BUF", VA_STATUS_ERROR_INVALID_PARAMETER);
     // PRIME_1 names the luma plane and, when the client fills the second
     // entry, the chroma plane; both have to be where the CAPTURE layout puts
-    // them.
+    // them. A packed BGRA/RGBA surface has one plane and ignores the second.
     const PlaneLayout layout = plane_layout(fourcc, width, height);
+    const bool single = layout.chroma_offset == layout.size;
     require(buffers.pitches[0] == layout.stride && buffers.offsets[0] == 0
-            && (buffers.num_planes < 2 || buffers.offsets[1] == layout.chroma_offset),
+            && (single || buffers.num_planes < 2 || buffers.offsets[1] == layout.chroma_offset),
         "the imported buffer must use the CAPTURE layout: luma at offset 0, chroma after the aligned rows, one pitch",
         VA_STATUS_ERROR_INVALID_PARAMETER);
     check_size(layout, buffers.data_size, allocation);
