@@ -515,7 +515,7 @@ vocabulary and its consumers, invariant 17, the capability table `sync_note`
 and both READMEs. Re-run the four-codec matrix, 120-frame AV1 clip, DRC,
 10-bit probe and the Chrome/Firefox browser matrix.
 
-### WP4 VPP feasibility spike — prereq gate passed, VPP still unimplemented
+### WP4 VPP — implemented on a branch behind an opt-in switch, not merged
 
 The 2026-11-12 read-only survey concluded "no proven viable backend" because
 `vulkaninfo` and `glslangValidator` are absent on the tablet and no CDSP
@@ -530,10 +530,10 @@ is `run-20261112T205511Z` (guard `complete`, exit 0), recorded in
 `TEST-RESULTS.md` §"Vulkan VPP prerequisites on the target". The CDSP/FastRPC
 path is not needed for this backend and was not probed.
 
-This reverses the "no viable backend" verdict: a Vulkan compute backend is
-viable on this device. It does **not** make VPP exist. No `VAProfileNone`,
-`VAEntrypointVideoProc`, VPP vtable hooks or filters are implemented, and the
-capability table is unchanged.
+This reverses the "no viable backend" verdict, for the backend alone: a
+Vulkan compute pipeline can import both DMA-BUF origins and write them back
+on this device. The VA entrypoint was still missing at that point, and the
+capability table is still unchanged.
 
 A second gate closes the gap between "compute can read/write a flat DMA-BUF"
 and a real scaled frame: `test/vulkan-vpp/nv12_scale_gate.sh` runs
@@ -546,16 +546,30 @@ driver `323c07cb`), recorded in `TEST-RESULTS.md` §"NV12 scale primitive on the
 target". The filter kernel now has a per-pixel target baseline, which is the
 load-bearing evidence WP4 asked for before advertising VPP.
 
-What remains before VPP can be advertised is the VA plumbing, not the pixel
-math: wire `ctx->vtable_vpp` (three query hooks), `VAProfileNone` +
-`VAEntrypointVideoProc` config/context, `VAProcPipelineParameterBufferType`
-(41) / `VAProcFilterParameterBufferType` (42) in createBuffer/renderPicture,
-dispatch this proven kernel from a VPP context, and pass an end-to-end client
-gate (FFmpeg `scale_vaapi` + `hwdownload`, per-pixel framemd5 against a
-software scale) with identity recorded. Vulkan must stay an optional meson
-dependency (CI has no Vulkan/glslang); the checked-in SPIR-V + host
-`make-spv.sh` pattern already fits. Keep `data/iris-codec-capabilities.json`
-and both README decode tables unchanged until that target gate passes.
+The VA plumbing that WP4 listed as remaining is implemented on
+`feat/absorb-upstream-advantages` (PR #7): `ctx->vtable_vpp` with its three
+query hooks, `VAProfileNone` + `VAEntrypointVideoProc` config and context
+behind `V4L2_VA_VPP`, buffer types 41 and 42, and `endPicture` dispatching the
+pinned SPIR-V over the source and output surface DMA-BUFs. A VideoProc
+context opens no node and owns no session. Everything the kernel does not do
+(crop, rotation, blending, filters, colour conversion, a ratio other than
+exactly 2x, a second pipeline buffer in one picture) fails the picture with a
+VA status instead of being approximated. Vulkan stays an optional meson
+dependency, so CI builds the stub and advertises nothing.
+
+End-to-end evidence is `test/vulkan-vpp/scale_vaapi_gate.sh`: FFmpeg
+`hwupload,scale_vaapi=256:256,hwdownload` of a 128x128 NV12 frame is
+byte-identical to swscale `flags=neighbor`, and the same client is refused
+without the switch (`TEST-RESULTS.md` §"VA video processor wired end to end").
+That run used `LIBVA_DRIVERS_PATH=build/src`, and the installed driver does
+not carry the entrypoint, so no capability row, README decode table or VA
+profile changed.
+
+Two gaps stay open by decision. The backend performs one operation, a 2x
+nearest NV12 scale; a general ratio needs a new kernel and a new oracle, not a
+config knob, because swscale's nearest map only coincides with the kernel's
+`src = dst/2` at exactly 2x. And the gate has only run against a build-tree
+override, so an installed-package run is owed before any support wording.
 
 ### WP5 RGB import — done, verdict "no RGB import code"
 
