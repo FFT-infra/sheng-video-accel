@@ -54,6 +54,11 @@ BuildRequires:  pkgconfig(gbm)
 # a package built without the loader and headers would not carry it at all.
 # All three package formats depend on it for the same reason.
 BuildRequires:  pkgconfig(vulkan)
+# %check runs the project's host checks, and three of them compare against
+# FFmpeg (the rotation model with software transpose, and two AV1 oracles that
+# need libdav1d). Without it a clean build root fails the test stage; a
+# developer machine that happens to have ffmpeg hides that.
+BuildRequires:  ffmpeg
 
 # The diagnostic commands resolve the decoder node by driver name with
 # v4l2-ctl, because the node number is not stable across boots on this device.

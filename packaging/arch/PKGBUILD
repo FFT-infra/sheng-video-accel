@@ -36,6 +36,8 @@ depends=('libva' 'libdrm' 'mesa' 'v4l-utils')
 # built without them would not contain it. The Fedora spec and the Debian
 # packaging declare the same dependency.
 makedepends=('meson' 'ninja' 'pkgconf' 'python' 'vulkan-headers' 'vulkan-icd-loader')
+# check() runs the host checks, three of which compare against FFmpeg.
+checkdepends=('ffmpeg')
 optdepends=('google-chrome: Google Chrome, the qualified VA-API decode client')
 source=("$pkgname-$pkgver.tar.gz")
 sha256sums=('SKIP')

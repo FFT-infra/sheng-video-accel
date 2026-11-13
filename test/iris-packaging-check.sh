@@ -140,6 +140,11 @@ grep -Fq 'Architecture: arm64' "$debian_control" \
 for manifest in "$spec" "$pkgbuild" "$debian_control"; do
     grep -Fq 'vulkan' "$manifest" \
         || fail "${manifest#"$root"/} does not build against Vulkan; the video processor would be missing"
+    # The test stage compares against FFmpeg (rotation model, two AV1 oracles),
+    # so a format that does not declare it builds only on a machine that
+    # happens to have it installed.
+    grep -Fq 'ffmpeg' "$manifest" \
+        || fail "${manifest#"$root"/} does not require ffmpeg for its test stage"
 done
 
 # The node rule exits rather than guessing a node number when v4l2-ctl is

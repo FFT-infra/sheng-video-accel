@@ -12,7 +12,8 @@ Build-Depends: debhelper-compat (= 13),
                libegl-dev,
                libgles-dev,
                libgbm-dev,
-               libvulkan-dev
+               libvulkan-dev,
+               ffmpeg
 Standards-Version: 4.6.2
 Rules-Requires-Root: no
 Homepage: https://github.com/phxinyang/qualcomm-iris-vaapi
