@@ -7698,3 +7698,99 @@ Identity for all four runs: kernel `7.2.6-sm8550-g42f3b40-iris1`, module
 `Iris Encoder` at `/dev/video1`, both resolved by
 `iris_driver` QUERYCAP. Battery 40 % discharging at ~1.0 A, thermal peak
 50.5 °C over the VPP suite and 53.2 °C over the matrix and browsers.
+
+## Debian packaging: built in a bookworm chroot, run on the target (`9dccdeb`)
+
+WP6 said not to add `debian/`: `libgbm-dev` pins an exact `libgbm1` and can
+downgrade a vendor-patched graphics stack, no Debian or Ubuntu system is a
+qualified target, and a package that cannot reproduce the Fedora/Arch
+provenance and installed-package gates would be an unverified distribution
+surface. The first two hold. The third is a cost, not a prohibition, and it is
+paid here: the package is built where Debian builds happen (a clean chroot)
+and the artifact it produces runs the gates on `sheng`.
+
+`debian/rules` installs through `scripts/install-system.sh` like the other two
+formats, pins `/usr/lib/$(DEB_HOST_MULTIARCH)/dri`, strips before refreshing
+the provenance manifest, and takes the source identity from the checkout or
+from `IRIS_SOURCE_COMMIT`, `IRIS_TRACKED_SOURCE_SHA256` and `IRIS_SOURCE_DIRTY`
+when a tarball has no `.git`. All three formats now also build-depend on
+Vulkan, because the video processor is compiled only when the loader and
+headers are found, and on FFmpeg, because the test stage runs the host checks
+and three of them compare against it.
+
+### Two defects the clean build found
+
+Both were invisible on the qualified target, which has GCC 16 and FFmpeg:
+
+1. `src/codec/annexb.h` names `size_t` without `<cstddef>`. bookworm's
+   libstdc++ 12 stops at `'size_t' has not been declared`; GCC 16 pulls the
+   type in through `<vector>`, which is a property of that library, not of the
+   header. `bitwriter.h` and `session.h` name it the same way. Fixed in
+   `0f3b9a0`.
+2. The test stage of all three formats runs the host checks, and the rotation
+   model plus the two AV1 oracles need FFmpeg. None of the three declared it,
+   so a clean build root fails at `%check` / `dh_auto_test` while a developer
+   machine with ffmpeg installed hides it. Fixed in `4296c1c`.
+
+### The build
+
+Debian bookworm arm64 rootfs, extracted from the image and entered with
+`chroot` on the lab host (`crun` refuses `RLIMIT_NPROC` in this VM, so a
+container was not available); `apt-get install build-essential meson
+ninja-build pkg-config python3 libva-dev libdrm-dev libegl-dev libgles-dev
+libgbm-dev libvulkan-dev dpkg-dev debhelper ffmpeg`, then
+`dpkg-buildpackage -b -us -uc` with the source identity passed for the tarball.
+`meson test` inside the chroot: 26/26.
+
+The Fedora target cannot build this package: `dh_shlibdeps` needs Debian's
+shlibs database and aborts with "no dependency information found for
+/lib64/libdrm.so.2". That is the reason the build lives in the chroot, not a
+workaround for it.
+
+`libva-v4l2-iris_0.1.0_arm64.deb`, sha256 `e1de06d7…`, 160,992 bytes,
+Installed-Size 513:
+
+```text
+Depends: libc6 (>= 2.34), libdrm2 (>= 2.4.38), libegl1, libgbm1 (>= 7.11~1),
+         libgcc-s1 (>= 3.0), libgles2 (>= 1.0.0), libstdc++6 (>= 12),
+         libvulkan1 (>= 1.2.131.2), v4l-utils
+```
+
+Those are `dh_shlibdeps`' own answers, not a hand-written list; `v4l-utils` is
+the node rule's requirement and is the one line `debian/control` states. The
+package carries the driver, the `msm_drv_video.so` symlink, `iris-node.sh`, the
+three diagnostic commands, both READMEs, `copyright` and the install manifest.
+The manifest's `artifact_sha256` equals the `.so` the package contains
+(`c0598c7e…`), which is what proves the refresh after `dh_strip` ran on the
+payload and not on the build-tree file.
+
+Two independent chroot builds — `4296c1c` and `9dccdeb` — produced a
+byte-identical driver (`c0598c7e…`), so the artifact the gates below ran
+against is the artifact in the final package.
+
+### The package on the target
+
+Extracted with `dpkg-deb -x` and pointed at with `LIBVA_DRIVERS_PATH`; nothing
+was copied into `/usr/lib64/dri`, so this is the packaged payload and not the
+installed package.
+
+| check | run | result |
+| --- | --- | --- |
+| `vainfo` through libva | — | `va_openDriver() returns 0`, H.264/HEVC/VP9 profiles listed |
+| `overlay_vaapi_gate.sh` | `run-20261113T112919Z` | 3 cases `max_diff=0`, `driver=c0598c7e…` |
+| `iris-matrix.sh` | `run-20261113T113021Z` | H.264, VP9, HEVC, AV1 frame-md5 exact, `drops=0` |
+
+Both runs are guard `complete`, exit 0, `source_dirty=0`, boot `4b73926c…`,
+module `b90bd823…`, decoder `Iris Decoder` at `/dev/video0`. The gate
+record says `driver_source=build-tree` because that field names how the driver
+was found, and `LIBVA_DRIVERS_PATH` is the build-tree mechanism; the hash is
+the packaged bytes.
+
+### What this does not prove
+
+No Debian or Ubuntu system is a qualified target. The package was built on
+bookworm and run on the Fedora 44 target, which proves the artifact, its
+dependency metadata and its provenance — not a Debian runtime. The `msm`
+alias, the node rule and the diagnostics are carried by the package but were
+exercised from the installed-tree copies on this boot, not from the extracted
+tree.

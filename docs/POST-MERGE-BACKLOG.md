@@ -599,14 +599,28 @@ decode and encode gates exercise. Keep the capability table's RGB rejection
 entries. `radxa-pkg/qcom-va-driver` is the reference implementation if a real
 consumer appears (`TEST-RESULTS.md` §"WP4/WP5/WP6 decisions").
 
-### WP6 Debian packaging — done, verdict "do not add debian/"
+### WP6 Debian packaging — done, verdict revised: `debian/` exists and the artifact is verified
 
-`docs/build-and-deploy.md` records that `libgbm-dev` pins an exact `libgbm1`
-and can downgrade a vendor-patched graphics stack. The 2026-11-12 survey
-confirms `mesa-libgbm` and `mesa-libgbm-devel` are both 26.2.5 on `sheng`.
-No Debian/Ubuntu distribution is a qualified target; a package that cannot
-reproduce the Fedora/Arch provenance and installed-package gates would add an
-unverified distribution surface (`TEST-RESULTS.md` §"WP4/WP5/WP6 decisions").
+The original verdict was "do not add debian/" for three reasons: `libgbm-dev`
+pins an exact `libgbm1` and can downgrade a vendor-patched graphics stack
+(`mesa-libgbm` and `mesa-libgbm-devel` are 26.2.5 on `sheng`), no Debian or
+Ubuntu system is a qualified target, and a package that cannot reproduce the
+Fedora/Arch provenance and installed-package gates would add an unverified
+distribution surface.
+
+The first and second still hold. The third is a cost of building it properly:
+the package is built in a clean bookworm chroot (never on the device, which is
+what the GBM pin argues for anyway), `debian/rules` installs through
+`scripts/install-system.sh` and refreshes the provenance manifest after
+`dh_strip`, and the built artifact was run on `sheng` against the decode matrix
+and the `overlay_vaapi` gate. The clean build also found two real defects that
+the Fedora build hides — a missing `<cstddef>` in three headers and the
+undeclared FFmpeg dependency of every format's test stage — which is the kind
+of surface this work package existed to keep honest.
+`TEST-RESULTS.md` §"Debian packaging: built in a bookworm chroot, run on the
+target" carries the dependency list `dh_shlibdeps` produced, the manifest hash,
+the two reproducible builds and the two guarded runs. What remains unproven is
+a Debian runtime: the package was built on bookworm and exercised on Fedora 44.
 
 ### WP7 SoC portability audit — done, docs only
 

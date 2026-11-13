@@ -6,6 +6,20 @@ Run the host-side unit tests without hardware:
 meson test -C build-local
 ```
 
+`test/iris-packaging-check.sh` is the one host check that reads the packaging
+instead of the code. It runs inside `run-static-checks.sh` and fails when an
+installed path is missing from the spec's `%files`, when any of the three
+manifests (`packaging/fedora`, `packaging/arch`, `debian/`) stops delegating
+to `scripts/install-system.sh` or stops refreshing the provenance manifest
+after its own strip step, when `v4l-utils` is dropped from the runtime
+dependencies, or when a format forgets the Vulkan or FFmpeg build dependency
+the driver and its test stage need.
+
+Building the Debian package needs a Debian host or chroot: `dh_shlibdeps`
+aborts on a Fedora machine because there is no shlibs database for its
+libraries. `TEST-RESULTS.md` §"Debian packaging" records the chroot recipe and
+what the artifact was run against.
+
 ## On an installed system
 
 `scripts/iris-verify.sh` is the user-facing check, not a gate: it generates
