@@ -350,6 +350,8 @@ VAStatus querySurfaceAttributes(VADriverContextP ctx, VAConfigID config, VASurfa
     add(VASurfaceAttribPixelFormat, VA_FOURCC_NV12, VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
     const VAProfile profile = it->second.profile;
     // The encoder's raw port is NV12 only; P010 is a decode-only format here.
+    // A VideoProc surface is NV12 only as well: the compute kernel has no
+    // 10-bit path, and p010_decode_profile() is false for VAProfileNone.
     const bool encoding = it->second.entrypoint == VAEntrypointEncSlice;
     if (!encoding && d.capabilities.p010 && p010_decode_profile(profile))
         add(VASurfaceAttribPixelFormat, VA_FOURCC_P010, VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
