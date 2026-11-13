@@ -397,7 +397,12 @@ whose second pipeline buffer names a `VABlendState` runs
 mixing the overlay into an even rectangle of it on the coded values of both
 planes; every other pipeline operation (mirroring, per-pixel alpha, luma
 keying, a third pass, any second filter, any colour conversion outside that one
-filter) fails the picture instead of being dropped. The entrypoint is advertised only when the
+filter) fails the picture instead of being dropped. The decode lives on the
+V4L2 node and the kernel on Vulkan, so `vaEndPicture` waits for each source
+surface's pending decode before it reads that surface — a client that issues
+the processor's picture straight behind the decode (FFmpeg's `overlay_vaapi`
+does) would otherwise composite a black frame — and a source whose decode never
+lands fails the picture. The entrypoint is advertised only when the
 build found Vulkan and the client set `V4L2_VA_VPP` (§6), so an installed
 decode/encode client sees the surface it qualified against. The kernel and the
 VA surface path are gated separately in §9:
@@ -648,12 +653,13 @@ monotone ramp). It also proves the curve follows the metadata by running two
 mastering peaks over one frame, and requires an NV12 source, a filter without
 its parameters and a rotation in a tone-mapped picture to be refused.
 `test/vulkan-vpp/overlay_gate.sh` drives `iris-va-vpp-probe overlay`, which
-submits the two pipeline buffers overlay_vaapi submits: five geometries across
-both sample widths against the mix `overlay.comp` documents, within 1 code, and
-then the two endpoints against the input frames themselves — an alpha of 0 over
-the whole surface must reproduce the main frame byte for byte and an alpha of 1
-the overlay frame, which a kernel that read the wrong plane or ignored the alpha
-cannot do. Premultiplied alpha, luma keying, a third pass, a blend before its
+submits the two pipeline buffers overlay_vaapi submits: six geometries across
+both sample widths — including a main surface padded wider than its picture, as
+a decoder allocates one — against the mix `overlay.comp` documents, within 1
+code, then the two endpoints against the input frames themselves — an alpha of
+0 over the whole surface must reproduce the main frame byte for byte and an
+alpha of 1 the overlay frame, which a kernel that read the wrong plane or
+ignored the alpha cannot do. Premultiplied alpha, luma keying, a third pass, a blend before its
 base pass, an odd or out-of-bounds rectangle, a crop of the main surface and an
 alpha outside 0..1 are required to be refused. The SPIR-V the driver embeds is
 regenerated from the pinned module and compared by `test/run-static-checks.sh`.

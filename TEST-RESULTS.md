@@ -7378,3 +7378,116 @@ all three cases is then within one code, which is the float32 kernel against a
 double-precision model. The oracle now writes its frame beside the kernel's
 (`<out>.expected`), so a disagreement names a plane and a column instead of a
 count.
+
+## Global-alpha compositing through the video processor (2026-11-13)
+
+`overlay_vaapi` submits one picture with two pipeline buffers: the main surface
+over the whole output, then an overlay surface into a rectangle of it with a
+`VABlendState` naming `VA_BLEND_GLOBAL_ALPHA`. The processor now runs
+`overlay.spv` over three DMA-BUFs for that shape, and
+`queryVideoProcPipelineCaps` answers `blend_flags = VA_BLEND_GLOBAL_ALPHA` and
+nothing else — premultiplied alpha and luma keying need an RGB or alpha-plane
+kernel this backend does not have, so they are refused rather than
+approximated.
+
+The mix runs on the coded Y'CbCr values. For a *global* alpha that is the same
+picture: a limited-range code is affine in the normalised value
+(`16 + 219 v`, `128 + 224 c`), so `alpha*o + (1-alpha)*m` on codes equals the
+mix on the normalised values. The rectangle must be even on both axes so no
+chroma cell is half covered.
+
+The main pass is an offset copy, not a copy of the whole surface. A decoder
+allocates its surfaces wider than the picture — the client below decodes 3048
+columns into a 3056-column surface with a 3072-byte stride — and FFmpeg names
+that whole surface as `surface_region` regardless, so the main pass copies the
+client's rectangle into an output of the same size and the overlay is scaled
+into a rectangle of that output.
+
+### The gate
+
+`overlay_gate.sh` runs `iris-va-vpp-probe overlay`, which submits the two
+pipeline buffers in FFmpeg's shape (`params[0]` with the whole surface region
+and a full-output `output_region`, `params[1]` copied from it with the overlay
+surface, no surface region, its own `output_region` and the blend state). There
+is an exact reference for a global-alpha mix, so every output byte is compared
+with the probe's double-precision model of what `overlay.comp` documents.
+
+| case | main | overlay | rect | alpha | result |
+| --- | --- | --- | --- | --- | --- |
+| `half` | 128x72 | 128x72 | 128x72+0,0 | 0.50 | `max_diff=0` |
+| `opaque` | 160x96 | 64x48 | 64x48+16,16 | 1.00 | `max_diff=0` |
+| `scale` | 128x72 | 64x48 | 32x24+34,12 | 0.60 | `max_diff=0` |
+| `p010` | 128x72 P010 | 32x24 P010 | 32x24+64,48 | 0.50 | `max_diff=0` |
+| `ragged` | 318x178 | 64x48 | 64x48+100,50 | 0.25 | `max_diff=0` |
+| `padded` | 128x72 in a 144-column surface | 64x48 | 64x48+16,16 | 0.35 | `max_diff=0` |
+
+Three checks run beside that comparison. At alpha 0 over the whole surface the
+output must be the main frame byte for byte and at alpha 1 the overlay frame,
+which a kernel that read the wrong plane or dropped the alpha cannot produce;
+the half-alpha case must equal neither input. Eight shapes must be refused:
+premultiplied alpha, luma keying, a third pass, a blend before the pass it
+blends onto, a rectangle that leaves the output, an odd rectangle, a crop of
+the main surface, and an alpha of 1.5. Without `V4L2_VA_VPP` the entrypoint
+does not exist and the same client fails at `vaCreateConfig`.
+
+Runs `run-20261113T092702Z` (build tree) and `run-20261113T093308Z`
+(installed package), guard `complete`, exit 0, `source_dirty=0` at commit
+`b971f26`, six cases `max_diff=0` both ways. The artifact installed by
+`scripts/install-system.sh build` is the same bytes the build tree ran
+(`fe3a1822`), with `c6dea809` kept as the rollback copy at
+`~/iris-vaapi-lab/rollback/v4l2_drv_video.so.c6dea809`. Identity: kernel
+`7.2.6-sm8550-g42f3b40-iris1`, module `b90bd823…`, boot `4b73926c…`, decoder
+`Iris Decoder` on `/dev/video0`, encoder `Iris Encoder` on `/dev/video1`.
+
+The other six VPP gates ran again at the same driver, because `b971f26`
+touches the shared `run_vpp` path: `tonemap_gate.sh`,
+`scale_vaapi_gate.sh`, `crop_vaapi_gate.sh`, `transpose_vaapi_gate.sh`,
+`p010_scale_gate.sh` and `nv12_scale_gate.sh` all exit 0 with guard
+`complete` (`run-20261113T092740Z`, `run-20261113T092817Z`,
+`run-20261113T092854Z`, `run-20261113T092931Z`, `run-20261113T093009Z`,
+`run-20261113T093046Z`).
+
+### The real client
+
+The probe mirrors what the code says a client sends; FFmpeg says what it
+actually sends. A 3048x2032 H.264 screen recording decoded through `vaapi` and
+composited with `testsrc2` at half alpha:
+
+```sh
+ffmpeg -init_hw_device vaapi=va:/dev/dri/renderD128 -filter_hw_device va \
+  -hwaccel vaapi -hwaccel_device va -hwaccel_output_format vaapi \
+  -i clip.mp4 -f lavfi -i testsrc2=size=320x200:rate=30 -filter_complex \
+  '[1:v]format=nv12,hwupload[ov];[0:v][ov]overlay_vaapi=x=100:y=100:w=160:h=100:alpha=0.5,hwdownload,format=nv12[out]' \
+  -map '[out]' -f rawvideo out.yuv
+```
+
+The trace reports `overlay=44 160x100+100,100 alpha=0.50` on both frames
+(`src=2 3056x2032->3048x2032` then `src=25 3072x2048->3048x2032`) and the
+session closes at `submitted=14 completed=14 errors=0 drops=0`.
+
+Against the same decode without the filter: 0 of 6,177,536 luma pixels outside
+the rectangle changed, 15,968 of 16,000 inside it did, and all 4,000 chroma
+cells inside it changed. With `alpha=0.0` the output is byte-identical to the
+plain decode (`cmp`).
+
+### Three defects only the real client found
+
+The probe passed its first runs while every FFmpeg attempt failed, and each
+failure was a client contract the probe had modelled from the code:
+
+1. `ff_vaapi_vpp_init_params` always fills `surface_region`, even when it is
+   the whole frame, and the driver refused any region on a blended main pass,
+   so every `overlay_vaapi` picture was refused. Fixed in `66b65c6`.
+2. The main surface is wider than its picture, so a whole-surface copy wrote
+   3056 columns where the output had 3048 and FFmpeg's `surface_region` could
+   not be honoured at all. The main pass became an offset copy of the client's
+   rectangle (`2a3ff37`), and the probe grew `--pad` to allocate the same kind
+   of surface.
+3. FFmpeg issues the filter picture straight after the decode and relies on one
+   command stream to order them. Here the decode is a V4L2 job and the kernel a
+   Vulkan one, so the processor read a surface that had not been decoded yet
+   and composited black. The trace shows the picture at `t=1248` and the
+   source's `capture token=1` at `t=1265`. `vaEndPicture` now waits for each
+   source's pending decode outside the driver mutex (`661dbb5`), and a source
+   with neither a frame nor a stable buffer passes the pixel check as pending
+   (`b971f26`).
