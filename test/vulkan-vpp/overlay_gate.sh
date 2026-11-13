@@ -157,6 +157,10 @@ failed=0
 count=0
 while IFS= read -r entry; do
     [ -n "$entry" ] || continue
+    # A `#` line is an editor's comment. The case file is a heredoc, so shell
+    # syntax does not apply inside it, and a comment left there used to be
+    # read as a case and fail the gate at the end with an unrelated message.
+    case $entry in '#'*) continue ;; esac
     tag=${entry%%:*}
     spec=${entry#*:}
     # The fields are positional and colon-separated; everything after the
