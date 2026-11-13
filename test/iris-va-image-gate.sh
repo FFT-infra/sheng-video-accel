@@ -45,8 +45,20 @@ fi
 [ -f "$driver_path/v4l2_drv_video.so" ] || fail "no v4l2_drv_video.so in $driver_path; set LIBVA_DRIVERS_PATH"
 driver_hash=$(sha256sum "$driver_path/v4l2_drv_video.so" | cut -d' ' -f1)
 
-probe=${IRIS_IMAGE_PROBE:-$(pwd)/build-local/test/iris-va-image-probe}
-[ -x "$probe" ] || fail "probe not built: $probe"
+# The probe is built next to the driver under test: build/test beside
+# build/src on the target, build-local/test beside build-local/src on the host.
+# An installed driver has no build tree, so IRIS_IMAGE_PROBE names it then.
+probe=${IRIS_IMAGE_PROBE:-}
+if [ -z "$probe" ]; then
+    for candidate in "$(dirname "$driver_path")/test/iris-va-image-probe" \
+            "$(pwd)/build/test/iris-va-image-probe" "$(pwd)/build-local/test/iris-va-image-probe"; do
+        if [ -x "$candidate" ]; then
+            probe=$candidate
+            break
+        fi
+    done
+fi
+[ -n "$probe" ] && [ -x "$probe" ] || fail "probe not built; set IRIS_IMAGE_PROBE"
 
 work=${IRIS_IMAGE_DIR:-$(iris_artifact_dir va-image)}
 mkdir -p "$work"
