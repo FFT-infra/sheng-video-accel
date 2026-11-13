@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 //
 // The three queries on the VPP vtable. They describe what the compute
-// backend runs — one NV12 2x nearest-neighbour scale, no filters, no
-// rotation, no blending — and nothing here creates a VkInstance or opens a
-// node, so a client can query them during GPU sandbox initialisation.
+// backend runs — one NV12 nearest-neighbour scale at the requested ratio, no
+// filters, no rotation, no blending — and nothing here creates a VkInstance or
+// opens a node, so a client can query them during GPU sandbox initialisation.
 
 #include "driver.h"
 

@@ -178,7 +178,7 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
 }
 
 // Run one VideoProc picture: the source comes from the pipeline buffer, the
-// target is the surface vaBeginPicture named. Synchronous — scale_2x waits
+// target is the surface vaBeginPicture named. Synchronous — scale_nv12 waits
 // for its fence, so a successful vaEndPicture means the pixels are there.
 VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_id,
     const std::shared_ptr<Surface>& target)
@@ -203,8 +203,8 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         iris::require(source->target.frame || source->stable, "VPP source holds no pixels",
             VA_STATUS_ERROR_OPERATION_FAILED);
 
-        // The kernel is a fixed 2x map with no crop, so a region that is not
-        // the whole surface is a picture it cannot produce.
+        // The kernel scales the whole frame and has no crop, so a region that
+        // is not the whole surface is a picture it cannot produce.
         if (job.region_set)
             iris::require(job.region.x == 0 && job.region.y == 0 && job.region.width == source->width
                     && job.region.height == source->height,
@@ -213,8 +213,11 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
             iris::require(job.output_region.x == 0 && job.output_region.y == 0
                     && job.output_region.width == target->width && job.output_region.height == target->height,
                 "VPP fills the whole output surface", VA_STATUS_ERROR_INVALID_PARAMETER);
-        iris::require(target->width == 2 * source->width && target->height == 2 * source->height,
-            "the VPP backend scales exactly 2x", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+        // Both ends are NV12, so both geometries must be even. The ratio itself
+        // is free: the kernel samples at swscale's point positions.
+        iris::require(source->width && source->height && target->width && target->height
+                && !((source->width | source->height | target->width | target->height) & 1u),
+            "VPP needs an even, non-empty geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
 
         src = pixels_of(d, *source);
         dst = pixels_of(d, *target);
@@ -231,9 +234,11 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
     sj.dst_uv = dst.layout.chroma_offset();
     sj.src_y = src.layout.data_offset;
     sj.dst_y = dst.layout.data_offset;
+    sj.src_width = source->width;
+    sj.src_height = source->height;
     sj.width = target->width;
     sj.height = target->height;
-    if (!iris::vpp::scale_2x(sj)) {
+    if (!iris::vpp::scale_nv12(sj)) {
         target->failed = true;
         throw iris::Error(VA_STATUS_ERROR_OPERATION_FAILED, "Vulkan VPP scale failed");
     }

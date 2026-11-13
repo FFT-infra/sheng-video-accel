@@ -7,12 +7,11 @@
 #
 # nv12_scale_gate.sh proved the compute kernel over two imported DMA-BUFs.
 # This gate proves the VA surface path around it: a client opens VAProfileNone
-# / VAEntrypointVideoProc, uploads a 128x128 NV12 frame, runs scale_vaapi to
-# 256x256 and downloads it. Every output byte is compared with swscale's
-# nearest-neighbour result on the same input. The kernel scales exactly 2x
-# with nearest sampling, so this geometry is both what the driver advertises
-# and what swscale can reproduce byte-for-byte; another ratio would not be a
-# like-for-like oracle.
+# / VAEntrypointVideoProc, uploads an NV12 frame, runs scale_vaapi and
+# downloads the result. Every output byte is compared with swscale's
+# nearest-neighbour result on the same input and geometry. The driver samples
+# at swscale's point positions, so the comparison is byte-exact at any ratio,
+# not just at 2x.
 #
 # The entrypoint is opt-in. The same client must be refused without
 # V4L2_VA_VPP, which is what keeps a VPP-capable build from changing the
@@ -48,46 +47,60 @@ driver_hash=$(sha256sum "$driver_path/v4l2_drv_video.so" | cut -d' ' -f1)
 work=${IRIS_VPP_DIR:-$(iris_artifact_dir va-vpp)}
 mkdir -p "$work"
 
-echo "== build the 128x128 NV12 input once"
-ffmpeg -y -hide_banner -loglevel error -f lavfi -i testsrc2=size=128x128:rate=1 \
-    -frames:v 1 -pix_fmt nv12 -f rawvideo "$work/src.nv12"
+# Ratios a client can ask for: 2x (the qualified geometry), fractional up and
+# down, identity, a mismatched aspect, and a real 720p frame each way. The
+# driver samples at swscale's point positions, so `scale_vaapi=w=W:h=H` must be
+# byte-identical to `scale=WxH:flags=neighbor` in every case.
+cases="64x64:128x128 64x64:96x96 64x64:32x32 128x128:200x150 62x34:62x34 1280x720:854x480 1280x720:1920x1080"
 
-echo "== software oracle: swscale nearest-neighbour 2x"
-ffmpeg -y -hide_banner -loglevel error -f rawvideo -pix_fmt nv12 -s 128x128 -i "$work/src.nv12" \
-    -vf scale=256:256:flags=neighbor -f rawvideo "$work/ref.nv12"
-ref_hash=$(sha256sum "$work/ref.nv12" | cut -d' ' -f1)
-
-echo "== opt-in: scale_vaapi end to end"
-if ! env LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH="$driver_path" \
-        LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_VPP=1 V4L2_VA_TRACE=1 \
-        timeout 120 ffmpeg -y -xerror -hide_banner -loglevel error \
-        -vaapi_device "$render" -f rawvideo -pix_fmt nv12 -s 128x128 -i "$work/src.nv12" \
-        -vf 'format=nv12,hwupload,scale_vaapi=w=256:h=256,hwdownload,format=nv12' \
-        -f rawvideo "$work/hw.nv12" 2>"$work/vpp.trace"; then
-    sed -n '1,40p' "$work/vpp.trace" >&2 || true
-    fail "scale_vaapi failed with V4L2_VA_VPP=1 (is the driver built with Vulkan?)"
-fi
-cmp "$work/ref.nv12" "$work/hw.nv12" || fail "VPP output differs from swscale neighbor 2x"
-hw_hash=$(sha256sum "$work/hw.nv12" | cut -d' ' -f1)
-
-echo "== the picture actually ran through the VideoProc entrypoint"
-grep -q 'entrypoint=videoproc' "$work/vpp.trace" || {
-    sed -n '1,40p' "$work/vpp.trace" >&2 || true
-    fail "no videoproc trace record; the client did not reach this backend"
-}
-ends=$(grep -c 'entrypoint=videoproc' "$work/vpp.trace" || true)
-if grep -Eq 'va error|Vulkan VPP scale failed' "$work/vpp.trace"; then
-    grep -E 'va error|Vulkan VPP scale failed' "$work/vpp.trace" >&2
-    fail "VPP diagnostics in the trace"
-fi
-[ "$ends" -ge 3 ] || fail "only $ends videoproc records; expected create, begin and end"
+failed=0
+for c in $cases; do
+    src=${c%%:*}
+    dst=${c#*:}
+    sw=${src%x*}
+    sh_=${src#*x}
+    dw=${dst%x*}
+    dh=${dst#*x}
+    echo "== $src -> $dst"
+    ffmpeg -y -hide_banner -loglevel error -f lavfi -i "testsrc2=size=$src:rate=1" \
+        -frames:v 1 -pix_fmt nv12 -f rawvideo "$work/src-$src.nv12"
+    ffmpeg -y -hide_banner -loglevel error -f rawvideo -pix_fmt nv12 -s "$src" \
+        -i "$work/src-$src.nv12" -vf "scale=$dst:flags=neighbor" -f rawvideo "$work/ref-$src-$dst.nv12"
+    ref_hash=$(sha256sum "$work/ref-$src-$dst.nv12" | cut -d' ' -f1)
+    if ! env LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH="$driver_path" \
+            LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_VPP=1 V4L2_VA_TRACE=1 \
+            timeout 120 ffmpeg -y -xerror -hide_banner -loglevel error \
+            -vaapi_device "$render" -f rawvideo -pix_fmt nv12 -s "$src" -i "$work/src-$src.nv12" \
+            -vf "format=nv12,hwupload,scale_vaapi=w=$dw:h=$dh,hwdownload,format=nv12" \
+            -f rawvideo "$work/hw-$src-$dst.nv12" 2>"$work/$src-$dst.trace"; then
+        sed -n '1,40p' "$work/$src-$dst.trace" >&2 || true
+        printf 'case=%s->%s exit=1 (scale_vaapi failed)\n' "$src" "$dst"
+        failed=1
+        continue
+    fi
+    hw_hash=$(sha256sum "$work/hw-$src-$dst.nv12" | cut -d' ' -f1)
+    ends=$(grep -c 'entrypoint=videoproc' "$work/$src-$dst.trace" || true)
+    rc=0
+    cmp "$work/ref-$src-$dst.nv12" "$work/hw-$src-$dst.nv12" || rc=$?
+    if [ "$ends" -lt 3 ]; then
+        echo "only $ends videoproc records; expected create, begin and end" >&2
+        rc=1
+    fi
+    if grep -Eq 'va error|Vulkan VPP scale failed' "$work/$src-$dst.trace"; then
+        grep -E 'va error|Vulkan VPP scale failed' "$work/$src-$dst.trace" >&2
+        rc=1
+    fi
+    printf 'case=%s->%s exit=%s ref=%s hw=%s videoproc=%s\n' "$src" "$dst" "$rc" "$ref_hash" "$hw_hash" "$ends"
+    [ "$rc" -eq 0 ] || failed=1
+done
+[ "$failed" -eq 0 ] || fail "VPP output differs from swscale neighbor for at least one ratio"
 
 echo "== opt-in is required: the same client is refused without V4L2_VA_VPP"
 if env LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH="$driver_path" \
         LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_TRACE=1 \
         timeout 120 ffmpeg -y -xerror -hide_banner -loglevel error \
-        -vaapi_device "$render" -f rawvideo -pix_fmt nv12 -s 128x128 -i "$work/src.nv12" \
-        -vf 'format=nv12,hwupload,scale_vaapi=w=256:h=256,hwdownload,format=nv12' \
+        -vaapi_device "$render" -f rawvideo -pix_fmt nv12 -s 64x64 -i "$work/src-64x64.nv12" \
+        -vf 'format=nv12,hwupload,scale_vaapi=w=128:h=128,hwdownload,format=nv12' \
         -f rawvideo "$work/default.nv12" 2>"$work/default.trace"; then
     fail "scale_vaapi ran without V4L2_VA_VPP; the entrypoint must stay opt-in"
 fi
@@ -97,7 +110,6 @@ fi
 
 printf 'driver_sha256=%s\n' "$driver_hash"
 printf 'decoder=%s\n' "$device"
-printf 'oracle=swscale:flags=neighbor 128x128->256x256 ref=%s\n' "$ref_hash"
-printf 'vpp=hwdownload 256x256 nv12=%s\n' "$hw_hash"
-printf 'trace_videoproc_records=%s\n' "$ends"
-echo "PASS va-vpp 2x-exact driver=$driver_hash"
+printf 'cases=%s\n' "$(echo "$cases" | wc -w)"
+printf 'oracle=swscale:flags=neighbor byte-identical for every case\n'
+echo "PASS va-vpp ratios=$(echo "$cases" | wc -w) exact driver=$driver_hash"

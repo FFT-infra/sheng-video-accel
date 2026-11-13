@@ -317,7 +317,7 @@ src/
     surface.cc        create/destroy/sync/query/export/derive/getImage
     picture.cc        begin/render/end -> codec translator -> Session::submit,
                       or for an EncSlice context -> EncoderSession::encode,
-                      or for a VideoProc context -> iris::vpp::scale_2x
+                      or for a VideoProc context -> iris::vpp::scale_nv12
     vpp.cc            the three vtable_vpp queries; no GPU probe
     image.cc          images and subpictures (minimal); derive aliases a surface
   iris/               the only code that touches /dev/videoN
@@ -336,7 +336,7 @@ src/
     alloc.{h,cc}      StableBuffer allocation (MSM GEM -> dma-heap), or a
                       duplicate of a client's DMA-BUF for an imported surface
     vpp/scale.{h,cc}  optional Vulkan compute video processor: imports two
-                      surface DMA-BUFs, runs the pinned NV12 2x nearest kernel
+                      surface DMA-BUFs, runs the pinned NV12 nearest kernel
                       embedded from test/vulkan-vpp/nv12_scale.spv
   codec/              VA parameters -> bytestream the firmware accepts; pure functions
     bitwriter.h
@@ -384,9 +384,9 @@ those formats).
 The video processor is a fourth context kind but not a fourth node:
 `VAProfileNone` / `VAEntrypointVideoProc` opens no V4L2 node and owns no
 session. `vaEndPicture` resolves the two surface DMA-BUFs and runs the pinned
-NV12 2x nearest kernel; every other pipeline operation (crop, rotation,
-blending, filters, colour conversion, a ratio other than 2x) fails the
-picture instead of being dropped. The entrypoint is advertised only when the
+NV12 nearest kernel at the requested ratio, sampling where swscale samples;
+every other pipeline operation (crop, rotation, blending, filters, colour
+conversion) fails the picture instead of being dropped. The entrypoint is advertised only when the
 build found Vulkan and the client set `V4L2_VA_VPP` (§6), so an installed
 decode/encode client sees the surface it qualified against. The kernel and the
 VA surface path are gated separately in §9:
@@ -599,10 +599,10 @@ them). The allocation chain behind those surfaces is gated on the target by
 below the first needs an MSM render node.
 
 The video processor is gated at two levels. `test/vulkan-vpp/nv12_scale_gate.sh`
-checks the NV12 2x nearest kernel byte for byte against a CPU oracle over both
-DMA-BUF origins; `test/vulkan-vpp/scale_vaapi_gate.sh` checks a `scale_vaapi` +
-`hwdownload` frame against swscale on the same input and checks that the
-entrypoint is refused without `V4L2_VA_VPP`. The SPIR-V the driver embeds is
+checks the NV12 nearest kernel byte for byte against a CPU oracle over both
+DMA-BUF origins and a matrix of ratios; `test/vulkan-vpp/scale_vaapi_gate.sh`
+checks `scale_vaapi` + `hwdownload` frames against swscale over the same
+ratios and checks that the entrypoint is refused without `V4L2_VA_VPP`. The SPIR-V the driver embeds is
 regenerated from the pinned module and compared by `test/run-static-checks.sh`.
 
 ## 10. Invariants (the ones tests exist for)

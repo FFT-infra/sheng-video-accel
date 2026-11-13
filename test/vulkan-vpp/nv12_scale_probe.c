@@ -3,19 +3,20 @@
 // NV12 scale primitive gate. Before a VA video processor can advertise
 // VAProfileNone, the compute kernel that produces its pixels must be proven
 // byte-exact against a CPU oracle on the target. This probe dispatches
-// nv12_scale.spv over two imported DMA-BUFs (NV12 source and 2x destination)
-// and checks every destination byte against a 2x nearest-neighbour oracle,
-// plus that the source is unchanged.
+// nv12_scale.spv over two imported DMA-BUFs and checks every destination byte
+// against a nearest-neighbour oracle that uses swscale's point positions, plus
+// that the source is unchanged.
 //
 // The plane geometry is the Iris CAPTURE layout (src/iris/alloc.cc:
 // stable_layout -> src/util/prime.cc:plane_layout for NV12): 128-byte stride,
 // 32-row luma, 16-row chroma, chroma immediately after luma. Stride, luma and
-// chroma offsets, and visible geometry are all push constants, so the kernel
-// is the one a VA VPP pipeline would dispatch, not a test with baked sizes.
-// Both DMA-BUF origins the driver allocates (MSM GEM PRIME fd and the system
-// DMA heap) are gated, exactly like the flat read/write prereq.
+// chroma offsets, and both visible geometries are push constants, so the
+// kernel is the one a VA VPP pipeline would dispatch, not a test with baked
+// sizes. Both DMA-BUF origins the driver allocates (MSM GEM PRIME fd and the
+// system DMA heap) are gated, exactly like the flat read/write prereq.
 //
-// Usage: nv12_scale_probe <nv12_scale.spv> <heap|msm> [render-node]
+// Usage: nv12_scale_probe <nv12_scale.spv> <heap|msm> [render-node] [WxH WxH]
+// The size pair is [source destination] and defaults to 64x32 128x64.
 // Exit 0 only when compute runs, both fds import, and all destination bytes
 // match the oracle for that origin. Build and run on the target, never in CI.
 
@@ -41,35 +42,47 @@
 #define MSM_BO_CACHED_COHERENT 0x080000
 #endif
 
-// Source 64x32, destination 128x64 (2x upscale). NV12: 8-bit samples,
-// 128-byte pitch, 32-row luma, 16-row chroma, chroma after luma.
-#define SRC_W 64u
-#define SRC_H 32u
-#define DST_W 128u
-#define DST_H 64u
-
 static unsigned align_up(unsigned v, unsigned a)
 {
     return (v + a - 1) & ~(a - 1);
 }
 
 struct geometry {
+    unsigned src_w, src_h, dst_w, dst_h;
     unsigned src_stride, src_uv, src_size;
     unsigned dst_stride, dst_uv, dst_size;
 };
 
-static struct geometry geometry(void)
+static struct geometry geometry(unsigned src_w, unsigned src_h, unsigned dst_w, unsigned dst_h)
 {
     struct geometry g;
-    g.src_stride = align_up(SRC_W, 128);
-    g.src_uv = g.src_stride * align_up(SRC_H, 32);
+    g.src_w = src_w;
+    g.src_h = src_h;
+    g.dst_w = dst_w;
+    g.dst_h = dst_h;
+    g.src_stride = align_up(src_w, 128);
+    g.src_uv = g.src_stride * align_up(src_h, 32);
     // stable_layout rounds the total up to 4 KiB; the DMA-BUF the driver
     // hands a Vulkan import has that size, so gate the same object.
-    g.src_size = align_up(g.src_uv + g.src_stride * align_up((SRC_H + 1) / 2, 16), 4096);
-    g.dst_stride = align_up(DST_W, 128);
-    g.dst_uv = g.dst_stride * align_up(DST_H, 32);
-    g.dst_size = align_up(g.dst_uv + g.dst_stride * align_up((DST_H + 1) / 2, 16), 4096);
+    g.src_size = align_up(g.src_uv + g.src_stride * align_up((src_h + 1) / 2, 16), 4096);
+    g.dst_stride = align_up(dst_w, 128);
+    g.dst_uv = g.dst_stride * align_up(dst_h, 32);
+    g.dst_size = align_up(g.dst_uv + g.dst_stride * align_up((dst_h + 1) / 2, 16), 4096);
     return g;
+}
+
+// swscale's point map (libswscale/utils.c initFilter, SWS_POINT): the step is
+// rounded to 16.16, and a destination sample takes the source index nearest
+// the centre of its support. `scale=WxH:flags=neighbor` uses the same integers,
+// so the gate's oracle and the FFmpeg client agree by construction.
+static unsigned point_step(unsigned src, unsigned dst)
+{
+    return ((src << 16) + (dst >> 1)) / dst;
+}
+
+static unsigned point_pick(unsigned i, unsigned inc)
+{
+    return (i * inc + (inc >> 1)) >> 16;
 }
 
 static uint32_t* read_spv(const char* path, uint32_t* words)
@@ -187,20 +200,22 @@ static VkDeviceMemory import_dmabuf(VkDevice dev, uint32_t mtype, VkMemoryRequir
 struct push_params {
     uint32_t src_stride, src_uv, dst_stride, dst_uv;
     uint32_t src_y, dst_y;
-    uint32_t width, height;
+    uint32_t src_w, src_h, dst_w, dst_h;
 };
 
-// Byte-exact 2x nearest-neighbour oracle over every destination byte. Checks
+// Byte-exact nearest-neighbour oracle over every destination byte. Checks
 // luma and both chroma channels. `src` is the CPU view of the source DMA-BUF
 // this gate just filled, so a wrong stride/offset/subsample in the shader
 // lands on a different pattern byte and fails here.
 static unsigned check_pixels(const volatile uint8_t* src, const volatile uint8_t* dst, const struct geometry* g)
 {
     unsigned bad = 0;
-    for (unsigned dy = 0; dy < DST_H; dy++) {
-        for (unsigned dx = 0; dx < DST_W; dx++) {
-            unsigned so = (dy / 2) * g->src_stride + (dx / 2);
-            uint8_t want = src[so];
+    const unsigned yinc = point_step(g->src_h, g->dst_h);
+    const unsigned xinc = point_step(g->src_w, g->dst_w);
+    for (unsigned dy = 0; dy < g->dst_h; dy++) {
+        unsigned so = point_pick(dy, yinc) * g->src_stride;
+        for (unsigned dx = 0; dx < g->dst_w; dx++) {
+            uint8_t want = src[so + point_pick(dx, xinc)];
             uint8_t got = dst[dy * g->dst_stride + dx];
             if (got != want) {
                 if (bad < 8)
@@ -209,12 +224,15 @@ static unsigned check_pixels(const volatile uint8_t* src, const volatile uint8_t
             }
         }
     }
-    for (unsigned cy = 0; cy < DST_H / 2; cy++) {
-        for (unsigned cx = 0; cx < DST_W / 2; cx++) {
-            unsigned su = g->src_uv + (cy / 2) * g->src_stride + (cx / 2) * 2;
-            unsigned du = g->dst_uv + cy * g->dst_stride + cx * 2;
-            uint8_t wu = src[su], wv = src[su + 1];
-            uint8_t gu = dst[du], gv = dst[du + 1];
+    const unsigned cyinc = point_step(g->src_h / 2, g->dst_h / 2);
+    const unsigned cxinc = point_step(g->src_w / 2, g->dst_w / 2);
+    for (unsigned cy = 0; cy < g->dst_h / 2; cy++) {
+        unsigned su = g->src_uv + point_pick(cy, cyinc) * g->src_stride;
+        unsigned du = g->dst_uv + cy * g->dst_stride;
+        for (unsigned cx = 0; cx < g->dst_w / 2; cx++) {
+            unsigned pair = su + point_pick(cx, cxinc) * 2;
+            uint8_t wu = src[pair], wv = src[pair + 1];
+            uint8_t gu = dst[du + cx * 2], gv = dst[du + cx * 2 + 1];
             if (gu != wu || gv != wv) {
                 if (bad < 8)
                     fprintf(stderr, "  chroma (%u,%u): got (%u,%u) want (%u,%u)\n", cx, cy, gu, gv, wu, wv);
@@ -228,12 +246,22 @@ static unsigned check_pixels(const volatile uint8_t* src, const volatile uint8_t
 int main(int argc, char** argv)
 {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <nv12_scale.spv> <heap|msm> [render-node]\n", argv[0]);
+        fprintf(stderr, "usage: %s <nv12_scale.spv> <heap|msm> [render-node] [WxH WxH]\n", argv[0]);
         return 2;
     }
     const char* origin = argv[2];
     const char* node = argc >= 4 ? argv[3] : "/dev/dri/renderD128";
-    const struct geometry g = geometry();
+    unsigned src_w = 64, src_h = 32, dst_w = 128, dst_h = 64;
+    if (argc >= 6 && (sscanf(argv[4], "%ux%u", &src_w, &src_h) != 2
+                         || sscanf(argv[5], "%ux%u", &dst_w, &dst_h) != 2)) {
+        fprintf(stderr, "FAIL sizes must be WxH WxH\n");
+        return 2;
+    }
+    if (!src_w || !src_h || !dst_w || !dst_h || ((src_w | src_h | dst_w | dst_h) & 1u)) {
+        fprintf(stderr, "FAIL sizes must be even and non-zero (NV12)\n");
+        return 2;
+    }
+    const struct geometry g = geometry(src_w, src_h, dst_w, dst_h);
 
     int (*alloc)(size_t, const char*);
     if (strcmp(origin, "heap") == 0)
@@ -436,12 +464,16 @@ int main(int argc, char** argv)
         .dst_uv = g.dst_uv,
         .src_y = 0,
         .dst_y = 0,
-        .width = DST_W,
-        .height = DST_H };
+        .src_w = g.src_w,
+        .src_h = g.src_h,
+        .dst_w = g.dst_w,
+        .dst_h = g.dst_h };
     vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-    // Each invocation covers 4x2 destination luma pixels: 128x64 needs 32x32
-    // invocations, dispatched in 8x8 workgroups.
-    vkCmdDispatch(cb, 4, 4, 1);
+    // One invocation per destination word (4 luma pixels, or 2 chroma pairs);
+    // the grid covers the luma rows and the half-height chroma plane.
+    const unsigned words_per_row = (g.dst_w + 3) / 4;
+    const unsigned rows = g.dst_h + g.dst_h / 2;
+    vkCmdDispatch(cb, (words_per_row + 7) / 8, (rows + 7) / 8, 1);
     vkEndCommandBuffer(cb);
     VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
     VkFence fence;
@@ -464,7 +496,8 @@ int main(int argc, char** argv)
         fprintf(stderr, "FAIL origin=%s pixels_wrong=%u src_changed=%u\n", origin, bad, changed);
         return 1;
     }
-    printf("PASS origin=%s nv12_2x=exact pixels=%u/%u src=unchanged\n", origin, g.dst_size, g.dst_size);
+    printf("PASS origin=%s scale=%ux%u->%ux%u exact bytes=%u src=unchanged\n", origin, g.src_w, g.src_h,
+        g.dst_w, g.dst_h, g.dst_size);
 
     vkDestroyFence(dev, fence, NULL);
     vkFreeCommandBuffers(dev, cmdp, 1, &cb);

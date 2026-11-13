@@ -2,9 +2,11 @@
 //
 // Vulkan compute backend for the VA video processor. Two surface DMA-BUFs
 // (source and destination) are imported as dedicated external memory and the
-// pinned 2x NV12 nearest-neighbour kernel runs over them. This is the same
+// pinned NV12 nearest-neighbour kernel runs over them. This is the same
 // import path the flat read/write prereq and the per-pixel scale gate prove
-// on the target; the kernel is embedded from test/vulkan-vpp/nv12_scale.spv.
+// on the target; the kernel is embedded from test/vulkan-vpp/nv12_scale.spv
+// and samples the source at swscale's point positions, so `scale_vaapi=w=W:h=H`
+// reproduces `scale=WxH:flags=neighbor` byte for byte.
 //
 // Built only when the Vulkan headers are present (meson's optional `vulkan`
 // dependency). CI has no Vulkan, so the driver still builds and the VPP
@@ -38,7 +40,7 @@ int dup_fd(int fd)
 struct PushParams {
     uint32_t src_stride, src_uv, dst_stride, dst_uv;
     uint32_t src_y, dst_y;
-    uint32_t width, height;
+    uint32_t src_width, src_height, dst_width, dst_height;
 };
 
 // Import one DMA-BUF as dedicated Vulkan memory bound to a storage buffer.
@@ -318,15 +320,16 @@ bool dispatch(Job& j, const ScaleJob& job, uint32_t family, uint32_t memory_type
     vkBeginCommandBuffer(command, &begin);
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, j.pipeline);
     vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, j.pipeline_layout, 0, 1, &set, 0, nullptr);
-    PushParams push = { job.src_stride, job.src_uv, job.dst_stride, job.dst_uv, job.src_y, job.dst_y, job.width,
-        job.height };
+    PushParams push = { job.src_stride, job.src_uv, job.dst_stride, job.dst_uv, job.src_y, job.dst_y,
+        job.src_width, job.src_height, job.width, job.height };
     vkCmdPushConstants(command, j.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-    // Each invocation covers 4x2 destination luma pixels (one 32-bit word per
-    // row), an 8x8 workgroup covers 32x16. Round up so the visible frame is
-    // fully written even when its size is not a multiple of that block.
-    const uint32_t groups_x = (job.width + 31) / 32;
-    const uint32_t groups_y = (job.height + 15) / 16;
-    vkCmdDispatch(command, groups_x, groups_y, 1);
+    // One invocation per destination 32-bit word: four luma pixels of one row,
+    // or two chroma pairs of one chroma row. The grid covers the luma rows and
+    // the half-height chroma plane in one dispatch, and is rounded up so a
+    // geometry that is not a multiple of the 8x8 workgroup is still complete.
+    const uint32_t words = (job.width + 3) / 4;
+    const uint32_t rows = job.height + job.height / 2;
+    vkCmdDispatch(command, (words + 7) / 8, (rows + 7) / 8, 1);
     vkEndCommandBuffer(command);
 
     VkFenceCreateInfo fence_info = {};
@@ -349,9 +352,13 @@ bool compiled_in()
     return true;
 }
 
-bool scale_2x(const ScaleJob& job)
+bool scale_nv12(const ScaleJob& job)
 {
-    if (job.src_fd < 0 || job.dst_fd < 0 || !job.width || !job.height)
+    if (job.src_fd < 0 || job.dst_fd < 0 || !job.width || !job.height || !job.src_width || !job.src_height)
+        return false;
+    // NV12 carries one chroma pair per 2x2 luma block on both ends, and the
+    // word writes assume it.
+    if ((job.width | job.height | job.src_width | job.src_height) & 1u)
         return false;
 
     Job j;
@@ -376,7 +383,7 @@ bool compiled_in()
     return false;
 }
 
-bool scale_2x(const ScaleJob&)
+bool scale_nv12(const ScaleJob&)
 {
     return false;
 }

@@ -13,15 +13,17 @@
 namespace iris {
 namespace vpp {
 
-// One 2x nearest-neighbour NV12 upscale. Geometry is in bytes and follows
-// Layout (src/iris/slots.h): chroma_offset is the byte offset of the UV
-// plane, data_offset is the luma start. width/height are the DESTINATION
-// visible size; the source visible size is exactly half of each.
+// One nearest-neighbour NV12 scale at any ratio. Geometry is in bytes and
+// follows Layout (src/iris/slots.h): chroma_offset is the byte offset of the
+// UV plane, data_offset is the luma start. src_width/src_height and
+// width/height are the visible source and destination sizes, both even (NV12
+// stores one chroma pair per 2x2 luma block).
 struct ScaleJob {
     int src_fd = -1, dst_fd = -1;
     uint32_t src_size = 0, dst_size = 0;
     uint32_t src_stride = 0, src_uv = 0, dst_stride = 0, dst_uv = 0;
     uint32_t src_y = 0, dst_y = 0;
+    uint32_t src_width = 0, src_height = 0;
     uint32_t width = 0, height = 0;
 };
 
@@ -30,10 +32,10 @@ struct ScaleJob {
 // Chromium's GPU-sandbox init is not allowed (docs/architecture.md §7).
 bool compiled_in();
 
-// Dispatch the pinned 2x NV12 kernel over the two imported DMA-BUFs. Returns
+// Dispatch the pinned NV12 kernel over the two imported DMA-BUFs. Returns
 // false when the backend is unavailable or the device rejected the job; the
 // VA layer must then fail the picture and never publish partial pixels.
-bool scale_2x(const ScaleJob& job);
+bool scale_nv12(const ScaleJob& job);
 
 } // namespace vpp
 } // namespace iris

@@ -32,9 +32,9 @@ Hardware encode verification requires an active Iris IRQ counter increase, error
 
 | Entrypoint | Operation | Input | Output | Verification |
 | --- | --- | --- | --- | --- |
-| `VAEntrypointVideoProc` (`VAProfileNone`, opt-in) | 2x nearest-neighbour scale | NV12 | NV12 | `scale_vaapi` frame byte-identical to swscale `flags=neighbor` |
+| `VAEntrypointVideoProc` (`VAProfileNone`, opt-in) | nearest-neighbour scale, any ratio | NV12 | NV12 | `scale_vaapi` frame byte-identical to swscale `flags=neighbor` |
 
-The processor is off unless `V4L2_VA_VPP` is set. It runs the pinned Vulkan compute kernel on the surface DMA-BUFs and offers exactly one operation, a 2x scale; other ratios, crop, rotation, blending and filters are refused rather than approximated.
+The processor is off unless `V4L2_VA_VPP` is set. It runs the pinned Vulkan compute kernel on the surface DMA-BUFs and offers exactly one operation, a nearest-neighbour scale at the ratio the client asks for, sampling where swscale samples; crop, rotation, blending, filters and colour conversion are refused rather than approximated.
 
 ## Requirements
 
@@ -95,7 +95,7 @@ Imported DMA-BUF surfaces must match native CAPTURE layout (single linear object
 | `V4L2_VA_SYNC_TIMEOUT_MS` | 2000 | Bounded session wait timeout in milliseconds |
 | `V4L2_VA_COPY` | gpu | Copy engine selection (`gpu` or `cpu`) |
 | `V4L2_VA_PUBLISH` | auto | Force publication mode (`auto`, `direct`, `import`, `copy`) |
-| `V4L2_VA_VPP` | off | Opt in to the `VAProfileNone` / `VAEntrypointVideoProc` entrypoint (2x NV12 scale) |
+| `V4L2_VA_VPP` | off | Opt in to the `VAProfileNone` / `VAEntrypointVideoProc` entrypoint (NV12 nearest scale) |
 | `V4L2_VA_DUMP` | off | Directory path to dump submitted access units |
 
 GStreamer's VA plugin (`libgstva`) filters VA drivers by vendor string before

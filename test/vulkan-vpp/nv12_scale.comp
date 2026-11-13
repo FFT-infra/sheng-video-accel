@@ -1,13 +1,28 @@
 // SPDX-License-Identifier: MIT
 //
-// NV12 2x nearest-neighbour upscale for the VPP target gate. The two DMA-BUFs
+// NV12 nearest-neighbour scale for the VA video processor. The two DMA-BUFs
 // are bound as flat uint[] storage buffers and every address (stride, luma and
-// chroma offsets, geometry) comes from push constants, so this is the same
-// kernel a VA video processor would dispatch, not a shader with one test size
-// baked in. Each invocation owns a disjoint 4x2 destination-luma block (two
-// whole 32-bit words) plus one 32-bit chroma word: no two invocations write
-// the same word, which is what makes a per-pixel oracle meaningful instead of
-// a race that happens to pass. No 16-bit storage extension is needed.
+// chroma offsets, source and destination geometry) comes from push constants,
+// so this is the same kernel the driver dispatches, not a shader with one test
+// size baked in.
+//
+// The sample position is swscale's point map, so a client that swaps
+// `scale=WxH:flags=neighbor` for `scale_vaapi=w=W:h=H` gets the same pixels at
+// any ratio:
+//
+//     xInc = ((src << 16) + (dst >> 1)) / dst      (rounded 16.16 step)
+//     src_index(i) = (i * xInc + (xInc >> 1)) >> 16
+//
+// (libswscale/utils.c initFilter, SWS_POINT with filterSize 1, and the
+// lumXInc/chrXInc rounding in sws_init_context; verified byte-exact against
+// the host `scale` filter over the ratio matrix in nv12_scale_gate.sh.)
+//
+// Each invocation owns one 32-bit destination word, so no two invocations
+// write the same word and a per-pixel oracle is meaningful instead of a race
+// that happens to pass. A luma word holds four pixels of one row; a chroma
+// word holds two (u,v) pairs. No 16-bit storage extension is needed. The plane
+// base and stride are 4-byte aligned by the CAPTURE layout (128-byte pitch,
+// page-aligned data offset), which is what makes a word write legal.
 
 #version 450
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -16,7 +31,7 @@ layout(set = 0, binding = 1, std430) writeonly buffer Dst { uint d[]; };
 layout(push_constant) uniform Params {
     uint src_stride, src_uv, dst_stride, dst_uv;
     uint src_y, dst_y;
-    uint width, height; // destination visible size
+    uint src_w, src_h, dst_w, dst_h;
 } p;
 
 uint src_byte(uint off)
@@ -25,25 +40,54 @@ uint src_byte(uint off)
     return (w >> ((off & 3u) << 3)) & 255u;
 }
 
+// 16.16 source step per destination sample, rounded to nearest like swscale.
+uint step(uint src, uint dst)
+{
+    return ((src << 16) + (dst >> 1)) / dst;
+}
+
+uint pick(uint i, uint inc)
+{
+    return (i * inc + (inc >> 1)) >> 16;
+}
+
 void main()
 {
-    uint gx = gl_GlobalInvocationID.x;
-    uint gy = gl_GlobalInvocationID.y;
-    uint dx = gx * 4u; // first destination luma column of this block
-    uint dy = gy * 2u; // first destination luma row
-    if (dx >= p.width || dy >= p.height)
+    uint word = gl_GlobalInvocationID.x;
+    uint words = (p.dst_w + 3u) >> 2;
+    if (word >= words)
         return;
-    // Two source luma samples, each duplicated into two destination columns.
-    uint so = p.src_y + gy * p.src_stride + gx * 2u;
-    uint a = src_byte(so);
-    uint b = src_byte(so + 1u);
-    uint luma = a | (a << 8) | (b << 16) | (b << 24);
-    d[(p.dst_y + dy * p.dst_stride + dx) >> 2] = luma;
-    d[(p.dst_y + (dy + 1u) * p.dst_stride + dx) >> 2] = luma;
-    // One source UV pair, duplicated into two destination chroma pairs.
-    uint suo = p.src_uv + (gy >> 1) * p.src_stride + gx * 2u;
-    uint u = src_byte(suo);
-    uint v = src_byte(suo + 1u);
-    uint uv = u | (v << 8);
-    d[(p.dst_uv + gy * p.dst_stride + gx * 4u) >> 2] = uv | (uv << 16);
+    // Luma rows first, then the half-height chroma plane: one dispatch covers
+    // both buffers, and each row indexes the same word count.
+    uint row = gl_GlobalInvocationID.y;
+    if (row >= p.dst_h + (p.dst_h >> 1))
+        return;
+
+    if (row < p.dst_h) {
+        uint inc = step(p.src_w, p.dst_w);
+        uint base = p.src_y + pick(row, step(p.src_h, p.dst_h)) * p.src_stride;
+        uint packed = 0u;
+        for (uint k = 0u; k < 4u; ++k) {
+            uint dx = word * 4u + k;
+            // Columns past the visible width land in the row padding; clamp so
+            // the read stays inside the source plane.
+            uint sx = pick(min(dx, p.dst_w - 1u), inc);
+            packed |= src_byte(base + sx) << (k * 8u);
+        }
+        d[(p.dst_y + row * p.dst_stride + word * 4u) >> 2] = packed;
+    } else {
+        uint cy = row - p.dst_h;
+        uint cw = p.dst_w >> 1;
+        uint inc = step(p.src_w >> 1, cw);
+        uint srow = pick(cy, step(p.src_h >> 1, p.dst_h >> 1));
+        uint base = p.src_uv + srow * p.src_stride;
+        uint packed = 0u;
+        for (uint k = 0u; k < 2u; ++k) {
+            uint cx = word * 2u + k;
+            uint sx = pick(min(cx, cw - 1u), inc) * 2u;
+            packed |= src_byte(base + sx) << (k * 16u);
+            packed |= src_byte(base + sx + 1u) << (k * 16u + 8u);
+        }
+        d[(p.dst_uv + cy * p.dst_stride + word * 4u) >> 2] = packed;
+    }
 }
