@@ -346,10 +346,71 @@ void expected_sdr(const std::vector<uint8_t>& hdr, unsigned width, unsigned heig
     }
 }
 
+// The scale kernel's map (test/vulkan-vpp/nv12_scale.comp) applied to a
+// converted frame: the crop is rotated clockwise, mirrored, then sampled at
+// swscale's point positions into the destination. This is the pass the
+// processor runs after the tone mapper, so the probe's model composes them in
+// the same order.
+unsigned step16(unsigned src, unsigned dst);
+unsigned pick16(unsigned i, unsigned inc);
+
+void map_frame(const std::vector<uint8_t>& in, unsigned in_w, unsigned in_h, unsigned cx, unsigned cy,
+    unsigned cw, unsigned ch, unsigned rot, unsigned mirror, unsigned out_w, unsigned out_h,
+    std::vector<uint8_t>& out)
+{
+    out.assign(static_cast<size_t>(out_w) * out_h * 3U / 2U, 0);
+    const bool transposed = (rot & 1U) != 0U;
+    const unsigned rw = transposed ? ch : cw, rh = transposed ? cw : ch;
+    auto mirror_at = [&](unsigned& x, unsigned& y, unsigned maxw, unsigned maxh) {
+        if ((mirror & 1U) != 0U)
+            x = maxw - 1U - x;
+        if ((mirror & 2U) != 0U)
+            y = maxh - 1U - y;
+    };
+    auto unrotate = [&](unsigned rx, unsigned ry, unsigned w, unsigned h, unsigned& sx, unsigned& sy) {
+        switch (rot & 3U) {
+        case 1U: sx = ry; sy = h - 1U - rx; break;
+        case 2U: sx = w - 1U - rx; sy = h - 1U - ry; break;
+        case 3U: sx = w - 1U - ry; sy = rx; break;
+        default: sx = rx; sy = ry; break;
+        }
+    };
+    const unsigned hx = step16(rw, out_w), hy = step16(rh, out_h);
+    for (unsigned dy = 0; dy < out_h; ++dy) {
+        unsigned ry = pick16(dy, hy);
+        for (unsigned dx = 0; dx < out_w; ++dx) {
+            unsigned rx = pick16(dx, hx);
+            mirror_at(rx, ry, rw, rh);
+            unsigned sx = 0, sy = 0;
+            unrotate(rx, ry, cw, ch, sx, sy);
+            out[static_cast<size_t>(dy) * out_w + dx] = in[static_cast<size_t>(cy + sy) * in_w + cx + sx];
+        }
+    }
+    const unsigned ccw = cw >> 1, cch = ch >> 1;
+    const unsigned crw = transposed ? cch : ccw, crh = transposed ? ccw : cch;
+    const unsigned dcw = out_w >> 1, dch = out_h >> 1;
+    const unsigned chx = step16(crw, dcw), chy = step16(crh, dch);
+    for (unsigned dy = 0; dy < dch; ++dy) {
+        unsigned ry = pick16(dy, chy);
+        for (unsigned dx = 0; dx < dcw; ++dx) {
+            unsigned rx = pick16(dx, chx);
+            mirror_at(rx, ry, crw, crh);
+            unsigned sx = 0, sy = 0;
+            unrotate(rx, ry, ccw, cch, sx, sy);
+            const size_t from = static_cast<size_t>(in_w) * in_h
+                + static_cast<size_t>((cy >> 1) + sy) * in_w + ((cx >> 1) + sx) * 2U;
+            const size_t to = static_cast<size_t>(out_w) * out_h + static_cast<size_t>(dy) * out_w + dx * 2U;
+            out[to] = in[from];
+            out[to + 1] = in[from + 1];
+        }
+    }
+}
+
 void tonemap_usage(const char* argv0)
 {
     std::fprintf(stderr, "usage: %s tonemap <render-node> <W> <H> <peak-nits> <out.raw> [--source-nv12] "
-                         "[--no-filter] [--rotate] [--expect-refusal]\n",
+                         "[--no-filter] [--expect-refusal] [--dst=WxH] [--crop=x,y,w,h] [--rotate=N] "
+                         "[--mirror=N]\n",
         argv0);
 }
 
@@ -364,16 +425,26 @@ int run_tonemap(int argc, char** argv)
     const unsigned height = static_cast<unsigned>(std::atoi(argv[2]));
     const double peak = std::atof(argv[3]);
     const char* out_path = argv[4];
-    bool source_nv12 = false, no_filter = false, rotate = false, expect_refusal = false;
+    bool source_nv12 = false, no_filter = false, expect_refusal = false;
+    unsigned dst_width = width, dst_height = height;
+    unsigned crop_x = 0, crop_y = 0, crop_w = width, crop_h = height;
+    unsigned rot = 0, mirror = 0;
     for (int i = 5; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--source-nv12") == 0)
+        const char* arg = argv[i];
+        if (std::strcmp(arg, "--source-nv12") == 0)
             source_nv12 = true;
-        else if (std::strcmp(argv[i], "--no-filter") == 0)
+        else if (std::strcmp(arg, "--no-filter") == 0)
             no_filter = true;
-        else if (std::strcmp(argv[i], "--rotate") == 0)
-            rotate = true;
-        else if (std::strcmp(argv[i], "--expect-refusal") == 0)
+        else if (std::strcmp(arg, "--expect-refusal") == 0)
             expect_refusal = true;
+        else if (std::strncmp(arg, "--dst=", 6) == 0)
+            std::sscanf(arg + 6, "%ux%u", &dst_width, &dst_height);
+        else if (std::strncmp(arg, "--crop=", 7) == 0)
+            std::sscanf(arg + 7, "%u,%u,%u,%u", &crop_x, &crop_y, &crop_w, &crop_h);
+        else if (std::strncmp(arg, "--rotate=", 9) == 0)
+            rot = static_cast<unsigned>(std::atoi(arg + 9));
+        else if (std::strncmp(arg, "--mirror=", 9) == 0)
+            mirror = static_cast<unsigned>(std::atoi(arg + 9));
         else {
             tonemap_usage("iris-va-vpp-probe");
             return 2;
@@ -383,6 +454,12 @@ int run_tonemap(int argc, char** argv)
         std::fprintf(stderr, "tone-mapping geometry must be even and at least 4x4\n");
         return 2;
     }
+    if (rot > 3 || mirror > 3 || dst_width < 2 || dst_height < 2 || (dst_width & 1U) || (dst_height & 1U)) {
+        std::fprintf(stderr, "rotation 0..3, mirror 0..3, an even destination of at least 2x2\n");
+        return 2;
+    }
+    const bool geometry = crop_x || crop_y || crop_w != width || crop_h != height || dst_width != width
+        || dst_height != height || rot || mirror;
 
     std::vector<uint8_t> hdr;
     make_hdr10_frame(width, height, peak, hdr);
@@ -415,7 +492,7 @@ int run_tonemap(int argc, char** argv)
     if (vaCreateSurfaces(display, source_nv12 ? VA_RT_FORMAT_YUV420 : VA_RT_FORMAT_YUV420_10, width, height,
             &src_surface, 1, nullptr, 0)
             != VA_STATUS_SUCCESS
-        || vaCreateSurfaces(display, VA_RT_FORMAT_YUV420, width, height, &dst_surface, 1, nullptr, 0)
+        || vaCreateSurfaces(display, VA_RT_FORMAT_YUV420, dst_width, dst_height, &dst_surface, 1, nullptr, 0)
             != VA_STATUS_SUCCESS) {
         std::fprintf(stderr, "vaCreateSurfaces failed\n");
         return 2;
@@ -469,13 +546,27 @@ int run_tonemap(int argc, char** argv)
         check(status == VA_STATUS_SUCCESS, "create the HDR10 filter buffer");
     }
 
+    VARectangle region = {};
+    region.x = static_cast<int16_t>(crop_x);
+    region.y = static_cast<int16_t>(crop_y);
+    region.width = static_cast<uint16_t>(crop_w);
+    region.height = static_cast<uint16_t>(crop_h);
+
     VAProcPipelineParameterBuffer pipeline = {};
     pipeline.surface = src_surface;
     pipeline.surface_color_standard = VAProcColorStandardBT2020;
     pipeline.output_color_standard = VAProcColorStandardBT709;
     pipeline.num_filters = 1;
     pipeline.filters = &filter_buffer;
-    pipeline.rotation_state = rotate ? VA_ROTATION_90 : VA_ROTATION_NONE;
+    pipeline.surface_region = geometry ? &region : nullptr;
+    pipeline.rotation_state = rot == 1 ? VA_ROTATION_90
+        : rot == 2                    ? VA_ROTATION_180
+        : rot == 3                    ? VA_ROTATION_270
+                                      : VA_ROTATION_NONE;
+    pipeline.mirror_state = mirror == 1 ? VA_MIRROR_HORIZONTAL
+        : mirror == 2                   ? VA_MIRROR_VERTICAL
+        : mirror == 3                   ? (VA_MIRROR_HORIZONTAL | VA_MIRROR_VERTICAL)
+                                        : VA_MIRROR_NONE;
     VABufferID pipeline_buffer = VA_INVALID_ID;
     status = vaCreateBuffer(display, context, VAProcPipelineParameterBufferType, sizeof(pipeline), 1, &pipeline,
         &pipeline_buffer);
@@ -496,20 +587,28 @@ int run_tonemap(int argc, char** argv)
         check(status == VA_STATUS_SUCCESS, "vaEndPicture");
         std::vector<uint8_t> output;
         if (status == VA_STATUS_SUCCESS)
-            check(download(display, dst_surface, output, width, height, VA_FOURCC_NV12),
+            check(download(display, dst_surface, output, dst_width, dst_height, VA_FOURCC_NV12),
                 "download the tone-mapped frame");
-        if (status == VA_STATUS_SUCCESS && output.size() == static_cast<size_t>(width) * height * 3U / 2U) {
-            // Black in, limited-range black out, with neutral chroma.
-            check(output[0] == 16 && output[static_cast<size_t>(width) * height] == 128
-                    && output[static_cast<size_t>(width) * height + 1] == 128,
-                "PQ black maps to 16/128/128");
-            // The EETF's endpoint is the SDR reference white, so the source
-            // peak lands at 235 whatever the peak was.
-            const uint8_t white = output[static_cast<size_t>(height / 2) * width + width - 1];
-            check(white >= 234 && white <= 236, "the mastering peak maps to limited-range white");
+        if (status == VA_STATUS_SUCCESS
+            && output.size() == static_cast<size_t>(dst_width) * dst_height * 3U / 2U) {
+            if (!geometry) {
+                // Black in, limited-range black out, with neutral chroma.
+                check(output[0] == 16 && output[static_cast<size_t>(width) * height] == 128
+                        && output[static_cast<size_t>(width) * height + 1] == 128,
+                    "PQ black maps to 16/128/128");
+                // The EETF's endpoint is the SDR reference white, so the source
+                // peak lands at 235 whatever the peak was.
+                const uint8_t white = output[static_cast<size_t>(height / 2) * width + width - 1];
+                check(white >= 234 && white <= 236, "the mastering peak maps to limited-range white");
+            }
 
-            std::vector<uint8_t> expected;
-            expected_sdr(hdr, width, height, peak, expected);
+            std::vector<uint8_t> expected, sdr;
+            expected_sdr(hdr, width, height, peak, sdr);
+            if (geometry)
+                map_frame(sdr, width, height, crop_x, crop_y, crop_w, crop_h, rot, mirror, dst_width,
+                    dst_height, expected);
+            else
+                expected = sdr;
             unsigned max_diff = 0;
             double sum = 0;
             size_t worst = 0;
@@ -531,16 +630,20 @@ int run_tonemap(int argc, char** argv)
             check(max_diff <= 2, "every byte within 2 codes of the documented pipeline");
             // A monotone ramp in, a monotone ramp out: a knee applied to the
             // wrong variable or a sign error in the matrix breaks this even
-            // when the tolerance above is generous.
-            bool monotone = true;
-            const unsigned row = height / 2;
-            for (unsigned x = 3; x + 2 < width; ++x)
-                monotone = monotone
-                    && output[static_cast<size_t>(row) * width + x]
-                    >= output[static_cast<size_t>(row) * width + x - 1];
-            check(monotone, "the luminance ramp stays monotone");
+            // when the tolerance above is generous. Only the unrotated frame
+            // keeps the ramp along a row.
+            if (!geometry) {
+                bool monotone = true;
+                const unsigned row = height / 2;
+                for (unsigned x = 3; x + 2 < width; ++x)
+                    monotone = monotone
+                        && output[static_cast<size_t>(row) * width + x]
+                        >= output[static_cast<size_t>(row) * width + x - 1];
+                check(monotone, "the luminance ramp stays monotone");
+            }
             check(write_file(out_path, output.data(), output.size()), "write the output frame");
-            std::printf("tonemap %ux%u peak=%.0f max_diff=%u mean=%.3f\n", width, height, peak, max_diff,
+            std::printf("tonemap %ux%u -> %ux%u rot=%u mirror=%u peak=%.0f max_diff=%u mean=%.3f\n", width,
+                height, dst_width, dst_height, rot, mirror, peak, max_diff,
                 sum / static_cast<double>(expected.size()));
         }
     }
@@ -688,7 +791,7 @@ void overlay_usage(const char* argv0)
     std::fprintf(stderr,
         "usage: %s overlay <render-node> <W> <H> <ovW> <ovH> <x> <y> <rw> <rh> <alpha> <out.raw>\n"
         "                 [--p010] [--premultiplied] [--luma-key] [--third] [--blend-first]\n"
-        "                 [--main-crop] [--pad=<columns>]\n"
+        "                 [--main-crop] [--pad=<columns>] [--tonemap=<peak-nits>]\n"
         "                 [--expect-refusal]\n",
         argv0);
 }
@@ -713,9 +816,12 @@ int run_overlay(int argc, char** argv)
     bool p010 = false, premultiplied = false, luma_key = false, third = false, blend_first = false;
     bool main_crop = false, expect_refusal = false;
     unsigned pad = 0;
+    double tonemap_peak = 0.0;
     for (int i = 11; i < argc; ++i) {
         if (std::strcmp(argv[i], "--p010") == 0)
             p010 = true;
+        else if (std::strncmp(argv[i], "--tonemap=", 10) == 0)
+            tonemap_peak = std::atof(argv[i] + 10);
         else if (std::strcmp(argv[i], "--premultiplied") == 0)
             premultiplied = true;
         else if (std::strcmp(argv[i], "--luma-key") == 0)
@@ -744,6 +850,15 @@ int run_overlay(int argc, char** argv)
     const unsigned bytes = p010 ? 2 : 1;
     const uint32_t fourcc = p010 ? VA_FOURCC_P010 : VA_FOURCC_NV12;
     const unsigned rt_format = p010 ? VA_RT_FORMAT_YUV420_10 : VA_RT_FORMAT_YUV420;
+    // `--tonemap` runs the HDR10 filter on the main pass: the main surface is
+    // P010, the overlay and the output stay NV12, and the model converts the
+    // main frame before mixing it.
+    if (tonemap_peak > 0.0 && (p010 || pad)) {
+        std::fprintf(stderr, "--tonemap takes an NV12 output and no padded main surface\n");
+        return 2;
+    }
+    const unsigned main_bytes = tonemap_peak > 0.0 ? 2 : bytes;
+    const unsigned main_rt = tonemap_peak > 0.0 ? VA_RT_FORMAT_YUV420_10 : rt_format;
     Mix mix;
     mix.width = width;
     mix.height = height;
@@ -758,11 +873,16 @@ int run_overlay(int argc, char** argv)
     // The main surface is `pad` columns wider than the picture, as a decoder
     // allocates it; the picture is the left `width` columns.
     std::vector<uint8_t> main_surface_frame;
-    make_pattern(width + pad, height, bytes, 1, main_surface_frame);
-    if (pad)
-        crop_left(main_surface_frame, width + pad, width, height, bytes, mix.main);
-    else
-        mix.main = main_surface_frame;
+    if (tonemap_peak > 0.0) {
+        make_hdr10_frame(width, height, tonemap_peak, main_surface_frame);
+        expected_sdr(main_surface_frame, width, height, tonemap_peak, mix.main);
+    } else {
+        make_pattern(width + pad, height, bytes, 1, main_surface_frame);
+        if (pad)
+            crop_left(main_surface_frame, width + pad, width, height, bytes, mix.main);
+        else
+            mix.main = main_surface_frame;
+    }
     make_pattern(ov_w, ov_h, bytes, 2, mix.overlay);
 
     const int fd = open(argv[0], O_RDWR | O_CLOEXEC);
@@ -789,7 +909,7 @@ int run_overlay(int argc, char** argv)
 
     VASurfaceID main_surface = VA_INVALID_ID, overlay_surface = VA_INVALID_ID, dst_surface = VA_INVALID_ID;
     VASurfaceID created[3] = { VA_INVALID_ID, VA_INVALID_ID, VA_INVALID_ID };
-    check(vaCreateSurfaces(display, rt_format, width + pad, height, &main_surface, 1, nullptr, 0)
+    check(vaCreateSurfaces(display, main_rt, width + pad, height, &main_surface, 1, nullptr, 0)
             == VA_STATUS_SUCCESS,
         "create the main surface");
     check(vaCreateSurfaces(display, rt_format, ov_w, ov_h, &overlay_surface, 1, nullptr, 0)
@@ -816,7 +936,7 @@ int run_overlay(int argc, char** argv)
     }
 
     if (main_surface != VA_INVALID_ID)
-        check(upload(display, main_surface, main_surface_frame, width + pad, height, bytes),
+        check(upload(display, main_surface, main_surface_frame, width + pad, height, main_bytes),
             "upload the main frame");
     if (overlay_surface != VA_INVALID_ID)
         check(upload(display, overlay_surface, mix.overlay, ov_w, ov_h, bytes), "upload the overlay frame");
@@ -851,8 +971,40 @@ int run_overlay(int argc, char** argv)
     main_params.output_region = &full;
     main_params.surface_color_standard = VAProcColorStandardBT709;
     main_params.output_color_standard = VAProcColorStandardBT709;
+    VABufferID filter_buffer = VA_INVALID_ID;
+    if (tonemap_peak > 0.0) {
+        VAHdrMetaDataHDR10 metadata = {};
+        metadata.display_primaries_x[0] = 13250;
+        metadata.display_primaries_y[0] = 34500;
+        metadata.display_primaries_x[1] = 7500;
+        metadata.display_primaries_y[1] = 3000;
+        metadata.display_primaries_x[2] = 34000;
+        metadata.display_primaries_y[2] = 16000;
+        metadata.white_point_x = 15635;
+        metadata.white_point_y = 16450;
+        metadata.max_display_mastering_luminance =
+            static_cast<uint32_t>(std::lround(tonemap_peak * 10000.0));
+        metadata.min_display_mastering_luminance = 50;
+        VAProcFilterParameterBufferHDRToneMapping params = {};
+        params.type = VAProcFilterHighDynamicRangeToneMapping;
+        params.data.metadata_type = VAProcHighDynamicRangeMetadataHDR10;
+        params.data.metadata = &metadata;
+        params.data.metadata_size = sizeof(metadata);
+        check(vaCreateBuffer(display, context, VAProcFilterParameterBufferType, sizeof(params), 1, &params,
+                  &filter_buffer)
+                == VA_STATUS_SUCCESS,
+            "create the HDR10 filter buffer");
+        main_params.num_filters = 1;
+        main_params.filters = &filter_buffer;
+        main_params.surface_color_standard = VAProcColorStandardBT2020;
+        main_params.output_color_standard = VAProcColorStandardBT709;
+    }
     VAProcPipelineParameterBuffer overlay_params = main_params;
     overlay_params.surface = overlay_surface;
+    // The blending pass carries no filter of its own; the conversion belongs
+    // to the pass that reads the HDR10 surface.
+    overlay_params.num_filters = 0;
+    overlay_params.filters = nullptr;
     // FFmpeg clears the overlay's region even though it copies the main pass:
     // the overlay surface is scaled into its output region as a whole.
     overlay_params.surface_region = nullptr;
@@ -870,11 +1022,16 @@ int run_overlay(int argc, char** argv)
         "create the blending pipeline buffer");
 
     VAStatus begin = vaBeginPicture(display, context, dst_surface);
-    VABufferID order[3] = { main_buffer, overlay_buffer, overlay_buffer };
+    VABufferID order[4] = { main_buffer, overlay_buffer, overlay_buffer, filter_buffer };
     int count = third ? 3 : 2;
     if (blend_first) {
         order[0] = overlay_buffer;
         order[1] = main_buffer;
+    }
+    if (filter_buffer != VA_INVALID_ID) {
+        order[2] = filter_buffer;
+        order[3] = overlay_buffer;
+        count = 3;
     }
     VAStatus render = begin == VA_STATUS_SUCCESS
         ? vaRenderPicture(display, context, order, count)
@@ -914,7 +1071,8 @@ int run_overlay(int argc, char** argv)
             // 0, 1/2 and 1 are exact in binary, so all but the last code of
             // slack is float32 against double; an alpha that is not dyadic
             // may round a tie either way.
-            check(max_diff <= 1, "every byte within 1 code of the documented mix");
+            check(max_diff <= (tonemap_peak > 0.0 ? 2u : 1u),
+                "every byte within the documented mix's tolerance");
             // Inside the rectangle the output has to differ from the main
             // frame whenever alpha and the two frames differ: a kernel that
             // silently copied the main surface would pass a loose tolerance

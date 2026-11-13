@@ -11,7 +11,6 @@
 
 #include "../util/error.h"
 
-#include <algorithm>
 #include <cstring>
 
 namespace va {
@@ -91,7 +90,6 @@ VAStatus queryVideoProcPipelineCaps(VADriverContextP ctx, VAContextID id, VABuff
     VAProcPipelineCaps* caps)
 {
     (void)filters;
-    (void)count;
     auto& d = data(ctx);
     std::lock_guard<std::recursive_mutex> lock(d.mutex);
     auto c = context(d, id);
@@ -128,8 +126,29 @@ VAStatus queryVideoProcPipelineCaps(VADriverContextP ctx, VAContextID id, VABuff
     caps->input_pixel_format = p010 ? kPixelFormatsNv12P010 : kPixelFormatsNv12;
     caps->num_output_pixel_formats = p010 ? 2 : 1;
     caps->output_pixel_format = p010 ? kPixelFormatsNv12P010 : kPixelFormatsNv12;
-    caps->min_input_width = std::max(kVppMinGeometry, d.capabilities.min_width);
-    caps->min_input_height = std::max(kVppMinGeometry, d.capabilities.min_height);
+    // A pipeline that names the tone mapper is a different processor: P010 in
+    // BT.2020, NV12 out BT.709. Answering with the unfiltered list would
+    // promise formats and standards the picture then refuses, which is the
+    // over-advertising the capability table exists to prevent.
+    if (count > 0 && p010) {
+        static VAProcColorStandardType kToneMapInput[] = { VAProcColorStandardBT2020, VAProcColorStandardNone };
+        static VAProcColorStandardType kToneMapOutput[] = { VAProcColorStandardBT709, VAProcColorStandardNone };
+        static uint32_t kToneMapInFormat[] = { VA_FOURCC_P010 };
+        static uint32_t kToneMapOutFormat[] = { VA_FOURCC_NV12 };
+        caps->input_color_standards = kToneMapInput;
+        caps->num_input_color_standards = 2;
+        caps->output_color_standards = kToneMapOutput;
+        caps->num_output_color_standards = 2;
+        caps->input_pixel_format = kToneMapInFormat;
+        caps->num_input_pixel_formats = 1;
+        caps->output_pixel_format = kToneMapOutFormat;
+        caps->num_output_pixel_formats = 1;
+    }
+    // The processor's own floor, not the decoder node's: a source can be an
+    // uploaded surface that never went through V4L2, and a 2x2 thumbnail is a
+    // geometry this kernel runs.
+    caps->min_input_width = kVppMinGeometry;
+    caps->min_input_height = kVppMinGeometry;
     caps->max_input_width = d.capabilities.max_width;
     caps->max_input_height = d.capabilities.max_height;
     caps->min_output_width = kVppMinGeometry;

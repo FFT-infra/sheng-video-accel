@@ -14,6 +14,8 @@
 #include <cstdio>
 #include <cstring>
 
+#include <sys/stat.h>
+
 namespace va {
 
 namespace {
@@ -110,6 +112,18 @@ Pixels pixels_of(DriverData& d, Surface& s)
         p.layout = stable.layout();
     }
     return p;
+}
+
+// Two VA surfaces can wrap one DMA-BUF: a client that imports the same fd
+// twice gets two surface ids over the same bytes, and a picture that writes
+// into one while reading the other would corrupt itself. The ids differ, so
+// the identity has to come from the kernel.
+bool same_buffer(const Pixels& a, const Pixels& b)
+{
+    struct stat sa = {}, sb = {};
+    if (a.fd < 0 || b.fd < 0 || fstat(a.fd, &sa) != 0 || fstat(b.fd, &sb) != 0)
+        return false;
+    return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
 }
 
 // Wait for a surface's decode to land before the kernel reads it. A client is
@@ -273,9 +287,10 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         VA_STATUS_ERROR_INVALID_PARAMETER);
     if (blend) {
         // Compositing is a copy of the main surface plus a blend into one
-        // rectangle. The kernels that resize, rotate or change the transfer
-        // curve are other pictures; a client that wants both composes them.
-        iris::require(!tone_map, "a blended picture does not tone map", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+        // rectangle. Rotating or mirroring the main pass is the scale kernel's
+        // job and a blended picture does not run it; the tone mapper is
+        // allowed because it converts at the source's own size, so the blend
+        // still reads a same-geometry main surface.
         iris::require(blend->filters == 0, "the blending pass carries no filter",
             VA_STATUS_ERROR_UNSUPPORTED_FILTER);
         iris::require(job.rotation == VA_ROTATION_NONE, "a blended picture does not rotate",
@@ -361,21 +376,10 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         iris::require(source->width && source->height && target->width && target->height
                 && !((source->width | source->height | target->width | target->height) & 1u),
             "VPP needs an even, non-empty geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
-        // The tone mapper converts per pixel and does not move pixels: it
-        // reads the whole source and fills a same-size output. Crop, scale and
-        // rotation are the scale kernel's job, and asking for both in one
-        // picture is a pipeline this driver does not run.
-        if (tone_map) {
-            iris::require(crop.x == 0 && crop.y == 0 && crop.width == source->width
-                    && crop.height == source->height,
-                "tone mapping reads the whole source surface", VA_STATUS_ERROR_INVALID_PARAMETER);
-            iris::require(target->width == source->width && target->height == source->height,
-                "tone mapping keeps the surface size", VA_STATUS_ERROR_INVALID_PARAMETER);
-            iris::require(job.rotation == VA_ROTATION_NONE, "tone mapping does not rotate",
-                VA_STATUS_ERROR_UNSUPPORTED_FILTER);
-            iris::require(job.mirror == VA_MIRROR_NONE, "tone mapping does not mirror",
-                VA_STATUS_ERROR_UNSUPPORTED_FILTER);
-        }
+        // The tone mapper converts per pixel at the source's own size. A crop,
+        // a scale, a rotation or a mirror in the same picture is the scale
+        // kernel's job on the converted surface, so the picture runs it into a
+        // scratch surface first (the pass chain below).
         if (blend) {
             // The main pass is copied at its own scale, so the rectangle the
             // client names is the output's size. FFmpeg names it on every
@@ -438,22 +442,69 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
             ov = pixels_of(d, *overlay_surface);
     }
 
-    bool ran = false;
-    if (blend) {
+    // The kernels read and write the same words. Two surfaces over one buffer
+    // pass every check above — different ids, different objects — and would
+    // make the picture race itself.
+    iris::require(!same_buffer(src, dst), "VPP output aliases its input", VA_STATUS_ERROR_INVALID_SURFACE);
+    if (blend)
+        iris::require(!same_buffer(ov, dst), "the overlay aliases the output", VA_STATUS_ERROR_INVALID_SURFACE);
+
+    // The tone mapper converts the whole source at its own size; the scale
+    // and the blend move pixels afterwards. A picture that asks for both runs
+    // the conversion into a scratch surface and the next pass reads that, so
+    // the passes stay the same kernels and only their inputs change.
+    const bool geometry_changes = crop.x != 0 || crop.y != 0
+        || static_cast<uint32_t>(crop.width) != target->width
+        || static_cast<uint32_t>(crop.height) != target->height || job.rotation != VA_ROTATION_NONE
+        || job.mirror != VA_MIRROR_NONE;
+    const bool tonemap_to_scratch = tone_map && (blend || geometry_changes);
+    std::unique_ptr<iris::StableBuffer> scratch;
+    Pixels mid;
+    if (tonemap_to_scratch) {
+        scratch = iris::allocate_stable(d.render_fd,
+            iris::stable_layout(VA_FOURCC_NV12, source->width, source->height));
+        mid.fd = scratch->fd();
+        mid.size = scratch->size();
+        mid.layout = scratch->layout();
+    }
+    // Whichever buffer holds the pixels the next pass reads: the source
+    // surface, or the tone mapper's scratch output.
+    const Pixels& base = tonemap_to_scratch ? mid : src;
+
+    bool ran = true;
+    if (tone_map) {
+        iris::vpp::ToneMapJob tj;
+        const Pixels& out = tonemap_to_scratch ? mid : dst;
+        tj.src_fd = src.fd;
+        tj.dst_fd = out.fd;
+        tj.src_size = src.size;
+        tj.dst_size = out.size;
+        tj.src_stride = src.layout.stride;
+        tj.dst_stride = out.layout.stride;
+        tj.src_uv = src.layout.chroma_offset();
+        tj.dst_uv = out.layout.chroma_offset();
+        tj.src_y = src.layout.data_offset;
+        tj.dst_y = out.layout.data_offset;
+        tj.width = tonemap_to_scratch ? source->width : target->width;
+        tj.height = tonemap_to_scratch ? source->height : target->height;
+        tj.source_peak_nits = *c.vpp_peak_nits;
+        ran = iris::vpp::tonemap_hdr10_to_sdr(tj);
+    }
+    if (ran && blend) {
         iris::vpp::OverlayJob oj;
-        oj.main_fd = src.fd;
+        oj.main_fd = base.fd;
         oj.overlay_fd = ov.fd;
         oj.dst_fd = dst.fd;
-        oj.main_size = src.size;
+        oj.main_size = base.size;
         oj.overlay_size = ov.size;
         oj.dst_size = dst.size;
-        oj.main_stride = src.layout.stride;
+        oj.main_stride = base.layout.stride;
         oj.overlay_stride = ov.layout.stride;
         oj.dst_stride = dst.layout.stride;
-        oj.main_uv = src.layout.chroma_offset();
+        oj.main_uv = base.layout.chroma_offset();
         oj.overlay_uv = ov.layout.chroma_offset();
         oj.dst_uv = dst.layout.chroma_offset();
-        oj.main_y = src.layout.data_offset;
+        oj.main_y = base.layout.data_offset;
         oj.main_x = static_cast<uint32_t>(crop.x);
         oj.main_row = static_cast<uint32_t>(crop.y);
         oj.main_width = static_cast<uint32_t>(crop.width);
@@ -468,36 +519,22 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         oj.height = rect.height;
         oj.dst_width = target->width;
         oj.dst_height = target->height;
-        oj.bytes = source->fourcc == VA_FOURCC_P010 ? 2 : 1;
+        // Both sides of the mix are the same format: the tone-mapped
+        // scratch is NV12 and the overlay was checked against the output.
+        oj.bytes = base.layout.fourcc == VA_FOURCC_P010 ? 2 : 1;
         oj.alpha = blend->global_alpha;
         ran = iris::vpp::overlay(oj);
-    } else if (tone_map) {
-        iris::vpp::ToneMapJob tj;
-        tj.src_fd = src.fd;
-        tj.dst_fd = dst.fd;
-        tj.src_size = src.size;
-        tj.dst_size = dst.size;
-        tj.src_stride = src.layout.stride;
-        tj.dst_stride = dst.layout.stride;
-        tj.src_uv = src.layout.chroma_offset();
-        tj.dst_uv = dst.layout.chroma_offset();
-        tj.src_y = src.layout.data_offset;
-        tj.dst_y = dst.layout.data_offset;
-        tj.width = target->width;
-        tj.height = target->height;
-        tj.source_peak_nits = *c.vpp_peak_nits;
-        ran = iris::vpp::tonemap_hdr10_to_sdr(tj);
-    } else {
+    } else if (ran && (!tone_map || tonemap_to_scratch)) {
         iris::vpp::ScaleJob sj;
-        sj.src_fd = src.fd;
+        sj.src_fd = base.fd;
         sj.dst_fd = dst.fd;
-        sj.src_size = src.size;
+        sj.src_size = base.size;
         sj.dst_size = dst.size;
-        sj.src_stride = src.layout.stride;
+        sj.src_stride = base.layout.stride;
         sj.dst_stride = dst.layout.stride;
-        sj.src_uv = src.layout.chroma_offset();
+        sj.src_uv = base.layout.chroma_offset();
         sj.dst_uv = dst.layout.chroma_offset();
-        sj.src_y = src.layout.data_offset;
+        sj.src_y = base.layout.data_offset;
         sj.dst_y = dst.layout.data_offset;
         sj.src_x = static_cast<uint32_t>(crop.x);
         sj.src_y_offset = static_cast<uint32_t>(crop.y);
@@ -505,7 +542,9 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         sj.src_height = static_cast<uint32_t>(crop.height);
         sj.width = target->width;
         sj.height = target->height;
-        sj.bytes = source->fourcc == VA_FOURCC_P010 ? 2 : 1;
+        // `base` is the surface the pass reads: the source, or the tone
+        // mapper's NV12 scratch output.
+        sj.bytes = base.layout.fourcc == VA_FOURCC_P010 ? 2 : 1;
         // The rotation happens before the scale, so a quarter turn swaps the
         // sampled rectangle's dimensions and the point map runs on that.
         sj.rotation = job.rotation;

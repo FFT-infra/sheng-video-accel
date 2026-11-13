@@ -69,22 +69,31 @@ fi
 work=${IRIS_VPP_DIR:-$(iris_artifact_dir va-vpp-tonemap)}
 mkdir -p "$work"
 
-# The tag, geometry and mastering peak of each case. 318 is not a multiple of
-# four, so the last chroma word of a row carries two columns the ramp does not
-# cover; that path has its own neutral fill in the kernel.
-cases="sdrwhite:128x72:1000 mastering4000:128x72:4000 ragged:318x178:1000"
+# The tag, geometry, mastering peak and extra processor arguments of each
+# case. 318 is not a multiple of four, so the last chroma word of a row carries
+# two columns the ramp does not cover; that path has its own neutral fill in
+# the kernel. The composition cases run the tone mapper and then the scale pass
+# over its output: three quarter turns, both mirrors, a crop that scales, and a
+# thumbnail at the processor's new 2x2 floor.
+cases="sdrwhite:128x72:1000: mastering4000:128x72:4000: ragged:318x178:1000:
+rotate90:128x72:1000:--dst=72x128 --rotate=1 rotate270:128x72:1000:--dst=72x128 --rotate=3
+halfturn:128x72:1000:--rotate=2 hflip:128x72:1000:--mirror=1 vflip:128x72:1000:--mirror=2
+bothflips:128x72:1000:--mirror=3 crop-scale:128x72:1000:--crop=16,8,64,48 --dst=32x24
+thumbnail:64x64:1000:--dst=2x2"
 
 failed=0
 run_case() {
     tag=$1
     size=$2
     peak=$3
+    extras=$4
     w=${size%x*}
     h=${size#*x}
-    echo "== $size peak=$peak"
+    echo "== $tag: $size peak=$peak $extras"
     rc=0
+    # shellcheck disable=SC2086
     env LIBVA_DRIVER_NAME=v4l2 $driver_env LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_VPP=1 V4L2_VA_TRACE=1 \
-        timeout 300 "$probe" tonemap "$render" "$w" "$h" "$peak" "$work/$tag.nv12" \
+        timeout 300 "$probe" tonemap "$render" "$w" "$h" "$peak" "$work/$tag.nv12" $extras \
         >"$work/$tag.log" 2>"$work/$tag.trace" || rc=$?
     if [ "$rc" -ne 0 ]; then
         sed -n '1,40p' "$work/$tag.log" >&2 || true
@@ -102,7 +111,8 @@ run_case() {
 }
 
 for c in $cases; do
-    run_case "$(echo "$c" | cut -d: -f1)" "$(echo "$c" | cut -d: -f2)" "$(echo "$c" | cut -d: -f3)"
+    run_case "$(echo "$c" | cut -d: -f1)" "$(echo "$c" | cut -d: -f2)" "$(echo "$c" | cut -d: -f3)" \
+        "$(echo "$c" | cut -d: -f4-)"
 done
 [ "$failed" -eq 0 ] || fail "a tone-mapped frame differs from the documented pipeline"
 
@@ -128,7 +138,7 @@ refuse() {
 }
 refuse nv12-source --source-nv12
 refuse no-parameters --no-filter
-refuse rotation --rotate
+refuse odd-crop --crop=1,0,64,64
 
 echo "== opt-in is required: the same client is refused without V4L2_VA_VPP"
 if env LIBVA_DRIVER_NAME=v4l2 $driver_env LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_TRACE=1 \
