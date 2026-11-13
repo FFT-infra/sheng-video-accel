@@ -379,10 +379,12 @@ void map_frame(const std::vector<uint8_t>& in, unsigned in_w, unsigned in_h, uns
     for (unsigned dy = 0; dy < out_h; ++dy) {
         unsigned ry = pick16(dy, hy);
         for (unsigned dx = 0; dx < out_w; ++dx) {
-            unsigned rx = pick16(dx, hx);
-            mirror_at(rx, ry, rw, rh);
+            // The mirror maps one pixel, so it works on a copy: flipping the
+            // running row coordinate would undo itself on the next column.
+            unsigned mx = pick16(dx, hx), my = ry;
+            mirror_at(mx, my, rw, rh);
             unsigned sx = 0, sy = 0;
-            unrotate(rx, ry, cw, ch, sx, sy);
+            unrotate(mx, my, cw, ch, sx, sy);
             out[static_cast<size_t>(dy) * out_w + dx] = in[static_cast<size_t>(cy + sy) * in_w + cx + sx];
         }
     }
@@ -393,10 +395,10 @@ void map_frame(const std::vector<uint8_t>& in, unsigned in_w, unsigned in_h, uns
     for (unsigned dy = 0; dy < dch; ++dy) {
         unsigned ry = pick16(dy, chy);
         for (unsigned dx = 0; dx < dcw; ++dx) {
-            unsigned rx = pick16(dx, chx);
-            mirror_at(rx, ry, crw, crh);
+            unsigned mx = pick16(dx, chx), my = ry;
+            mirror_at(mx, my, crw, crh);
             unsigned sx = 0, sy = 0;
-            unrotate(rx, ry, ccw, cch, sx, sy);
+            unrotate(mx, my, ccw, cch, sx, sy);
             const size_t from = static_cast<size_t>(in_w) * in_h
                 + static_cast<size_t>((cy >> 1) + sy) * in_w + ((cx >> 1) + sx) * 2U;
             const size_t to = static_cast<size_t>(out_w) * out_h + static_cast<size_t>(dy) * out_w + dx * 2U;

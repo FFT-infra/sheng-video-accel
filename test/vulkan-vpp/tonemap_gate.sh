@@ -69,17 +69,26 @@ fi
 work=${IRIS_VPP_DIR:-$(iris_artifact_dir va-vpp-tonemap)}
 mkdir -p "$work"
 
-# The tag, geometry, mastering peak and extra processor arguments of each
-# case. 318 is not a multiple of four, so the last chroma word of a row carries
-# two columns the ramp does not cover; that path has its own neutral fill in
-# the kernel. The composition cases run the tone mapper and then the scale pass
-# over its output: three quarter turns, both mirrors, a crop that scales, and a
-# thumbnail at the processor's new 2x2 floor.
-cases="sdrwhite:128x72:1000: mastering4000:128x72:4000: ragged:318x178:1000:
-rotate90:128x72:1000:--dst=72x128 --rotate=1 rotate270:128x72:1000:--dst=72x128 --rotate=3
-halfturn:128x72:1000:--rotate=2 hflip:128x72:1000:--mirror=1 vflip:128x72:1000:--mirror=2
-bothflips:128x72:1000:--mirror=3 crop-scale:128x72:1000:--crop=16,8,64,48 --dst=32x24
-thumbnail:64x64:1000:--dst=2x2"
+# One case per line: tag, source geometry, mastering peak and the extra
+# processor arguments, colon-separated. 318 is not a multiple of four, so the
+# last chroma word of a row carries two columns the ramp does not cover; that
+# path has its own neutral fill in the kernel. The composition cases run the
+# tone mapper and then the scale pass over its output: three quarter turns,
+# both mirrors, a crop that scales, and a thumbnail at the processor's 2x2
+# floor.
+cat > "$work/cases" <<'EOF'
+sdrwhite:128x72:1000:
+mastering4000:128x72:4000:
+ragged:318x178:1000:
+rotate90:128x72:1000:--dst=72x128 --rotate=1
+rotate270:128x72:1000:--dst=72x128 --rotate=3
+halfturn:128x72:1000:--rotate=2
+hflip:128x72:1000:--mirror=1
+vflip:128x72:1000:--mirror=2
+bothflips:128x72:1000:--mirror=3
+crop-scale:128x72:1000:--crop=16,8,64,48 --dst=32x24
+thumbnail:64x64:1000:--dst=2x2
+EOF
 
 failed=0
 run_case() {
@@ -110,10 +119,11 @@ run_case() {
     [ "$rc" -eq 0 ] || failed=1
 }
 
-for c in $cases; do
+while IFS= read -r c; do
+    [ -n "$c" ] || continue
     run_case "$(echo "$c" | cut -d: -f1)" "$(echo "$c" | cut -d: -f2)" "$(echo "$c" | cut -d: -f3)" \
         "$(echo "$c" | cut -d: -f4-)"
-done
+done < "$work/cases"
 [ "$failed" -eq 0 ] || fail "a tone-mapped frame differs from the documented pipeline"
 
 echo "== the curve follows the metadata: 1000 and 4000 cd/m2 differ"
