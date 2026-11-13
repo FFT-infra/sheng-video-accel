@@ -67,21 +67,20 @@ void main()
         }
         d[(p.dst_y + row * p.dst_stride + word * 4u) >> 2] = packed;
     } else {
-        // Chroma samples are interleaved u,v; a word holds the pair at
-        // destination pair index `word`.
+        // Chroma samples are interleaved u,v and a word holds exactly one
+        // pair: 32 bits of samples is two samples. Pair `word` sits at byte
+        // word * 4 in the destination row, and its source pair index is the
+        // one the same point map picks (the pair covers two source chroma
+        // samples, so the byte stride between pairs is 4).
         uint cy = row - p.dst_h;
-        uint cw = p.dst_w >> 1;
-        if (word >= ((cw + 1u) >> 1))
+        uint pairs = p.dst_w >> 1;
+        if (word >= pairs)
             return;
-        uint inc = step(p.src_w >> 1, cw);
+        uint inc = step(p.src_w >> 1, pairs);
         uint srow = (p.src_row >> 1) + pick(cy, step(p.src_h >> 1, p.dst_h >> 1));
         uint base = p.src_uv + srow * p.src_stride;
-        uint packed = 0u;
-        for (uint k = 0u; k < 2u; ++k) {
-            uint cx = word * 2u + k;
-            uint sx = p.src_x + pick(min(cx, cw - 1u), inc) * 2u;
-            packed |= sample16(base + sx) << (k * 16u);
-        }
-        d[(p.dst_uv + cy * p.dst_stride + word * 4u) >> 2] = packed;
+        uint sx = p.src_x + pick(min(word, pairs - 1u), inc) * 4u;
+        d[(p.dst_uv + cy * p.dst_stride + word * 4u) >> 2]
+            = sample16(base + sx) | (sample16(base + sx + 2u) << 16u);
     }
 }
