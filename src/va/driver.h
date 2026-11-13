@@ -205,10 +205,13 @@ struct Context {
         bool premultiplied = false;
     };
     std::optional<VppJob> vpp;
-    // The blending pass, when the picture has one. It names the overlay
-    // surface and the rectangle of the output it is drawn into; its colour
-    // standards and filters are judged with the main pass in run_vpp.
-    std::optional<VppJob> vpp_overlay;
+    // The blending passes, in the order the client rendered them. Each names
+    // an overlay surface and the rectangle of the output it is drawn into, and
+    // the composite runs them bottom-up, so a later pass covers an earlier
+    // one. VA lets a picture carry many — FFmpeg's overlay_vaapi submits two,
+    // a client that stacks subtitles over a video submits three — and their
+    // colour standards and filters are judged with the main pass in run_vpp.
+    std::vector<VppJob> vpp_overlays;
     // Set by a VAProcFilterParameterBufferType buffer: the mastering display
     // peak of the HDR10 source, in cd/m². Absent means no filter.
     std::optional<float> vpp_peak_nits;

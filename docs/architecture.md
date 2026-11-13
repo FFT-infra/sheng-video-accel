@@ -413,17 +413,20 @@ two bits are clear. Because a point map picks one source sample, converting
 before the pick and converting after it are the same sample, so a cross-depth
 picture is byte-identical to `scale` then `format`. A picture that names the HDR10 tone mapper instead runs
 `iris::vpp::tonemap_hdr10_to_sdr` over the two DMA-BUFs and converts P010
-BT.2020/PQ to NV12 BT.709 at the surface's own size; a picture
-whose second pipeline buffer names a `VABlendState` runs
-`iris::vpp::overlay` over three DMA-BUFs, keeping the main surface in place and
-mixing the overlay into an even rectangle of it on the coded values of both
-planes — or, when the overlay surface is a packed `VA_RT_FORMAT_RGB32` surface
+BT.2020/PQ to NV12 BT.709 at the surface's own size; a picture whose later
+pipeline buffers name a `VABlendState` first copies its main rectangle into the
+output — the scale kernel at 1:1, since a blended picture does not scale its
+main pass — and then runs one `iris::vpp::overlay` per layer over three
+DMA-BUFs, the output standing as the main term and the destination at once, so
+each layer mixes onto the pixels the previous one left. The mix runs on the
+coded values of both planes — or, when the overlay surface is a packed `VA_RT_FORMAT_RGB32` surface
 (`VA_FOURCC_BGRA` or `VA_FOURCC_RGBA`, the shape `overlay_vaapi` builds),
 `iris::vpp::overlay_rgb`, which converts every sampled overlay pixel to the
 output frame's Y'CbCr matrix before mixing; every other pipeline operation
-(luma keying, a third pass, any second filter, any colour conversion outside
-that one filter, and a mirror or a rotation in a tone-mapped or blended
-picture) fails the picture instead of being dropped. Both blends implement the
+(luma keying, more than sixteen blending passes, a blending pass rendered
+before the main one, any second filter, any colour conversion outside that one
+filter, and a mirror or a rotation in a tone-mapped or blended picture) fails
+the picture instead of being dropped. Both blends implement the
 global alpha of `VABlendState` and `VA_BLEND_PREMULTIPLIED_ALPHA`, which
 FFmpeg sets whenever its overlay input carries an alpha channel; with that flag
 a packed overlay's own alpha byte multiplies the global one, so the layer's
@@ -592,7 +595,8 @@ va end_picture ctx=<n> surface=<n> entrypoint=videoproc src=<n> <w>x<h>-><w>x<h>
                                                         <w>x<h>+<x>,<y>
                                                         alpha=<0..1>
                                                         [source=bgra|rgba]
-                                                        [premultiplied]]
+                                                        [premultiplied]
+                                                        [layers=<n>]]
                                                       (the suffix names the
                                                        one operation beyond
                                                        the scale: the tone
@@ -604,7 +608,10 @@ va end_picture ctx=<n> surface=<n> entrypoint=videoproc src=<n> <w>x<h>-><w>x<h>
                                                        and names its byte
                                                        order; `premultiplied`
                                                        marks a stored-alpha
-                                                       blend.)
+                                                       blend; `layers=`
+                                                       appears only for a
+                                                       stack and gives the
+                                                       count.)
 encode open node=<path> codec=<fourcc> raw=<w>x<h> crop=<w>x<h> mode=cbr|vbr|cqp
             gop=<n> rate=<num>/<den>
 encode frame index=<n> bytes=<n> idr=0|1 promoted=0|1    (idr=1 covers both the
@@ -703,7 +710,8 @@ monotone ramp). It also proves the curve follows the metadata by running two
 mastering peaks over one frame, and requires an NV12 source, a filter without
 its parameters and a rotation in a tone-mapped picture to be refused.
 `test/vulkan-vpp/overlay_gate.sh` drives `iris-va-vpp-probe overlay`, which
-submits the two pipeline buffers overlay_vaapi submits: twenty-six geometries
+submits the two pipeline buffers overlay_vaapi submits — and, with `--layers`,
+any number of them: thirty geometries
 across both sample widths — including a main surface padded wider than its
 picture, as a decoder allocates one, packed BGRA and RGBA overlays, the BT.601
 matrix, a packed overlay over a tone-mapped main surface, a layer that reads

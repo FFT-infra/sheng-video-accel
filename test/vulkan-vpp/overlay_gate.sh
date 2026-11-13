@@ -28,11 +28,11 @@
 # difference. The straight-alpha premultiplied equivalence is the check that
 # does not come from the model.
 #
-# The refusals are part of the contract: luma keying, a third pass, a blend
+# The refusals are part of the contract: luma keying, a blend pass rendered
 # before the pass it blends onto, an odd or out-of-bounds rectangle, a crop of
-# the main surface, an overlay region that leaves its own surface and an alpha
-# outside 0..1 are all refused rather than approximated.
-# So is the whole entrypoint without V4L2_VA_VPP.
+# the main surface, an overlay region that leaves its own surface, more than
+# sixteen layers and an alpha outside 0..1 are all refused rather than
+# approximated. So is the whole entrypoint without V4L2_VA_VPP.
 
 set -eu
 
@@ -139,6 +139,10 @@ cubic:128x72:64x48:16:0:100:72:0.60:--interp=advanced
 full:128x72:64x48:16:16:64:48:0.50:--full
 rgbfull:128x72:64x48:16:16:64:48:0.50:--rgb --full
 premult-full:128x72:64x48:16:16:64:48:0.50:--full --premultiplied
+layers2:128x72:64x48:16:16:64:48:0.50:--layers=2
+layers3:128x72:64x48:16:16:64:48:0.50:--layers=3
+layers2rgb:128x72:64x48:16:16:64:48:0.50:--rgb --layers=2
+layers2premult:128x72:64x48:16:16:64:48:0.50:--premultiplied --layers=2
 EOF
 
 failed=0
@@ -289,7 +293,7 @@ refuse() {
     printf 'refused=%s\n' "$what"
 }
 refuse luma-key 128 72 64 48 16 16 64 48 0.50 --luma-key
-refuse third-pass 128 72 64 48 16 16 64 48 0.50 --third
+refuse too-many-layers 128 72 64 48 16 16 64 48 0.50 --layers=18
 refuse blend-first 128 72 64 48 16 16 64 48 0.50 --blend-first
 refuse outside 128 72 64 48 112 16 32 48 0.50
 refuse odd-region 128 72 64 48 17 16 32 48 0.50

@@ -31,11 +31,11 @@
 //
 //   iris-va-vpp-probe overlay <render-node> <W> <H> <ovW> <ovH> <x> <y>
 //                     <rw> <rh> <alpha> <out.raw>
-//                     [--p010] [--premultiplied] [--luma-key] [--third]
+//                     [--p010] [--premultiplied] [--luma-key] [--layers=N]
 //                     [--blend-first] [--main-crop] [--pad=<columns>]
 //                     [--expect-refusal]
 //
-// The third mode submits two pipeline buffers in one picture, the way
+// The overlay mode submits two or more pipeline buffers in one picture, the way
 // overlay_vaapi does: the main surface over the whole output, then the
 // overlay surface into one rectangle with a VABlendState naming a global
 // alpha. It compares the result with the mix documented in
@@ -44,8 +44,8 @@
 //
 // `--expect-refusal` inverts the verdict: the picture must fail (an odd or
 // out-of-bounds region, an NV12 source, a filter without its parameters, a
-// rotation, premultiplied alpha, a third pass, all are the driver's to refuse
-// rather than to round).
+// rotation, a blending pass rendered before the main one, more than sixteen
+// layers, all are the driver's to refuse rather than to round).
 //
 // Needs V4L2_VA_VPP=1, LIBVA_DRIVER_NAME=v4l2 and either the installed driver
 // or LIBVA_DRIVERS_PATH pointing at a build tree.
@@ -915,9 +915,12 @@ void premultiply_pattern(std::vector<uint8_t>& frame, unsigned width, unsigned h
         }
 }
 
-void expected_composite(const Mix& mix, std::vector<uint8_t>& out)
+// One layer mixed onto `out` in place. `out` is both the main term and the
+// destination, which is what makes a stack work: the driver reads the output
+// back between dispatches, so layer i sees layers 0..i-1 where a single-layer
+// picture sees the main surface.
+void apply_composite(const Mix& mix, std::vector<uint8_t>& out)
 {
-    out = mix.main;
     const double luma = mix.full ? 0.0 : (mix.bytes == 2 ? 64.0 : 16.0);
     const double chroma = mix.bytes == 2 ? 512.0 : 128.0;
     for (unsigned dy = 0; dy < mix.rect_height; ++dy)
@@ -1084,9 +1087,10 @@ void sample_rgb(const Mix& mix, unsigned dx, unsigned dy, double rgb[3], double*
     *alpha = std::min(std::max(asum, 0.0), 1.0);
 }
 
-void expected_composite_rgb(const Mix& mix, std::vector<uint8_t>& out)
+// The same in-place mix for a packed RGB overlay; `out` carries the pixels the
+// previous layer left, as the driver's output buffer does.
+void apply_composite_rgb(const Mix& mix, std::vector<uint8_t>& out)
 {
-    out = mix.main;
     for (unsigned dy = 0; dy < mix.rect_height; ++dy)
         for (unsigned dx = 0; dx < mix.rect_width; ++dx) {
             const size_t m = static_cast<size_t>(mix.y + dy) * mix.width + mix.x + dx;
@@ -1131,7 +1135,7 @@ void overlay_usage(const char* argv0)
 {
     std::fprintf(stderr,
         "usage: %s overlay <render-node> <W> <H> <ovW> <ovH> <x> <y> <rw> <rh> <alpha> <out.raw>\n"
-        "                 [--p010] [--premultiplied] [--luma-key] [--third] [--blend-first]\n"
+        "                 [--p010] [--premultiplied] [--luma-key] [--layers=N] [--blend-first]\n"
         "                 [--main-crop] [--pad=<columns>] [--tonemap=<peak-nits>]\n"
         "                 [--rgb[=rgba]] [--standard=601|709|2020] [--full] [--alpha-byte=<n>]\n"
         "                 [--crop=<w>x<h>+<x>+<y>]\n"
@@ -1156,7 +1160,7 @@ int run_overlay(int argc, char** argv)
     const unsigned rh = static_cast<unsigned>(std::atoi(argv[8]));
     const double alpha = std::atof(argv[9]);
     const char* out_path = argv[10];
-    bool p010 = false, premultiplied = false, luma_key = false, third = false, blend_first = false;
+    bool p010 = false, premultiplied = false, luma_key = false, blend_first = false;
     bool main_crop = false, expect_refusal = false, full_range = false;
     // The overlay surface is packed BGRA (default with --rgb) or RGBA.
     bool rgb = false, bgra = true;
@@ -1170,6 +1174,11 @@ int run_overlay(int argc, char** argv)
     bool ov_crop_set = false;
     // The overlay's per-pixel alpha byte: -1 keeps the pattern's own.
     int alpha_byte = -1;
+    // How many blending passes to submit over the main one. Each is the same
+    // overlay surface into a rectangle one step down and to the right, so a
+    // stack is distinguishable from a single layer: the model composites them
+    // in submission order, exactly as the driver does.
+    unsigned layers = 1;
     for (int i = 11; i < argc; ++i) {
         if (std::strcmp(argv[i], "--p010") == 0)
             p010 = true;
@@ -1193,8 +1202,6 @@ int run_overlay(int argc, char** argv)
             premultiplied = true;
         else if (std::strcmp(argv[i], "--luma-key") == 0)
             luma_key = true;
-        else if (std::strcmp(argv[i], "--third") == 0)
-            third = true;
         else if (std::strcmp(argv[i], "--blend-first") == 0)
             blend_first = true;
         else if (std::strcmp(argv[i], "--main-crop") == 0)
@@ -1219,6 +1226,15 @@ int run_overlay(int argc, char** argv)
                                                           : 99u;
             if (interp == 99u) {
                 overlay_usage("iris-va-vpp-probe");
+                return 2;
+            }
+        }
+        else if (std::strncmp(argv[i], "--layers=", 9) == 0) {
+            layers = static_cast<unsigned>(std::atoi(argv[i] + 9));
+            // The driver's limit is sixteen blending passes; a larger count is
+            // the driver's to refuse, not the probe's, so it is submitted.
+            if (layers < 1 || layers > 64) {
+                std::fprintf(stderr, "--layers must be 1..64\n");
                 return 2;
             }
         }
@@ -1453,30 +1469,46 @@ int run_overlay(int argc, char** argv)
         main_params.output_color_properties.color_range = VA_SOURCE_RANGE_FULL;
     }
 
-    VABufferID main_buffer = VA_INVALID_ID, overlay_buffer = VA_INVALID_ID;
+    // One pipeline buffer per layer, each blending a rectangle one step down
+    // and right of the one before, so a stack is a picture no single layer
+    // produces. The step is two pixels, which keeps every rectangle even and
+    // every chroma cell wholly inside or outside its layer. A rectangle the
+    // caller put outside the output is passed through unchanged: refusing it
+    // is the driver's job, and clamping here would hide that.
+    std::vector<VAProcPipelineParameterBuffer> layer_params(layers, overlay_params);
+    std::vector<VARectangle> layer_regions(layers);
+    for (unsigned i = 0; i < layers; ++i) {
+        VARectangle& r = layer_regions[i];
+        r.x = static_cast<int16_t>(x + 2u * i);
+        r.y = static_cast<int16_t>(y + 2u * i);
+        r.width = static_cast<uint16_t>(rw);
+        r.height = static_cast<uint16_t>(rh);
+        layer_params[i].output_region = &r;
+    }
+
+    VABufferID main_buffer = VA_INVALID_ID;
     check(vaCreateBuffer(display, context, VAProcPipelineParameterBufferType, sizeof(main_params), 1,
               &main_params, &main_buffer)
             == VA_STATUS_SUCCESS,
         "create the main pipeline buffer");
-    check(vaCreateBuffer(display, context, VAProcPipelineParameterBufferType, sizeof(overlay_params), 1,
-              &overlay_params, &overlay_buffer)
-            == VA_STATUS_SUCCESS,
-        "create the blending pipeline buffer");
+    std::vector<VABufferID> layer_buffers(layers, VA_INVALID_ID);
+    for (unsigned i = 0; i < layers; ++i)
+        check(vaCreateBuffer(display, context, VAProcPipelineParameterBufferType, sizeof(layer_params[i]), 1,
+                  &layer_params[i], &layer_buffers[i])
+                == VA_STATUS_SUCCESS,
+            "create a blending pipeline buffer");
 
     VAStatus begin = vaBeginPicture(display, context, dst_surface);
-    VABufferID order[4] = { main_buffer, overlay_buffer, overlay_buffer, filter_buffer };
-    int count = third ? 3 : 2;
-    if (blend_first) {
-        order[0] = overlay_buffer;
-        order[1] = main_buffer;
-    }
-    if (filter_buffer != VA_INVALID_ID) {
-        order[2] = filter_buffer;
-        order[3] = overlay_buffer;
-        count = 3;
-    }
+    std::vector<VABufferID> order;
+    order.push_back(main_buffer);
+    for (VABufferID id : layer_buffers)
+        order.push_back(id);
+    if (blend_first)
+        std::swap(order[0], order[1]);
+    if (filter_buffer != VA_INVALID_ID)
+        order.push_back(filter_buffer);
     VAStatus render = begin == VA_STATUS_SUCCESS
-        ? vaRenderPicture(display, context, order, count)
+        ? vaRenderPicture(display, context, order.data(), static_cast<int>(order.size()))
         : begin;
     status = render == VA_STATUS_SUCCESS ? vaEndPicture(display, context) : render;
 
@@ -1493,11 +1525,21 @@ int run_overlay(int argc, char** argv)
         if (status == VA_STATUS_SUCCESS)
             check(download(display, dst_surface, output, width, height, fourcc), "download the output frame");
         if (status == VA_STATUS_SUCCESS && output.size() == mix.main.size()) {
-            std::vector<uint8_t> expected;
-            if (rgb)
-                expected_composite_rgb(mix, expected);
-            else
-                expected_composite(mix, expected);
+            // One mix per layer, in submission order, each reading what the
+            // one before it left — the driver reads its own output back
+            // between dispatches, so this is the same picture.
+            std::vector<uint8_t> expected = mix.main;
+            for (unsigned i = 0; i < layers; ++i) {
+                Mix step = mix;
+                step.x = layer_regions[i].x;
+                step.y = layer_regions[i].y;
+                step.rect_width = layer_regions[i].width;
+                step.rect_height = layer_regions[i].height;
+                if (rgb)
+                    apply_composite_rgb(step, expected);
+                else
+                    apply_composite(step, expected);
+            }
             unsigned max_diff = 0;
             size_t worst = 0;
             for (size_t i = 0; i < expected.size(); ++i) {

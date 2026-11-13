@@ -144,22 +144,32 @@ void wait_for_pixels(const std::shared_ptr<Surface>& s, const std::shared_ptr<ir
     }
 }
 
+// How many blending passes one picture may carry. VA puts no limit on the
+// count and neither does the kernel — each pass is one more dispatch — so this
+// is a bound on the work a single vaEndPicture can be asked for, not a
+// capability. Sixteen is the sibling driver's figure.
+constexpr size_t kMaxOverlays = 16;
+
 // Copy the client's pipeline parameters and refuse every operation the
 // compute kernel does not run. The struct's pointers are valid only until
 // vaEndPicture, so the regions are dereferenced here rather than kept.
 void accept_vpp_pipeline(Context& c, const Buffer& b)
 {
-    // A picture runs one pass, or a main pass and one blending pass — the pair
-    // FFmpeg's overlay_vaapi submits. The order is part of the contract: the
-    // pass that names a blend state blends onto the one before it. Dropping
-    // either would publish a picture the client did not ask for.
+    // A picture runs one main pass and any number of blending passes on top of
+    // it. The order is part of the contract: each pass that names a blend
+    // state blends onto everything before it, so the first one rendered is the
+    // bottom layer. Dropping any of them would publish a picture the client
+    // did not ask for.
     iris::require(b.size >= sizeof(VAProcPipelineParameterBuffer), "pipeline buffer too small",
         VA_STATUS_ERROR_INVALID_PARAMETER);
     VAProcPipelineParameterBuffer p = {};
     std::memcpy(&p, b.data.data(), sizeof(p));
     const bool blending = p.blend_state != nullptr;
-    iris::require(blending ? c.vpp.has_value() && !c.vpp_overlay.has_value() : !c.vpp.has_value(),
-        "a VideoProc picture is one pass, or a main pass and one blend", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    iris::require(blending ? c.vpp.has_value() : !c.vpp.has_value() && c.vpp_overlays.empty(),
+        "the first VideoProc pipeline buffer is the main pass and every later one blends",
+        VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    iris::require(c.vpp_overlays.size() < kMaxOverlays, "too many blending passes",
+        VA_STATUS_ERROR_UNSUPPORTED_FILTER);
 
     // One filter is supported, the HDR10 tone mapper. Its parameters travel in
     // their own buffer, so nothing about them is read here.
@@ -255,7 +265,7 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
         job.output_region_set = true;
     }
     if (blending)
-        c.vpp_overlay = job;
+        c.vpp_overlays.push_back(job);
     else
         c.vpp = job;
 }
@@ -299,7 +309,10 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
     iris::require(c.vpp.has_value(), "VideoProc picture has no pipeline parameters",
         VA_STATUS_ERROR_INVALID_PARAMETER);
     const Context::VppJob job = *c.vpp;
-    const std::optional<Context::VppJob> blend = c.vpp_overlay;
+    // The blending passes, bottom first: the composite runs them in this
+    // order, so a later one covers an earlier one.
+    const std::vector<Context::VppJob>& blends = c.vpp_overlays;
+    const bool blended = !blends.empty();
 
     // One filter is supported, the HDR10 tone mapper, and its parameters
     // arrive as their own buffer in whichever order the client renders them.
@@ -309,26 +322,32 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         tone_map ? "the HDR10 tone mapper needs its parameter buffer"
                  : "VideoProc filter parameters without a filter",
         VA_STATUS_ERROR_INVALID_PARAMETER);
-    if (blend) {
+    for (const Context::VppJob& blend : blends) {
         // Compositing is a copy of the main surface plus a blend into one
         // rectangle. Rotating or mirroring the main pass is the scale kernel's
         // job and a blended picture does not run it; the tone mapper is
         // allowed because it converts at the source's own size, so the blend
         // still reads a same-geometry main surface.
-        iris::require(blend->filters == 0, "the blending pass carries no filter",
+        iris::require(blend.filters == 0, "the blending pass carries no filter",
             VA_STATUS_ERROR_UNSUPPORTED_FILTER);
-        iris::require(job.rotation == VA_ROTATION_NONE, "a blended picture does not rotate",
+        iris::require(blend.rotation == VA_ROTATION_NONE, "the overlay does not rotate",
             VA_STATUS_ERROR_UNSUPPORTED_FILTER);
-        iris::require(job.mirror == VA_MIRROR_NONE, "a blended picture does not mirror",
+        iris::require(blend.mirror == VA_MIRROR_NONE, "the overlay does not mirror",
             VA_STATUS_ERROR_UNSUPPORTED_FILTER);
         // The overlay is mixed in the main pass's coded values, so naming a
         // different standard (or different explicit properties) would claim a
         // conversion the kernel does not do.
-        iris::require(blend->input_standard == job.input_standard
-                && blend->output_standard == job.output_standard && blend->explicit_colour_properties_equal
-                && blend->input_full_range == job.input_full_range
-                && blend->output_full_range == job.output_full_range,
+        iris::require(blend.input_standard == job.input_standard
+                && blend.output_standard == job.output_standard && blend.explicit_colour_properties_equal
+                && blend.input_full_range == job.input_full_range
+                && blend.output_full_range == job.output_full_range,
             "the blending pass shares the colour standards of the pass it blends onto",
+            VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    }
+    if (blended) {
+        iris::require(job.rotation == VA_ROTATION_NONE, "a blended picture does not rotate",
+            VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+        iris::require(job.mirror == VA_MIRROR_NONE, "a blended picture does not mirror",
             VA_STATUS_ERROR_UNSUPPORTED_FILTER);
     }
     if (!tone_map) {
@@ -357,21 +376,27 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
             "a tone-mapped output must be BT.709 or unnamed", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
     }
 
-    Pixels src, dst, ov;
+    Pixels src, dst;
     VARectangle crop = {};
-    VARectangle rect = {};
-    // The rectangle of the overlay surface the layer samples, which is the
-    // whole surface unless the client named one.
-    VARectangle ov_crop = {};
-    // The overlay surface is either the output's Y'CbCr format or one of the
-    // packed RGB formats the processor converts while it mixes.
-    bool overlay_rgb = false;
+    // One entry per blending pass: the surface it reads, the rectangle of the
+    // output it lands in, and the rectangle of its own surface it samples.
+    struct Layer {
+        std::shared_ptr<Surface> surface;
+        std::shared_ptr<iris::Session> session;
+        Pixels pixels;
+        VARectangle rect = {};
+        VARectangle crop = {};
+        // Either the output's Y'CbCr format or one of the packed RGB formats
+        // the processor converts while it mixes.
+        bool rgb = false;
+    };
+    std::vector<Layer> layers(blends.size());
     // Keep the sources alive across the dispatch: the fd captured below is
     // closed when its Surface dies, and a client that destroys a source
     // while this picture is running must not pull the buffer out from under
     // the import.
-    std::shared_ptr<Surface> source, overlay_surface;
-    std::shared_ptr<iris::Session> source_session, overlay_session;
+    std::shared_ptr<Surface> source;
+    std::shared_ptr<iris::Session> source_session;
     {
         std::lock_guard<std::recursive_mutex> lock(d.mutex);
         source = surface(d, job.source);
@@ -417,7 +442,7 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         // a scale, a rotation or a mirror in the same picture is the scale
         // kernel's job on the converted surface, so the picture runs it into a
         // scratch surface first (the pass chain below).
-        if (blend) {
+        if (blended) {
             // The main pass is copied at its own scale, so the rectangle the
             // client names is the output's size. FFmpeg names it on every
             // pass: the picture inside a decode surface that is wider than it.
@@ -427,26 +452,27 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
                     && static_cast<uint32_t>(crop.height) == target->height,
                 "a blended picture copies its main rectangle at its own scale",
                 VA_STATUS_ERROR_UNSUPPORTED_FILTER);
-            iris::require(blend->output_region_set, "the blending pass needs an output region",
+        }
+        for (size_t i = 0; i < blends.size(); ++i) {
+            const Context::VppJob& blend = blends[i];
+            Layer& layer = layers[i];
+            iris::require(blend.output_region_set, "the blending pass needs an output region",
                 VA_STATUS_ERROR_INVALID_PARAMETER);
-            iris::require(blend->rotation == VA_ROTATION_NONE, "the overlay does not rotate",
-                VA_STATUS_ERROR_UNSUPPORTED_FILTER);
-            iris::require(blend->mirror == VA_MIRROR_NONE, "the overlay does not mirror",
-                VA_STATUS_ERROR_UNSUPPORTED_FILTER);
-            overlay_surface = surface(d, blend->source);
-            iris::require(overlay_surface.get() != target.get() && overlay_surface.get() != source.get(),
+            layer.surface = surface(d, blend.source);
+            iris::require(layer.surface.get() != target.get() && layer.surface.get() != source.get(),
                 "the overlay is a third surface", VA_STATUS_ERROR_INVALID_PARAMETER);
-            const uint32_t ov_fourcc = overlay_surface->fourcc;
-            overlay_rgb = ov_fourcc == VA_FOURCC_BGRA || ov_fourcc == VA_FOURCC_RGBA;
-            iris::require(overlay_rgb
-                    ? target->fourcc == VA_FOURCC_NV12 || target->fourcc == VA_FOURCC_P010
-                    : ov_fourcc == target->fourcc,
+            // Two layers may read the same surface — a client can stack one
+            // image at two positions — but the output may not be one of them.
+            const uint32_t ov_fourcc = layer.surface->fourcc;
+            layer.rgb = ov_fourcc == VA_FOURCC_BGRA || ov_fourcc == VA_FOURCC_RGBA;
+            iris::require(layer.rgb ? target->fourcc == VA_FOURCC_NV12 || target->fourcc == VA_FOURCC_P010
+                                    : ov_fourcc == target->fourcc,
                 "the overlay is the output's format or a packed RGBA/BGRA surface",
                 VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
-            iris::require(overlay_surface->target.pending || overlay_surface->target.frame
-                    || overlay_surface->stable,
+            iris::require(layer.surface->target.pending || layer.surface->target.frame || layer.surface->stable,
                 "the overlay surface holds no pixels", VA_STATUS_ERROR_OPERATION_FAILED);
-            rect = blend->output_region;
+            layer.rect = blend.output_region;
+            const VARectangle& rect = layer.rect;
             iris::require(rect.x >= 0 && rect.y >= 0 && rect.width > 0 && rect.height > 0
                     && static_cast<uint32_t>(rect.x) + static_cast<uint32_t>(rect.width) <= target->width
                     && static_cast<uint32_t>(rect.y) + static_cast<uint32_t>(rect.height) <= target->height,
@@ -459,25 +485,24 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
             // A packed RGB overlay is sampled per pixel, so no subsampling
             // constraint reaches its own geometry; the rectangle still has
             // one, because the output's chroma cells do.
-            iris::require(overlay_surface->width && overlay_surface->height
-                    && (overlay_rgb || !((overlay_surface->width | overlay_surface->height) & 1u)),
+            iris::require(layer.surface->width && layer.surface->height
+                    && (layer.rgb || !((layer.surface->width | layer.surface->height) & 1u)),
                 "the overlay needs an even, non-empty geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
             // The overlay's own region is what gets scaled into the output
             // rectangle. FFmpeg leaves it null, which means the whole surface;
             // a client that names one composites part of a surface. On a
             // Y'CbCr overlay it has to be even on both axes for the same
             // reason the output rectangle does.
-            ov_crop = { 0, 0, static_cast<uint16_t>(overlay_surface->width),
-                static_cast<uint16_t>(overlay_surface->height) };
-            if (blend->region_set) {
-                ov_crop = blend->region;
-                iris::require(ov_crop.x >= 0 && ov_crop.y >= 0 && ov_crop.width > 0 && ov_crop.height > 0
-                        && static_cast<uint32_t>(ov_crop.x) + static_cast<uint32_t>(ov_crop.width)
-                            <= overlay_surface->width
-                        && static_cast<uint32_t>(ov_crop.y) + static_cast<uint32_t>(ov_crop.height)
-                            <= overlay_surface->height,
+            layer.crop = { 0, 0, static_cast<uint16_t>(layer.surface->width),
+                static_cast<uint16_t>(layer.surface->height) };
+            if (blend.region_set) {
+                layer.crop = blend.region;
+                const VARectangle& oc = layer.crop;
+                iris::require(oc.x >= 0 && oc.y >= 0 && oc.width > 0 && oc.height > 0
+                        && static_cast<uint32_t>(oc.x) + static_cast<uint32_t>(oc.width) <= layer.surface->width
+                        && static_cast<uint32_t>(oc.y) + static_cast<uint32_t>(oc.height) <= layer.surface->height,
                     "the overlay region is outside the overlay surface", VA_STATUS_ERROR_INVALID_PARAMETER);
-                iris::require(overlay_rgb || !((ov_crop.x | ov_crop.y | ov_crop.width | ov_crop.height) & 1),
+                iris::require(layer.rgb || !((oc.x | oc.y | oc.width | oc.height) & 1),
                     "the overlay region must be even", VA_STATUS_ERROR_INVALID_PARAMETER);
             }
         }
@@ -486,29 +511,30 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         // it (architecture §7: never hold the mutex across a session wait).
         const auto source_owner = owner_of(d, *source);
         source_session = source_owner ? source_owner->session : nullptr;
-        if (blend) {
-            const auto overlay_owner = owner_of(d, *overlay_surface);
-            overlay_session = overlay_owner ? overlay_owner->session : nullptr;
+        for (Layer& layer : layers) {
+            const auto overlay_owner = owner_of(d, *layer.surface);
+            layer.session = overlay_owner ? overlay_owner->session : nullptr;
         }
     }
 
     wait_for_pixels(source, source_session);
-    if (blend)
-        wait_for_pixels(overlay_surface, overlay_session);
+    for (Layer& layer : layers)
+        wait_for_pixels(layer.surface, layer.session);
     {
         std::lock_guard<std::recursive_mutex> lock(d.mutex);
         src = pixels_of(d, *source);
         dst = pixels_of(d, *target);
-        if (blend)
-            ov = pixels_of(d, *overlay_surface);
+        for (Layer& layer : layers)
+            layer.pixels = pixels_of(d, *layer.surface);
     }
 
     // The kernels read and write the same words. Two surfaces over one buffer
     // pass every check above — different ids, different objects — and would
     // make the picture race itself.
     iris::require(!same_buffer(src, dst), "VPP output aliases its input", VA_STATUS_ERROR_INVALID_SURFACE);
-    if (blend)
-        iris::require(!same_buffer(ov, dst), "the overlay aliases the output", VA_STATUS_ERROR_INVALID_SURFACE);
+    for (const Layer& layer : layers)
+        iris::require(!same_buffer(layer.pixels, dst), "the overlay aliases the output",
+            VA_STATUS_ERROR_INVALID_SURFACE);
 
     // The tone mapper converts the whole source at its own size; the scale
     // and the blend move pixels afterwards. A picture that asks for both runs
@@ -518,7 +544,7 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         || static_cast<uint32_t>(crop.width) != target->width
         || static_cast<uint32_t>(crop.height) != target->height || job.rotation != VA_ROTATION_NONE
         || job.mirror != VA_MIRROR_NONE;
-    const bool tonemap_to_scratch = tone_map && (blend || geometry_changes);
+    const bool tonemap_to_scratch = tone_map && (blended || geometry_changes);
     std::unique_ptr<iris::StableBuffer> scratch;
     Pixels mid;
     if (tonemap_to_scratch) {
@@ -551,97 +577,152 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         tj.source_peak_nits = *c.vpp_peak_nits;
         ran = iris::vpp::tonemap_hdr10_to_sdr(tj);
     }
-    if (ran && blend && overlay_rgb) {
-        iris::vpp::OverlayRgbJob oj;
-        oj.main_fd = base.fd;
-        oj.overlay_fd = ov.fd;
-        oj.dst_fd = dst.fd;
-        oj.main_size = base.size;
-        oj.overlay_size = ov.size;
-        oj.dst_size = dst.size;
-        oj.main_stride = base.layout.stride;
-        oj.overlay_stride = ov.layout.stride;
-        oj.dst_stride = dst.layout.stride;
-        oj.main_uv = base.layout.chroma_offset();
-        oj.dst_uv = dst.layout.chroma_offset();
-        oj.main_y = base.layout.data_offset;
-        oj.main_x = static_cast<uint32_t>(crop.x);
-        oj.main_row = static_cast<uint32_t>(crop.y);
-        oj.overlay_y = ov.layout.data_offset;
-        oj.dst_y = dst.layout.data_offset;
-        oj.overlay_width = overlay_surface->width;
-        oj.overlay_height = overlay_surface->height;
-        oj.overlay_x = static_cast<uint32_t>(ov_crop.x);
-        oj.overlay_row = static_cast<uint32_t>(ov_crop.y);
-        oj.overlay_crop_width = ov_crop.width;
-        oj.overlay_crop_height = ov_crop.height;
-        oj.x = static_cast<uint32_t>(rect.x);
-        oj.y = static_cast<uint32_t>(rect.y);
-        oj.width = rect.width;
-        oj.height = rect.height;
-        oj.dst_width = target->width;
-        oj.dst_height = target->height;
-        oj.bytes = base.layout.fourcc == VA_FOURCC_P010 ? 2 : 1;
-        oj.bgra = overlay_surface->fourcc == VA_FOURCC_BGRA;
-        oj.premultiplied = blend->premultiplied;
-        // The matrix is the output frame's. A tone-mapped picture has already
-        // converted to BT.709 and names that or nothing, so this is the same
-        // standard the main surface carries in every supported picture.
-        if (job.output_standard == VAProcColorStandardBT601)
-            oj.standard = 1;
-        else if (job.output_standard == VAProcColorStandardBT2020)
-            oj.standard = 2;
-        else
-            oj.standard = 0;
-        // The overlay is sampled with the method the pass that blends it
-        // names, over that pass's own region rather than the whole source.
-        oj.interpolation = blend->interpolation;
-        // The composite encodes its result, so it has to know which range the
-        // client means; the scale carries codes through and does not.
-        oj.full_range = job.output_full_range;
-        oj.alpha = blend->global_alpha;
-        ran = iris::vpp::overlay_rgb(oj);
-    } else if (ran && blend) {
-        iris::vpp::OverlayJob oj;
-        oj.main_fd = base.fd;
-        oj.overlay_fd = ov.fd;
-        oj.dst_fd = dst.fd;
-        oj.main_size = base.size;
-        oj.overlay_size = ov.size;
-        oj.dst_size = dst.size;
-        oj.main_stride = base.layout.stride;
-        oj.overlay_stride = ov.layout.stride;
-        oj.dst_stride = dst.layout.stride;
-        oj.main_uv = base.layout.chroma_offset();
-        oj.overlay_uv = ov.layout.chroma_offset();
-        oj.dst_uv = dst.layout.chroma_offset();
-        oj.main_y = base.layout.data_offset;
-        oj.main_x = static_cast<uint32_t>(crop.x);
-        oj.main_row = static_cast<uint32_t>(crop.y);
-        oj.main_width = static_cast<uint32_t>(crop.width);
-        oj.main_height = static_cast<uint32_t>(crop.height);
-        oj.overlay_y = ov.layout.data_offset;
-        oj.dst_y = dst.layout.data_offset;
-        oj.overlay_width = overlay_surface->width;
-        oj.overlay_height = overlay_surface->height;
-        oj.overlay_x = static_cast<uint32_t>(ov_crop.x);
-        oj.overlay_row = static_cast<uint32_t>(ov_crop.y);
-        oj.overlay_crop_width = ov_crop.width;
-        oj.overlay_crop_height = ov_crop.height;
-        oj.x = static_cast<uint32_t>(rect.x);
-        oj.y = static_cast<uint32_t>(rect.y);
-        oj.width = rect.width;
-        oj.height = rect.height;
-        oj.dst_width = target->width;
-        oj.dst_height = target->height;
-        // Both sides of the mix are the same format: the tone-mapped
-        // scratch is NV12 and the overlay was checked against the output.
-        oj.bytes = base.layout.fourcc == VA_FOURCC_P010 ? 2 : 1;
-        oj.premultiplied = blend->premultiplied;
-        oj.interpolation = blend->interpolation;
-        oj.full_range = job.output_full_range;
-        oj.alpha = blend->global_alpha;
-        ran = iris::vpp::overlay(oj);
+    if (ran && blended) {
+        // The main pass is copied into the output first — the composite is an
+        // offset copy plus a mix per layer, not a scale — and then every layer
+        // is mixed onto the pixels before it. Reading the output back between
+        // dispatches is what lets one kernel serve any number of layers: layer
+        // i covers layers 0..i-1 exactly as it would cover the main surface,
+        // because the kernel only ever sees one "main" buffer.
+        //
+        // The copy is the scale kernel at 1:1, the tone mapper already having
+        // put its result in `base`. That is the same path a picture with no
+        // blend takes when it only crops, so there is one copy implementation
+        // and not two.
+        {
+            iris::vpp::ScaleJob sj;
+            sj.src_fd = base.fd;
+            sj.dst_fd = dst.fd;
+            sj.src_size = base.size;
+            sj.dst_size = dst.size;
+            sj.src_stride = base.layout.stride;
+            sj.dst_stride = dst.layout.stride;
+            sj.src_uv = base.layout.chroma_offset();
+            sj.dst_uv = dst.layout.chroma_offset();
+            sj.src_y = base.layout.data_offset;
+            sj.dst_y = dst.layout.data_offset;
+            sj.src_x = static_cast<uint32_t>(crop.x);
+            sj.src_y_offset = static_cast<uint32_t>(crop.y);
+            sj.src_width = static_cast<uint32_t>(crop.width);
+            sj.src_height = static_cast<uint32_t>(crop.height);
+            sj.width = target->width;
+            sj.height = target->height;
+            sj.src_bytes = base.layout.fourcc == VA_FOURCC_P010 ? 2 : 1;
+            sj.dst_bytes = dst.layout.fourcc == VA_FOURCC_P010 ? 2 : 1;
+            // A blended picture copies its main rectangle at its own scale, so
+            // the point map is the identity here; naming it keeps the copy
+            // independent of the client's interpolation choice.
+            sj.interpolation = 0;
+            ran = iris::vpp::scale_nv12_or_p010(sj);
+        }
+        for (size_t i = 0; ran && i < layers.size(); ++i) {
+            const Context::VppJob& blend = blends[i];
+            const Layer& layer = layers[i];
+            const VARectangle& rect = layer.rect;
+            const VARectangle& ov_crop = layer.crop;
+            const Pixels& ov = layer.pixels;
+            if (layer.rgb) {
+                iris::vpp::OverlayRgbJob oj;
+                oj.main_fd = dst.fd;
+                oj.overlay_fd = ov.fd;
+                oj.dst_fd = dst.fd;
+                oj.main_size = dst.size;
+                oj.overlay_size = ov.size;
+                oj.dst_size = dst.size;
+                oj.main_stride = dst.layout.stride;
+                oj.overlay_stride = ov.layout.stride;
+                oj.dst_stride = dst.layout.stride;
+                oj.main_uv = dst.layout.chroma_offset();
+                oj.dst_uv = dst.layout.chroma_offset();
+                oj.main_y = dst.layout.data_offset;
+                oj.main_x = 0;
+                oj.main_row = 0;
+                oj.overlay_y = ov.layout.data_offset;
+                oj.dst_y = dst.layout.data_offset;
+                oj.overlay_width = layer.surface->width;
+                oj.overlay_height = layer.surface->height;
+                oj.overlay_x = static_cast<uint32_t>(ov_crop.x);
+                oj.overlay_row = static_cast<uint32_t>(ov_crop.y);
+                oj.overlay_crop_width = ov_crop.width;
+                oj.overlay_crop_height = ov_crop.height;
+                oj.x = static_cast<uint32_t>(rect.x);
+                oj.y = static_cast<uint32_t>(rect.y);
+                oj.width = rect.width;
+                oj.height = rect.height;
+                oj.dst_width = target->width;
+                oj.dst_height = target->height;
+                oj.bytes = dst.layout.fourcc == VA_FOURCC_P010 ? 2 : 1;
+                oj.bgra = layer.surface->fourcc == VA_FOURCC_BGRA;
+                oj.premultiplied = blend.premultiplied;
+                // The matrix is the output frame's. A tone-mapped picture has
+                // already converted to BT.709 and names that or nothing, so
+                // this is the same standard the main surface carries in every
+                // supported picture.
+                if (job.output_standard == VAProcColorStandardBT601)
+                    oj.standard = 1;
+                else if (job.output_standard == VAProcColorStandardBT2020)
+                    oj.standard = 2;
+                else
+                    oj.standard = 0;
+                // The overlay is sampled with the method the pass that blends
+                // it names, over that pass's own region rather than the whole
+                // source.
+                oj.interpolation = blend.interpolation;
+                // The composite encodes its result, so it has to know which
+                // range the client means; the scale carries codes through and
+                // does not.
+                oj.full_range = job.output_full_range;
+                oj.alpha = blend.global_alpha;
+                ran = iris::vpp::overlay_rgb(oj);
+            } else {
+                iris::vpp::OverlayJob oj;
+                oj.main_fd = dst.fd;
+                oj.overlay_fd = ov.fd;
+                oj.dst_fd = dst.fd;
+                oj.main_size = dst.size;
+                oj.overlay_size = ov.size;
+                oj.dst_size = dst.size;
+                oj.main_stride = dst.layout.stride;
+                oj.overlay_stride = ov.layout.stride;
+                oj.dst_stride = dst.layout.stride;
+                oj.main_uv = dst.layout.chroma_offset();
+                oj.overlay_uv = ov.layout.chroma_offset();
+                oj.dst_uv = dst.layout.chroma_offset();
+                oj.main_y = dst.layout.data_offset;
+                oj.main_x = 0;
+                oj.main_row = 0;
+                // The main term is the output itself, so this is an identity
+                // copy of the whole surface: the kernel reads and writes the
+                // same word, and the layer rectangle is what changes. The
+                // kernel's own rule — the main rectangle is the destination's
+                // size — is what the whole-surface geometry satisfies.
+                oj.main_width = target->width;
+                oj.main_height = target->height;
+                oj.overlay_y = ov.layout.data_offset;
+                oj.dst_y = dst.layout.data_offset;
+                oj.overlay_width = layer.surface->width;
+                oj.overlay_height = layer.surface->height;
+                oj.overlay_x = static_cast<uint32_t>(ov_crop.x);
+                oj.overlay_row = static_cast<uint32_t>(ov_crop.y);
+                oj.overlay_crop_width = ov_crop.width;
+                oj.overlay_crop_height = ov_crop.height;
+                oj.x = static_cast<uint32_t>(rect.x);
+                oj.y = static_cast<uint32_t>(rect.y);
+                oj.width = rect.width;
+                oj.height = rect.height;
+                oj.dst_width = target->width;
+                oj.dst_height = target->height;
+                // Both sides of the mix are the same format: the output holds
+                // the pixels the previous layer left, and this layer was
+                // checked against that format.
+                oj.bytes = dst.layout.fourcc == VA_FOURCC_P010 ? 2 : 1;
+                oj.premultiplied = blend.premultiplied;
+                oj.interpolation = blend.interpolation;
+                oj.full_range = job.output_full_range;
+                oj.alpha = blend.global_alpha;
+                ran = iris::vpp::overlay(oj);
+            }
+        }
     } else if (ran && (!tone_map || tonemap_to_scratch)) {
         iris::vpp::ScaleJob sj;
         sj.src_fd = base.fd;
@@ -676,23 +757,29 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
     if (!ran) {
         target->failed = true;
         throw iris::Error(VA_STATUS_ERROR_OPERATION_FAILED,
-            blend ? "Vulkan VPP blending failed"
-                  : tone_map ? "Vulkan VPP tone mapping failed" : "Vulkan VPP scale failed");
+            blended ? "Vulkan VPP blending failed"
+                    : tone_map ? "Vulkan VPP tone mapping failed" : "Vulkan VPP scale failed");
     }
     target->vpp_pixels = true;
     target->failed = false;
     // The trailing field is the trace vocabulary docs/architecture.md §8
-    // defines: which operation this picture ran beyond the scale.
-    char extra[128] = "";
-    if (blend && overlay_rgb)
-        std::snprintf(extra, sizeof(extra), " overlay=%u %ux%u+%d,%d alpha=%.2f source=%s%s", blend->source,
-            rect.width, rect.height, rect.x, rect.y, blend->global_alpha,
-            overlay_surface->fourcc == VA_FOURCC_BGRA ? "bgra" : "rgba",
-            blend->premultiplied ? " premultiplied" : "");
-    else if (blend)
-        std::snprintf(extra, sizeof(extra), " overlay=%u %ux%u+%d,%d alpha=%.2f%s", blend->source, rect.width,
-            rect.height, rect.x, rect.y, blend->global_alpha, blend->premultiplied ? " premultiplied" : "");
-    else if (tone_map)
+    // defines: which operation this picture ran beyond the scale. A stacked
+    // picture names its bottom layer, which is the one a single-layer client
+    // names too; the count is what tells the two apart.
+    char extra[160] = "";
+    if (!layers.empty()) {
+        const Context::VppJob& bottom = blends[0];
+        const Layer& first = layers[0];
+        const VARectangle& rect = first.rect;
+        std::snprintf(extra, sizeof(extra), " overlay=%u %ux%u+%d,%d alpha=%.2f%s%s", bottom.source,
+            rect.width, rect.height, rect.x, rect.y, bottom.global_alpha,
+            bottom.premultiplied ? " premultiplied" : "",
+            first.rgb ? (first.surface->fourcc == VA_FOURCC_BGRA ? " source=bgra" : " source=rgba") : "");
+        if (layers.size() > 1) {
+            const size_t used = std::strlen(extra);
+            std::snprintf(extra + used, sizeof(extra) - used, " layers=%zu", layers.size());
+        }
+    } else if (tone_map)
         std::snprintf(extra, sizeof(extra), " tonemap=hdr10");
     d.trace("va end_picture ctx=%u surface=%u entrypoint=videoproc src=%u %ux%u->%ux%u%s", ctx_id, dst_id,
         job.source, src.layout.width, src.layout.height, target->width, target->height, extra);
@@ -924,7 +1011,7 @@ VAStatus beginPicture(VADriverContextP ctx, VAContextID id, VASurfaceID surface_
             } else if (c->video_proc()) {
                 // A new picture replaces whatever this surface held.
                 c->vpp.reset();
-                c->vpp_overlay.reset();
+                c->vpp_overlays.clear();
                 c->vpp_peak_nits.reset();
                 s->failed = false;
             } else {

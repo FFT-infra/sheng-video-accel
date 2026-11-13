@@ -8018,3 +8018,56 @@ reachable through it; it is reachable for a client comparing against a
 software chain that dithered. The chroma planes go through the same shift
 without the chroma-specific rounding swscale applies when the two depths have
 different chroma sample positions, which NV12 and P010 do not.
+
+## Stacked compositing (2026-11-13, branch `feat/absorb-upstream-advantages`)
+
+A picture could carry one main pass and one blending pass. VA puts no limit on
+the number of pipeline buffers, and the sibling driver accepts sixteen; a
+client that stacks a subtitle over a logo over a video had no way to submit
+that here.
+
+The context now keeps a list of blending passes in submission order, and
+`run_vpp` copies the main rectangle into the output once — the scale kernel at
+1:1, since a blended picture does not scale its main pass — and then runs one
+overlay kernel per layer with the output standing as both the main term and the
+destination. Reading the output back between dispatches is what lets one kernel
+serve any number of layers: layer i covers layers 0..i-1 exactly as it would
+cover the main surface, because the kernel only ever sees one "main" buffer.
+The main rectangle is the output's own size, which is the kernel's rule and
+also what makes the main term an identity read.
+
+### The gates
+
+Source `c257d92` with this change in the working tree (`source_dirty=1`),
+driver `f20b0588…` (build-tree override, `LIBVA_DRIVERS_PATH=build/src`), boot
+`4b73926c…`, kernel `7.2.6-sm8550-g42f3b40-iris1`, module `b90bd823…`, decoder
+resolved by `iris_driver` QUERYCAP to `/dev/video0`, encoder to `/dev/video1`.
+
+| gate | run | cases | verdict |
+| --- | --- | --- | --- |
+| `overlay_gate.sh` | `141003Z` | 30 cases, 2 endpoints, 9 refusals | `PASS`, every case within 1 code |
+| `overlay_vaapi_gate.sh` | `141049Z` | 3 through FFmpeg's `overlay_vaapi` | `PASS`, exact |
+
+The four new cases are `layers2`, `layers3`, `layers2rgb` and
+`layers2premult`. Each layer blends a rectangle two pixels down and right of
+the one before, so the stack is a picture no single layer produces, and the
+probe's model composites them in the same order onto the pixels the previous
+one left — a model that reset to the main frame each time would pass every
+single-layer case and be wrong for every stack. All four came out with
+`max_diff=0`.
+
+Two refusals changed. `--third` used to be a refusal case and is now a feature,
+so it is gone. `too-many-layers` (`--layers=18`) replaces it: the driver's
+sixteen-pass bound is what fails the picture, not the probe's argument check.
+`blend-first` still passes, which is the ordering rule the list depends on — a
+picture whose first pipeline buffer carries a blend state is refused rather
+than composited onto an undefined main surface.
+
+### What this does not prove
+
+Sixteen is the driver's own bound and no gate reaches it: the largest stack
+measured is three layers. The cost of a stack is one dispatch per layer with a
+full output read-back between them, so a sixteen-layer picture is sixteen
+passes over the output rather than one — correct, but not free, and nothing
+here measured what it costs. The sibling driver's figure was copied as a bound
+on a single `vaEndPicture`, not as a performance target.

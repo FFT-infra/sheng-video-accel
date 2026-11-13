@@ -88,7 +88,12 @@ run vpp-tonemap-refusals grep -Fq -- '--source-nv12' "$test_dir/vulkan-vpp/tonem
 # frames byte for byte as well as the model. Losing either comparison would
 # let a kernel that ignored the alpha pass on a loose tolerance alone.
 run vpp-overlay-gate-uses-probe grep -Fq 'iris-va-vpp-probe' "$test_dir/vulkan-vpp/overlay_gate.sh"
-run vpp-overlay-oracle grep -Fq 'expected_composite' "$test_dir/iris-va-vpp-probe.cc"
+# The probe's model composites one layer at a time onto the pixels the
+# previous one left, which is what makes a stack correct; a model that reset
+# to the main frame each time would pass every single-layer case and be wrong
+# for every stack.
+run vpp-overlay-oracle grep -Fq 'apply_composite' "$test_dir/iris-va-vpp-probe.cc"
+run vpp-overlay-layers grep -Fq -- '--layers=' "$test_dir/vulkan-vpp/overlay_gate.sh"
 run vpp-overlay-endpoints grep -Fq 'alpha 0 did not reproduce the main frame' \
     "$test_dir/vulkan-vpp/overlay_gate.sh"
 run vpp-overlay-refusals grep -Fq -- '--premultiplied' "$test_dir/vulkan-vpp/overlay_gate.sh"
