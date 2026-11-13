@@ -11,7 +11,10 @@
 // quarter turn applied before the scale, as VA specifies, and the same kernel
 // reproduces FFmpeg's `transpose` filter. A third kernel, tonemap.spv, converts
 // a P010 HDR10 surface to SDR NV12; it does not scale, crop or rotate, and its
-// pipeline is written down in test/vulkan-vpp/tonemap.comp.
+// pipeline is written down in test/vulkan-vpp/tonemap.comp. A fourth,
+// overlay.spv, composites an overlay surface into one rectangle of the main
+// surface with a global alpha, importing three DMA-BUFs instead of two (see
+// test/vulkan-vpp/overlay.comp).
 //
 // Built only when the Vulkan headers are present (meson's optional `vulkan`
 // dependency). CI has no Vulkan, so the driver still builds and the VPP
@@ -22,6 +25,7 @@
 #ifdef IRIS_HAVE_VULKAN_VPP
 
 #include "nv12_scale_spv.h"
+#include "overlay_spv.h"
 #include "p010_scale_spv.h"
 #include "tonemap_spv.h"
 
@@ -63,11 +67,39 @@ struct ToneMapParams {
     float src_pq, knee, max_lum;
 };
 
-// The two surface buffers a job reads and writes, independent of what the
-// kernel does with them.
+// The memory a job imports, in binding order, independent of what the kernel
+// does with it: one, two or three DMA-BUFs.
 struct PlaneBuffers {
-    int src_fd = -1, dst_fd = -1;
-    uint32_t src_size = 0, dst_size = 0;
+    static constexpr unsigned kMax = 3;
+    int fd[kMax] = { -1, -1, -1 };
+    uint32_t size[kMax] = {};
+    unsigned count = 0;
+
+    PlaneBuffers(int src_fd, int dst_fd, uint32_t src_size, uint32_t dst_size)
+        : fd { src_fd, dst_fd, -1 }
+        , size { src_size, dst_size, 0 }
+        , count(2)
+    {
+    }
+    PlaneBuffers(int main_fd, int overlay_fd, int dst_fd, uint32_t main_size, uint32_t overlay_size,
+        uint32_t dst_size)
+        : fd { main_fd, overlay_fd, dst_fd }
+        , size { main_size, overlay_size, dst_size }
+        , count(3)
+    {
+    }
+};
+
+// Must mirror the push-constant block in test/vulkan-vpp/overlay.comp.
+struct OverlayParams {
+    uint32_t main_stride, main_uv, main_y;
+    uint32_t overlay_stride, overlay_uv, overlay_y;
+    uint32_t dst_stride, dst_uv, dst_y;
+    uint32_t overlay_width, overlay_height;
+    uint32_t x, y, width, height;
+    uint32_t dst_width, dst_height;
+    uint32_t bytes;
+    float alpha;
 };
 
 // PQ (SMPTE ST 2084) code for a luminance in cd/m², and the BT.2390
@@ -166,8 +198,11 @@ struct Job {
     VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
     VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
     VkPipeline pipeline = VK_NULL_HANDLE;
-    VkBuffer src_buffer = VK_NULL_HANDLE, dst_buffer = VK_NULL_HANDLE;
-    VkDeviceMemory src_memory = VK_NULL_HANDLE, dst_memory = VK_NULL_HANDLE;
+    VkBuffer buffers[PlaneBuffers::kMax] = {};
+    VkDeviceMemory memories[PlaneBuffers::kMax] = {};
+    // How many of the slots are in use: 2 for a scale or a tone map, 3 for a
+    // composite. The descriptor set, the imports and the cleanup follow it.
+    unsigned buffer_count = 0;
     VkDescriptorPool pool = VK_NULL_HANDLE;
     VkCommandPool command_pool = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
@@ -180,14 +215,12 @@ struct Job {
             vkDestroyCommandPool(device, command_pool, nullptr);
         if (pool)
             vkDestroyDescriptorPool(device, pool, nullptr);
-        if (src_memory)
-            vkFreeMemory(device, src_memory, nullptr);
-        if (dst_memory)
-            vkFreeMemory(device, dst_memory, nullptr);
-        if (src_buffer)
-            vkDestroyBuffer(device, src_buffer, nullptr);
-        if (dst_buffer)
-            vkDestroyBuffer(device, dst_buffer, nullptr);
+        for (unsigned i = 0; i < PlaneBuffers::kMax; ++i) {
+            if (memories[i])
+                vkFreeMemory(device, memories[i], nullptr);
+            if (buffers[i])
+                vkDestroyBuffer(device, buffers[i], nullptr);
+        }
         if (pipeline)
             vkDestroyPipeline(device, pipeline, nullptr);
         if (pipeline_layout)
@@ -208,6 +241,7 @@ struct Job {
 bool make_job(Job& j, const PlaneBuffers& buffers, const uint32_t* code, size_t code_words, uint32_t push_size,
     VkPhysicalDevice* physical_out, uint32_t* family_out, uint32_t* memory_type_out)
 {
+    j.buffer_count = buffers.count;
     VkInstanceCreateInfo instance_info = {};
     instance_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     const char* instance_ext[] = { "VK_KHR_external_memory_capabilities", "VK_KHR_get_physical_device_properties2" };
@@ -259,8 +293,8 @@ bool make_job(Job& j, const PlaneBuffers& buffers, const uint32_t* code, size_t 
     if (!j.ok(vkCreateShaderModule(j.device, &shader_info, nullptr, &j.shader)))
         return false;
 
-    VkDescriptorSetLayoutBinding bindings[2] = {};
-    for (unsigned i = 0; i < 2; ++i) {
+    VkDescriptorSetLayoutBinding bindings[PlaneBuffers::kMax] = {};
+    for (unsigned i = 0; i < buffers.count; ++i) {
         bindings[i].binding = i;
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         bindings[i].descriptorCount = 1;
@@ -268,7 +302,7 @@ bool make_job(Job& j, const PlaneBuffers& buffers, const uint32_t* code, size_t 
     }
     VkDescriptorSetLayoutCreateInfo layout_info = {};
     layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layout_info.bindingCount = 2;
+    layout_info.bindingCount = buffers.count;
     layout_info.pBindings = bindings;
     if (!j.ok(vkCreateDescriptorSetLayout(j.device, &layout_info, nullptr, &j.set_layout)))
         return false;
@@ -298,28 +332,40 @@ bool make_job(Job& j, const PlaneBuffers& buffers, const uint32_t* code, size_t 
     VkExternalMemoryBufferCreateInfo external = {};
     external.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO;
     external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-    VkBufferCreateInfo src_info = {};
-    src_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    src_info.pNext = &external;
-    src_info.size = buffers.src_size;
-    src_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-    src_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    VkBufferCreateInfo dst_info = src_info;
-    dst_info.size = buffers.dst_size;
-    if (!j.ok(vkCreateBuffer(j.device, &src_info, nullptr, &j.src_buffer))
-        || !j.ok(vkCreateBuffer(j.device, &dst_info, nullptr, &j.dst_buffer)))
-        return false;
+    VkBufferCreateInfo info = {};
+    info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    info.pNext = &external;
+    info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    for (unsigned i = 0; i < buffers.count; ++i) {
+        info.size = buffers.size[i];
+        if (!j.ok(vkCreateBuffer(j.device, &info, nullptr, &j.buffers[i])))
+            return false;
+    }
 
-    VkMemoryRequirements src_req = {}, dst_req = {};
-    vkGetBufferMemoryRequirements(j.device, j.src_buffer, &src_req);
-    vkGetBufferMemoryRequirements(j.device, j.dst_buffer, &dst_req);
-    *memory_type_out = external_memory_type(*physical_out, src_req.memoryTypeBits & dst_req.memoryTypeBits);
+    // One memory type has to serve every import: the smallest requirement set
+    // is the intersection, and a job whose surfaces disagree has no such type.
+    uint32_t bits = UINT32_MAX;
+    for (unsigned i = 0; i < buffers.count; ++i) {
+        VkMemoryRequirements req = {};
+        vkGetBufferMemoryRequirements(j.device, j.buffers[i], &req);
+        bits &= req.memoryTypeBits;
+    }
+    *memory_type_out = external_memory_type(*physical_out, bits);
     if (*memory_type_out == UINT32_MAX)
         return false;
 
-    j.dst_memory = import_dmabuf(j.device, *memory_type_out, dst_req.size, buffers.dst_fd, j.dst_buffer);
-    j.src_memory = import_dmabuf(j.device, *memory_type_out, src_req.size, buffers.src_fd, j.src_buffer);
-    return j.dst_memory && j.src_memory;
+    // Imports run from the last binding back, so the destination is allocated
+    // before the sources it reads, as the two-buffer path always did; a
+    // failure leaves the destructor to free what was already imported.
+    for (unsigned i = buffers.count; i-- > 0;) {
+        VkMemoryRequirements req = {};
+        vkGetBufferMemoryRequirements(j.device, j.buffers[i], &req);
+        j.memories[i] = import_dmabuf(j.device, *memory_type_out, req.size, buffers.fd[i], j.buffers[i]);
+        if (!j.memories[i])
+            return false;
+    }
+    return true;
 }
 
 // The backend stays free of VA headers, so the clockwise quarter turns are
@@ -333,7 +379,7 @@ bool dispatch(Job& j, const void* push_data, size_t push_size, uint32_t groups_x
 
     VkDescriptorPoolSize pool_size = {};
     pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    pool_size.descriptorCount = 2;
+    pool_size.descriptorCount = j.buffer_count;
     VkDescriptorPoolCreateInfo pool_info = {};
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pool_info.maxSets = 1;
@@ -349,18 +395,18 @@ bool dispatch(Job& j, const void* push_data, size_t push_size, uint32_t groups_x
     VkDescriptorSet set = VK_NULL_HANDLE;
     if (!j.ok(vkAllocateDescriptorSets(j.device, &set_info, &set)))
         return false;
-    VkDescriptorBufferInfo src_desc = { j.src_buffer, 0, VK_WHOLE_SIZE };
-    VkDescriptorBufferInfo dst_desc = { j.dst_buffer, 0, VK_WHOLE_SIZE };
-    VkWriteDescriptorSet writes[2] = {};
-    for (unsigned i = 0; i < 2; ++i) {
+    VkDescriptorBufferInfo desc[PlaneBuffers::kMax] = {};
+    VkWriteDescriptorSet writes[PlaneBuffers::kMax] = {};
+    for (unsigned i = 0; i < j.buffer_count; ++i) {
+        desc[i] = { j.buffers[i], 0, VK_WHOLE_SIZE };
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = set;
         writes[i].dstBinding = i;
         writes[i].descriptorCount = 1;
         writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        writes[i].pBufferInfo = i ? &dst_desc : &src_desc;
+        writes[i].pBufferInfo = &desc[i];
     }
-    vkUpdateDescriptorSets(j.device, 2, writes, 0, nullptr);
+    vkUpdateDescriptorSets(j.device, j.buffer_count, writes, 0, nullptr);
 
     VkCommandPoolCreateInfo cp_info = {};
     cp_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -480,6 +526,63 @@ bool tonemap_hdr10_to_sdr(const ToneMapJob& job)
     return ok;
 }
 
+bool overlay(const OverlayJob& job)
+{
+    if (job.main_fd < 0 || job.overlay_fd < 0 || job.dst_fd < 0)
+        return false;
+    if (!job.dst_width || !job.dst_height || !job.overlay_width || !job.overlay_height || !job.width || !job.height)
+        return false;
+    if (job.bytes != 1 && job.bytes != 2)
+        return false;
+    // Word writes assume the 4:2:0 geometry, and an even rectangle keeps every
+    // chroma cell wholly inside it or wholly outside it.
+    if ((job.dst_width | job.dst_height | job.overlay_width | job.overlay_height | job.x | job.y | job.width
+            | job.height)
+        & 1u)
+        return false;
+    if (job.x + job.width > job.dst_width || job.y + job.height > job.dst_height)
+        return false;
+    if (!(job.alpha >= 0.0f && job.alpha <= 1.0f))
+        return false;
+
+    OverlayParams push = {};
+    push.main_stride = job.main_stride;
+    push.main_uv = job.main_uv;
+    push.main_y = job.main_y;
+    push.overlay_stride = job.overlay_stride;
+    push.overlay_uv = job.overlay_uv;
+    push.overlay_y = job.overlay_y;
+    push.dst_stride = job.dst_stride;
+    push.dst_uv = job.dst_uv;
+    push.dst_y = job.dst_y;
+    push.overlay_width = job.overlay_width;
+    push.overlay_height = job.overlay_height;
+    push.x = job.x;
+    push.y = job.y;
+    push.width = job.width;
+    push.height = job.height;
+    push.dst_width = job.dst_width;
+    push.dst_height = job.dst_height;
+    push.bytes = job.bytes;
+    push.alpha = job.alpha;
+
+    const PlaneBuffers buffers = { job.main_fd, job.overlay_fd, job.dst_fd, job.main_size, job.overlay_size,
+        job.dst_size };
+    Job j;
+    VkPhysicalDevice physical = VK_NULL_HANDLE;
+    uint32_t family = 0, memory_type = 0;
+    bool ok = make_job(j, buffers, kOverlaySpv, kOverlaySpvWords, sizeof(OverlayParams), &physical, &family,
+        &memory_type);
+    if (ok) {
+        // One invocation per destination word, over the luma rows and the
+        // half-height chroma plane.
+        const uint32_t words = (job.dst_width * job.bytes + 3) / 4;
+        const uint32_t rows = job.dst_height + job.dst_height / 2;
+        ok = dispatch(j, &push, sizeof(push), (words + 7) / 8, (rows + 7) / 8, family);
+    }
+    return ok;
+}
+
 } // namespace vpp
 } // namespace iris
 
@@ -499,6 +602,11 @@ bool scale_nv12_or_p010(const ScaleJob&)
 }
 
 bool tonemap_hdr10_to_sdr(const ToneMapJob&)
+{
+    return false;
+}
+
+bool overlay(const OverlayJob&)
 {
     return false;
 }

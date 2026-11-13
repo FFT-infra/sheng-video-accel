@@ -25,9 +25,22 @@
 // frame (it demands mastering-display side data), so this is the only client
 // that can drive the filter at all.
 //
+//   iris-va-vpp-probe overlay <render-node> <W> <H> <ovW> <ovH> <x> <y>
+//                     <rw> <rh> <alpha> <out.raw>
+//                     [--p010] [--premultiplied] [--luma-key] [--third]
+//                     [--blend-first] [--expect-refusal]
+//
+// The third mode submits two pipeline buffers in one picture, the way
+// overlay_vaapi does: the main surface over the whole output, then the
+// overlay surface into one rectangle with a VABlendState naming a global
+// alpha. It compares the result with the mix documented in
+// test/vulkan-vpp/overlay.comp, and checks that the caps advertise
+// VA_BLEND_GLOBAL_ALPHA, which is what overlay_vaapi refuses to run without.
+//
 // `--expect-refusal` inverts the verdict: the picture must fail (an odd or
 // out-of-bounds region, an NV12 source, a filter without its parameters, a
-// rotation, all are the driver's to refuse rather than to round).
+// rotation, premultiplied alpha, a third pass, all are the driver's to refuse
+// rather than to round).
 //
 // Needs V4L2_VA_VPP=1, LIBVA_DRIVER_NAME=v4l2 and either the installed driver
 // or LIBVA_DRIVERS_PATH pointing at a build tree.
@@ -547,12 +560,374 @@ int run_tonemap(int argc, char** argv)
     return 0;
 }
 
+// ---- global-alpha compositing ----------------------------------------------
+//
+// The contract test/vulkan-vpp/overlay.comp documents: the main surface stays
+// in place, the overlay surface is scaled into one rectangle of the output at
+// swscale's point positions, and inside it
+//
+//     out = alpha * overlay + (1 - alpha) * main
+//
+// on the coded values of both planes. The rectangle is even, so a chroma cell
+// is never half blended. Below is the same map and the same mix in double
+// precision, plus two frames that change on both axes so a transposed or
+// shifted sample shows up as a difference.
+
+unsigned step16(unsigned src, unsigned dst)
+{
+    return ((src << 16) + (dst >> 1)) / dst;
+}
+
+unsigned pick16(unsigned i, unsigned inc)
+{
+    return (i * inc + (inc >> 1)) >> 16;
+}
+
+// Packed rows, NV12 or P010, with a pattern that differs on every row and
+// column of both planes.
+void make_pattern(unsigned width, unsigned height, unsigned bytes, unsigned seed, std::vector<uint8_t>& frame)
+{
+    const unsigned top = bytes == 2 ? 1024u : 256u;
+    frame.assign(static_cast<size_t>(width) * height * bytes * 3 / 2, 0);
+    const auto put = [&](size_t sample, unsigned code) {
+        const unsigned stored = bytes == 2 ? code << 6 : code;
+        frame[sample * bytes] = static_cast<uint8_t>(stored & 0xff);
+        if (bytes == 2)
+            frame[sample * 2 + 1] = static_cast<uint8_t>(stored >> 8);
+    };
+    for (unsigned y = 0; y < height; ++y)
+        for (unsigned x = 0; x < width; ++x)
+            put(static_cast<size_t>(y) * width + x, (x * 3 + y * 5 + seed) % top);
+    for (unsigned y = 0; y < height / 2; ++y)
+        for (unsigned x = 0; x < width / 2; ++x) {
+            const size_t cell = static_cast<size_t>(width) * height + static_cast<size_t>(y) * width + x * 2;
+            put(cell, (x * 7 + y * 11 + seed) % top);
+            put(cell + 1, (x * 13 + y * 17 + seed * 3) % top);
+        }
+}
+
+unsigned code_at(const std::vector<uint8_t>& frame, size_t sample, unsigned bytes)
+{
+    if (bytes == 1)
+        return frame[sample];
+    return (static_cast<unsigned>(frame[sample * 2]) | (static_cast<unsigned>(frame[sample * 2 + 1]) << 8)) >> 6;
+}
+
+void set_code(std::vector<uint8_t>& frame, size_t sample, unsigned bytes, unsigned code)
+{
+    const unsigned stored = bytes == 2 ? code << 6 : code;
+    frame[sample * bytes] = static_cast<uint8_t>(stored & 0xff);
+    if (bytes == 2)
+        frame[sample * 2 + 1] = static_cast<uint8_t>(stored >> 8);
+}
+
+struct Mix {
+    std::vector<uint8_t> main;
+    std::vector<uint8_t> overlay;
+    unsigned width = 0, height = 0;
+    unsigned overlay_width = 0, overlay_height = 0;
+    unsigned x = 0, y = 0, rect_width = 0, rect_height = 0;
+    unsigned bytes = 1;
+    double alpha = 1.0;
+};
+
+double mixed(double m, double o, double alpha)
+{
+    return alpha * o + (1.0 - alpha) * m;
+}
+
+void expected_composite(const Mix& mix, std::vector<uint8_t>& out)
+{
+    out = mix.main;
+    const unsigned hx = step16(mix.overlay_width, mix.rect_width);
+    const unsigned hy = step16(mix.overlay_height, mix.rect_height);
+    for (unsigned dy = 0; dy < mix.rect_height; ++dy)
+        for (unsigned dx = 0; dx < mix.rect_width; ++dx) {
+            const size_t m = static_cast<size_t>(mix.y + dy) * mix.width + mix.x + dx;
+            const size_t o = static_cast<size_t>(pick16(dy, hy)) * mix.overlay_width + pick16(dx, hx);
+            const double v = mixed(code_at(out, m, mix.bytes), code_at(mix.overlay, o, mix.bytes), mix.alpha);
+            set_code(out, m, mix.bytes, static_cast<unsigned>(std::lround(v)));
+        }
+    // Chroma cells cover 2x2 luma pixels, and the rectangle is even, so a cell
+    // is inside it exactly when its own coordinates are.
+    const unsigned hx_c = step16(mix.overlay_width / 2, mix.rect_width / 2);
+    const unsigned hy_c = step16(mix.overlay_height / 2, mix.rect_height / 2);
+    for (unsigned cy = 0; cy < mix.rect_height / 2; ++cy)
+        for (unsigned cx = 0; cx < mix.rect_width / 2; ++cx) {
+            const size_t m = static_cast<size_t>(mix.width) * mix.height
+                + static_cast<size_t>(mix.y / 2 + cy) * mix.width + (mix.x / 2 + cx) * 2;
+            const size_t o = static_cast<size_t>(mix.overlay_width) * mix.overlay_height
+                + static_cast<size_t>(pick16(cy, hy_c)) * mix.overlay_width + pick16(cx, hx_c) * 2;
+            for (unsigned k = 0; k < 2; ++k) {
+                const double v = mixed(code_at(out, m + k, mix.bytes), code_at(mix.overlay, o + k, mix.bytes),
+                    mix.alpha);
+                set_code(out, m + k, mix.bytes, static_cast<unsigned>(std::lround(v)));
+            }
+        }
+}
+
+void overlay_usage(const char* argv0)
+{
+    std::fprintf(stderr,
+        "usage: %s overlay <render-node> <W> <H> <ovW> <ovH> <x> <y> <rw> <rh> <alpha> <out.raw>\n"
+        "                 [--p010] [--premultiplied] [--luma-key] [--third] [--blend-first]\n"
+        "                 [--expect-refusal]\n",
+        argv0);
+}
+
+// The compositing mode. `argv[0]` is the render node.
+int run_overlay(int argc, char** argv)
+{
+    if (argc < 11) {
+        overlay_usage("iris-va-vpp-probe");
+        return 2;
+    }
+    const unsigned width = static_cast<unsigned>(std::atoi(argv[1]));
+    const unsigned height = static_cast<unsigned>(std::atoi(argv[2]));
+    const unsigned ov_w = static_cast<unsigned>(std::atoi(argv[3]));
+    const unsigned ov_h = static_cast<unsigned>(std::atoi(argv[4]));
+    const unsigned x = static_cast<unsigned>(std::atoi(argv[5]));
+    const unsigned y = static_cast<unsigned>(std::atoi(argv[6]));
+    const unsigned rw = static_cast<unsigned>(std::atoi(argv[7]));
+    const unsigned rh = static_cast<unsigned>(std::atoi(argv[8]));
+    const double alpha = std::atof(argv[9]);
+    const char* out_path = argv[10];
+    bool p010 = false, premultiplied = false, luma_key = false, third = false, blend_first = false;
+    bool expect_refusal = false;
+    for (int i = 11; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--p010") == 0)
+            p010 = true;
+        else if (std::strcmp(argv[i], "--premultiplied") == 0)
+            premultiplied = true;
+        else if (std::strcmp(argv[i], "--luma-key") == 0)
+            luma_key = true;
+        else if (std::strcmp(argv[i], "--third") == 0)
+            third = true;
+        else if (std::strcmp(argv[i], "--blend-first") == 0)
+            blend_first = true;
+        else if (std::strcmp(argv[i], "--expect-refusal") == 0)
+            expect_refusal = true;
+        else {
+            overlay_usage("iris-va-vpp-probe");
+            return 2;
+        }
+    }
+    if (width < 4 || height < 4 || ov_w < 2 || ov_h < 2 || (width & 1U) || (height & 1U) || (ov_w & 1U)
+        || (ov_h & 1U)) {
+        std::fprintf(stderr, "overlay geometry must be even, the surfaces at least 4x4\n");
+        return 2;
+    }
+
+    const unsigned bytes = p010 ? 2 : 1;
+    const uint32_t fourcc = p010 ? VA_FOURCC_P010 : VA_FOURCC_NV12;
+    const unsigned rt_format = p010 ? VA_RT_FORMAT_YUV420_10 : VA_RT_FORMAT_YUV420;
+    Mix mix;
+    mix.width = width;
+    mix.height = height;
+    mix.overlay_width = ov_w;
+    mix.overlay_height = ov_h;
+    mix.x = x;
+    mix.y = y;
+    mix.rect_width = rw;
+    mix.rect_height = rh;
+    mix.bytes = bytes;
+    mix.alpha = alpha;
+    make_pattern(width, height, bytes, 1, mix.main);
+    make_pattern(ov_w, ov_h, bytes, 2, mix.overlay);
+
+    const int fd = open(argv[0], O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        std::perror("open render node");
+        return 2;
+    }
+    VADisplay display = vaGetDisplayDRM(fd);
+    int major = 0, minor = 0;
+    if (vaInitialize(display, &major, &minor) != VA_STATUS_SUCCESS) {
+        std::fprintf(stderr, "vaInitialize failed (is V4L2_VA_VPP=1 set?)\n");
+        return 2;
+    }
+
+    VAConfigAttrib attrib = {};
+    attrib.type = VAConfigAttribRTFormat;
+    attrib.value = VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10;
+    VAConfigID config = VA_INVALID_ID;
+    VAStatus status = vaCreateConfig(display, VAProfileNone, VAEntrypointVideoProc, &attrib, 1, &config);
+    if (status != VA_STATUS_SUCCESS) {
+        std::fprintf(stderr, "vaCreateConfig(VAProfileNone, VideoProc) failed: %s\n", vaErrorStr(status));
+        return 2;
+    }
+
+    VASurfaceID main_surface = VA_INVALID_ID, overlay_surface = VA_INVALID_ID, dst_surface = VA_INVALID_ID;
+    VASurfaceID created[3] = { VA_INVALID_ID, VA_INVALID_ID, VA_INVALID_ID };
+    check(vaCreateSurfaces(display, rt_format, width, height, &main_surface, 1, nullptr, 0)
+            == VA_STATUS_SUCCESS,
+        "create the main surface");
+    check(vaCreateSurfaces(display, rt_format, ov_w, ov_h, &overlay_surface, 1, nullptr, 0)
+            == VA_STATUS_SUCCESS,
+        "create the overlay surface");
+    check(vaCreateSurfaces(display, rt_format, width, height, &dst_surface, 1, nullptr, 0)
+            == VA_STATUS_SUCCESS,
+        "create the output surface");
+
+    VAContextID context = VA_INVALID_ID;
+    check(vaCreateContext(display, config, static_cast<int>(width), static_cast<int>(height), VA_PROGRESSIVE,
+              &dst_surface, 1, &context)
+            == VA_STATUS_SUCCESS,
+        "create a VideoProc context");
+    if (context != VA_INVALID_ID) {
+        // `overlay_vaapi` will not build at all unless the driver reports the
+        // global alpha, so a client check is worth making here too.
+        VAProcPipelineCaps caps = {};
+        check(vaQueryVideoProcPipelineCaps(display, context, nullptr, 0, &caps) == VA_STATUS_SUCCESS
+                && (caps.blend_flags & VA_BLEND_GLOBAL_ALPHA) != 0,
+            "the pipeline caps offer global-alpha blending");
+        check((caps.blend_flags & (VA_BLEND_PREMULTIPLIED_ALPHA | VA_BLEND_LUMA_KEY)) == 0,
+            "no per-pixel alpha and no luma key are advertised");
+    }
+
+    if (main_surface != VA_INVALID_ID)
+        check(upload(display, main_surface, mix.main, width, height, bytes), "upload the main frame");
+    if (overlay_surface != VA_INVALID_ID)
+        check(upload(display, overlay_surface, mix.overlay, ov_w, ov_h, bytes), "upload the overlay frame");
+
+    VABlendState blend = {};
+    blend.flags = VA_BLEND_GLOBAL_ALPHA;
+    if (premultiplied)
+        blend.flags |= VA_BLEND_PREMULTIPLIED_ALPHA;
+    if (luma_key)
+        blend.flags |= VA_BLEND_LUMA_KEY;
+    blend.global_alpha = static_cast<float>(alpha);
+
+    VARectangle full = {};
+    full.width = static_cast<uint16_t>(width);
+    full.height = static_cast<uint16_t>(height);
+    VARectangle region = {};
+    region.x = static_cast<int16_t>(x);
+    region.y = static_cast<int16_t>(y);
+    region.width = static_cast<uint16_t>(rw);
+    region.height = static_cast<uint16_t>(rh);
+
+    // FFmpeg's shape: the main pass fills the output, and the overlay pass is
+    // that same buffer with its own surface, region and blend state.
+    VAProcPipelineParameterBuffer main_params = {};
+    main_params.surface = main_surface;
+    main_params.output_region = &full;
+    main_params.surface_color_standard = VAProcColorStandardBT709;
+    main_params.output_color_standard = VAProcColorStandardBT709;
+    VAProcPipelineParameterBuffer overlay_params = main_params;
+    overlay_params.surface = overlay_surface;
+    overlay_params.output_region = &region;
+    overlay_params.blend_state = &blend;
+
+    VABufferID main_buffer = VA_INVALID_ID, overlay_buffer = VA_INVALID_ID;
+    check(vaCreateBuffer(display, context, VAProcPipelineParameterBufferType, sizeof(main_params), 1,
+              &main_params, &main_buffer)
+            == VA_STATUS_SUCCESS,
+        "create the main pipeline buffer");
+    check(vaCreateBuffer(display, context, VAProcPipelineParameterBufferType, sizeof(overlay_params), 1,
+              &overlay_params, &overlay_buffer)
+            == VA_STATUS_SUCCESS,
+        "create the blending pipeline buffer");
+
+    VAStatus begin = vaBeginPicture(display, context, dst_surface);
+    VABufferID order[3] = { main_buffer, overlay_buffer, overlay_buffer };
+    int count = third ? 3 : 2;
+    if (blend_first) {
+        order[0] = overlay_buffer;
+        order[1] = main_buffer;
+    }
+    VAStatus render = begin == VA_STATUS_SUCCESS
+        ? vaRenderPicture(display, context, order, count)
+        : begin;
+    status = render == VA_STATUS_SUCCESS ? vaEndPicture(display, context) : render;
+
+    if (expect_refusal) {
+        const bool refused = render != VA_STATUS_SUCCESS || status != VA_STATUS_SUCCESS;
+        std::printf("%s the driver refused the composite (render 0x%x, end 0x%x)\n", refused ? "PASS" : "FAIL",
+            static_cast<unsigned>(render), static_cast<unsigned>(status));
+        if (!refused)
+            ++failures;
+    } else {
+        check(render == VA_STATUS_SUCCESS, "vaRenderPicture");
+        check(status == VA_STATUS_SUCCESS, "vaEndPicture");
+        std::vector<uint8_t> output;
+        if (status == VA_STATUS_SUCCESS)
+            check(download(display, dst_surface, output, width, height, fourcc), "download the output frame");
+        if (status == VA_STATUS_SUCCESS && output.size() == mix.main.size()) {
+            std::vector<uint8_t> expected;
+            expected_composite(mix, expected);
+            unsigned max_diff = 0;
+            size_t worst = 0;
+            for (size_t i = 0; i < expected.size(); ++i) {
+                const unsigned d = static_cast<unsigned>(std::abs(int(expected[i]) - int(output[i])));
+                if (d > max_diff) {
+                    max_diff = d;
+                    worst = i;
+                }
+            }
+            const std::string side = std::string(out_path) + ".expected";
+            write_file(side.c_str(), expected.data(), expected.size());
+            if (max_diff > 1)
+                std::printf("worst offset=%zu plane=%s expected=%u got=%u\n", worst,
+                    worst < static_cast<size_t>(width) * height * bytes ? "Y" : "chroma", expected[worst],
+                    output[worst]);
+            // 0, 1/2 and 1 are exact in binary, so all but the last code of
+            // slack is float32 against double; an alpha that is not dyadic
+            // may round a tie either way.
+            check(max_diff <= 1, "every byte within 1 code of the documented mix");
+            // Inside the rectangle the output has to differ from the main
+            // frame whenever alpha and the two frames differ: a kernel that
+            // silently copied the main surface would pass a loose tolerance
+            // test but fail this one.
+            if (alpha > 0.0) {
+                bool moved = false;
+                for (unsigned dy = 0; dy < rh && !moved; ++dy)
+                    for (unsigned dx = 0; dx < rw && !moved; ++dx) {
+                        const size_t m = static_cast<size_t>(y + dy) * width + x + dx;
+                        moved = code_at(output, m, bytes) != code_at(mix.main, m, bytes);
+                    }
+                check(moved, "the overlay changed the pixels inside its rectangle");
+            }
+            check(write_file(out_path, output.data(), output.size()), "write the output frame");
+            // The two inputs beside it, so the gate can compare a full-cover
+            // alpha of 0 or 1 with the frame it should reproduce byte for
+            // byte instead of trusting only the model.
+            write_file((std::string(out_path) + ".main").c_str(), mix.main.data(), mix.main.size());
+            write_file((std::string(out_path) + ".overlay").c_str(), mix.overlay.data(), mix.overlay.size());
+            std::printf("overlay %ux%u rect=%ux%u+%u,%u alpha=%.2f max_diff=%u\n", width, height, rw, rh, x, y,
+                alpha, max_diff);
+        }
+    }
+
+    created[0] = main_surface;
+    created[1] = overlay_surface;
+    created[2] = dst_surface;
+    for (VASurfaceID id : created)
+        if (id != VA_INVALID_ID)
+            vaDestroySurfaces(display, &id, 1);
+    if (context != VA_INVALID_ID)
+        vaDestroyContext(display, context);
+    vaDestroyConfig(display, config);
+    vaTerminate(display);
+    close(fd);
+
+    if (failures) {
+        std::printf("FAIL iris-va-vpp-probe overlay %d check(s)\n", failures);
+        return 1;
+    }
+    std::printf("PASS iris-va-vpp-probe overlay %ux%u rect=%ux%u+%u,%u alpha=%.2f\n", width, height, rw, rh, x, y,
+        alpha);
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
 {
     if (argc >= 2 && std::strcmp(argv[1], "tonemap") == 0)
         return run_tonemap(argc - 2, argv + 2);
+    if (argc >= 2 && std::strcmp(argv[1], "overlay") == 0)
+        return run_overlay(argc - 2, argv + 2);
 
     const bool expect_refusal = argc == 13 && std::strcmp(argv[12], "--expect-refusal") == 0;
     if (argc != 12 && !expect_refusal) {

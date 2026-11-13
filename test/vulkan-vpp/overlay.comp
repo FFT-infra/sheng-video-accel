@@ -1,0 +1,157 @@
+// SPDX-License-Identifier: MIT
+//
+// Global-alpha compositing for the VA video processor: the whole main surface
+// stays in place, the overlay surface is scaled into one rectangle of the
+// output, and every pixel inside that rectangle becomes
+//
+//     out = alpha * overlay + (1 - alpha) * main
+//
+// This is what `overlay_vaapi` asks for: FFmpeg submits two
+// VAProcPipelineParameterBuffers in one picture, the first naming the main
+// surface over the whole output and the second naming the overlay surface, its
+// output_region and a VABlendState with VA_BLEND_GLOBAL_ALPHA. The three
+// DMA-BUFs (main, overlay, destination) are bound as flat uint[] storage
+// buffers and every address comes from push constants.
+//
+// The mix runs on the encoded Y'CbCr codes, not on RGB. For a *global* alpha
+// that is the same picture: a limited-range code is an affine function of the
+// normalised value (16 + 219 v for luma, 128 + 224 c for chroma), so
+// `a*o + (1-a)*m` on codes equals the same mix on the normalised values, and
+// the mix of two encoded triples equals encoding the mix of the two encoded
+// RGB triples. Per-pixel alpha would need the RGB space; this kernel has one
+// scalar.
+//
+// The overlay sample position is the same swscale point map the scale kernel
+// uses, over the rectangle instead of the whole output:
+//
+//     inc = ((src << 16) + (dst >> 1)) / dst
+//     src_index(i) = (i * inc + (inc >> 1)) >> 16
+//
+// Each invocation owns one 32-bit destination word: four luma pixels and two
+// chroma pairs for NV12, two luma samples and one chroma pair for P010 (the
+// `bytes` push constant selects; a P010 sample keeps the ten bits in the top
+// of its 16-bit word). No two invocations write the same word. The rectangle
+// is even on both axes, so every 2x2 luma block is either wholly inside it or
+// wholly outside, and a destination chroma cell is never half blended.
+
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0, std430) readonly buffer Main { uint s[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Overlay { uint o[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer Dst { uint d[]; };
+layout(push_constant) uniform Params {
+    uint m_stride, m_uv, m_y;
+    uint o_stride, o_uv, o_y;
+    uint d_stride, d_uv, d_y;
+    // Overlay surface size, and the rectangle it is drawn into.
+    uint o_width, o_height;
+    uint r_x, r_y, r_w, r_h;
+    uint dst_width, dst_height;
+    // Bytes per sample: 1 for NV12, 2 for P010. Both ends share it.
+    uint bytes;
+    float alpha;
+} p;
+
+// One sample as its own code value: 0..255 for NV12, 0..1023 for P010.
+float code(uint off)
+{
+    uint w = s[off >> 2];
+    uint shift = (off & 3u) << 3;
+    return p.bytes == 1u ? float((w >> shift) & 255u) : float((w >> shift) & 0xffffu) / 64.0;
+}
+
+float code_overlay(uint off)
+{
+    uint w = o[off >> 2];
+    uint shift = (off & 3u) << 3;
+    return p.bytes == 1u ? float((w >> shift) & 255u) : float((w >> shift) & 0xffffu) / 64.0;
+}
+
+// The code as the bits of the destination word: the 8-bit code for NV12, the
+// 10-bit code shifted into the top of its 16-bit word for P010.
+uint code_bits(float v)
+{
+    float top = p.bytes == 1u ? 255.0 : 1023.0;
+    uint u = uint(clamp(floor(v + 0.5), 0.0, top));
+    return p.bytes == 1u ? u : (u << 6);
+}
+
+// 16.16 source step per destination sample, rounded to nearest like swscale.
+uint step(uint src, uint dst)
+{
+    return ((src << 16) + (dst >> 1)) / dst;
+}
+
+uint pick(uint i, uint inc)
+{
+    return (i * inc + (inc >> 1)) >> 16;
+}
+
+float mix_codes(float main_code, float overlay_code)
+{
+    return p.alpha * overlay_code + (1.0 - p.alpha) * main_code;
+}
+
+// Whether destination pixel (x, y) lands in the rectangle. Columns past the
+// visible width are clamped first, so the padding bytes of the last word carry
+// the last column's value rather than a read outside the plane.
+bool inside(uint x, uint y)
+{
+    return x >= p.r_x && x < p.r_x + p.r_w && y >= p.r_y && y < p.r_y + p.r_h;
+}
+
+void main()
+{
+    uint per_word = 4u / p.bytes;
+    uint words = (p.dst_width * p.bytes + 3u) / 4u;
+    uint word = gl_GlobalInvocationID.x;
+    if (word >= words)
+        return;
+    uint row = gl_GlobalInvocationID.y;
+    if (row >= p.dst_height + (p.dst_height >> 1))
+        return;
+
+    if (row < p.dst_height) {
+        uint hx = step(p.o_width, p.r_w);
+        uint hy = step(p.o_height, p.r_h);
+        uint packed = 0u;
+        for (uint k = 0u; k < per_word; ++k) {
+            uint dx = min(word * per_word + k, p.dst_width - 1u);
+            float m = code(p.m_y + row * p.m_stride + dx * p.bytes);
+            if (inside(dx, row)) {
+                uint ox = pick(dx - p.r_x, hx);
+                uint oy = pick(row - p.r_y, hy);
+                m = mix_codes(m, code_overlay(p.o_y + oy * p.o_stride + ox * p.bytes));
+            }
+            packed |= code_bits(m) << (k * 8u * p.bytes);
+        }
+        d[(p.d_y + row * p.d_stride + word * 4u) >> 2] = packed;
+    } else {
+        uint cy = row - p.dst_height;
+        uint cells = 2u / p.bytes;
+        uint cw = p.dst_width >> 1;
+        // The rectangle is even, so a chroma cell is inside exactly when its
+        // own half-scale coordinates are.
+        uint rx = p.r_x >> 1, ry = p.r_y >> 1;
+        uint rw = p.r_w >> 1, rh = p.r_h >> 1;
+        uint ow = p.o_width >> 1, oh = p.o_height >> 1;
+        uint hx = step(ow, rw);
+        uint hy = step(oh, rh);
+        uint packed = 0u;
+        for (uint k = 0u; k < cells; ++k) {
+            uint cx = min(word * cells + k, cw - 1u);
+            uint m_off = p.m_uv + cy * p.m_stride + cx * 2u * p.bytes;
+            float u = code(m_off);
+            float v = code(m_off + p.bytes);
+            if (cx >= rx && cx < rx + rw && cy >= ry && cy < ry + rh) {
+                uint ox = pick(cx - rx, hx);
+                uint oy = pick(cy - ry, hy);
+                uint o_off = p.o_uv + oy * p.o_stride + ox * 2u * p.bytes;
+                u = mix_codes(u, code_overlay(o_off));
+                v = mix_codes(v, code_overlay(o_off + p.bytes));
+            }
+            packed |= (code_bits(u) | (code_bits(v) << (8u * p.bytes))) << (k * 16u);
+        }
+        d[(p.d_uv + cy * p.d_stride + word * 4u) >> 2] = packed;
+    }
+}

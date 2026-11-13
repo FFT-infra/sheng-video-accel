@@ -154,12 +154,14 @@ struct Context {
     };
     std::map<VASurfaceID, EncSubmitted> enc_submitted;
 
-    // VideoProc state: one picture, one VAProcPipelineParameterBuffer. The
-    // client's pointers are only valid until vaEndPicture, so the regions it
-    // names are resolved to values in renderPicture and the buffer is not
-    // kept. The backend scales NV12 or P010 at any ratio, from an optional
-    // crop, with an optional clockwise quarter turn; or it tone maps HDR10
-    // P010 to SDR NV12 at one-to-one size. Anything else fails the picture.
+    // VideoProc state: one picture, one or two VAProcPipelineParameterBuffers
+    // (a main pass and, when the client blends, an overlay pass). The client's
+    // pointers are only valid until vaEndPicture, so the regions it names are
+    // resolved to values in renderPicture and the buffer is not kept. The
+    // backend scales NV12 or P010 at any ratio, from an optional crop, with an
+    // optional clockwise quarter turn; or tone maps HDR10 P010 to SDR NV12 at
+    // one-to-one size; or composites an overlay into one rectangle of the main
+    // surface with a global alpha. Anything else fails the picture.
     struct VppJob {
         VASurfaceID source = VA_INVALID_ID;
         VARectangle region = {};
@@ -177,8 +179,16 @@ struct Context {
         int input_standard = VAProcColorStandardNone;
         int output_standard = VAProcColorStandardNone;
         bool explicit_colour_properties_equal = true;
+        // The global alpha of the VABlendState this buffer named. Only the
+        // second (overlay) pass carries one, and it is the only blend flag the
+        // driver runs.
+        float global_alpha = 1.0f;
     };
     std::optional<VppJob> vpp;
+    // The blending pass, when the picture has one. It names the overlay
+    // surface and the rectangle of the output it is drawn into; its colour
+    // standards and filters are judged with the main pass in run_vpp.
+    std::optional<VppJob> vpp_overlay;
     // Set by a VAProcFilterParameterBufferType buffer: the mastering display
     // peak of the HDR10 source, in cd/m². Absent means no filter.
     std::optional<float> vpp_peak_nits;

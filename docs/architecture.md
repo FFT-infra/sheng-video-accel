@@ -319,6 +319,7 @@ src/
                       or for an EncSlice context -> EncoderSession::encode,
                       or for a VideoProc context -> iris::vpp::scale_nv12_or_p010
                       or iris::vpp::tonemap_hdr10_to_sdr
+                      or iris::vpp::overlay
     vpp.cc            the three vtable_vpp queries; no GPU probe
     image.cc          images and subpictures (minimal); derive aliases a surface
   iris/               the only code that touches /dev/videoN
@@ -390,10 +391,13 @@ nearest kernel for the surface's sample width at the requested ratio over the
 surface region the client names, after the clockwise quarter turn the client
 names, sampling where swscale samples; a picture that names the HDR10 tone
 mapper instead runs `iris::vpp::tonemap_hdr10_to_sdr` over the two DMA-BUFs and
-converts P010 BT.2020/PQ to NV12 BT.709 at the surface's own size;
-every other pipeline operation (mirroring, blending, any second filter, any
-colour conversion outside that one filter) fails the picture instead of being
-dropped. The entrypoint is advertised only when the
+converts P010 BT.2020/PQ to NV12 BT.709 at the surface's own size; a picture
+whose second pipeline buffer names a `VABlendState` runs
+`iris::vpp::overlay` over three DMA-BUFs, keeping the main surface in place and
+mixing the overlay into an even rectangle of it on the coded values of both
+planes; every other pipeline operation (mirroring, per-pixel alpha, luma
+keying, a third pass, any second filter, any colour conversion outside that one
+filter) fails the picture instead of being dropped. The entrypoint is advertised only when the
 build found Vulkan and the client set `V4L2_VA_VPP` (§6), so an installed
 decode/encode client sees the surface it qualified against. The kernel and the
 VA surface path are gated separately in §9:
@@ -403,8 +407,10 @@ check every pixel of the primitive and
 frame against swscale; `test/vulkan-vpp/crop_vaapi_gate.sh` checks a
 `surface_region` picture against `crop,scale=...:flags=neighbor`, and
 `test/vulkan-vpp/transpose_vaapi_gate.sh` checks every rotation direction
-against `transpose`, and `test/vulkan-vpp/tonemap_gate.sh` checks the tone
-mapper against the pipeline `tonemap.comp` documents.
+against `transpose`, `test/vulkan-vpp/tonemap_gate.sh` checks the tone
+mapper against the pipeline `tonemap.comp` documents, and
+`test/vulkan-vpp/overlay_gate.sh` checks the composite against the mix
+`overlay.comp` documents plus both of its endpoint frames byte for byte.
 
 ## 6. Environment surface
 
@@ -535,7 +541,18 @@ va begin_picture ctx=<n> surface=<n> entrypoint=encslice
 va begin_picture ctx=<n> surface=<n> entrypoint=videoproc
 va end_picture ctx=<n> surface=<n> bytes=<n> seq_start=0|1
 va end_picture ctx=<n> surface=<n> entrypoint=encslice submitted token=<n>
-va end_picture ctx=<n> surface=<n> entrypoint=videoproc src=<n> <w>x<h>-><w>x<h>[ tonemap=hdr10]
+va end_picture ctx=<n> surface=<n> entrypoint=videoproc src=<n> <w>x<h>-><w>x<h>
+                                                      [ tonemap=hdr10]
+                                                      [ overlay=<src>
+                                                        <w>x<h>+<x>,<y>
+                                                        alpha=<0..1>]
+                                                      (the suffix names the
+                                                       one operation beyond
+                                                       the scale: the tone
+                                                       mapper, or the blended
+                                                       overlay surface and
+                                                       the rectangle it was
+                                                       drawn into)
 encode open node=<path> codec=<fourcc> raw=<w>x<h> crop=<w>x<h> mode=cbr|vbr|cqp
             gop=<n> rate=<num>/<den>
 encode frame index=<n> bytes=<n> idr=0|1 promoted=0|1    (idr=1 covers both the
@@ -629,7 +646,16 @@ within 2 codes, plus three properties of the curve that a shared model mistake
 would not satisfy (PQ black on 16/128/128, the mastering peak on 235, a
 monotone ramp). It also proves the curve follows the metadata by running two
 mastering peaks over one frame, and requires an NV12 source, a filter without
-its parameters and a rotation in a tone-mapped picture to be refused. The SPIR-V the driver embeds is
+its parameters and a rotation in a tone-mapped picture to be refused.
+`test/vulkan-vpp/overlay_gate.sh` drives `iris-va-vpp-probe overlay`, which
+submits the two pipeline buffers overlay_vaapi submits: five geometries across
+both sample widths against the mix `overlay.comp` documents, within 1 code, and
+then the two endpoints against the input frames themselves — an alpha of 0 over
+the whole surface must reproduce the main frame byte for byte and an alpha of 1
+the overlay frame, which a kernel that read the wrong plane or ignored the alpha
+cannot do. Premultiplied alpha, luma keying, a third pass, a blend before its
+base pass, an odd or out-of-bounds rectangle and an alpha outside 0..1 are
+required to be refused. The SPIR-V the driver embeds is
 regenerated from the pinned module and compared by `test/run-static-checks.sh`.
 
 ## 10. Invariants (the ones tests exist for)

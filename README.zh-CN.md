@@ -32,9 +32,9 @@
 
 | 接口入口 | 操作 | 输入格式 | 输出格式 | 验证基准 |
 | --- | --- | --- | --- | --- |
-| `VAEntrypointVideoProc`（`VAProfileNone`，需显式开启） | 任意比例最近邻缩放，可带裁剪与旋转；HDR10 转 SDR 色调映射 | NV12、P010 | NV12、P010 | `scale_vaapi` 输出与 swscale `flags=neighbor` 逐字节一致；裁剪与 `crop,scale` 逐字节一致；三个方向都与 `transpose` 逐字节一致；色调映射与文档所述流程相差不超过 2 个码值 |
+| `VAEntrypointVideoProc`（`VAProfileNone`，需显式开启） | 任意比例最近邻缩放，可带裁剪与旋转；HDR10 转 SDR 色调映射；带全局 alpha 的第二 surface 合成 | NV12、P010 | NV12、P010 | `scale_vaapi` 输出与 swscale `flags=neighbor` 逐字节一致；裁剪与 `crop,scale` 逐字节一致；三个方向都与 `transpose` 逐字节一致；色调映射与文档所述流程相差不超过 2 个码值；合成的 alpha 0 与 alpha 1 两端各自与输入帧逐字节相同 |
 
-视频处理默认关闭，需设置 `V4L2_VA_VPP`。处理在 surface 的 DMA-BUF 上运行固定的 Vulkan 计算内核，只提供最近邻缩放一种操作，取点位置与 swscale 相同，起点是客户端给出的 surface region，先按客户端要求做顺时针旋转再缩放。NV12 与 P010 走同一套取点，按样本宽度各有一个内核；两端位深不一致的画面、镜像、混合、滤镜与色彩转换都会被拒绝，不做近似处理。 缩放下限是内核自身的 16x16，不再受解码节点最小尺寸约束，因此可以缩到缩略图大小。滤镜只实现了一个：带 HDR10 元数据的 `VAProcFilterHighDynamicRangeToneMapping`，按 BT.2390 曲线、BT.2020 到 BT.709 矩阵和 BT.709 OETF 把 P010 的 BT.2020/PQ 画面转成 SDR NV12。它按原尺寸转换整幅 surface，因此同一画面里的裁剪、缩放或旋转会被拒绝，NV12 输入、HDR 转 HDR 和第二个滤镜也一样。
+视频处理默认关闭，需设置 `V4L2_VA_VPP`。处理在 surface 的 DMA-BUF 上运行固定的 Vulkan 计算内核，只提供最近邻缩放一种操作，取点位置与 swscale 相同，起点是客户端给出的 surface region，先按客户端要求做顺时针旋转再缩放。NV12 与 P010 走同一套取点，按样本宽度各有一个内核；两端位深不一致的画面、镜像、滤镜与色彩转换都会被拒绝，不做近似处理。 缩放下限是内核自身的 16x16，不再受解码节点最小尺寸约束，因此可以缩到缩略图大小。滤镜只实现了一个：带 HDR10 元数据的 `VAProcFilterHighDynamicRangeToneMapping`，按 BT.2390 曲线、BT.2020 到 BT.709 矩阵和 BT.709 OETF 把 P010 的 BT.2020/PQ 画面转成 SDR NV12。它按原尺寸转换整幅 surface，因此同一画面里的裁剪、缩放或旋转会被拒绝，NV12 输入、HDR 转 HDR 和第二个滤镜也一样。处理器也做合成：一个画面可以带两个 pipeline buffer，第二个用 `VABlendState` 里的 `VA_BLEND_GLOBAL_ALPHA` 把一个 surface 混进输出的一个偶数矩形，也就是 `overlay_vaapi` 提交的形状。混合在两个平面的码值上做，预乘 alpha 和 luma key 会被拒绝；alpha 取 0 或 1 时输出分别与主画面和叠加画面逐字节相同。
 
 ## 运行环境
 

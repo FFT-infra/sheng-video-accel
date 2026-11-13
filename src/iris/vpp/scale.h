@@ -54,6 +54,24 @@ struct ToneMapJob {
     float source_peak_nits = 1000.0f;
 };
 
+// Global-alpha compositing: the main surface stays in place and the overlay
+// surface is scaled into x/y/width/height of the output, where every pixel
+// becomes alpha * overlay + (1 - alpha) * main. All three surfaces share one
+// sample width (bytes) and the destination is the main surface's size; the
+// rectangle is even on both axes, so no chroma cell is half covered.
+struct OverlayJob {
+    int main_fd = -1, overlay_fd = -1, dst_fd = -1;
+    uint32_t main_size = 0, overlay_size = 0, dst_size = 0;
+    uint32_t main_stride = 0, overlay_stride = 0, dst_stride = 0;
+    uint32_t main_uv = 0, overlay_uv = 0, dst_uv = 0;
+    uint32_t main_y = 0, overlay_y = 0, dst_y = 0;
+    uint32_t overlay_width = 0, overlay_height = 0;
+    uint32_t x = 0, y = 0, width = 0, height = 0;
+    uint32_t dst_width = 0, dst_height = 0;
+    uint32_t bytes = 1;
+    float alpha = 1.0f;
+};
+
 // True when this driver was built with the Vulkan VPP backend. Capability
 // queries use this instead of touching Vulkan: creating a VkInstance during
 // Chromium's GPU-sandbox init is not allowed (docs/architecture.md §7).
@@ -69,6 +87,10 @@ bool scale_nv12_or_p010(const ScaleJob& job);
 // DMA-BUFs. Same failure contract as the scale: false means the VA layer must
 // fail the picture rather than publish partial pixels.
 bool tonemap_hdr10_to_sdr(const ToneMapJob& job);
+
+// Dispatch the compositing kernel (overlay.spv) over the three imported
+// DMA-BUFs. Same failure contract again.
+bool overlay(const OverlayJob& job);
 
 } // namespace vpp
 } // namespace iris

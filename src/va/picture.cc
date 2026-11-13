@@ -11,6 +11,7 @@
 #include "../util/error.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 namespace va {
@@ -116,15 +117,17 @@ Pixels pixels_of(DriverData& d, Surface& s)
 // vaEndPicture, so the regions are dereferenced here rather than kept.
 void accept_vpp_pipeline(Context& c, const Buffer& b)
 {
-    // One picture is one scale. Several pipeline buffers describe compositing
-    // into several output regions, which the kernel does not do; dropping all
-    // but the last would publish a picture the client did not ask for.
-    iris::require(!c.vpp.has_value(), "one VideoProc pipeline per picture is supported",
-        VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    // A picture runs one pass, or a main pass and one blending pass — the pair
+    // FFmpeg's overlay_vaapi submits. The order is part of the contract: the
+    // pass that names a blend state blends onto the one before it. Dropping
+    // either would publish a picture the client did not ask for.
     iris::require(b.size >= sizeof(VAProcPipelineParameterBuffer), "pipeline buffer too small",
         VA_STATUS_ERROR_INVALID_PARAMETER);
     VAProcPipelineParameterBuffer p = {};
     std::memcpy(&p, b.data.data(), sizeof(p));
+    const bool blending = p.blend_state != nullptr;
+    iris::require(blending ? c.vpp.has_value() && !c.vpp_overlay.has_value() : !c.vpp.has_value(),
+        "a VideoProc picture is one pass, or a main pass and one blend", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
 
     // One filter is supported, the HDR10 tone mapper. Its parameters travel in
     // their own buffer, so nothing about them is read here.
@@ -138,9 +141,19 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
         "VPP backward references are not supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
     iris::require(p.additional_outputs == nullptr && p.num_additional_outputs == 0,
         "VPP additional outputs are not supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
-    iris::require(p.blend_state == nullptr, "VPP blending is not supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
     iris::require(p.output_hdr_metadata == nullptr, "VPP HDR metadata is not supported",
         VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    // The blend state is copied: the client's pointer dies with vaEndPicture.
+    // Per-pixel alpha (premultiplied) and luma keying are separate kernels
+    // that do not exist here, so naming either is refused rather than ignored.
+    VABlendState blend = {};
+    if (blending) {
+        blend = *p.blend_state;
+        iris::require((blend.flags & ~static_cast<unsigned>(VA_BLEND_GLOBAL_ALPHA)) == 0,
+            "only global-alpha blending is supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+        iris::require(blend.global_alpha >= 0.0f && blend.global_alpha <= 1.0f,
+            "blend alpha is outside 0..1", VA_STATUS_ERROR_INVALID_PARAMETER);
+    }
     iris::require(p.rotation_state <= VA_ROTATION_270, "invalid VPP rotation",
         VA_STATUS_ERROR_INVALID_PARAMETER);
     iris::require(p.mirror_state == VA_MIRROR_NONE, "VPP mirroring is not supported",
@@ -175,6 +188,7 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
     job.input_standard = input_standard;
     job.output_standard = output_standard;
     job.explicit_colour_properties_equal = colour_properties_equal;
+    job.global_alpha = blend.global_alpha;
     if (p.surface_region) {
         job.region = *p.surface_region;
         job.region_set = true;
@@ -183,7 +197,10 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
         job.output_region = *p.output_region;
         job.output_region_set = true;
     }
-    c.vpp = job;
+    if (blending)
+        c.vpp_overlay = job;
+    else
+        c.vpp = job;
 }
 
 // One HDR10 tone-mapping filter buffer. The kernel's curve needs one number
@@ -225,6 +242,7 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
     iris::require(c.vpp.has_value(), "VideoProc picture has no pipeline parameters",
         VA_STATUS_ERROR_INVALID_PARAMETER);
     const Context::VppJob job = *c.vpp;
+    const std::optional<Context::VppJob> blend = c.vpp_overlay;
 
     // One filter is supported, the HDR10 tone mapper, and its parameters
     // arrive as their own buffer in whichever order the client renders them.
@@ -234,6 +252,25 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         tone_map ? "the HDR10 tone mapper needs its parameter buffer"
                  : "VideoProc filter parameters without a filter",
         VA_STATUS_ERROR_INVALID_PARAMETER);
+    if (blend) {
+        // Compositing is a copy of the main surface plus a blend into one
+        // rectangle. The kernels that resize, rotate or change the transfer
+        // curve are other pictures; a client that wants both composes them.
+        iris::require(!tone_map, "a blended picture does not tone map", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+        iris::require(blend->filters == 0, "the blending pass carries no filter",
+            VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+        iris::require(!job.region_set, "a blended picture does not crop the main surface",
+            VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+        iris::require(job.rotation == VA_ROTATION_NONE, "a blended picture does not rotate",
+            VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+        // The overlay is mixed in the main pass's coded values, so naming a
+        // different standard (or different explicit properties) would claim a
+        // conversion the kernel does not do.
+        iris::require(blend->input_standard == job.input_standard
+                && blend->output_standard == job.output_standard && blend->explicit_colour_properties_equal,
+            "the blending pass shares the colour standards of the pass it blends onto",
+            VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    }
     if (!tone_map) {
         iris::require(job.input_standard == job.output_standard, "VPP colour conversion is not supported",
             VA_STATUS_ERROR_UNSUPPORTED_FILTER);
@@ -254,13 +291,14 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
             "a tone-mapped output must be BT.709 or unnamed", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
     }
 
-    Pixels src, dst;
+    Pixels src, dst, ov;
     VARectangle crop = {};
-    // Keep the source alive across the dispatch: the fd captured below is
-    // closed when its Surface dies, and a client that destroys the source
+    VARectangle rect = {};
+    // Keep the sources alive across the dispatch: the fd captured below is
+    // closed when its Surface dies, and a client that destroys a source
     // while this picture is running must not pull the buffer out from under
     // the import.
-    std::shared_ptr<Surface> source;
+    std::shared_ptr<Surface> source, overlay_surface;
     {
         std::lock_guard<std::recursive_mutex> lock(d.mutex);
         source = surface(d, job.source);
@@ -314,13 +352,75 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
             iris::require(job.rotation == VA_ROTATION_NONE, "tone mapping does not rotate",
                 VA_STATUS_ERROR_UNSUPPORTED_FILTER);
         }
+        if (blend) {
+            // The compositing kernel keeps the main surface in place, so its
+            // size is the output's, and draws the overlay into one rectangle.
+            iris::require(source->width == target->width && source->height == target->height,
+                "a blended picture keeps the main surface's size", VA_STATUS_ERROR_INVALID_PARAMETER);
+            iris::require(!blend->region_set, "the overlay samples its whole surface",
+                VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+            iris::require(blend->output_region_set, "the blending pass needs an output region",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
+            iris::require(blend->rotation == VA_ROTATION_NONE, "the overlay does not rotate",
+                VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+            overlay_surface = surface(d, blend->source);
+            iris::require(overlay_surface.get() != target.get() && overlay_surface.get() != source.get(),
+                "the overlay is a third surface", VA_STATUS_ERROR_INVALID_PARAMETER);
+            iris::require(overlay_surface->fourcc == target->fourcc,
+                "the overlay shares the output's format", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+            iris::require(overlay_surface->target.frame || overlay_surface->stable,
+                "the overlay surface holds no pixels", VA_STATUS_ERROR_OPERATION_FAILED);
+            rect = blend->output_region;
+            iris::require(rect.x >= 0 && rect.y >= 0 && rect.width > 0 && rect.height > 0
+                    && static_cast<uint32_t>(rect.x) + static_cast<uint32_t>(rect.width) <= target->width
+                    && static_cast<uint32_t>(rect.y) + static_cast<uint32_t>(rect.height) <= target->height,
+                "the overlay region is outside the output surface", VA_STATUS_ERROR_INVALID_PARAMETER);
+            // An even rectangle puts every 2x2 chroma block wholly inside it
+            // or wholly outside it; an odd one would need a per-pixel mix on
+            // each chroma cell, which this kernel does not do.
+            iris::require(!((rect.x | rect.y | rect.width | rect.height) & 1),
+                "the overlay region must be even", VA_STATUS_ERROR_INVALID_PARAMETER);
+            iris::require(overlay_surface->width && overlay_surface->height
+                    && !((overlay_surface->width | overlay_surface->height) & 1u),
+                "the overlay needs an even, non-empty geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
+        }
 
         src = pixels_of(d, *source);
         dst = pixels_of(d, *target);
+        if (blend)
+            ov = pixels_of(d, *overlay_surface);
     }
 
     bool ran = false;
-    if (tone_map) {
+    if (blend) {
+        iris::vpp::OverlayJob oj;
+        oj.main_fd = src.fd;
+        oj.overlay_fd = ov.fd;
+        oj.dst_fd = dst.fd;
+        oj.main_size = src.size;
+        oj.overlay_size = ov.size;
+        oj.dst_size = dst.size;
+        oj.main_stride = src.layout.stride;
+        oj.overlay_stride = ov.layout.stride;
+        oj.dst_stride = dst.layout.stride;
+        oj.main_uv = src.layout.chroma_offset();
+        oj.overlay_uv = ov.layout.chroma_offset();
+        oj.dst_uv = dst.layout.chroma_offset();
+        oj.main_y = src.layout.data_offset;
+        oj.overlay_y = ov.layout.data_offset;
+        oj.dst_y = dst.layout.data_offset;
+        oj.overlay_width = overlay_surface->width;
+        oj.overlay_height = overlay_surface->height;
+        oj.x = static_cast<uint32_t>(rect.x);
+        oj.y = static_cast<uint32_t>(rect.y);
+        oj.width = rect.width;
+        oj.height = rect.height;
+        oj.dst_width = target->width;
+        oj.dst_height = target->height;
+        oj.bytes = source->fourcc == VA_FOURCC_P010 ? 2 : 1;
+        oj.alpha = blend->global_alpha;
+        ran = iris::vpp::overlay(oj);
+    } else if (tone_map) {
         iris::vpp::ToneMapJob tj;
         tj.src_fd = src.fd;
         tj.dst_fd = dst.fd;
@@ -362,14 +462,22 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
     }
     if (!ran) {
         target->failed = true;
-        throw iris::Error(VA_STATUS_ERROR_OPERATION_FAILED, tone_map ? "Vulkan VPP tone mapping failed"
-                                                                     : "Vulkan VPP scale failed");
+        throw iris::Error(VA_STATUS_ERROR_OPERATION_FAILED,
+            blend ? "Vulkan VPP blending failed"
+                  : tone_map ? "Vulkan VPP tone mapping failed" : "Vulkan VPP scale failed");
     }
     target->vpp_pixels = true;
     target->failed = false;
+    // The trailing field is the trace vocabulary docs/architecture.md §8
+    // defines: which operation this picture ran beyond the scale.
+    char extra[96] = "";
+    if (blend)
+        std::snprintf(extra, sizeof(extra), " overlay=%u %ux%u+%d,%d alpha=%.2f", blend->source, rect.width,
+            rect.height, rect.x, rect.y, blend->global_alpha);
+    else if (tone_map)
+        std::snprintf(extra, sizeof(extra), " tonemap=hdr10");
     d.trace("va end_picture ctx=%u surface=%u entrypoint=videoproc src=%u %ux%u->%ux%u%s", ctx_id, dst_id,
-        job.source, src.layout.width, src.layout.height, target->width, target->height,
-        tone_map ? " tonemap=hdr10" : "");
+        job.source, src.layout.width, src.layout.height, target->width, target->height, extra);
     return VA_STATUS_SUCCESS;
 }
 
@@ -598,6 +706,7 @@ VAStatus beginPicture(VADriverContextP ctx, VAContextID id, VASurfaceID surface_
             } else if (c->video_proc()) {
                 // A new picture replaces whatever this surface held.
                 c->vpp.reset();
+                c->vpp_overlay.reset();
                 c->vpp_peak_nits.reset();
                 s->failed = false;
             } else {

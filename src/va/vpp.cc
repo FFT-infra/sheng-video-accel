@@ -3,9 +3,9 @@
 // The three queries on the VPP vtable. They describe what the compute
 // backend runs — one nearest-neighbour scale at the requested ratio from an
 // optional crop, in NV12 or P010, after an optional clockwise quarter turn,
-// and the HDR10 tone mapper as its only filter, with no mirroring or blending
-// — and nothing here creates a VkInstance or opens a node, so a client can
-// query them during GPU sandbox initialisation.
+// the HDR10 tone mapper as its only filter, and a second surface composited
+// with a global alpha — and nothing here creates a VkInstance or opens a
+// node, so a client can query them during GPU sandbox initialisation.
 
 #include "driver.h"
 
@@ -113,7 +113,10 @@ VAStatus queryVideoProcPipelineCaps(VADriverContextP ctx, VAContextID id, VABuff
     // All three clockwise quarter turns; mirroring is not implemented.
     caps->rotation_flags = (1u << VA_ROTATION_NONE) | (1u << VA_ROTATION_90) | (1u << VA_ROTATION_180)
         | (1u << VA_ROTATION_270);
-    caps->blend_flags = 0;
+    // What `overlay_vaapi` refuses to run without. Per-pixel (premultiplied)
+    // alpha and luma keying are separate kernels that do not exist here, so
+    // only the global alpha is advertised.
+    caps->blend_flags = VA_BLEND_GLOBAL_ALPHA;
     caps->mirror_flags = 0;
     caps->num_additional_outputs = 0;
     const bool p010 = d.capabilities.p010;

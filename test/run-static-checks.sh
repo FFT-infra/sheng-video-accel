@@ -46,12 +46,13 @@ echo "== VPP SPIR-V pin"
 # fail a host check rather than silently change what the target gate measures.
 # SHA256SUMS lists copy.spv (flat read/write prereq), nv12_scale.spv (the
 # nearest NV12 scale with crop and rotation), p010_scale.spv (the same map for
-# P010) and tonemap.spv (HDR10 P010 to SDR NV12);
-# sha256sum -c verifies every entry.
+# P010), tonemap.spv (HDR10 P010 to SDR NV12) and overlay.spv (global-alpha
+# compositing of two surfaces); sha256sum -c verifies every entry.
 run vpp-spv-pin sh -c 'cd "$1" && sha256sum -c SHA256SUMS' sh "$test_dir/vulkan-vpp"
 run vpp-spv-scale-pinned grep -Fq 'nv12_scale.spv' "$test_dir/vulkan-vpp/SHA256SUMS"
 run vpp-spv-p010-pinned grep -Fq 'p010_scale.spv' "$test_dir/vulkan-vpp/SHA256SUMS"
 run vpp-spv-tonemap-pinned grep -Fq 'tonemap.spv' "$test_dir/vulkan-vpp/SHA256SUMS"
+run vpp-spv-overlay-pinned grep -Fq 'overlay.spv' "$test_dir/vulkan-vpp/SHA256SUMS"
 # The scale gate must stay a per-pixel oracle, not a spot check: a stride or
 # chroma-offset bug can otherwise hide behind a handful of sampled bytes.
 run vpp-scale-pixel-oracle grep -Fq 'check_pixels(src, dst, &g)' "$test_dir/vulkan-vpp/scale_probe.c"
@@ -65,6 +66,14 @@ run vpp-rotate-gate-uses-driver grep -Fq 'transpose_vaapi' "$test_dir/vulkan-vpp
 run vpp-tonemap-gate-uses-probe grep -Fq 'iris-va-vpp-probe' "$test_dir/vulkan-vpp/tonemap_gate.sh"
 run vpp-tonemap-oracle grep -Fq 'expected_sdr' "$test_dir/iris-va-vpp-probe.cc"
 run vpp-tonemap-refusals grep -Fq -- '--source-nv12' "$test_dir/vulkan-vpp/tonemap_gate.sh"
+# The composite has an exact reference, so the gate compares both endpoint
+# frames byte for byte as well as the model. Losing either comparison would
+# let a kernel that ignored the alpha pass on a loose tolerance alone.
+run vpp-overlay-gate-uses-probe grep -Fq 'iris-va-vpp-probe' "$test_dir/vulkan-vpp/overlay_gate.sh"
+run vpp-overlay-oracle grep -Fq 'expected_composite' "$test_dir/iris-va-vpp-probe.cc"
+run vpp-overlay-endpoints grep -Fq 'alpha 0 did not reproduce the main frame' \
+    "$test_dir/vulkan-vpp/overlay_gate.sh"
+run vpp-overlay-refusals grep -Fq -- '--premultiplied' "$test_dir/vulkan-vpp/overlay_gate.sh"
 # The rotation map is the one piece of the kernel a host can check: it mirrors
 # scale_probe.c's coordinates and compares them with FFmpeg's software filters,
 # so a swapped axis fails here instead of on the target as a pixel mismatch.
@@ -81,6 +90,9 @@ run vpp-spv-p010-header sh -c 'python3 "$1" "$2" | cmp -s - "$3"' sh \
 run vpp-spv-tonemap-header sh -c 'python3 "$1" "$2" | cmp -s - "$3"' sh \
     "$test_dir/vulkan-vpp/spv-to-header.py" "$test_dir/vulkan-vpp/tonemap.spv" \
     "$root/src/iris/vpp/tonemap_spv.h"
+run vpp-spv-overlay-header sh -c 'python3 "$1" "$2" | cmp -s - "$3"' sh \
+    "$test_dir/vulkan-vpp/spv-to-header.py" "$test_dir/vulkan-vpp/overlay.spv" \
+    "$root/src/iris/vpp/overlay_spv.h"
 
 echo "== remote gate command transport"
 # The guard backgrounds its child. A `sh -s` child fed by a heredoc reads

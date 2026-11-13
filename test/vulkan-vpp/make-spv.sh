@@ -2,7 +2,7 @@
 
 # Regenerate the checked-in SPIR-V binaries from their .comp sources on a host
 # with glslangValidator, then rewrite SHA256SUMS. The target has no glslang,
-# so both modules are checked in and pinned by hash; the target gates verify
+# so every module is checked in and pinned by hash; the target gates verify
 # the pin at run time instead of compiling on the device.
 #
 #   copy.spv          flat read/write prereq (prereq.sh / probe.c)
@@ -12,9 +12,11 @@
 #   p010_scale.spv    the same kernel for P010 surfaces
 #                     (p010_scale_gate.sh / scale_probe.c)
 #   tonemap.spv       HDR10 P010 to SDR NV12 (tonemap_gate.sh / tonemap_probe.c)
+#   overlay.spv       global-alpha compositing of two surfaces into one output
+#                     (overlay_gate.sh / the probe's overlay mode)
 #
 # Usage: test/vulkan-vpp/make-spv.sh [-c]
-#   -c  check that both current .spv files match a fresh compile and
+#   -c  check that every current .spv file matches a fresh compile and
 #       SHA256SUMS, without writing (glslang is still needed for the compile)
 #
 # glslangValidator is a host build tool, not a runtime dependency. Its absence
@@ -36,7 +38,7 @@ scratch=${TMPDIR:-$HOME/Lab/Bridge/tmp}
 work=$(mktemp -d "$scratch/vpp-spv.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
-names="copy nv12_scale p010_scale tonemap"
+names="copy nv12_scale p010_scale tonemap overlay"
 for name in $names; do
     "$glslang" -V --target-env vulkan1.1 -o "$work/$name.spv" "$here/$name.comp" >/dev/null
 done

@@ -557,10 +557,12 @@ the client asks for before scaling, and it runs the same map on
 P010 with a second kernel (same-depth only: a mixed-depth picture is
 refused, because swscale's own 10-to-8 conversion dithers). One filter is
 implemented, `VAProcFilterHighDynamicRangeToneMapping`, which converts P010
-BT.2020/PQ to SDR NV12 through `tonemap.spv`. Everything else (mirroring,
-blending, a second filter, any other colour conversion, a second pipeline
-buffer in one picture) fails the picture with a VA status instead of being
-approximated. Vulkan stays an optional meson dependency, so CI builds the stub
+BT.2020/PQ to SDR NV12 through `tonemap.spv`. A picture may also carry a second
+pipeline buffer that composites a surface into one even rectangle of the output
+with a global alpha — the shape `overlay_vaapi` submits — through
+`overlay.spv`, importing three DMA-BUFs. Everything else (mirroring, per-pixel
+alpha, luma keying, a third pass, a second filter, any other colour conversion)
+fails the picture with a VA status instead of being approximated. Vulkan stays an optional meson dependency, so CI builds the stub
 and advertises nothing.
 
 The backend samples where swscale's `SWS_POINT` map samples - the rounded
