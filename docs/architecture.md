@@ -711,7 +711,7 @@ mastering peaks over one frame, and requires an NV12 source, a filter without
 its parameters and a rotation in a tone-mapped picture to be refused.
 `test/vulkan-vpp/overlay_gate.sh` drives `iris-va-vpp-probe overlay`, which
 submits the two pipeline buffers overlay_vaapi submits — and, with `--layers`,
-any number of them: thirty geometries
+a stack of them up to the sixteen the driver accepts: thirty-two geometries
 across both sample widths — including a main surface padded wider than its
 picture, as a decoder allocates one, packed BGRA and RGBA overlays, the BT.601
 matrix, a packed overlay over a tone-mapped main surface, a layer that reads
@@ -726,10 +726,10 @@ land on the same picture as a straight one at the same global alpha, and a
 per-pixel alpha that is not opaque has to produce a different one. The three
 sampling methods have to produce three different pictures, at a ratio where the
 area average and the four-tap blend genuinely differ — at an exact 2:1 they
-coincide by construction. Luma keying, a third pass, a blend before its base
-pass, an odd or out-of-bounds rectangle, a crop of the main surface, an overlay
-region that leaves its own surface, and an alpha outside 0..1 are required to
-be refused. `test/vulkan-vpp/overlay_vaapi_gate.sh` then
+coincide by construction. Luma keying, a seventeenth pass, a blend before its
+base pass, an odd or out-of-bounds rectangle, a crop of the main surface, an
+overlay region that leaves its own surface, and an alpha outside 0..1 are
+required to be refused. `test/vulkan-vpp/overlay_vaapi_gate.sh` then
 drives `overlay_vaapi` itself over a BGRA upload, because two things about the
 real client are invisible from the probe: FFmpeg asks for
 `VA_BLEND_PREMULTIPLIED_ALPHA` whenever its overlay input carries an alpha

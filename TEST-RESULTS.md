@@ -8047,6 +8047,7 @@ resolved by `iris_driver` QUERYCAP to `/dev/video0`, encoder to `/dev/video1`.
 | --- | --- | --- | --- |
 | `overlay_gate.sh` | `141003Z` | 30 cases, 2 endpoints, 9 refusals | `PASS`, every case within 1 code |
 | `overlay_vaapi_gate.sh` | `141049Z` | 3 through FFmpeg's `overlay_vaapi` | `PASS`, exact |
+| `overlay_gate.sh` (bound) | `165001Z` | 32 cases, 2 endpoints, 9 refusals | `PASS`, sixteen layers at `max_diff=0` |
 
 The four new cases are `layers2`, `layers3`, `layers2rgb` and
 `layers2premult`. Each layer blends a rectangle two pixels down and right of
@@ -8056,21 +8057,32 @@ one left — a model that reset to the main frame each time would pass every
 single-layer case and be wrong for every stack. All four came out with
 `max_diff=0`.
 
+The last row is the bound reached rather than named. `layers16` and
+`layers16rgb` stack sixteen layers — the figure the driver refuses a
+seventeenth of, and the one the README advertises — on a 32x24 rectangle whose
+sixteenth position still ends at 78,70 inside a 128x72 output, so the layer
+count is the only thing under test. Run `165001Z` on committed source
+`e70ff2a` (`source_dirty=0`) reports `cases=32 endpoints=2 refused=9`,
+`max_diff=0` on both, guard `complete`, driver `f20b0588…` from `build/src`,
+boot `4b73926c…`, module `b90bd823…`. The first attempt at this row put its
+comments inside the case heredoc and the loop read them as cases; the two real
+cases passed in that run as well, and the clean record is the one above.
+
 Two refusals changed. `--third` used to be a refusal case and is now a feature,
-so it is gone. `too-many-layers` (`--layers=18`) replaces it: the driver's
-sixteen-pass bound is what fails the picture, not the probe's argument check.
-`blend-first` still passes, which is the ordering rule the list depends on — a
-picture whose first pipeline buffer carries a blend state is refused rather
-than composited onto an undefined main surface.
+so it is gone. `too-many-layers` replaces it at seventeen layers, one past the
+bound, on geometry that fits — the seventeenth rectangle ends at 72,68, so the
+driver's layer bound is what fails the picture rather than its geometry or the
+probe's argument check. `blend-first` still passes, which is the ordering rule
+the list depends on — a picture whose first pipeline buffer carries a blend
+state is refused rather than composited onto an undefined main surface.
 
 ### What this does not prove
 
-Sixteen is the driver's own bound and no gate reaches it: the largest stack
-measured is three layers. The cost of a stack is one dispatch per layer with a
-full output read-back between them, so a sixteen-layer picture is sixteen
-passes over the output rather than one — correct, but not free, and nothing
-here measured what it costs. The sibling driver's figure was copied as a bound
-on a single `vaEndPicture`, not as a performance target.
+The cost of a stack is one dispatch per layer with a full output read-back
+between them, so a sixteen-layer picture is sixteen passes over the output
+rather than one — correct, but not free, and nothing here measured what it
+costs. The sibling driver's figure was copied as a bound on a single
+`vaEndPicture`, not as a performance target.
 
 ## The CDSP FastRPC path, measured instead of assumed (2026-11-13)
 
