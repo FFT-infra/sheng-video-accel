@@ -590,14 +590,25 @@ API contract plus four `hwupload,hwdownload` round trips
 refuse"). The previous installed build fails the same gate ten checks of
 fourteen, which is the negative control.
 
-### WP5 RGB import — done, verdict "no RGB import code"
+### WP5 RGB import — done, verdict "packed RGB exists for the processor, none for decode"
 
-WP4's Vulkan backend is now proven viable on `sheng` (prereq gate), but no VA
-client in this project's recorded gates needs BGRA/RGBA and no VPP filter
-consumes them yet. The current NV12/P010 CAPTURE-layout contract is what the
-decode and encode gates exercise. Keep the capability table's RGB rejection
-entries. `radxa-pkg/qcom-va-driver` is the reference implementation if a real
-consumer appears (`TEST-RESULTS.md` §"WP4/WP5/WP6 decisions").
+The original verdict was "no RGB import code". That held for a codec
+surface, and still does: no Iris node advertises an RGB CAPTURE format and the
+capability table's RGB rejection entries stand. It stopped holding for the
+video processor, which is where a real consumer appeared. `overlay_vaapi`
+uploads its overlay input into a `VA_RT_FORMAT_RGB32` surface
+(`vf_overlay_vaapi.c`), so the surface layer takes `RGB32` on its own, accepts
+`VA_FOURCC_BGRA` and `VA_FOURCC_RGBA` as attributes, maps them to
+`DRM_FORMAT_ARGB8888` and `DRM_FORMAT_ABGR8888` as a single 32-bit plane, and
+`overlay_rgb.comp` converts each sampled pixel to the output frame's matrix
+while it mixes. `overlay_vaapi_gate.sh` drives it through FFmpeg
+(`TEST-RESULTS.md` §"A packed overlay, stored alpha, and the image list the
+client sizes").
+
+What remains unimplemented is RGB on a decode or encode surface, which is a
+different thing and has no client: the CAPTURE layout is still NV12/P010. A
+driver importing client RGB buffers would need the modifier negotiation the
+capability table already records as rejected.
 
 ### WP6 Debian packaging — done, verdict revised: `debian/` exists and the artifact is verified
 
