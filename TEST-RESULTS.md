@@ -7135,3 +7135,51 @@ Identity for the pair: kernel `7.2.6-sm8550-g42f3b40-iris1`, module
 `972c13d1-1848-4bb3-8c9b-ce60c74376cb`, decoder and encoder nodes resolved by
 `iris_driver` QUERYCAP name (`/dev/video17`, `/dev/video18`), battery 93 %
 discharging, thermal maximum 43.0 °C, no reset and no thermal breach.
+
+## Crop through the video processor (2026-11-13)
+
+A VA client crops by naming a `surface_region` in the pipeline buffer, and the
+driver refused every region but the whole surface. The kernel now samples the
+region's rectangle: the 16.16 step, the row index and the chroma index are all
+computed from `region.width/height` with `region.x/y` as the origin, and an
+origin or size that is not even is refused with
+`VA_STATUS_ERROR_INVALID_PARAMETER` instead of being rounded — a 4:2:0 chroma
+sample covers a 2x2 luma block.
+
+### Two gates
+
+`test/vulkan-vpp/nv12_scale_gate.sh` gained four crop cases over both DMA-BUF
+origins (a 2:1 downscale of the whole surface, a fractional crop, a crop that
+scales down to a quarter, and an 86x48 result from a 96x40 region):
+
+```
+PASS nv12-scale ratios=7 crops=4 origins=2 pixels_exact
+spv=70609a51bf154c3580718df219c09e42b777538abb583d61efe3d0f1292a42c6
+```
+
+Run `run-20261113T052342Z`, guard `complete`, exit 0, driver `c30e2bbb`.
+
+At the VA level FFmpeg cannot ask for a region: 8.1.3 has no `crop_vaapi`
+filter (`ffmpeg -filters` lists `scale_vaapi`, `overlay_vaapi`,
+`transpose_vaapi`, `tonemap_vaapi`, `pad_vaapi`, `drawbox_vaapi`, none of
+which submits a `surface_region`). `test/iris-va-vpp-probe.cc` is therefore
+the client for `test/vulkan-vpp/crop_vaapi_gate.sh`: it uploads an NV12 frame
+through a derived image, submits one VideoProc picture with the region, and
+downloads the result with `vaGetImage`. The oracle is
+`crop=W:H:X:Y,scale=DWxDH:flags=neighbor` on the same frame.
+
+| source | crop | output | sha256, oracle and hardware |
+| --- | --- | --- | --- |
+| 128x72 | 96x40+16+16 | 86x48 | `8808bfec693fcaf27ff6176ee73fa820d3f534dcd17e856fa23075262fe2737c` |
+| 64x32 | 32x16+16+8 | 128x64 | `d77022a6f8e82282ff10fb1a7cc43909f8c7eaf8e80af6bc5394123e41746497` |
+| 128x128 | 64x64+32+32 | 32x32 | `8ab51afd4d6998f70bd3be3269ce454460de7dc463d13f369e01bc88a41da1a5` |
+
+The fourth case asks for a 31x16 region and requires `vaEndPicture` to fail;
+it did. Run `run-20261113T052425Z`, guard `complete`, exit 0, driver
+`c30e2bbb` from `build/src`.
+
+Identity: source commit `a575c20`, kernel `7.2.6-sm8550-g42f3b40-iris1`, module
+`b90bd823…`, boot `972c13d1…`, decoder and encoder nodes resolved by
+`iris_driver` name (`/dev/video17`, `/dev/video18`), battery 93 % → 92 %
+discharging, thermal maximum 53.2 °C on the kernel run and 48.5 °C on the VA
+run, no reset and no thermal breach.
