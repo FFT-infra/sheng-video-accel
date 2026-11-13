@@ -88,8 +88,10 @@ for entry in $cases; do
     tag=${entry%%:*}
     spec=${entry#*:}
     set -- $(echo "$spec" | tr ':' ' ')
-    w=$1 h=$2 ow=$3 oh=$4 rx=$5 ry=$6 rw=$7 rh=$8 alpha=$9
-    flags=${10:-}
+    w=${1%x*} h=${1#*x}
+    ow=${2%x*} oh=${2#*x}
+    rx=$3 ry=$4 rw=$5 rh=$6 alpha=$7
+    flags=${8:-}
     echo "== $tag ${w}x${h} overlay ${ow}x${oh} rect ${rw}x${rh}+$rx,$ry alpha=$alpha $flags"
     rc=0
     run_probe "$tag" "$w" "$h" "$ow" "$oh" "$rx" "$ry" "$rw" "$rh" "$alpha" "$work/$tag.raw" $flags || rc=$?
