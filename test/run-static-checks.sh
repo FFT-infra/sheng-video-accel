@@ -58,6 +58,10 @@ run vpp-scale-pixel-oracle grep -Fq 'check_pixels(src, dst, &g)' "$test_dir/vulk
 # helper would leave a gate compiling nothing.
 run vpp-p010-gate-uses-probe grep -Fq 'scale_probe.c' "$test_dir/vulkan-vpp/p010_scale_gate.sh"
 run vpp-rotate-gate-uses-driver grep -Fq 'transpose_vaapi' "$test_dir/vulkan-vpp/transpose_vaapi_gate.sh"
+# The rotation map is the one piece of the kernel a host can check: it mirrors
+# scale_probe.c's coordinates and compares them with FFmpeg's software filters,
+# so a swapped axis fails here instead of on the target as a pixel mismatch.
+run vpp-rotation-model python3 "$test_dir/vulkan-vpp/rotation_model_check.py"
 # The driver embeds the shader, so the array in src/ is a second copy of the
 # pinned binary. Regenerate it from the .spv and require an identical file; a
 # hand edit here would ship a kernel no gate ever measured.

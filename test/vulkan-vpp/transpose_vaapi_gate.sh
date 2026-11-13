@@ -46,6 +46,21 @@ for filter in transpose_vaapi transpose hwupload hwdownload; do
     printf '%s\n' "$filters" | grep -Eq "[[:space:]]$filter[[:space:]]" \
         || fail "ffmpeg has no $filter filter"
 done
+# The software transpose filter lost its named half-turn option in 8.x; a
+# half-turn is hflip followed by vflip, which is the same bytes. The hardware
+# filter still names it, so the gate says so plainly when it does not.
+ffmpeg -hide_banner -h filter=transpose_vaapi 2>/dev/null | grep -q 'reversal' \
+    || fail "transpose_vaapi has no reversal direction in this ffmpeg"
+
+# The software chain that produces the same pixels for each direction the
+# driver advertises.
+software_chain() {
+    case $1 in
+        clock) echo 'transpose=clock' ;;
+        cclock) echo 'transpose=cclock' ;;
+        reversal) echo 'hflip,vflip' ;;
+    esac
+}
 
 device=$(iris_resolve_device) || exit 2
 render=${IRIS_RENDER_DEVICE:-/dev/dri/renderD128}
@@ -96,7 +111,7 @@ run_case() {
     # Software transpose swaps the dimensions too, so the reference and the
     # hardware output have the same size by construction.
     ffmpeg -y -hide_banner -loglevel error -f rawvideo -pix_fmt "$pix" -s "$src" \
-        -i "$work/src-$pix-$src.raw" -vf "transpose=$dir" -f rawvideo "$work/ref-$tag.raw"
+        -i "$work/src-$pix-$src.raw" -vf "$(software_chain "$dir")" -f rawvideo "$work/ref-$tag.raw"
     ref_hash=$(sha256sum "$work/ref-$tag.raw" | cut -d' ' -f1)
     if ! env LIBVA_DRIVER_NAME=v4l2 $driver_env \
             LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_VPP=1 V4L2_VA_TRACE=1 \
@@ -158,5 +173,5 @@ printf 'driver_source=%s\n' "$([ -n "$driver_env" ] && echo build-tree || echo i
 printf 'driver_sha256=%s\n' "$driver_hash"
 printf 'decoder=%s\n' "$device"
 printf 'cases=%s\n' "$(echo "$cases" | wc -w)"
-printf 'oracle=ffmpeg:transpose byte-identical for every direction\n'
+printf 'oracle=ffmpeg software transpose (half-turn as hflip,vflip) byte-identical for every direction\n'
 echo "PASS va-vpp-transpose directions=3 formats=2 exact driver=$driver_hash"

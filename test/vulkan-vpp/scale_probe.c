@@ -110,19 +110,17 @@ static unsigned point_pick(unsigned i, unsigned inc)
 // top-right, 180 degrees to the bottom-right, 270 to the bottom-left.
 static void unrotate(unsigned rot, unsigned rx, unsigned ry, unsigned w, unsigned h, unsigned* sx, unsigned* sy)
 {
-    const unsigned rw = (rot & 1u) ? h : w;
-    const unsigned rh = (rot & 1u) ? w : h;
     switch (rot) {
     case 1:
         *sx = ry;
-        *sy = rh - 1 - rx;
+        *sy = h - 1 - rx;
         break;
     case 2:
-        *sx = rw - 1 - rx;
-        *sy = rh - 1 - ry;
+        *sx = w - 1 - rx;
+        *sy = h - 1 - ry;
         break;
     case 3:
-        *sx = rw - 1 - ry;
+        *sx = w - 1 - ry;
         *sy = rx;
         break;
     default:

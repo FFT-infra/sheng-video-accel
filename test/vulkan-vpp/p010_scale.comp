@@ -64,13 +64,12 @@ uvec2 rotated(uint w, uint h)
 // rotated plane and then taken back to the source.
 uvec2 unrotate(uint rx, uint ry, uint w, uint h)
 {
-    uvec2 r = rotated(w, h);
     if (p.rot == 1u)
-        return uvec2(ry, r.y - 1u - rx);
+        return uvec2(ry, h - 1u - rx);
     if (p.rot == 2u)
-        return uvec2(r.x - 1u - rx, r.y - 1u - ry);
+        return uvec2(w - 1u - rx, h - 1u - ry);
     if (p.rot == 3u)
-        return uvec2(r.x - 1u - ry, rx);
+        return uvec2(w - 1u - ry, rx);
     return uvec2(rx, ry);
 }
 
