@@ -462,9 +462,8 @@ VAStatus beginPicture(VADriverContextP ctx, VAContextID id, VASurfaceID surface_
                 iris::require(s->width <= c->width && s->height <= c->height,
                     "encode surface exceeds the context", VA_STATUS_ERROR_INVALID_SURFACE);
             }
-            if (c->video_proc())
-                iris::require(s->fourcc == VA_FOURCC_NV12, "VPP surfaces must be NV12",
-                    VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+            // The processor scales either sample width; run_vpp checks that the
+            // source and this target agree on it.
             // A surface may move between contexts (FFmpeg's pool); it just
             // becomes the new context's target. A pending picture on another
             // context is released there first.
