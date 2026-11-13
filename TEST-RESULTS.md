@@ -7231,3 +7231,58 @@ Identity: kernel `7.2.6-sm8550-g42f3b40-iris1`, module `b90bd823…`, boot
 `972c13d1…`, decoder and encoder nodes resolved by `iris_driver` name
 (`/dev/video17`, `/dev/video18`), battery 90 % discharging, thermal maximum
 45.3 °C, no reset and no thermal breach.
+
+## Rotation through the video processor, and the P010 crop origin (2026-11-13)
+
+VA orders a picture as a clockwise rotation, then a scale. Both kernels now
+follow that order: the point map runs on the rotated size and each destination
+point is walked back through the rotation to the source, so a quarter turn and
+a scale are one dispatch. `queryVideoProcPipelineCaps` advertises rotation
+0/90/180/270 and still no mirroring; a client that names a mirror is refused,
+not given unmirrored pixels.
+
+### The map, checked on the host first
+
+`test/vulkan-vpp/rotation_model_check.py` runs the same coordinates as
+`scale_probe.c` against FFmpeg's `crop,transpose,scale=flags=neighbor` chain (a
+half-turn is `hflip,vflip`, since ffmpeg 8 dropped the named one from the
+software filter) on non-square sources, a crop and a downscale. This is the
+check that found the first version of the map reading the rotated width for
+the y coordinate and the rotated height for x: identical on a square frame,
+out of the crop on 64x32. It is part of `run-static-checks.sh`, so the mistake
+now fails in CI instead of on the target.
+
+### The three gates
+
+| gate | cases | result |
+| --- | --- | --- |
+| `nv12_scale_gate.sh` | 18 geometries x 2 DMA-BUF origins | every destination pixel matches the oracle; `spv` `8aa340cd…` |
+| `p010_scale_gate.sh` | 9 geometries x 2 origins | same, in 16-bit samples; `spv` `9c354b3d…` |
+| `transpose_vaapi_gate.sh` | `clock`, `cclock`, `reversal` x NV12, P010 | 9/9 byte-identical to the software filter |
+
+The kernel gates now include a quarter turn onto a transposed output, a
+quarter turn onto an unrelated size (rotate then scale), and a quarter turn
+inside a crop. `transpose_vaapi_gate.sh` also requires two refusals: the
+`clock_flip` direction, which needs a vertical mirror the driver does not
+advertise, and the same pipeline without `V4L2_VA_VPP`. Every transpose case
+reports `videoproc=4` in its trace.
+
+Runs `run-20261113T054800Z`, `run-20261113T054852Z` and `run-20261113T054935Z`
+(guard `complete`, exit 0 for each) at source commit `a1d1fae`, driver
+`7dc6f386` from `build/src`. Identity: kernel `7.2.6-sm8550-g42f3b40-iris1`,
+module `b90bd823…`, boot `972c13d1…`, decoder `/dev/video17`, encoder
+`/dev/video18`, battery 88-89 % discharging, thermal maximum 39.8 °C.
+
+### The P010 crop origin this exposed
+
+A P010 chroma pair spans two luma columns and four bytes, so a surface region
+starting at x begins its chroma at byte `2 * x` of the row; the kernel used
+`x`. Every 10-bit crop case until now started at the origin, where the two
+agree. The gate's crop cases now start at `+16+16`, and both origins pass.
+
+Two claims are not yet made: the pre-fix kernel has not been re-run against
+the new crop case as a negative control (the tablet went offline first), and
+none of this has been repeated from the installed package. `scale_vaapi_gate.sh`
+in its previous form still passes from `build/src`; its 8-bit and 10-bit
+hashes are unchanged by the rotation work, which is what the byte comparison
+against swscale is for.
