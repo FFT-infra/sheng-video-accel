@@ -187,5 +187,5 @@ printf 'driver_source=%s\n' "$([ -n "$driver_env" ] && echo build-tree || echo i
 printf 'driver_sha256=%s\n' "$driver_hash"
 printf 'decoder=%s\n' "$device"
 printf 'cases=%s\n' "$(echo "$cases" | wc -w)"
-printf 'oracle=ffmpeg software transpose (half-turn as hflip,vflip) byte-identical for every direction\n'
-echo "PASS va-vpp-transpose directions=3 formats=2 exact driver=$driver_hash"
+printf 'oracle=ffmpeg software transpose, hflip and vflip filters byte-identical for every direction\n'
+echo "PASS va-vpp-transpose directions=7 formats=2 exact driver=$driver_hash"
