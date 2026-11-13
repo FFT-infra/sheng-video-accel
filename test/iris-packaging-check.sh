@@ -51,6 +51,11 @@ grep -Fq 'destdir$prefix/lib/iris-vaapi/iris-node.sh' "$installer" \
 # shellcheck disable=SC2016
 grep -Fq 'msm_drv_video.so' "$installer" \
     || fail 'install-system.sh no longer installs the msm alias libva resolves by DRM name'
+# The qcom name is what the sibling distribution and its recipes use, so a
+# client that sets LIBVA_DRIVER_NAME=qcom must reach this driver too.
+# shellcheck disable=SC2016
+grep -Fq 'qcom_drv_video.so' "$installer" \
+    || fail 'install-system.sh no longer installs the qcom compatibility alias'
 
 expect_in_spec() {
     grep -Fq "$1" "$spec" || fail "spec %files does not list $1"
@@ -58,6 +63,7 @@ expect_in_spec() {
 
 expect_in_spec '%{_libdir}/dri/v4l2_drv_video.so'
 expect_in_spec '%{_libdir}/dri/msm_drv_video.so'
+expect_in_spec '%{_libdir}/dri/qcom_drv_video.so'
 expect_in_spec '%{_prefix}/lib/iris-vaapi/iris-node.sh'
 expect_in_spec '%{_datadir}/iris-vaapi/install-manifest.txt'
 

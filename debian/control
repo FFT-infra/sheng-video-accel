@@ -32,10 +32,11 @@ Description: VA-API backend for the Qualcomm Iris V4L2 stateful decoder and enco
  The package installs the driver into libva's driver directory together with
  a read-only device report and a one-command hardware check. Clients need no
  wrapper and no environment variable: libva resolves the driver through the
- msm_drv_video.so alias. Diagnostic commands refuse to guess a /dev/video
- number, because the decoder node moves between boots on this device; they
- resolve it by its iris_driver QUERYCAP name, which is why v4l-utils is a
- hard dependency.
+ msm_drv_video.so alias, and the qcom_drv_video.so alias keeps recipes that
+ set LIBVA_DRIVER_NAME=qcom on the same driver. Diagnostic commands refuse to
+ guess a /dev/video number, because the decoder node moves between boots on
+ this device; they resolve it by its iris_driver QUERYCAP name, which is why
+ v4l-utils is a hard dependency.
  .
  The VA video processor (scale, crop, rotation, mirroring, HDR tone mapping,
  compositing) is compiled in when the Vulkan loader and headers are present

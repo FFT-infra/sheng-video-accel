@@ -151,8 +151,9 @@ path. `iris-configure-clients` writes `hwdec=vaapi` and the Firefox VA pref into
 the invoking user's home only.
 
 Check the installed driver with nothing set at all. This is the property the
-package ships: libva resolves the driver through the `msm_drv_video.so` alias,
-and the driver resolves its own node.
+package ships: libva resolves the driver through the `msm_drv_video.so` alias
+(`qcom_drv_video.so` is installed beside it for recipes that name the sibling
+driver), and the driver resolves its own node.
 
 ```sh
 env -u LIBVA_DRIVERS_PATH -u LIBVA_DRIVER_NAME -u LIBVA_V4L2_VIDEO_PATH vainfo

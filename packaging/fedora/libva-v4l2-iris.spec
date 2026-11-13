@@ -125,6 +125,10 @@ sh scripts/refresh-install-manifest.sh \
 # this SoC reports DRIVER=msm_dpu. The alias keeps clients that do not set the
 # variable (mpv, VLC, GStreamer) on this driver instead of software.
 %{_libdir}/dri/msm_drv_video.so
+# Client recipes written for the sibling distribution set
+# LIBVA_DRIVER_NAME=qcom; this alias keeps that name resolving to the same
+# driver instead of falling back to software.
+%{_libdir}/dri/qcom_drv_video.so
 # Read-only device report, one-command hardware check, and the opt-in mpv /
 # Firefox configuration. The first two source one shared node-resolution file.
 %{_bindir}/iris-device-check
