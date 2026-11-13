@@ -2,7 +2,7 @@
 
 **English** | [中文](README.zh-CN.md)
 
-A libva driver for the Qualcomm Iris V4L2 video decoder and encoder, hardware-optimized for the Xiaomi Pad 6S Pro (sheng, SM8550) on ARM64 Linux. It provides hardware-accelerated video decode and encode for Google Chrome, Firefox, and FFmpeg, routing decoded frames directly into application buffers with zero copy on qualified pipelines.
+A libva driver for the Qualcomm Iris V4L2 video decoder and encoder, hardware-optimized for the Xiaomi Pad 6S Pro (sheng, SM8550) on ARM64 Linux. It provides hardware-accelerated video decode and encode for Google Chrome, Firefox, FFmpeg, Kodi, and Sunshine (Moonlight game streaming), routing decoded frames directly into application buffers with zero copy on qualified pipelines.
 
 Kernel patches, diagnostic scripts, and packaging specs are provided in this repository as supporting assets for hardware validation and deployment.
 
@@ -38,6 +38,36 @@ Hardware encode verification requires an active Iris IRQ counter increase, error
 
 The processor is off unless `V4L2_VA_VPP` is set. It runs the pinned Vulkan compute kernel on the surface DMA-BUFs and offers one operation, a scale at the ratio the client asks for, sampling where swscale samples, starting from the surface region the client names and applied after the clockwise quarter turn the client asks for. The interpolation method comes from the picture's `filter_flags`: the default and `VA_FILTER_INTERPOLATION_NEAREST_NEIGHBOR` are the point map, `VA_FILTER_INTERPOLATION_BILINEAR` blends the four samples around the destination sample's centre, and `VA_FILTER_INTERPOLATION_ADVANCED` is the driver's own pick per axis — the area average when an axis shrinks, where a two-tap filter aliases, and a four-tap cubic when it grows. The pipeline caps name advanced, because the field holds one method rather than a bit set and that is the best of the three. NV12 and P010 surfaces are scaled by the same taps, one kernel per destination sample width, and either source depth feeds either output: the kernel converts `code >> 2` on the way down to eight bits and `code << 2` on the way up to ten before it samples, which is the conversion swscale applies, so a picture that only changes bit depth is byte-identical to `format` and a scale in the same picture matches `scale` then `format`. Colour conversion and the filters outside the one below are refused. Mirroring on either axis, or on both, runs after the rotation and before the scale, so every `transpose_vaapi` direction a client can name works. Its geometry floor is the kernel's own 2x2 rather than the decoder node's minimum, so a client can scale down to a thumbnail. One filter is implemented: `VAProcFilterHighDynamicRangeToneMapping` with HDR10 metadata takes a P010 BT.2020/PQ surface to SDR NV12 through the BT.2390 EETF, the BT.2020 to BT.709 matrix and the BT.709 OETF. It converts the whole surface at its own size and runs first, so a crop, a scale, a rotation, a mirror or a second buffer in the same picture is a later pass over the converted frame rather than a refusal. An NV12 source, HDR-to-HDR and a second filter are still refused. The processor also composites: a picture may carry one main pipeline buffer and up to sixteen blending passes on top of it, each mixing a surface into one even rectangle of the output with a `VABlendState` — the shape `overlay_vaapi` submits, generalised to a stack. The passes run in submission order, so a later one covers an earlier one; the driver copies the main rectangle into the output and then reads the output back for each layer, which is why one kernel serves any number of them. The overlay is either the output's own Y'CbCr format, mixed on the coded values of both planes, or a packed `VA_RT_FORMAT_RGB32` surface (`VA_FOURCC_BGRA` or `VA_FOURCC_RGBA`), converted to the output frame's BT.601, BT.709 or BT.2020 matrix while it is mixed. The overlay is sampled from its own surface region, so a client composites part of a surface rather than all of it, with the same interpolation method the scale kernel runs. Both forms implement `VA_BLEND_GLOBAL_ALPHA` and `VA_BLEND_PREMULTIPLIED_ALPHA`, the flag FFmpeg sets for an overlay input with an alpha channel: with it, a packed overlay's own alpha byte multiplies the global one, so a surface with a real alpha channel produces the picture that channel describes. The output's range comes from `output_color_properties`: a full-range destination is encoded on 0..255 rather than 16..235. Luma keying is refused, and an alpha of 0 or 1 reproduces the main or the overlay frame byte for byte.
 
+## Performance
+
+HEVC Main 8-bit throughput on the SM8550 tablet, FFmpeg 8.1.3, five
+interleaved runs per cell with every CPU policy at its maximum
+(2016/2803/2956 MHz) and the GPU at 680 MHz. Clips are synthetic I/P at GOP 60
+and VBR 5/10/20 Mbps; encoding includes the CPU NV12 upload and runs at
+`-async_depth 4`; decoding excludes download and rendering. 900 frames per run
+at 720p and 1080p, 480 at 4K, so process start-up is amortised. The comparison
+is the sibling `radxa-pkg/qcom-va-driver` built and run on the same node and
+clips.
+
+| Operation | 720p | 1080p | 4K |
+| --- | ---: | ---: | ---: |
+| Decode, this driver | 759 fps | 581 fps | 359 fps |
+| Decode, sibling | 759 fps | 579 fps | 358 fps |
+| Encode, this driver | 644 fps | 591 fps | 167 fps |
+| Encode, sibling | 631 fps | 575 fps | 163 fps |
+
+Decode is at parity; encode is 2.1-2.8 % ahead at all three sizes. Decode also
+costs 16-19 % less client CPU per process (0.27/0.42/0.40 s against
+0.33/0.50/0.50 s), consistent with this driver deferring the copy engine until
+a copy is actually requested. The sibling's published table is SC8280XP and is
+not comparable with these SM8550 numbers.
+
+The VA video processor scales 1080p to 720p at 536 fps on 0.54 s of client CPU
+per 900 frames, against 287 fps and 8.4 s for
+`hwdownload,format=nv12,scale=1280:720` behind the same hardware decode: the
+scale runs on the GPU instead of a copy out to the CPU. It is opt-in
+(`V4L2_VA_VPP`).
+
 ## Requirements
 
 - Target SoC: Qualcomm SM8550 (HFI gen2 Iris VPU), aarch64.
@@ -70,7 +100,7 @@ Build the Debian package in a chroot (`sbuild`, `pbuilder`) rather than on a
 device: `libgbm-dev` is pinned to the distribution's Mesa and can downgrade a
 vendor-patched graphics stack.
 
-The package installs the driver binary along with the `msm_drv_video.so` symlink, allowing libva to resolve the driver automatically for clients such as mpv, VLC, and GStreamer without requiring `LIBVA_DRIVER_NAME`.
+The package installs the driver binary along with the `msm_drv_video.so` and `qcom_drv_video.so` symlinks, allowing libva to resolve the driver automatically for clients such as mpv, VLC, and GStreamer without requiring `LIBVA_DRIVER_NAME`, and for client recipes that set `LIBVA_DRIVER_NAME=qcom`, the name the sibling distribution uses.
 
 ### Diagnostic Tools
 

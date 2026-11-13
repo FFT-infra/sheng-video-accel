@@ -8289,3 +8289,169 @@ this change; Chrome does not encode, and the Chrome decode pass is unchanged
 by both commits. The matrix and quality gates ran from the build tree, not
 from an installed package. 4K numbers are not comparable across runs on this
 tablet without pinning CPU and GPU frequency.
+
+## Pinned-clock HEVC throughput against the sibling on one node (2026-11-14)
+
+Target `sheng`, boot `4b73926c-a774-4ae4-8968-d0a26b20a9c3`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, decoder node `/dev/video0` and encoder node
+`/dev/video1` resolved by QUERYCAP name `iris_driver`, render node
+`/dev/dri/renderD128`. This driver `f74ea6ad0defee68`, sibling
+`f7dd97109f3a9965`, both built in the same tree layout and run from a
+release build tree in interleaved rounds on the same clips. FFmpeg 8.1.3,
+battery 83% discharging, thermal zones 31-47 °C, no firmware reset.
+
+Throughput on this tablet tracks the clock, so CPU policies 0, 3 and 7 were
+held in the `performance` governor at 2016000, 2803200 and 2956800 Hz and
+`3d00000.gpu` in `userspace` at 680000000 Hz for the whole run. Each cell is
+the mean of five rounds, alternating drivers. Clips are `x265` ultrafast with
+`bframes=0` and `keyint=60`, 900 frames at 720p and 1080p and 480 frames at
+4K, so process start-up is amortised rather than measured. Encode is
+`-c:v h264_vaapi -b:v 5M/10M/20M -g 60 -async_depth 4` over an `-f lavfi`
+`testsrc2` source, which includes the CPU NV12 upload. Decode is
+`-hwaccel vaapi -hwaccel_output_format vaapi -f null -`, so it excludes the
+download and the display.
+
+| operation | 720p | 1080p | 4K |
+| --- | ---: | ---: | ---: |
+| decode, this driver | 759.1 fps | 581.1 fps | 358.6 fps |
+| decode, sibling | 758.5 fps | 578.8 fps | 358.0 fps |
+| encode, this driver | 644.4 fps | 591.0 fps | 167.2 fps |
+| encode, sibling | 631.0 fps | 575.0 fps | 163.2 fps |
+| decode client utime, this driver | 0.274 s | 0.423 s | 0.403 s |
+| decode client utime, sibling | 0.331 s | 0.501 s | 0.495 s |
+
+Decode sits at parity, within 0.4 % in every size. Encode is 2.1 %, 2.8 % and
+2.5 % ahead. The client CPU column is the part that a browser or a player
+feels: decode costs 17 %, 16 % and 19 % less user time per 900 frames, which
+is the deferred copy engine — a pipeline that never asks for a copy never
+starts the GPU copy backend. Encode utime is equal between the two drivers
+(1.01 against 1.08 s at 720p, 1.94 against 1.91 s at 1080p, 4.82 against
+4.80 s at 4K), so the fps difference there is scheduling overhead, not work.
+
+The first attempt at this table was thrown away: a leftover profiler ffmpeg
+had been spinning in `R` for 50 minutes and held a core, and its temperatures
+were 52-64 °C. The numbers above are from a quiet machine.
+
+What this does not prove: one synthetic clip per size, so scene complexity
+and bitrate effects are not sampled; the sibling's published table is
+SC8280XP and cannot be compared with these SM8550 numbers; 4K at 167 fps is
+close enough to the encoder's own ceiling that a different content mix would
+move it more than the driver difference.
+
+## The video processor's per-picture Vulkan cost, and what it buys (2026-11-14)
+
+The first working scale pipeline created a `VkInstance`, a physical device, a
+logical device and a compute pipeline per picture. It passed every
+correctness gate and ran 1080p to 720p at 20.8 fps on 34.6 s of client CPU
+per 900 frames: the cost was device creation, not the scale.
+
+`src/iris/vpp/scale.cc` now keeps one device and one compute queue for the
+process, compiles each kernel once, and serialises submit-plus-wait on that
+queue under a mutex. A job owns only its buffers, memories, descriptor and
+command pools and fence; the device, descriptor set layout, pipeline layout
+and pipeline are borrowed and outlive it. The shared state is deliberately
+leaked so the device is not torn down while a client still holds surfaces.
+
+Same command, same pinned clocks, same clip, five interleaved rounds:
+
+| 1080p to 720p | fps | client utime per 900 frames |
+| --- | ---: | ---: |
+| VPP scale, cached device | 535.7 | 0.542 s |
+| `hwdownload,format=nv12,scale=1280:720` | 287.0 | 8.370 s |
+
+The scale is 1.87x the throughput of downloading and scaling on the CPU, and
+it costs 6.4 % of the client CPU time, because the picture never leaves the
+device: `hwdownload` pulls 900 frames out of the GPU and swscale runs on the
+SoC cores. The old per-picture code would have been 4.8 % of the cached
+figure, which is why this had to be fixed before the VPP number meant
+anything.
+
+Correctness did not move with the ownership change. On driver `f74ea6ad` the
+seven VPP gates pass: `scale_vaapi` 8/8 byte-identical to swscale, a crop
+matches `crop,scale`, all seven `transpose_vaapi` directions exact, the tone
+mapper within one code of its model, `overlay_vaapi` at the documented codes,
+the 32-case compositing gate, and the bilinear method against its four-tap
+model.
+
+What this does not prove: the queue is one per process, so two clients that
+both stream through VPP serialise their picture submissions; the measured
+client is FFmpeg's `scale_vaapi` on one stream, not a compositor mixing
+several; the CDSP backend is still blocked on this tablet by the FastRPC PD
+create (see the FastRPC record above), so all of this runs on the GPU.
+
+## Kodi plays H.264 and HEVC from the installed driver (2026-11-14)
+
+Kodi 22.0-RC1 (21.90.901, Fedora 44 package) on Wayland, driven with
+`kodi --test <clip>` so it plays the file and exits. Driver installed with
+`scripts/install-system.sh build-rel` from source `5ec922c` with a dirty tree
+(tracked digest `227f62fa5fab0e61`), sha256 `f74ea6ad0defee68` under
+`/usr/lib64/dri/`, both `msm_drv_video.so` and `qcom_drv_video.so` symlinks
+present. No `LIBVA_*` override. Battery 83% discharging, no firmware reset.
+
+| clip | session | result |
+| --- | --- | --- |
+| H.264 1920x1080, 300 frames | `mode=decode-order codec=H264`, 300 capture tokens, all `publish=direct` | submitted=300 completed=300 errors=0 drops=0 timeouts=0 drains=1 misplaced=0, 11.59 s |
+| HEVC 1920x1080, 300 frames | `mode=decode-order codec=HEVC`, 300 capture tokens, all `publish=direct` | submitted=300 completed=300 errors=0 drops=0 timeouts=0 drains=1 misplaced=0, 11.49 s |
+
+Both ran in real time (300 frames at 30 fps is 10 s of content, and Kodi's
+own log closes `VAAPI::Close` 10.1 s after "Opening stream"). A 300-frame
+decode through `LIBVA_DRIVER_NAME=qcom` and through `msm` produced the same
+300/300 direct session, so the compatibility alias reaches this driver and
+not libva's software fallback.
+
+Kodi probes the video processor on startup. With VPP off it logs
+`VAAPI/vpp vaCreateConfig error: the requested VAProfile is not supported
+(12)` and plays the file anyway. With `V4L2_VA_VPP=1` the profile-none config
+is created and the remaining message is `vaQueryVideoProcFilterCaps error:
+the requested filter is not supported (32)`, which is Kodi asking for
+deinterlacing filters this driver does not implement; the same clip played
+300/300 direct. Neither message changes the playback result.
+
+What this does not prove: no navigation through Kodi's UI, no audio, no
+subtitles, no 4K and no interlaced source; VPP stayed on the probe path
+because progressive 1080p needs no filter; this is the installed driver, but
+the client was driven from the command line rather than by a person.
+
+## Sunshine streams 1080p60 with both halves on the hardware (2026-11-14)
+
+Sunshine 2026.914.233613 captured the DSI-1 KMS output and encoded
+it; Moonlight 6.2.0 on the same tablet decoded the stream through the same
+driver. The encoder probe accepted `h264_vaapi` (H.264 High, level 4.2) and
+`hevc_vaapi` (HEVC Main) and refused `av1_vaapi` and HEVC Main10 with "No
+usable encoding entrypoint found", which is the encoder surface this driver
+advertises, not a client fault.
+
+A 30 s session at 1920x1080, 60 fps, H.264 10 Mbps encoded 1847 pictures
+between t=31.0 s and t=61.9 s of the driver trace, 8 of them IDRs, and every
+`encode drain result=complete`; a second session brought the log to 2813
+pictures with no encode error. The encoder ran CBR at the client's requested
+7.3 Mbps, level 4.2.
+
+Moonlight's session summary at exit:
+
+| metric | value |
+| --- | --- |
+| incoming frame rate | 60.31 fps |
+| decoding frame rate | 60.31 fps |
+| rendering frame rate | 59.53 fps |
+| host processing latency min/max/avg | 4.7 / 20.3 / 7.8 ms |
+| network latency | 1 ms |
+| rendering time, including vsync | 4.47 ms |
+
+Moonlight's FFmpeg decoder selected VAAPI for the incoming stream and logged
+"Direct mapping possible" on the stream surfaces, so the decode half is this
+driver too.
+
+Two operational facts for anyone repeating this. The f2fs rootfs does not
+support the `security.capability` xattr: `setcap` fails with "Operation not
+supported", so the packaged capability setup cannot be used and Sunshine has
+to run as root; its DRM worker holds CAP_SYS_ADMIN and CAP_SYS_NICE and the
+main thread logs `drop_elevated_privileges succeeded`. Pairing failed with
+"Incorrect PIN" through both the stdin path and the web API until
+`/root/.config/sunshine` and the Moonlight profile were removed and the
+credentials re-created: stale pairing state, not the PIN submission.
+
+What this does not prove: no gamepad or input-to-photon latency, no HEVC
+session (HEVC was probed but not streamed), no AV1 encode, one display output
+(DSI-1), and loopback only, so the 1 ms network latency says nothing about a
+real Wi-Fi link.

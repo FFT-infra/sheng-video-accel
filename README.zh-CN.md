@@ -2,7 +2,7 @@
 
 [English](README.md) | **中文**
 
-面向小米平板 6S Pro（sheng，骁龙 SM8550）硬件优化的 Qualcomm Iris V4L2 VA-API 视频驱动。为 ARM64 Linux 上的 Google Chrome、Firefox 和 FFmpeg 提供硬件视频编解码支持，并在特定流水线中支持画面从固件直出应用缓冲区的零拷贝路径。
+面向小米平板 6S Pro（sheng，骁龙 SM8550）硬件优化的 Qualcomm Iris V4L2 VA-API 视频驱动。为 ARM64 Linux 上的 Google Chrome、Firefox、FFmpeg、Kodi 和 Sunshine（Moonlight 串流）提供硬件视频编解码支持，在已验收的流水线上把解码画面直接送进应用缓冲区，不做拷贝。
 
 仓库内包含的内核补丁、诊断脚本与打包规则均作为硬件验证与部署配套提供。
 
@@ -38,6 +38,21 @@ AV1 film grain 合成已支持。客户端给出独立的 `current_display_pictu
 
 视频处理默认关闭，需设置 `V4L2_VA_VPP`。处理在 surface 的 DMA-BUF 上运行固定的 Vulkan 计算内核，缩放取点位置与 swscale 相同，起点是客户端给出的 surface region，先按客户端要求做顺时针旋转再缩放。插值方式由画面的 `filter_flags` 决定：默认值和 `VA_FILTER_INTERPOLATION_NEAREST_NEIGHBOR` 都是点映射，`VA_FILTER_INTERPOLATION_BILINEAR` 在目标样本中心周围取四点做双线性混合，`VA_FILTER_INTERPOLATION_ADVANCED` 由驱动按每个轴自己选——某个轴在缩小时取区域平均，两级抽头在那里会混叠，放大时取四点三次插值。pipeline caps 公布的是 advanced：这个字段存的是单个方法而不是位集合，三者中它最强。NV12 与 P010 用同一套抽头，按目标样本宽度各有一个内核，源与目标的位深可以不同：内核在取点前先做 `code >> 2` 降到八位或 `code << 2` 升到十位，这正是 swscale 的换算，所以只改位深的画面与 `format` 逐字节相同，同一画面里的缩放也与 `scale` 再 `format` 一致。色彩转换和下面这一个之外的滤镜都会被拒绝。水平、垂直或两者同时的镜像都在旋转之后、缩放之前生效，所以客户端能写的 `transpose_vaapi` 七个方向都能跑。几何下限是内核自身的 2x2，不再受解码节点最小尺寸约束，因此可以缩到缩略图大小。滤镜只实现了一个：带 HDR10 元数据的 `VAProcFilterHighDynamicRangeToneMapping`，按 BT.2390 曲线、BT.2020 到 BT.709 矩阵和 BT.709 OETF 把 P010 的 BT.2020/PQ 画面转成 SDR NV12。它按原尺寸转换整幅 surface 并先执行，所以同一画面里的裁剪、缩放、旋转、镜像或第二个 buffer 都是转换之后的独立一档，不再被拒绝；NV12 输入、HDR 转 HDR 和第二个滤镜仍然拒绝。处理器也做合成：一个画面可以带一个主 pipeline buffer 和最多十六个叠加档，每档用 `VABlendState` 把一个 surface 混进输出的一个偶数矩形，也就是 `overlay_vaapi` 提交的形状，只是可以叠多层。各档按提交顺序执行，后一档盖住前一档；驱动先把主矩形拷进输出，再逐层读回输出，因此一个内核能服务任意多层。叠加面可以是输出自身的 Y'CbCr 格式，在两个平面的码值上混合；也可以是打包的 `VA_RT_FORMAT_RGB32` 面（`VA_FOURCC_BGRA` 或 `VA_FOURCC_RGBA`），混合时转换成输出画面的 BT.601、BT.709 或 BT.2020 矩阵。叠加面从它自己的 surface region 采样，所以客户端可以只合成一个 surface 的一部分，插值方式与缩放内核相同。两种形式都实现 `VA_BLEND_GLOBAL_ALPHA` 和 `VA_BLEND_PREMULTIPLIED_ALPHA`（FFmpeg 对带 alpha 通道的叠加输入会置后者）：置上后打包叠加面自己的 alpha 字节会乘上全局 alpha，带真实 alpha 通道的 surface 因此能出它描述的画面。输出范围取自 `output_color_properties`，全范围目标编码在 0..255 而不是 16..235。luma key 会被拒绝，alpha 取 0 或 1 时输出分别与主画面和叠加画面逐字节相同。
 
+## 性能
+
+SM8550 平板上的 HEVC Main 8-bit 吞吐，FFmpeg 8.1.3。每个格五轮交错运行，三个 CPU policy 都锁在 performance governor 的最高频（2016/2803/2956 MHz），`3d00000.gpu` 锁在 680 MHz。片源为 GOP 60、`bframes=0`、`keyint=60` 的 x265 合成 I/P 帧，720p 与 1080p 每次 900 帧，4K 480 帧，进程启动时间因此被摊薄。编码使用 VBR 5/10/20 Mbps，计入 CPU 端的 NV12 上传，`-async_depth 4`；解码不下载、不显示。对照组是 `radxa-pkg/qcom-va-driver`，同一节点、同一批片源、同一种构建布局。
+
+| 操作 | 720p | 1080p | 4K |
+| --- | ---: | ---: | ---: |
+| 解码，本驱动 | 759 fps | 581 fps | 359 fps |
+| 解码，对照组 | 759 fps | 579 fps | 358 fps |
+| 编码，本驱动 | 644 fps | 591 fps | 167 fps |
+| 编码，对照组 | 631 fps | 575 fps | 163 fps |
+
+解码三档都在 0.4% 以内，算持平；编码分别快 2.1%、2.8%、2.5%。解码每 900 帧的客户端用户态 CPU 少 17%、16%、19%（0.27/0.42/0.40 s 对 0.33/0.50/0.50 s），来自把拷贝引擎推迟到真正需要拷贝时才启动：不需要拷贝的流水线不会拉起 GPU 拷贝后端。编码的用户态 CPU 两者相同（720p 1.01 对 1.08 s，1080p 1.94 对 1.91 s，4K 4.82 对 4.80 s），fps 的差距来自调度开销，不是多干活。对照组公布的表是 SC8280XP 的成绩，不能和这里的 SM8550 数字直接比较。
+
+VPP 把 1080p 缩到 720p：每 900 帧 535.7 fps，客户端用户态 CPU 0.542 s；同样的硬件解码接 `hwdownload,format=nv12,scale=1280:720` 只有 287.0 fps、8.370 s。画面留在设备上由 GPU 缩放，不用搬到 CPU。VPP 默认关闭，设置 `V4L2_VA_VPP` 才启用。
+
 ## 运行环境
 
 - 目标平台：高通 SM8550（HFI gen2 Iris VPU），aarch64 架构。
@@ -68,7 +83,7 @@ sudo apt install ../libva-v4l2-iris_0.1.0_arm64.deb
 
 Debian 包请在 chroot（`sbuild`、`pbuilder`）里构建：`libgbm-dev` 绑定发行版的 Mesa，直接在设备上安装构建依赖可能降级厂商魔改的图形栈。
 
-安装包会自动放置驱动本体与 `msm_drv_video.so` 符号链接，mpv、VLC 与 GStreamer 等客户端可在未指定 `LIBVA_DRIVER_NAME` 的情况下直接加载该驱动。
+安装包会自动放置驱动本体与 `msm_drv_video.so`、`qcom_drv_video.so` 两个符号链接：mpv、VLC 与 GStreamer 等客户端可在未指定 `LIBVA_DRIVER_NAME` 的情况下直接加载该驱动，按兄弟发行版写法显式设置 `LIBVA_DRIVER_NAME=qcom` 的客户端也能落到同一个驱动。
 
 ### 诊断脚本
 
