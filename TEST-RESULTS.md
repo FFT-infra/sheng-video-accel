@@ -7280,9 +7280,21 @@ starting at x begins its chroma at byte `2 * x` of the row; the kernel used
 `x`. Every 10-bit crop case until now started at the origin, where the two
 agree. The gate's crop cases now start at `+16+16`, and both origins pass.
 
-Three claims are not yet made. The pre-fix kernel has not been re-run against
-the new crop case as a negative control. None of this has been repeated from
-the installed package. And `scale_vaapi_gate.sh` has not been re-run since the
-rotation change: its unrotated ratios are covered by the kernel gate above,
-but the VA-level scale path last ran on the previous commit, so the next
-session owes that run.
+### The negative control, the scale gate and the installed package
+
+The pre-fix `p010_scale.spv` (`8ab4699c…`) run against the crop case that
+starts at `+16+16` fails on every chroma pair (1920 samples: `96/2 * 40/2 * 2`)
+and on no luma sample, and the fixed kernel passes the same case in the same
+run (`run-20261113T082219Z`, guard `complete`, exit 0). That is what makes the
+crop case evidence rather than a coincidence.
+
+`scale_vaapi_gate.sh` was re-run after the rotation change: 8 NV12 ratios and
+3 P010 ratios, all byte-identical to swscale (`run-20261113T082306Z`). The
+rotation work did not move the scale path.
+
+The same two VA-level gates then ran from the installed package: artifacts
+`7dc6f386` in `/usr/lib64/dri` (previous build kept as the rollback copy),
+`IRIS_VPP_INSTALLED=1`, no `LIBVA_DRIVERS_PATH`. Transpose 9/9 and scale
+8+3/11 byte-identical (`run-20261113T082519Z`, `run-20261113T082604Z`), both
+reporting `driver_source=installed-package` and the same `driver_sha256`.
+Battery 59 % discharging at the last run.
