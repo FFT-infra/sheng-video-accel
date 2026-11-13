@@ -7531,14 +7531,13 @@ minimum; and a picture whose output aliases its input through two surfaces
 over one DMA-BUF is refused by `st_dev`/`st_ino` rather than by object
 identity.
 
-**Build-tree artifact**, not the installed package. Source commit `681b21d`,
-tracked source `02aec978…`, driver `cc0d022b…`, `source_dirty=0` for every
-run. Boot `4b73926c-a774-4ae4-8968-d0a26b20a9c3`, kernel
+The gate table below ran against the **build tree** (`LIBVA_DRIVERS_PATH`
+pointing at `build/src`): source commit `681b21d`, tracked source
+`02aec978…`, driver `cc0d022b…`, `source_dirty=0`. The same artifact was then
+installed and the whole client surface re-run; that is the second table.
+Boot `4b73926c-a774-4ae4-8968-d0a26b20a9c3`, kernel
 `7.2.6-sm8550-g42f3b40-iris1`, module `b90bd823…`, decoder node resolved by
-`iris_driver` QUERYCAP at `/dev/video0`, encoder at `/dev/video1`. The runs
-pin the pass chain and the kernels; decode and encode were not re-qualified
-against this artifact, and the installed package on the target is still
-`fe3a1822`.
+`iris_driver` QUERYCAP at `/dev/video0`, encoder at `/dev/video1`.
 
 | Gate | Run | Cases | Result |
 | --- | --- | ---: | --- |
@@ -7584,3 +7583,25 @@ depths 0, `amp_enabled_flag=0`, `sample_adaptive_offset_enabled_flag=1`,
 `deblocking_filter_override_enabled_flag=1`. The driver now returns exactly
 those as REQUIRED/SUPPORTED with a 32x32 CTB, and the same encode runs
 without the two warnings.
+
+### The installed package, re-qualified
+
+`scripts/install-system.sh build` installed `cc0d022b…` as
+`/usr/lib64/dri/v4l2_drv_video.so` at source commit `94c646e`, tracked source
+`6bf8c526…`, `IRIS_SOURCE_DIRTY=0`. The manifest records the rollback as
+`/usr/local/share/iris-vaapi/backup/v4l2_drv_video.so`, the former
+`fe3a1822…`. Every run below has `source_dirty=0` and resolved the driver
+through libva with no `LIBVA_DRIVERS_PATH`.
+
+| gate | run | result |
+| --- | --- | --- |
+| `tonemap_gate.sh` (`IRIS_VPP_INSTALLED=1`) | `run-20261113T102614Z` | 11 cases, 3 refusals |
+| `overlay_gate.sh` (`IRIS_VPP_INSTALLED=1`) | `run-20261113T102649Z` | 7 cases, 2 endpoints, 8 refusals |
+| `crop_vaapi_gate.sh` (`IRIS_VPP_INSTALLED=1`) | `run-20261113T102725Z` | 3 exact |
+| `scale_vaapi_gate.sh` (`IRIS_VPP_INSTALLED=1`) | `run-20261113T102800Z` | 8 ratios exact |
+| `transpose_vaapi_gate.sh` (`IRIS_VPP_INSTALLED=1`) | `run-20261113T102836Z` | 7 directions, 2 formats |
+| `iris-matrix.sh` | `run-20261113T102931Z` | H.264, HEVC, VP9, AV1 48/48 exact, `drops=0` |
+| `iris-real-clip-gate.sh` | `run-20261113T103007Z` | AV1 120/120 `import=120 copy=0`; DRC 80 frames `import=42 copy=42` |
+| `iris-encode-quality.sh` | `run-20261113T103047Z` | 120 frames each, SSIM 0.9986 / 0.9968, HEVC IRQ +241 |
+| `iris-browser-acceptance.sh` | `run-20261113T103134Z` | Chrome 156 `VaapiVideoDecoder`, `platform=True`, 478 frames, 0 dropped, `driver=installed:cc0d022b` |
+| `iris-av1-browser-matrix.sh local-only` | `run-20261113T103213Z` | Firefox 485 decoded / 8 dropped `hw_log=True`; Chrome 477 / 0 |
