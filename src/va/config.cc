@@ -68,6 +68,10 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
     auto& d = data(ctx);
     const bool decode = d.capabilities.profiles.count(profile) && entrypoint == VAEntrypointVLD;
     const bool encode = d.capabilities.encode_profiles.count(profile) && entrypoint == VAEntrypointEncSlice;
+    // The HEVC feature and block-size attributes describe the parameter sets
+    // the firmware writes, so they answer only for a profile that HEVC encodes.
+    const bool hevc_encode = encode
+        && (profile == VAProfileHEVCMain || profile == VAProfileHEVCMain10);
     const bool vpp = profile == VAProfileNone && entrypoint == VAEntrypointVideoProc && vpp_available(d);
     for (int i = 0; i < count; ++i) {
         switch (attributes[i].type) {
@@ -127,6 +131,50 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
             // NOT_SUPPORTED answer makes it compute -1.
             attributes[i].value = encode ? 1 : VA_ATTRIB_NOT_SUPPORTED;
             break;
+#if VA_CHECK_VERSION(1, 13, 0)
+        case VAConfigAttribEncHEVCFeatures: {
+            // The firmware writes the parameter sets, so the answer is what a
+            // trace_headers dump of its own SPS/PPS says rather than what a
+            // client asked for (TEST-RESULTS.md, "HEVC encode attributes").
+            // SAO, temporal MVP and cu_qp_delta are on in every stream and no
+            // picture parameter turns them off, which is REQUIRED; the slice's
+            // deblocking-disable flag is the one the encoder acts on, which is
+            // SUPPORTED. AMP, PCM, transform skip, scaling lists, sign data
+            // hiding and the rest are zero in that SPS and stay unsupported.
+            if (!hevc_encode) {
+                attributes[i].value = VA_ATTRIB_NOT_SUPPORTED;
+                break;
+            }
+            VAConfigAttribValEncHEVCFeatures features = {};
+            features.bits.sao = VA_FEATURE_REQUIRED;
+            features.bits.temporal_mvp = VA_FEATURE_REQUIRED;
+            features.bits.cu_qp_delta = VA_FEATURE_REQUIRED;
+            features.bits.deblocking_filter_disable = VA_FEATURE_SUPPORTED;
+            attributes[i].value = features.value;
+            break;
+        }
+        case VAConfigAttribEncHEVCBlockSizes: {
+            // log2_min_luma_coding_block_size_minus3 = 0, log2_diff_max_min =
+            // 2, log2_min_luma_transform_block_size_minus2 = 0 and
+            // log2_diff_max_min = 3: one 32x32 CTB size, 8x8 smallest coding
+            // block, 4x4 to 32x32 transforms, no transform hierarchy. FFmpeg
+            // otherwise guesses 32/16 and logs that it guessed.
+            if (!hevc_encode) {
+                attributes[i].value = VA_ATTRIB_NOT_SUPPORTED;
+                break;
+            }
+            VAConfigAttribValEncHEVCBlockSizes sizes = {};
+            sizes.bits.log2_max_coding_tree_block_size_minus3 = 2;
+            sizes.bits.log2_min_coding_tree_block_size_minus3 = 2;
+            sizes.bits.log2_min_luma_coding_block_size_minus3 = 0;
+            sizes.bits.log2_max_luma_transform_block_size_minus2 = 3;
+            sizes.bits.log2_min_luma_transform_block_size_minus2 = 0;
+            sizes.bits.max_max_transform_hierarchy_depth_inter = 0;
+            sizes.bits.max_max_transform_hierarchy_depth_intra = 0;
+            attributes[i].value = sizes.value;
+            break;
+        }
+#endif
         default:
             // Slice structure, ROI, quality range and tiles stay unsupported:
             // the firmware decides the layout.
