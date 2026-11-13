@@ -641,6 +641,11 @@ encode control missing name=<control> id=<hex>        (optional control absent;
                                                        the session continues;
                                                        prepend-spspps-to-idr has no id)
 va export_surface id=<n> persistent=0|1 source=frame|stable fd=<n> pitch=<n>
+va grain <w>x<h> source=frame|stable                   (a grained AV1 display
+                                                      surface's blend ran;
+                                                      `source` names where
+                                                      the ungrained picture
+                                                      came from)
 ```
 
 Four VA-side diagnostics are emitted but intentionally stay out of the

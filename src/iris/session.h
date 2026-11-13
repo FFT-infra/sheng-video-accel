@@ -19,11 +19,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
-#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
-#include <vector>
 
 namespace iris {
 

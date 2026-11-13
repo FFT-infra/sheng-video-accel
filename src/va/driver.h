@@ -15,6 +15,7 @@
 #include "../util/encode-params.h"
 #include "../util/options.h"
 #include "../util/trace.h"
+#include "grain.h"
 
 extern "C" {
 #include <va/va.h>
@@ -61,8 +62,9 @@ struct Surface {
     iris::Target target;
     // Memory the client may already have imported. Allocated on the first
     // export/derive/import that happens before a decode, or when the copy
-    // policy is forced. Never replaced once handed out.
-    std::unique_ptr<iris::StableBuffer> stable;
+    // policy is forced. Never replaced once handed out. Shared because a
+    // film grain job may outlive the surface it writes into.
+    std::shared_ptr<iris::StableBuffer> stable;
     bool persistent_export = false;
     unsigned derived_images = 0;
     unsigned acquired_handles = 0;
@@ -76,10 +78,31 @@ struct Surface {
     // vaPutImage. Nothing on the hardware side has to happen before a
     // download may read them, so this counts as "has pixels" on its own.
     bool client_pixels = false;
+    // AV1 film grain synthesis. The picture decodes into current_frame and
+    // the grained pixels belong on current_display_picture, this surface.
+    // The blend is synchronous with that picture's endPicture: a Direct
+    // completion releases its CAPTURE slot with the next submit and a Copy
+    // one overwrites the surface's buffer, so the source pixels are only the
+    // picture's while endPicture still holds them.
+    struct GrainJob {
+        // The display surface owns the job; the job names it weakly so the
+        // pair cannot keep itself alive.
+        std::weak_ptr<Surface> display;
+        // The display surface's own buffer, held strongly: the blend writes
+        // it even if the surface is destroyed on another thread meanwhile.
+        std::shared_ptr<iris::StableBuffer> destination;
+        GrainParams params;
+        iris::Trace trace { false };
+    };
+    // Set on the display surface while its synthesis is still owed.
+    std::shared_ptr<GrainJob> grain;
+    // Pixels this driver blended here from another surface's decode. They
+    // live in `stable`, and no session owns this surface.
+    bool grain_pixels = false;
     bool rendering() const { return target.pending; }
     bool has_pixels() const
     {
-        return (target.completed || vpp_pixels || client_pixels) && (target.frame || stable);
+        return (target.completed || vpp_pixels || client_pixels || grain_pixels) && (target.frame || stable);
     }
 };
 
@@ -286,6 +309,27 @@ std::shared_ptr<Context> owner_of(DriverData& d, const Surface& surface);
 // places that advertise or accept a capture format (config attributes,
 // surface attributes, context creation) all ask this one function.
 bool p010_decode_profile(VAProfile profile);
+
+// Queue the AV1 film grain picture the client described, if it asked for one:
+// the picture decodes into `decoded` (current_frame, the ungrained reference)
+// and the grained picture is owed on current_display_picture. Called before
+// the submit, so the display surface knows a blend is coming.
+std::shared_ptr<Surface::GrainJob> queue_grain(DriverData& d, Context& c, const std::shared_ptr<Surface>& decoded);
+
+// Settle that picture: wait for its completion through the session and blend
+// the grain into the display surface. Must run before endPicture returns and
+// before the decode surface is reused. Throws when the picture or the blend
+// failed, which fails the endPicture call.
+void finish_grain(DriverData& d, const std::shared_ptr<Surface::GrainJob>& job,
+    const std::shared_ptr<iris::Session>& session, iris::Target& source);
+
+// The picture never reached the session (a submit failure): the display
+// surface must not report a synthesis that will never run.
+void abandon_grain(DriverData& d, const std::shared_ptr<Surface::GrainJob>& job);
+
+// Whether the surface's pixels are still being produced: a decode on its own
+// target, or a film grain blend from another surface's picture.
+bool producing(DriverData& d, const Surface& surface);
 
 // Publish policy for the next picture on this surface through `session`.
 iris::Publish publish_policy(const DriverData& d, const Surface& surface, const iris::Session& session);

@@ -15,6 +15,7 @@
 extern "C" {
 #include <fcntl.h>
 #include <libdrm/drm_fourcc.h>
+#include <linux/dma-buf.h>
 #include <unistd.h>
 #include <va/va_drmcommon.h>
 }
@@ -39,12 +40,80 @@ uint32_t fourcc_for(uint32_t rt_format)
     return (rt_format & VA_RT_FORMAT_YUV420_10) ? VA_FOURCC_P010 : VA_FOURCC_NV12;
 }
 
+// Blend a settled picture's grain into the job's display buffer. The source
+// is the CAPTURE slot a Direct target holds, or the buffer a Copy or Import
+// target published into. Returns why it could not, or null when it did.
+const char* blend_into(const Surface::GrainJob& job, const iris::Target& source)
+{
+    const iris::FrameRef& frame = source.frame;
+    iris::StableBuffer* from_buffer = frame ? nullptr : source.destination;
+    if (!source.completed || source.error || (!frame && !from_buffer))
+        return "film grain: the picture it grains did not decode";
+    iris::StableBuffer& destination = *job.destination;
+    bool blended = false;
+    try {
+        // A Direct completion's CAPTURE slot is storage-aligned: its layout
+        // is the pool's rectangle, not the picture the client's surfaces
+        // name. The picture sits at the top left of that storage with the
+        // pool stride, so the blend reads it as the display surface's
+        // geometry.
+        iris::Layout from = frame ? frame->layout() : from_buffer->layout();
+        from.width = destination.layout().width;
+        from.height = destination.layout().height;
+        uint8_t* src = frame ? frame->map() : from_buffer->map();
+        const int source_fd = frame ? frame->fd() : from_buffer->fd();
+        uint8_t* dst = destination.map();
+        // The same coherency the CPU copy engine uses: wait for whoever still
+        // reads the destination, then bracket both buffers' CPU access.
+        iris::wait_dma_buf(destination.fd(), true, 5000);
+        iris::dma_buf_cpu_sync(source_fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ);
+        iris::dma_buf_cpu_sync(destination.fd(), DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE);
+        blended = apply_grain(job.params, from, src, destination.layout(), dst);
+        iris::dma_buf_cpu_sync(destination.fd(), DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE);
+        iris::dma_buf_cpu_sync(source_fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
+    } catch (const std::exception&) {
+        return "film grain: the blend could not map the surfaces";
+    }
+    if (!blended)
+        return "film grain: the picture is not a layout this driver decodes";
+    job.trace(
+        "va grain %ux%u source=%s", destination.layout().width, destination.layout().height, frame ? "frame" : "stable");
+    return nullptr;
+}
+
+// Take the job off its display surface and record what it left behind. Only
+// this surface's own job is touched: a newer picture may have replaced it.
+void settle_grain_job(DriverData& d, const std::shared_ptr<Surface::GrainJob>& job, bool ok)
+{
+    if (auto display = job->display.lock()) {
+        std::lock_guard<std::recursive_mutex> lock(d.mutex);
+        if (display->grain != job)
+            return;
+        display->grain.reset();
+        display->grain_pixels = ok;
+        display->failed = !ok;
+    }
+}
+
 // Wait for the surface's picture outside the driver mutex, then report.
 // `session` is the owner's session captured under the lock (may be null when
 // the owner is gone); holding it by value keeps it alive for the wait.
 VAStatus wait_for(DriverData& d, std::shared_ptr<iris::Session> session, const std::shared_ptr<Surface>& s)
 {
     iris::require(!s->failed, "surface decode failed", VA_STATUS_ERROR_DECODING_ERROR);
+    std::shared_ptr<Surface::GrainJob> job;
+    {
+        std::lock_guard<std::recursive_mutex> lock(d.mutex);
+        job = s->grain;
+    }
+    if (job) {
+        // endPicture settles a grained picture before it returns, so a job
+        // still on the surface means another thread is inside that call. A VA
+        // client serializes calls on a surface, and waiting here would have
+        // nothing that ends it.
+        throw iris::Error(
+            VA_STATUS_ERROR_SURFACE_BUSY, "film grain: the display surface's picture has not finished");
+    }
     if (!session) {
         // The owner was destroyed between our two reads. destroyContext
         // drains before it drops the context, so the target is settled now.
@@ -104,6 +173,80 @@ std::unique_ptr<iris::StableBuffer> import_stable(int fd, uint64_t allocation, c
 }
 
 } // namespace
+
+std::shared_ptr<Surface::GrainJob> queue_grain(DriverData& d, Context& c,
+    const std::shared_ptr<Surface>& decoded)
+{
+    if (c.profile != VAProfileAV1Profile0 || !c.picture.parameters)
+        return nullptr;
+    const auto& picture = *static_cast<const VADecPictureParameterBufferAV1*>(c.picture.parameters);
+    const auto& grain = picture.film_grain_info;
+    if (!grain.film_grain_info_fields.bits.apply_grain)
+        return nullptr;
+    const VASurfaceID display_id = picture.current_display_picture;
+    iris::require(picture.current_frame == c.picture.surface_id && display_id != VA_INVALID_ID
+            && display_id != picture.current_frame,
+        "film grain needs the picture on current_frame and a separate display surface",
+        VA_STATUS_ERROR_INVALID_PARAMETER);
+    const unsigned depth = picture.bit_depth_idx ? 10 : 8;
+
+    std::lock_guard<std::recursive_mutex> lock(d.mutex);
+    auto display = surface(d, display_id);
+    iris::require(display->width == decoded->width && display->height == decoded->height
+            && display->fourcc == decoded->fourcc
+            && display->fourcc == (depth == 10 ? VA_FOURCC_P010 : VA_FOURCC_NV12),
+        "film grain: the display surface is not this picture's size and format", VA_STATUS_ERROR_INVALID_SURFACE);
+    iris::require(!display->target.pending, "film grain: the display surface is decoding",
+        VA_STATUS_ERROR_SURFACE_BUSY);
+    auto job = std::make_shared<Surface::GrainJob>();
+    // The job names its display surface weakly: the surface owns the job, so
+    // a strong pointer back would keep the pair alive forever.
+    job->display = display;
+    ensure_stable(d, *display);
+    job->destination = display->stable;
+    job->params = grain_params(grain, depth, picture.matrix_coefficients);
+    job->trace = d.trace;
+    // Whatever this surface showed before belongs to an older picture.
+    display->grain = job;
+    display->grain_pixels = false;
+    display->failed = false;
+    return job;
+}
+
+void finish_grain(DriverData& d, const std::shared_ptr<Surface::GrainJob>& job,
+    const std::shared_ptr<iris::Session>& session, iris::Target& source)
+{
+    // FFmpeg decodes into a scratch current_frame that it recycles at the
+    // next access unit, so the picture is settled here: the target must be
+    // read while it still names this picture, not from a later wait on the
+    // display surface.
+    const char* failure = nullptr;
+    try {
+        session->wait(source);
+        failure = blend_into(*job, source);
+    } catch (...) {
+        settle_grain_job(d, job, false);
+        throw;
+    }
+    if (failure) {
+        settle_grain_job(d, job, false);
+        throw iris::Error(VA_STATUS_ERROR_INVALID_SURFACE, failure);
+    }
+    settle_grain_job(d, job, true);
+}
+
+void abandon_grain(DriverData& d, const std::shared_ptr<Surface::GrainJob>& job)
+{
+    settle_grain_job(d, job, false);
+}
+
+bool producing(DriverData& d, const Surface& surface)
+{
+    std::lock_guard<std::recursive_mutex> lock(d.mutex);
+    // A grain job exists only while endPicture is still blending it; after
+    // that the surface has pixels no caller has been handed yet.
+    return surface.rendering() || surface.grain != nullptr;
+}
 
 VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, unsigned height, VASurfaceID* ids,
     unsigned count, VASurfaceAttrib* attributes, unsigned attribute_count)
@@ -229,6 +372,10 @@ VAStatus destroySurfaces(VADriverContextP ctx, VASurfaceID* ids, int count)
                     VA_STATUS_ERROR_SURFACE_BUSY);
                 doomed.push_back(it->second);
                 sessions.push_back(session_of(d, *it->second));
+                // A synthesis belongs to the picture that is running it, and
+                // that picture holds the job; the surface it would land on is
+                // being destroyed, so the job is dropped here.
+                it->second->grain.reset();
                 d.surfaces.erase(it);
             }
         }
@@ -336,7 +483,14 @@ VAStatus querySurfaceStatus(VADriverContextP ctx, VASurfaceID id, VASurfaceStatu
         // A client that polls instead of syncing still drives completions.
         if (s->rendering() && session)
             session->service();
-        *status = s->rendering() ? VASurfaceRendering : VASurfaceReady;
+        // A grained display surface is owed its pixels until its picture's
+        // endPicture has run the blend.
+        bool grain_owed = false;
+        {
+            std::lock_guard<std::recursive_mutex> lock(d.mutex);
+            grain_owed = s->grain != nullptr;
+        }
+        *status = (s->rendering() || grain_owed) ? VASurfaceRendering : VASurfaceReady;
         return VA_STATUS_SUCCESS;
     });
 }

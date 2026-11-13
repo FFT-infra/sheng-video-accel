@@ -35,6 +35,7 @@ core_sources = [
 	'codec/annexb.cc',
 	'codec/encode_h264.cc',
 	'codec/encode_hevc.cc',
+	'va/grain.cc',
 ]
 if have_gpu_copy
 	core_sources += 'iris/gpu_copy.cc'

@@ -4,7 +4,6 @@
 #include "../src/codec/av1_obu.h"
 #include "../src/codec/translator.h"
 
-#include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -242,17 +241,28 @@ void test_held_picture_across_a_resolution_change()
         "the released frame is coded at its own sequence size");
 }
 
-void test_film_grain_stays_fail_closed()
+void test_film_grain_is_not_coded()
 {
-    // VA-API film grain synthesis needs two surfaces (current_frame for the
-    // ungrained reference, current_display_picture for the grained display).
-    // The Iris node produces one completion per picture and this driver
-    // publishes one target, so writing film_grain_params() alone leaves the
-    // client's display surface empty. A target run confirmed the rebuilt OBU
-    // was decodable by libdav1d but the hardware path ended in "getImage:
-    // surface has no decoded pixels". Keep refusing apply_grain=1 explicitly.
+    // The firmware never applies film grain: the driver writes apply_grain=0
+    // into the rebuilt frame header and blends the grained display picture in
+    // software. So the client's grain parameters must not reach the bitstream
+    // at all, and a picture with and without them rebuilds to the same bytes.
     VADecPictureParameterBufferAV1 picture = key_frame(false, 0);
     picture.seq_info_fields.fields.film_grain_params_present = 1;
+    const AV1SequenceState sequence = av1_sequence_state(picture);
+    const AV1ReferenceState references;
+    const std::vector<uint8_t> tile_data = { 0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33 };
+    const std::vector<AV1TileEntry> tiles = { { 0, 8 } };
+    auto build = [&](std::vector<uint8_t>& out) {
+        const char* reject_reason = nullptr;
+        const bool ok = av1_build_temporal_unit(out, picture, sequence, references, false, 0xff,
+            tile_data.data(), tiles, &reject_reason);
+        check(ok && reject_reason == nullptr, "film grain picture rebuilds");
+        return out;
+    };
+    std::vector<uint8_t> plain, grained;
+    build(plain);
+
     picture.film_grain_info.film_grain_info_fields.bits.apply_grain = 1;
     picture.film_grain_info.grain_seed = 45231;
     picture.film_grain_info.num_y_points = 2;
@@ -260,27 +270,8 @@ void test_film_grain_stays_fail_closed()
     picture.film_grain_info.point_y_scaling[0] = 10;
     picture.film_grain_info.point_y_value[1] = 255;
     picture.film_grain_info.point_y_scaling[1] = 20;
-
-    const AV1SequenceState sequence = av1_sequence_state(picture);
-    const AV1ReferenceState references;
-    const std::vector<uint8_t> tile_data = { 0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33 };
-    const std::vector<AV1TileEntry> tiles = { { 0, 8 } };
-    std::vector<uint8_t> out;
-    const char* reject_reason = nullptr;
-    check(!av1_build_temporal_unit(out, picture, sequence, references, false, 0xff,
-              tile_data.data(), tiles, &reject_reason),
-        "apply_grain=1 is rejected");
-    check(reject_reason && std::strstr(reject_reason, "display surface") != nullptr,
-        "the rejection names the missing display surface");
-
-    // Clients that export film grain as side data set apply_grain=0. Those
-    // streams must still rebuild normally.
-    picture.film_grain_info.film_grain_info_fields.bits.apply_grain = 0;
-    reject_reason = nullptr;
-    check(av1_build_temporal_unit(out, picture, sequence, references, false, 0xff,
-              tile_data.data(), tiles, &reject_reason),
-        "apply_grain=0 rebuilds the frame");
-    check(reject_reason == nullptr, "apply_grain=0 has no rejection reason");
+    build(grained);
+    check(grained == plain, "grain parameters do not change the rebuilt bitstream");
 }
 
 void test_lr_unit_shift()
@@ -311,7 +302,7 @@ int main()
 {
     try {
         test_lr_unit_shift();
-        test_film_grain_stays_fail_closed();
+        test_film_grain_is_not_coded();
         test_held_picture_across_a_resolution_change();
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';

@@ -1000,6 +1000,11 @@ VAStatus beginPicture(VADriverContextP ctx, VAContextID id, VASurfaceID surface_
             // one left on this surface are gone. A decode reused as a VPP
             // output (or the reverse) must not read the old frame back.
             s->vpp_pixels = false;
+            // A grain job belongs to the picture that queued it on this
+            // surface as its display target; the new picture replaces those
+            // pixels, so the job must not run on them.
+            s->grain.reset();
+            s->grain_pixels = false;
             if (c->encoding()) {
                 // Per-picture state; the sequence parameters survive, since
                 // a client may render them with the IDR only.
@@ -1211,7 +1216,19 @@ VAStatus endPicture(VADriverContextP ctx, VAContextID id)
         }
         d.trace("va end_picture ctx=%u surface=%u bytes=%zu seq_start=%d", id, current, c->au.bytes.size(),
             c->au.sequence_start ? 1 : 0);
-        submit(d, *c, *s, c->au);
+        // The display surface has to know a blend is coming before the
+        // picture does, and the blend itself runs here: the client recycles
+        // current_frame at its next submit, so the pixels are gone by then.
+        const auto grain = queue_grain(d, *c, s);
+        try {
+            submit(d, *c, *s, c->au);
+        } catch (...) {
+            if (grain)
+                abandon_grain(d, grain);
+            throw;
+        }
+        if (grain)
+            finish_grain(d, grain, c->session, s->target);
         return VA_STATUS_SUCCESS;
     });
 }

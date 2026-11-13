@@ -15,9 +15,11 @@ Kernel patches, diagnostic scripts, and packaging specs are provided in this rep
 | H.264 | Constrained Baseline, Main, High | Import (zero-copy) | Bit-exact MD5, Fluster 72/135 |
 | HEVC | Main, Main 10 | Import (zero-copy) | Bit-exact MD5, Fluster 141/147 |
 | VP9 | Profile 0, Profile 2 | Import (zero-copy) | Bit-exact MD5, 2026-11-12 Chrome alt-ref runs |
-| AV1 | Profile 0 (8/10-bit) | Import (zero-copy, decode-order kernel) | Bit-exact MD5, 2026-11-11 installed-package and browser runs; 1080p and 4K 10-bit exact against libdav1d over P010 Import |
+| AV1 | Profile 0 (8/10-bit) | Import (zero-copy, decode-order kernel) | Bit-exact MD5, 2026-11-11 installed-package and browser runs; 1080p and 4K 10-bit exact against libdav1d over P010 Import; film grain synthesis exact at 8 and 10 bits |
 
 Hardware decode verification requires a media surface that reports the selected hardware decoder (for Chrome, `VaapiVideoDecoder` with `kIsPlatformVideoDecoder=true`; for Firefox, successful VA-API initialization) together with decoded and dropped frame counts over the test window.
+
+AV1 film grain synthesis is supported. When a client names a separate `current_display_picture`, the driver decodes the access unit with grain off and blends the grain onto that surface in user space, synchronously with the picture's `endPicture`, before the client can recycle the ungrained `current_frame`. Clients that export grain parameters as side data keep blending it themselves. `test/iris-av1-grain-gate.sh` requires every downloaded frame to be byte-identical to libdav1d's own grained output.
 
 ### Encode
 
@@ -88,7 +90,6 @@ Imported DMA-BUF surfaces must match native CAPTURE layout (single linear object
 ## Known Limits
 
 - **AV1 dynamic resolution change & browser selection**: The internal eight-slot DPB emits each picture at `vaEndPicture` without holding frames across access units. After an in-context resolution change, if a client continues exporting surfaces with the previous CAPTURE geometry, the driver falls back to GPU copy for those pictures to avoid pitch corruption. For local file playback, Chromium 152 chooses its built-in software AV1 decoder; hardware AV1 is verified on live Chrome 156 web pages and in Firefox 158.
-- **AV1 film grain synthesis**: Refused at `endPicture`. VA-API picture parameters distinguish `current_frame` (ungrained reference) from `current_display_picture` (grained display surface). Because the driver maps each CAPTURE completion to a single target surface, synthesis requires a separate dual-target publishing path in user space. Streams with film grain decode in hardware when the client exports grain parameters as side data (`apply_grain=0`).
 - **Stock kernel fallback**: On kernels without display-delay or sync-frame controls, decode degrades to GPU copy and requested IDRs are handled via intra-period repositioning.
 - **Encode features**: Single full-picture slice only. Multi-slice, tiles, B-frames, and ROI return `VA_STATUS_ERROR_UNIMPLEMENTED`.
 - **Packed headers**: Extradata emission reports `VA_ENC_PACKED_HEADER_NONE`. Parameter sets are carried in-band.

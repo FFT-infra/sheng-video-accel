@@ -294,7 +294,7 @@ VAStatus deriveImage(VADriverContextP ctx, VASurfaceID id, VAImage* image)
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
             s = surface(d, id);
         }
-        if (s->rendering())
+        if (producing(d, *s))
             syncSurface(ctx, id);
         // A view, not a copy. FFmpeg's encode upload maps the derived image
         // and writes straight into it, then unmaps without ever calling
@@ -369,7 +369,7 @@ VAStatus getImage(VADriverContextP ctx, VASurfaceID id, int x, int y, unsigned w
         }
         iris::require(x == 0 && y == 0 && width == image.width && height == image.height,
             "partial vaGetImage is not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
-        if (s->rendering())
+        if (producing(d, *s))
             syncSurface(ctx, id);
         // An image obtained from vaDeriveImage already is a view of these
         // pixels; copying a surface onto itself would need a direction the
@@ -418,7 +418,7 @@ VAStatus putImage(VADriverContextP ctx, VASurfaceID id, VAImageID image_id, int 
                 "vaPutImage regions are even for 4:2:0", VA_STATUS_ERROR_INVALID_PARAMETER);
         iris::require(compatible(image.format.fourcc, s->fourcc), "image format does not match the surface",
             VA_STATUS_ERROR_INVALID_IMAGE_FORMAT);
-        if (s->rendering())
+        if (producing(d, *s))
             syncSurface(ctx, id);
 
         uint8_t* destination = nullptr;

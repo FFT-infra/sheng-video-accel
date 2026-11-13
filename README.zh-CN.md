@@ -15,9 +15,11 @@
 | H.264 | Constrained Baseline, Main, High | Import（零拷贝） | 逐帧 MD5 一致，Fluster 72/135 |
 | HEVC | Main, Main 10 | Import（零拷贝） | 逐帧 MD5 一致，Fluster 141/147 |
 | VP9 | Profile 0, Profile 2 | Import（零拷贝） | 逐帧 MD5 一致，2026-11-12 Chrome 含 alt-ref 实机验证 |
-| AV1 | Profile 0（8/10 位） | Import（零拷贝，解码顺序内核） | 逐帧 MD5 一致，2026-11-11 安装包与浏览器实机验证；1080p 与 4K 10 位以 P010 Import 与 libdav1d 逐帧一致 |
+| AV1 | Profile 0（8/10 位） | Import（零拷贝，解码顺序内核） | 逐帧 MD5 一致，2026-11-11 安装包与浏览器实机验证；1080p 与 4K 10 位以 P010 Import 与 libdav1d 逐帧一致；film grain 合成在 8 位与 10 位逐帧一致 |
 
 硬件解码的判定标准：媒体表面报告选中了硬件解码器（Chrome 为 `VaapiVideoDecoder` 且 `kIsPlatformVideoDecoder=true`，Firefox 为 VA-API 初始化成功），并给出测试窗口内的解码帧数与丢帧数。
+
+AV1 film grain 合成已支持。客户端给出独立的 `current_display_picture` 时，驱动以 grain 关闭的方式解码该访问单元，并在画面 `endPicture` 内同步把 grain 混合到显示表面，赶在客户端复用无 grain 的 `current_frame` 之前完成。以 side data 导出 grain 参数的客户端仍自行合成。`test/iris-av1-grain-gate.sh` 要求每个下载帧与 libdav1d 的加 grain 输出逐字节一致。
 
 ### 编码
 
@@ -86,7 +88,6 @@ Debian 包请在 chroot（`sbuild`、`pbuilder`）里构建：`libgbm-dev` 绑�
 ## 已知限制
 
 - **AV1 动态分辨率切换与浏览器选择**：驱动内部维护八槽 DPB，在 `vaEndPicture` 直接提交当前帧。同一 VA 上下文分辨率改变后，若客户端继续沿用旧 CAPTURE 几何导出表面，驱动检测到跨距不匹配时改用 GPU 拷贝发布，避免跨距错位。Chromium 152 播放本地文件默认走内置软件解码；Chrome 156 在线页面与 Firefox 158 已验证硬解。
-- **AV1 film grain 合成**：在 `endPicture` 直接拒绝。VA-API 画面参数区分 `current_frame`（无 grain 参考帧）与 `current_display_picture`（加 grain 显示表面）；驱动单次 CAPTURE 完成对应单个目标表面，支持合成需在用户态增加双目标表面发布路径。客户端以 side data 导出 grain 参数（`apply_grain=0`）时码流可正常硬解。
 - **原版内核降级**：在缺少显示延迟控制或强制关键帧控制的内核上，解码降级为 GPU 拷贝，关键帧请求通过临时改动 intra period 实现。
 - **编码高级特性**：仅支持单图单切片结构。多切片、分块（Tiles）、B 帧及 ROI 配置直接返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。
 - **封装头信息**：头信息声明为 `VA_ENC_PACKED_HEADER_NONE`，参数集随码流带内传输。
