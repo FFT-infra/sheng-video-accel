@@ -216,9 +216,20 @@ bool make_job(Job& j, const PlaneBuffers& buffers, const uint32_t* code, size_t 
     if (!j.ok(vkCreateInstance(&instance_info, nullptr, &j.instance)))
         return false;
 
+    // The first call reports how many devices there are; the second writes
+    // exactly that many handles. A one-element slot here let a second device
+    // land on the next stack word, which happened to be the job's own buffer
+    // descriptor, and the picture then failed on a garbage fd.
     uint32_t device_count = 0;
     vkEnumeratePhysicalDevices(j.instance, &device_count, nullptr);
-    if (!device_count || !j.ok(vkEnumeratePhysicalDevices(j.instance, &device_count, physical_out)))
+    if (!device_count)
+        return false;
+    VkPhysicalDevice* devices = new VkPhysicalDevice[device_count];
+    const VkResult enumerated = vkEnumeratePhysicalDevices(j.instance, &device_count, devices);
+    if (j.ok(enumerated) && device_count)
+        *physical_out = devices[0];
+    delete[] devices;
+    if (!j.ok(enumerated) || !device_count)
         return false;
 
     if (!compute_family(*physical_out, family_out))
