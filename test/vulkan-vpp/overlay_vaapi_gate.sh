@@ -16,8 +16,8 @@
 #     BGRA frame into, so the RGB32 surface, image and blend paths all run.
 #
 # The oracle does not come from the driver or from FFmpeg. Both frames are a
-# single colour, so `out = overlay + (1 - alpha) * main` on the normalised
-# BT.709 codes is one number per plane, computed here in awk:
+# single colour, so `out = alpha * overlay + (1 - alpha) * main` on the
+# normalised BT.709 codes is one number per plane, computed here in awk:
 #
 #   alpha 0, a black overlay   every byte equals the main frame (cmp)
 #   alpha 1                   every byte equals the BT.709 codes of the
@@ -79,12 +79,19 @@ yuv_codes() {
     }'
 }
 
-# The stored-alpha mix in the order overlay_rgb.comp documents: convert the
-# overlay colour to normalised Y'/Cb'/Cr', scale the main frame's own code by
-# (1 - alpha), add, and encode once at the end. Plane 0 is luma, 1 is Cb and
-# 2 is Cr; n and s are that plane's neutral code and span.
+# The stored-alpha mix overlay_rgb.comp documents, in normalised Y'/Cb'/Cr':
+# convert the overlay colour, then
+#
+#     out = alpha * overlay + (1 - alpha * a) * main
+#
+# where `a` is the overlay pixel's own alpha byte (1 for these opaque bands)
+# and `alpha` the filter's global one. The global alpha scales the overlay term
+# too: a premultiplied colour carries only the pixel's own coverage, so leaving
+# the global factor out of it would composite an opaque image at full strength
+# no matter what `alpha` the client asked for. Plane 0 is luma, 1 is Cb and 2
+# is Cr; n and s are that plane's neutral code and span.
 mix_norm() {
-    awk -v r="$1" -v g="$2" -v b="$3" -v plane="$4" -v m="$5" -v n="$6" -v s="$7" -v a="$8" 'BEGIN {
+    awk -v r="$1" -v g="$2" -v b="$3" -v plane="$4" -v m="$5" -v n="$6" -v s="$7" -v a="$8" -v pa="$9" 'BEGIN {
         kr = 0.2126; kb = 0.0722; kg = 1 - kr - kb;
         r /= 255; g /= 255; b /= 255;
         y = kr * r + kg * g + kb * b;
@@ -94,7 +101,8 @@ mix_norm() {
             o = (b - y) / (2 * (1 - kb));
         else
             o = (r - y) / (2 * (1 - kr));
-        v = o + (1 - a) * ((m - n) / s);
+        layer = a * pa;
+        v = layer * o + (1 - layer) * ((m - n) / s);
         printf "%d", int(n + s * v + 0.5);
     }'
 }
@@ -218,9 +226,10 @@ if [ "$rc" -ne 0 ]; then
     sed -n '1,40p' "$work/alpha25.trace" >&2 || true
     failed=1
 else
-    want_y=$(mix_norm "$ov_r" "$ov_g" "$ov_b" 0 "$main_y" 16 219 0.25)
-    want_cb=$(mix_norm "$ov_r" "$ov_g" "$ov_b" 1 "$main_cb" 128 224 0.25)
-    want_cr=$(mix_norm "$ov_r" "$ov_g" "$ov_b" 2 "$main_cr" 128 224 0.25)
+    # `overlay_band` builds an opaque band, so every pixel's own alpha is 255.
+    want_y=$(mix_norm "$ov_r" "$ov_g" "$ov_b" 0 "$main_y" 16 219 0.25 1.0)
+    want_cb=$(mix_norm "$ov_r" "$ov_g" "$ov_b" 1 "$main_cb" 128 224 0.25 1.0)
+    want_cr=$(mix_norm "$ov_r" "$ov_g" "$ov_b" 2 "$main_cr" 128 224 0.25 1.0)
     err=$(frame_error "$work/alpha25.nv12" "$width" "$height" "$want_y" "$want_cb" "$want_cr")
     [ "$err" -eq 0 ] || failed=1
     printf 'alpha25=expected %s,%s,%s max_diff=%s\n' "$want_y" "$want_cb" "$want_cr" "$err"
@@ -251,5 +260,5 @@ printf 'driver_source=%s\n' "$([ -n "$driver_env" ] && echo build-tree || echo i
 printf 'driver_sha256=%s\n' "$driver_hash"
 printf 'decoder=%s\n' "$device"
 printf 'cases=3\n'
-printf 'oracle=BT.709 limited-range codes of the overlay colour, the main frame byte for byte at alpha 0, and the stored-alpha mix in awk\n'
+printf 'oracle=BT.709 limited-range codes of the overlay colour, the main frame byte for byte at alpha 0, and the global-alpha mix in awk\n'
 echo "PASS va-vpp-overlay-vaapi cases=3 client=ffmpeg driver=$driver_hash"

@@ -76,6 +76,8 @@ struct OverlayRgbParams {
     uint32_t dst_width, dst_height;
     uint32_t bytes, bgra, premult;
     uint32_t standard;
+    uint32_t full, interp;
+    uint32_t o_x, o_row, o_crop_w, o_crop_h;
     float alpha;
 };
 
@@ -122,6 +124,8 @@ struct OverlayParams {
     uint32_t bytes;
     float alpha;
     uint32_t premult;
+    uint32_t full, interp;
+    uint32_t o_x, o_row, o_crop_w, o_crop_h;
 };
 
 // PQ (SMPTE ST 2084) code for a luminance in cd/m², and the BT.2390
@@ -580,6 +584,15 @@ bool overlay(const OverlayJob& job)
         return false;
     if (!(job.alpha >= 0.0f && job.alpha <= 1.0f))
         return false;
+    // The overlay's own rectangle, at half scale on the chroma plane, has to
+    // land inside the surface: a tap outside it would read a neighbouring
+    // frame's bytes.
+    if (!job.overlay_crop_width || !job.overlay_crop_height
+        || job.overlay_x + job.overlay_crop_width > job.overlay_width
+        || job.overlay_row + job.overlay_crop_height > job.overlay_height)
+        return false;
+    if (job.interpolation > 1u && job.interpolation != 4u)
+        return false;
 
     OverlayParams push = {};
     push.main_stride = job.main_stride;
@@ -604,6 +617,12 @@ bool overlay(const OverlayJob& job)
     push.bytes = job.bytes;
     push.alpha = job.alpha;
     push.premult = job.premultiplied ? 1u : 0u;
+    push.full = job.full_range ? 1u : 0u;
+    push.interp = job.interpolation;
+    push.o_x = job.overlay_x;
+    push.o_row = job.overlay_row;
+    push.o_crop_w = job.overlay_crop_width;
+    push.o_crop_h = job.overlay_crop_height;
 
     const PlaneBuffers buffers = { job.main_fd, job.overlay_fd, job.dst_fd, job.main_size, job.overlay_size,
         job.dst_size };
@@ -639,6 +658,14 @@ bool overlay_rgb(const OverlayRgbJob& job)
         return false;
     if (!(job.alpha >= 0.0f && job.alpha <= 1.0f) || job.standard > 2)
         return false;
+    // The overlay's own rectangle has to land inside the surface: the packed
+    // side is sampled per pixel, so it carries no subsampling constraint.
+    if (!job.overlay_crop_width || !job.overlay_crop_height
+        || job.overlay_x + job.overlay_crop_width > job.overlay_width
+        || job.overlay_row + job.overlay_crop_height > job.overlay_height)
+        return false;
+    if (job.interpolation > 1u && job.interpolation != 4u)
+        return false;
 
     OverlayRgbParams push = {};
     push.m_stride = job.main_stride;
@@ -663,6 +690,12 @@ bool overlay_rgb(const OverlayRgbJob& job)
     push.bgra = job.bgra ? 1u : 0u;
     push.premult = job.premultiplied ? 1u : 0u;
     push.standard = job.standard;
+    push.full = job.full_range ? 1u : 0u;
+    push.interp = job.interpolation;
+    push.o_x = job.overlay_x;
+    push.o_row = job.overlay_row;
+    push.o_crop_w = job.overlay_crop_width;
+    push.o_crop_h = job.overlay_crop_height;
     push.alpha = job.alpha;
 
     const PlaneBuffers buffers = { job.main_fd, job.overlay_fd, job.dst_fd, job.main_size, job.overlay_size,

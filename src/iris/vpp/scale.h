@@ -73,6 +73,12 @@ struct ToneMapJob {
 // destination, main_x/main_row is where it starts inside the main surface, and
 // the overlay rectangle is even on both axes so no chroma cell is half
 // covered.
+//
+// The overlay is sampled from its own rectangle — overlay_x/overlay_row and
+// overlay_crop_width/overlay_crop_height inside the overlay surface — with the
+// same tap model the scale kernel runs, selected by `interpolation` (0 the
+// point map, 1 the four-tap blend, 4 the driver's per-axis pick). The overlay
+// surface is a Y'CbCr one, so its alpha is the layer's scalar alone.
 struct OverlayJob {
     int main_fd = -1, overlay_fd = -1, dst_fd = -1;
     uint32_t main_size = 0, overlay_size = 0, dst_size = 0;
@@ -82,9 +88,19 @@ struct OverlayJob {
     uint32_t main_x = 0, main_row = 0;
     uint32_t main_width = 0, main_height = 0;
     uint32_t overlay_width = 0, overlay_height = 0;
+    uint32_t overlay_x = 0, overlay_row = 0;
+    uint32_t overlay_crop_width = 0, overlay_crop_height = 0;
     uint32_t x = 0, y = 0, width = 0, height = 0;
     uint32_t dst_width = 0, dst_height = 0;
     uint32_t bytes = 1;
+    // The destination's range: false is limited (16..235 luma, 128 +- 112
+    // chroma at eight bits), true is full (0..255). It reaches the kernel
+    // because a premultiplied source's neutral code and the encoded output
+    // both depend on it.
+    bool full_range = false;
+    // As in ScaleJob: 0 the point map, 1 the four-tap blend, 4 the driver's
+    // own per-axis pick.
+    uint32_t interpolation = 0;
     // VA_BLEND_PREMULTIPLIED_ALPHA: the overlay's codes already carry alpha,
     // so only the main surface is scaled by (1 - alpha).
     bool premultiplied = false;
@@ -93,12 +109,21 @@ struct OverlayJob {
 
 // The same composite with a packed RGB overlay: main and destination are
 // still NV12 or P010, the overlay surface is BGRA or RGBA (one 32-bit word per
-// pixel), and the kernel converts it to BT.709 limited-range Y'CbCr before
+// pixel), and the kernel converts it to the output's Y'CbCr matrix before
 // mixing. The main rectangle is the destination's size, as in OverlayJob, so
 // main_width/main_height are implied by dst_width/dst_height. `bgra` names the
 // overlay's byte order as VA does (VA_FOURCC_BGRA vs VA_FOURCC_RGBA), and
 // `premultiplied` selects out = overlay + (1 - alpha) * main for a source
 // whose colours are already multiplied by their alpha.
+//
+// A packed surface carries an alpha byte, and VA scopes it to
+// VA_BLEND_PREMULTIPLIED_ALPHA ("RGBA surfaces only"): naming that flag makes
+// the layer's alpha the global one times each sample's own, so a client that
+// hands the processor a real alpha channel gets the picture that channel
+// describes rather than a flat rectangle. Without it the global alpha alone
+// applies and the byte is not read, so an opaque image whose alpha happens to
+// be zero is not made invisible. The overlay rectangle, the interpolation
+// method and the destination's range are as in OverlayJob.
 struct OverlayRgbJob {
     int main_fd = -1, overlay_fd = -1, dst_fd = -1;
     uint32_t main_size = 0, overlay_size = 0, dst_size = 0;
@@ -107,11 +132,15 @@ struct OverlayRgbJob {
     uint32_t main_y = 0, overlay_y = 0, dst_y = 0;
     uint32_t main_x = 0, main_row = 0;
     uint32_t overlay_width = 0, overlay_height = 0;
+    uint32_t overlay_x = 0, overlay_row = 0;
+    uint32_t overlay_crop_width = 0, overlay_crop_height = 0;
     uint32_t x = 0, y = 0, width = 0, height = 0;
     uint32_t dst_width = 0, dst_height = 0;
     uint32_t bytes = 1;
     bool bgra = true;
     bool premultiplied = false;
+    bool full_range = false;
+    uint32_t interpolation = 0;
     // Matrix for the RGB-to-Y'CbCr step, from the picture's colour standard:
     // 0 BT.709 (also what an unnamed standard means), 1 BT.601, 2 BT.2020.
     uint32_t standard = 0;

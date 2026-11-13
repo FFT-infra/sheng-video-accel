@@ -69,6 +69,12 @@ layout(push_constant) uniform Params {
     float alpha;
     // Non-zero when the overlay's colours are already multiplied by alpha.
     uint premult;
+    // Whether the destination is full range, and which interpolation method
+    // samples the overlay.
+    uint full, interp;
+    // The overlay region this layer reads: origin and size inside the
+    // overlay surface.
+    uint o_x, o_row, o_crop_w, o_crop_h;
 } p;
 
 // One sample as its own code value: 0..255 for NV12, 0..1023 for P010.
@@ -106,10 +112,114 @@ uint pick(uint i, uint inc)
     return (i * inc + (inc >> 1)) >> 16;
 }
 
-float mix_codes(float main_code, float overlay_code, float neutral)
+// The method one axis actually runs: the client's own, or the driver's pick
+// when it asked for "advanced" — the area average when the axis shrinks, where
+// a two-tap filter aliases, and the cubic when it grows.
+uint method(uint src, uint dst)
+{
+    if (p.interp != 4u)
+        return p.interp;
+    if (src > dst)
+        return 2u;
+    if (src < dst)
+        return 3u;
+    return 1u;
+}
+
+// Up to four (index, weight) taps for one axis of the overlay's region: the
+// point map, the four-tap blend, the area average, or the cubic.
+int axis_taps(uint d, uint dst, uint src, uint m, out int idx[4], out float wgt[4])
+{
+    if (m == 0u) {
+        uint inc = ((src << 16) + (dst >> 1)) / dst;
+        idx[0] = int(pick(d, inc));
+        wgt[0] = 1.0;
+        return 1;
+    }
+    if (m == 2u) {
+        uint a = (d * src) / dst;
+        uint b = ((d + 1u) * src + dst - 1u) / dst;
+        if (b <= a)
+            b = a + 1u;
+        b = min(b, src);
+        a = min(a, b - 1u);
+        uint n = b - a;
+        if (n <= 4u) {
+            for (int i = 0; i < 4; ++i) {
+                idx[i] = min(int(a) + i, int(b) - 1);
+                wgt[i] = 1.0 / float(n);
+            }
+            return int(n);
+        }
+        for (int i = 0; i < 4; ++i) {
+            idx[i] = int(a) + int((uint(i) * (n - 1u)) / 3u);
+            wgt[i] = 0.25;
+        }
+        return 4;
+    }
+    float v = clamp((float(d) + 0.5) * (float(src) / float(dst)) - 0.5, 0.0, float(src - 1u));
+    uint i0 = uint(floor(v));
+    float f = v - float(i0);
+    if (m == 1u) {
+        idx[0] = int(i0);
+        idx[1] = int(min(i0 + 1u, src - 1u));
+        wgt[0] = 1.0 - f;
+        wgt[1] = f;
+        return 2;
+    }
+    float f2 = f * f, f3 = f2 * f;
+    vec4 w = vec4(-0.5 * f3 + f2 - 0.5 * f, 1.5 * f3 - 2.5 * f2 + 1.0,
+        -1.5 * f3 + 2.0 * f2 + 0.5 * f, 0.5 * f3 - 0.5 * f2);
+    for (int i = 0; i < 4; ++i) {
+        idx[i] = clamp(int(i0) - 1 + i, 0, int(src) - 1);
+        wgt[i] = w[i];
+    }
+    return 4;
+}
+
+// One overlay code at destination offset (dx, dy) inside the rectangle. The
+// chroma plane is half scale on both axes, so its region and its sample
+// positions are too: a destination chroma cell and the overlay chroma cell it
+// reads are the same half-scale coordinate.
+float sample_code(uint plane, uint dx, uint dy, uint comp, uint bpp)
+{
+    const uint dw = plane == 0u ? p.r_w : p.r_w >> 1;
+    const uint dh = plane == 0u ? p.r_h : p.r_h >> 1;
+    const uint sw = plane == 0u ? p.o_crop_w : p.o_crop_w >> 1;
+    const uint sh = plane == 0u ? p.o_crop_h : p.o_crop_h >> 1;
+    int xi[4], yi[4];
+    float xw[4], yw[4];
+    int nx = axis_taps(dx, dw, sw, method(sw, dw), xi, xw);
+    int ny = axis_taps(dy, dh, sh, method(sh, dh), yi, yw);
+    const uint ox = plane == 0u ? p.o_x : p.o_x >> 1;
+    const uint oy = plane == 0u ? p.o_row : p.o_row >> 1;
+    float v = 0.0;
+    for (int j = 0; j < ny; ++j) {
+        float rowsum = 0.0;
+        for (int i = 0; i < nx; ++i) {
+            uint off = (plane == 0u ? p.o_y : p.o_uv)
+                + (oy + uint(yi[j])) * p.o_stride + (ox + uint(xi[i])) * bpp + comp * p.bytes;
+            rowsum += xw[i] * code_overlay(off);
+        }
+        v += yw[j] * rowsum;
+    }
+    return v;
+}
+
+// The code that carries zero on a plane: the luma floor of the destination's
+// range, and the chroma midpoint, which is 128 (or 512 for ten bits) in both
+// ranges. A premultiplied sample that is fully transparent sits on it.
+float neutral(uint plane)
+{
+    if (plane == 0u)
+        return p.full != 0u ? 0.0 : (p.bytes == 1u ? 16.0 : 64.0);
+    return p.bytes == 1u ? 128.0 : 512.0;
+}
+
+float mix_codes(float main_code, float overlay_code, float n)
 {
     if (p.premult != 0u)
-        return overlay_code + (1.0 - p.alpha) * (main_code - neutral);
+        return overlay_code + (1.0 - p.alpha) * (main_code - n);
     return p.alpha * overlay_code + (1.0 - p.alpha) * main_code;
 }
 
@@ -133,18 +243,12 @@ void main()
         return;
 
     if (row < p.dst_height) {
-        uint hx = step(p.o_width, p.r_w);
-        uint hy = step(p.o_height, p.r_h);
         uint packed = 0u;
         for (uint k = 0u; k < per_word; ++k) {
             uint dx = min(word * per_word + k, p.dst_width - 1u);
             float m = code(p.m_y + (row + p.m_row) * p.m_stride + (dx + p.m_x) * p.bytes);
-            if (inside(dx, row)) {
-                uint ox = pick(dx - p.r_x, hx);
-                uint oy = pick(row - p.r_y, hy);
-                m = mix_codes(m, code_overlay(p.o_y + oy * p.o_stride + ox * p.bytes),
-                    p.bytes == 1u ? 16.0 : 64.0);
-            }
+            if (inside(dx, row))
+                m = mix_codes(m, sample_code(0u, dx - p.r_x, row - p.r_y, 0u, p.bytes), neutral(0u));
             packed |= code_bits(m) << (k * 8u * p.bytes);
         }
         d[(p.d_y + row * p.d_stride + word * 4u) >> 2] = packed;
@@ -156,9 +260,6 @@ void main()
         // own half-scale coordinates are.
         uint rx = p.r_x >> 1, ry = p.r_y >> 1;
         uint rw = p.r_w >> 1, rh = p.r_h >> 1;
-        uint ow = p.o_width >> 1, oh = p.o_height >> 1;
-        uint hx = step(ow, rw);
-        uint hy = step(oh, rh);
         uint packed = 0u;
         for (uint k = 0u; k < cells; ++k) {
             uint cx = min(word * cells + k, cw - 1u);
@@ -166,12 +267,10 @@ void main()
             float u = code(m_off);
             float v = code(m_off + p.bytes);
             if (cx >= rx && cx < rx + rw && cy >= ry && cy < ry + rh) {
-                uint ox = pick(cx - rx, hx);
-                uint oy = pick(cy - ry, hy);
-                uint o_off = p.o_uv + oy * p.o_stride + ox * 2u * p.bytes;
-                const float neutral = p.bytes == 1u ? 128.0 : 512.0;
-                u = mix_codes(u, code_overlay(o_off), neutral);
-                v = mix_codes(v, code_overlay(o_off + p.bytes), neutral);
+                // The chroma cell covers the 2x2 luma block, so it samples the
+                // overlay at the same half-scale offset the block starts at.
+                u = mix_codes(u, sample_code(1u, cx - rx, cy - ry, 0u, 2u * p.bytes), neutral(1u));
+                v = mix_codes(v, sample_code(1u, cx - rx, cy - ry, 1u, 2u * p.bytes), neutral(1u));
             }
             packed |= (code_bits(u) | (code_bits(v) << (8u * p.bytes))) << (k * 16u);
         }

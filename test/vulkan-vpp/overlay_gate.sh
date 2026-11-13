@@ -30,8 +30,8 @@
 #
 # The refusals are part of the contract: luma keying, a third pass, a blend
 # before the pass it blends onto, an odd or out-of-bounds rectangle, a crop of
-# the main surface and an alpha outside 0..1 are all refused rather than
-# approximated.
+# the main surface, an overlay region that leaves its own surface and an alpha
+# outside 0..1 are all refused rather than approximated.
 # So is the whole entrypoint without V4L2_VA_VPP.
 
 set -eu
@@ -101,6 +101,17 @@ run_probe() {
 #           are each read the way VA names them
 #   rgb601  the same composite with the BT.601 matrix the picture names
 #   rgbtonemap  a packed overlay onto a tone-mapped main surface
+#   rgbpremult  a premultiplied packed overlay: the layer's alpha is the global
+#           one times each sample's alpha byte, and the colours already carry it
+#   rgbopaque  the same flag with an opaque alpha byte, which is the picture a
+#           straight-alpha run at the same global alpha produces
+#   crop, rgbcrop  the layer reads part of its surface instead of all of it
+#   bilinear, rgblinear  the four-tap blend samples the overlay
+#   advanced, rgbadvanced  the driver's own per-axis pick, over a 3.2:1 shrink
+#           where it selects the area average
+#   cubic   the same pick over a 1.56:1 growth, where it selects the cubic
+#   full, rgbfull  a full-range destination, where the encoded output and a
+#           premultiplied sample's neutral code both move
 cat > "$work/cases" <<'EOF'
 half:128x72:128x72:0:0:128:72:0.50
 opaque:160x96:64x48:16:16:64:48:1.00
@@ -114,9 +125,20 @@ premult-p010:128x72:32x24:64:48:32:24:0.50:--p010 --premultiplied
 rgb:128x72:64x48:32:8:64:48:0.50:--rgb
 rgba:128x72:64x48:32:8:64:48:0.50:--rgb=rgba
 rgbpremult:128x72:64x48:32:8:64:48:0.50:--rgb --premultiplied
+rgbopaque:128x72:64x48:32:8:64:48:0.50:--rgb --premultiplied --alpha-byte=255
 rgbp010:128x72:32x24:64:48:32:24:0.50:--rgb --p010
 rgb601:128x72:64x48:32:8:64:48:0.50:--rgb --standard=601
 rgbtonemap:128x72:64x48:32:8:64:48:0.50:--rgb --tonemap=1000
+crop:128x72:96x72:16:16:64:48:0.50:--crop=48x36+24+18
+rgbcrop:128x72:96x72:16:16:64:48:0.50:--rgb --crop=48x36+24+18
+bilinear:128x72:64x48:34:12:20:14:0.60:--interp=bilinear
+rgblinear:128x72:64x48:34:12:20:14:0.60:--rgb --interp=bilinear
+advanced:128x72:64x48:34:12:20:14:0.60:--interp=advanced
+rgbadvanced:128x72:64x48:34:12:20:14:0.60:--rgb --interp=advanced
+cubic:128x72:64x48:16:0:100:72:0.60:--interp=advanced
+full:128x72:64x48:16:16:64:48:0.50:--full
+rgbfull:128x72:64x48:16:16:64:48:0.50:--rgb --full
+premult-full:128x72:64x48:16:16:64:48:0.50:--full --premultiplied
 EOF
 
 failed=0
@@ -174,14 +196,15 @@ if cmp -s "$work/half.raw" "$work/half.raw.main" || cmp -s "$work/half.raw" "$wo
 fi
 echo "copy=byte-exact over=byte-exact half=neither-input"
 
-# A premultiplied frame is the straight frame's colours already scaled by the
-# global alpha, so the two runs have to land on the same picture. This is the
-# one composite check whose answer does not come from the probe's model.
+# A premultiplied frame whose alpha byte is fully opaque is the straight
+# frame's colours already scaled by the global alpha, so the two runs have to
+# land on the same picture. This is the one composite check whose answer does
+# not come from the probe's model.
 echo "== stored alpha is the same picture as straight alpha"
 run_probe premult-straight 128 72 64 48 32 8 64 48 0.50 "$work/premult-straight.raw" --rgb \
     || fail "straight-alpha composite failed"
-if ! cmp -s "$work/rgbpremult.raw" "$work/premult-straight.raw"; then
-    differ=$(cmp -l "$work/rgbpremult.raw" "$work/premult-straight.raw" | awk '
+if ! cmp -s "$work/rgbopaque.raw" "$work/premult-straight.raw"; then
+    differ=$(cmp -l "$work/rgbopaque.raw" "$work/premult-straight.raw" | awk '
         function oct(s, i, c, v) { v = 0; for (i = 1; i <= length(s); i++) { c = substr(s, i, 1); v = v * 8 + c } return v }
         { d = oct($3) - oct($2); if (d < 0) d = -d; if (d > m) m = d }
         END { print m + 0 }')
@@ -190,6 +213,12 @@ if ! cmp -s "$work/rgbpremult.raw" "$work/premult-straight.raw"; then
 else
     echo "premultiplied=straight-byte-exact"
 fi
+# A per-pixel alpha that is not opaque is a different picture, not the same
+# one: the alpha byte has to reach the mix.
+if cmp -s "$work/rgbpremult.raw" "$work/rgbopaque.raw"; then
+    fail "the overlay's own alpha byte made no difference; the kernel ignored it"
+fi
+echo "per-pixel-alpha=differs-from-opaque"
 
 # A packed overlay that never reached the kernel would leave the main frame in
 # place, which is what an alpha of 0 looks like; the two have to differ inside
@@ -197,6 +226,38 @@ fi
 if cmp -s "$work/rgb.raw" "$work/rgb.raw.main"; then
     fail "the packed overlay did not change the output; the frame is the main surface"
 fi
+
+# Each sampling method has to run as itself: a kernel that ignored the method
+# would return the point map's picture three times over.
+echo "== the three sampling methods are three pictures"
+# The shrink is 64x48 into 20x14, a 3.2:1 ratio where the area average covers
+# three or four samples and the four-tap blend covers two. At an exact 2:1 the
+# two agree by construction — a two-sample box is the bilinear midpoint — so
+# that geometry would prove nothing.
+for pair in "scale bilinear" "bilinear advanced" "scale advanced"; do
+    set -- $pair
+    if cmp -s "$work/$1.raw" "$work/$2.raw"; then
+        fail "the $1 and $2 runs produced the same picture; the method was ignored"
+    fi
+    echo "differs=$1/$2"
+done
+# "advanced" over a growth picks the cubic, which is a different kernel again.
+if cmp -s "$work/cubic.raw" "$work/bilinear.raw"; then
+    fail "advanced did not select the cubic over a growth"
+fi
+echo "differs=cubic/bilinear"
+if cmp -s "$work/rgb.raw" "$work/rgblinear.raw" || cmp -s "$work/rgblinear.raw" "$work/rgbadvanced.raw"; then
+    fail "a packed overlay ignored its sampling method"
+fi
+echo "differs=rgb/rgblinear,rgblinear/rgbadvanced"
+
+# A full-range destination is a different encoding of the same picture: the
+# luma floor moves from 16 to 0, so the two cannot be equal. The case itself is
+# checked against the model, which normalises onto that range.
+if cmp -s "$work/full.raw" "$work/half.raw"; then
+    fail "the full-range destination produced the limited-range codes"
+fi
+echo "full-range=differs"
 
 echo "== refusals"
 refuse() {
@@ -234,6 +295,8 @@ refuse outside 128 72 64 48 112 16 32 48 0.50
 refuse odd-region 128 72 64 48 17 16 32 48 0.50
 refuse main-crop 128 72 64 48 16 16 64 48 0.50 --main-crop
 refuse alpha-range 128 72 64 48 16 16 64 48 1.50
+refuse overlay-crop-outside 128 72 64 48 16 16 64 48 0.50 --crop=64x48+16+16
+refuse overlay-crop-odd 128 72 64 48 16 16 64 48 0.50 --crop=31x24+0+0
 
 echo "== opt-in is required: the same client is refused without V4L2_VA_VPP"
 rc=0
@@ -253,4 +316,4 @@ printf 'driver_sha256=%s\n' "$driver_hash"
 printf 'decoder=%s\n' "$device"
 printf 'cases=%s\n' "$count"
 printf 'oracle=the documented mix in double precision, both endpoint frames byte for byte, and straight against stored alpha\n'
-echo "PASS va-vpp-overlay cases=$count endpoints=2 refused=7 driver=$driver_hash"
+echo "PASS va-vpp-overlay cases=$count endpoints=2 refused=9 driver=$driver_hash"

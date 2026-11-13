@@ -418,7 +418,15 @@ output frame's Y'CbCr matrix before mixing; every other pipeline operation
 that one filter, and a mirror or a rotation in a tone-mapped or blended
 picture) fails the picture instead of being dropped. Both blends implement the
 global alpha of `VABlendState` and `VA_BLEND_PREMULTIPLIED_ALPHA`, which
-FFmpeg sets whenever its overlay input carries an alpha channel. The decode lives on the
+FFmpeg sets whenever its overlay input carries an alpha channel; with that flag
+a packed overlay's own alpha byte multiplies the global one, so the layer's
+coverage is `alpha * a` and the mix is `alpha * overlay + (1 - alpha * a) *
+main` — the global factor stays on the overlay term because a stored colour
+carries only the pixel's own coverage, and leaving it out would composite an
+opaque image at full strength whatever `alpha` the client named. The overlay is
+sampled from its own surface region with the same tap model the scale kernel
+runs, and the output is encoded in the range `output_color_properties` names,
+full or limited. The decode lives on the
 V4L2 node and the kernel on Vulkan, so `vaEndPicture` waits for each source
 surface's pending decode before it reads that surface — a client that issues
 the processor's picture straight behind the decode (FFmpeg's `overlay_vaapi`
@@ -686,26 +694,35 @@ monotone ramp). It also proves the curve follows the metadata by running two
 mastering peaks over one frame, and requires an NV12 source, a filter without
 its parameters and a rotation in a tone-mapped picture to be refused.
 `test/vulkan-vpp/overlay_gate.sh` drives `iris-va-vpp-probe overlay`, which
-submits the two pipeline buffers overlay_vaapi submits: fifteen geometries
+submits the two pipeline buffers overlay_vaapi submits: twenty-six geometries
 across both sample widths — including a main surface padded wider than its
 picture, as a decoder allocates one, packed BGRA and RGBA overlays, the BT.601
-matrix, and a packed overlay over a tone-mapped main surface — against the mix
-`overlay.comp` and `overlay_rgb.comp` document, within 2 codes, then the two
-endpoints against the input frames themselves — an alpha of 0 over the whole
-surface must reproduce the main frame byte for byte and an alpha of 1 the
-overlay frame, which a kernel that read the wrong plane or ignored the alpha
-cannot do. Stored alpha gets one check that does not come from the model: the
-same picture run with a premultiplied frame and with the straight one has to
-land within 1 code. Luma keying, a third pass, a blend before its base pass, an
-odd or out-of-bounds rectangle, a crop of the main surface and an alpha outside
-0..1 are required to be refused. `test/vulkan-vpp/overlay_vaapi_gate.sh` then
+matrix, a packed overlay over a tone-mapped main surface, a layer that reads
+part of its own surface, all three sampling methods, and a full-range
+destination — against the mix `overlay.comp` and `overlay_rgb.comp` document,
+within 2 codes, then the two endpoints against the input frames themselves —
+an alpha of 0 over the whole surface must reproduce the main frame byte for
+byte and an alpha of 1 the overlay frame, which a kernel that read the wrong
+plane or ignored the alpha cannot do. Stored alpha gets two checks that do not
+come from the model: a premultiplied frame whose alpha byte is opaque has to
+land on the same picture as a straight one at the same global alpha, and a
+per-pixel alpha that is not opaque has to produce a different one. The three
+sampling methods have to produce three different pictures, at a ratio where the
+area average and the four-tap blend genuinely differ — at an exact 2:1 they
+coincide by construction. Luma keying, a third pass, a blend before its base
+pass, an odd or out-of-bounds rectangle, a crop of the main surface, an overlay
+region that leaves its own surface, and an alpha outside 0..1 are required to
+be refused. `test/vulkan-vpp/overlay_vaapi_gate.sh` then
 drives `overlay_vaapi` itself over a BGRA upload, because two things about the
 real client are invisible from the probe: FFmpeg asks for
 `VA_BLEND_PREMULTIPLIED_ALPHA` whenever its overlay input carries an alpha
 channel, and the overlay surface is a `VA_RT_FORMAT_RGB32` surface FFmpeg
 fills through the image path. Its frames are single colours, so the expected
 output is one BT.709 triple computed in the gate — exact, not within a code —
-plus the main frame byte for byte at alpha 0. The SPIR-V the driver embeds is
+plus the main frame byte for byte at alpha 0 and the overlay's own codes at
+alpha 1. The alpha 0.25 case is what catches the premultiplied form being
+wrong: an overlay that is not scaled by the global alpha passes both endpoints
+and fails this one. The SPIR-V the driver embeds is
 regenerated from the pinned modules and compared by `test/run-static-checks.sh`.
 
 ## 10. Invariants (the ones tests exist for)

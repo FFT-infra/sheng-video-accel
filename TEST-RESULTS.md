@@ -7877,3 +7877,86 @@ reached today only by a client that sets it, such as Chromium's VA-API wrapper
 on the paths where it asks for EU-bilinear. The `crop_vaapi_gate.sh` bilinear
 case proves the VA layer accepts and runs the method; it does not compare
 those pixels with anything.
+
+## The composite samples its own region, all three methods, and both ranges (`31987d8`)
+
+The composite read the overlay surface whole, sampled it only at the point map,
+and encoded its result in the limited range. A client that named an overlay
+region, an interpolation method or a full-range output got the whole surface at
+nearest and a limited-range frame, silently.
+
+The two overlay kernels now run the same tap model the scale kernel runs, over
+the layer's own region instead of the whole source: the point map, the
+four-tap blend, the area average and the cubic, with `advanced` resolving per
+axis. The region is `surface_region` of the blending pass, which FFmpeg leaves
+null for the whole surface. The destination's range comes from
+`output_color_properties`, which moves the luma floor from 16 to 0 and the
+chroma span to the full one.
+
+Three defects turned up on the target, two in this change and one older:
+
+- **The premultiplied form was wrong, and had been since it shipped.** It
+  computed `out = overlay + (1 - alpha) * main`, which leaves the overlay at
+  full strength whatever global alpha the client names. FFmpeg sets
+  `VA_BLEND_PREMULTIPLIED_ALPHA` for *any* overlay input with an alpha channel
+  (`vf_overlay_vaapi.c`, `have_alpha_planar`), so a plain opaque BGRA overlay
+  composited at `alpha=0.25` came out at `alpha=1`. The correct form is
+  `out = alpha * overlay + (1 - alpha * a) * main`: the stored colour carries
+  the pixel's own coverage, not the global factor. The sibling repository's
+  shader (`src/vulkan/overlay.comp:55`) has the same defect. Both the
+  primitive gate's model and `overlay_vaapi_gate.sh`'s awk oracle encoded the
+  old form, so both passed; the FFmpeg gate's alpha-0.25 case is what caught
+  it once the oracle was corrected, and `alpha0` and `alpha1` passed
+  throughout because both endpoints are insensitive to it.
+- **The probe's oracle did not clamp.** A mix of two codes can leave the
+  representable range — the cubic has negative lobes, so an overshoot is
+  ordinary — and the kernel clamps in `code_bits` while the model wrote an
+  unclamped value that wrapped. The cubic case reported a 255-code difference
+  against a kernel that was right.
+- **The gate's sampling-method cases used a 2:1 shrink.** At exactly 2:1 the
+  area average over two samples *is* the bilinear midpoint, so the two methods
+  coincide by construction and the case could not tell them apart. The cases
+  moved to 3.2:1, where the area footprint is three or four samples.
+
+### The gates
+
+Source `31987d8`, tracked source `60ecc051…`, driver `980390ef…` (build-tree
+override, `LIBVA_DRIVERS_PATH=build/src`), boot `4b73926c…`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, module `b90bd823…`, decoder resolved by
+`iris_driver` QUERYCAP to `/dev/video0`, encoder to `/dev/video1`. Every run
+below is a guarded target run with `source_dirty=0`.
+
+| gate | run | cases | verdict |
+| --- | --- | --- | --- |
+| `overlay_gate.sh` | `133243Z` | 26 cases, 2 endpoints, 9 refusals | `PASS`, every case within 1 code |
+| `overlay_vaapi_gate.sh` | `133621Z` | 3 through FFmpeg's `overlay_vaapi` | `PASS`, exact |
+
+The 26 cases are the previous 15 plus `crop`/`rgbcrop` (a layer reading
+`48x36+24+18` of a 96x72 surface), `bilinear`/`rgblinear` and
+`advanced`/`rgbadvanced` over a 3.2:1 shrink, `cubic` over a 1.56:1 growth,
+`full`/`rgbfull`/`premult-full`, and `rgbopaque` (a premultiplied packed
+overlay whose alpha byte is 255, which has to land byte-exact on the same
+picture as a straight-alpha run at the same global alpha). The refusals gained
+an overlay region that leaves its own surface and an odd one.
+
+Four checks in the gate do not come from the model: the two endpoint frames
+byte for byte, the premultiplied-equals-straight equality above, a per-pixel
+alpha that is not opaque having to differ from an opaque one, and the three
+sampling methods having to produce three different pictures at a ratio where
+they genuinely differ.
+
+`overlay_vaapi_gate.sh`'s three cases are the ones that matter for the
+premultiplied defect: `alpha 0` is the main frame byte for byte, `alpha 1` is
+the overlay colour's BT.709 codes exactly, and `alpha 0.25` is the global-alpha
+mix — the only one of the three that a premultiplied form missing the global
+factor can fail.
+
+### What this does not prove
+
+The overlay region and the full-range output are proven by the probe and by
+the primitive gate's model, not by a real client: FFmpeg 8.1's `overlay_vaapi`
+sets neither, so no FFmpeg run exercises them. The cubic has no software
+reference at any ratio — like the bilinear path, its evidence is the tap model
+plus the endpoints, not an equivalence with a reference filter. Full-range
+output is checked against the same model that defines it; no client was
+measured consuming a full-range frame from this driver.

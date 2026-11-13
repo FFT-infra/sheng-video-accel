@@ -219,6 +219,10 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
         "invalid input colour standard", VA_STATUS_ERROR_INVALID_PARAMETER);
     iris::require(output_standard >= 0 && output_standard < VAProcColorStandardCount,
         "invalid output colour standard", VA_STATUS_ERROR_INVALID_PARAMETER);
+    iris::require(p.input_color_properties.color_range <= VA_SOURCE_RANGE_FULL,
+        "invalid input colour range", VA_STATUS_ERROR_INVALID_PARAMETER);
+    iris::require(p.output_color_properties.color_range <= VA_SOURCE_RANGE_FULL,
+        "invalid output colour range", VA_STATUS_ERROR_INVALID_PARAMETER);
     // Whether the two ends may name different standards depends on whether a
     // tone-mapping filter is in the picture, and that buffer is not required to
     // arrive before this one; run_vpp judges it once both are in.
@@ -236,6 +240,10 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
     job.input_standard = input_standard;
     job.output_standard = output_standard;
     job.explicit_colour_properties_equal = colour_properties_equal;
+    job.input_range_unknown = p.input_color_properties.color_range == VA_SOURCE_RANGE_UNKNOWN;
+    job.output_range_unknown = p.output_color_properties.color_range == VA_SOURCE_RANGE_UNKNOWN;
+    job.input_full_range = p.input_color_properties.color_range == VA_SOURCE_RANGE_FULL;
+    job.output_full_range = p.output_color_properties.color_range == VA_SOURCE_RANGE_FULL;
     job.global_alpha = (blend.flags & VA_BLEND_GLOBAL_ALPHA) ? blend.global_alpha : 1.0f;
     job.premultiplied = (blend.flags & VA_BLEND_PREMULTIPLIED_ALPHA) != 0;
     if (p.surface_region) {
@@ -317,7 +325,9 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         // different standard (or different explicit properties) would claim a
         // conversion the kernel does not do.
         iris::require(blend->input_standard == job.input_standard
-                && blend->output_standard == job.output_standard && blend->explicit_colour_properties_equal,
+                && blend->output_standard == job.output_standard && blend->explicit_colour_properties_equal
+                && blend->input_full_range == job.input_full_range
+                && blend->output_full_range == job.output_full_range,
             "the blending pass shares the colour standards of the pass it blends onto",
             VA_STATUS_ERROR_UNSUPPORTED_FILTER);
     }
@@ -327,6 +337,12 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         if (job.input_standard == VAProcColorStandardExplicit)
             iris::require(job.explicit_colour_properties_equal, "VPP colour conversion is not supported",
                 VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+        // The kernels move codes through unchanged, so a picture that names
+        // one range at the input and the other at the output is claiming a
+        // range conversion the driver does not do. Naming nothing is fine.
+        iris::require(job.input_range_unknown || job.output_range_unknown
+                || job.input_full_range == job.output_full_range,
+            "VPP range conversion is not supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
     } else {
         // The kernel's matrices are fixed: BT.2020 primaries and the PQ
         // transfer in, BT.709 primaries and the BT.709 OETF out. A client
@@ -344,6 +360,9 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
     Pixels src, dst, ov;
     VARectangle crop = {};
     VARectangle rect = {};
+    // The rectangle of the overlay surface the layer samples, which is the
+    // whole surface unless the client named one.
+    VARectangle ov_crop = {};
     // The overlay surface is either the output's Y'CbCr format or one of the
     // packed RGB formats the processor converts while it mixes.
     bool overlay_rgb = false;
@@ -409,8 +428,6 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
                     && static_cast<uint32_t>(crop.height) == target->height,
                 "a blended picture copies its main rectangle at its own scale",
                 VA_STATUS_ERROR_UNSUPPORTED_FILTER);
-            iris::require(!blend->region_set, "the overlay samples its whole surface",
-                VA_STATUS_ERROR_UNSUPPORTED_FILTER);
             iris::require(blend->output_region_set, "the blending pass needs an output region",
                 VA_STATUS_ERROR_INVALID_PARAMETER);
             iris::require(blend->rotation == VA_ROTATION_NONE, "the overlay does not rotate",
@@ -446,6 +463,24 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
             iris::require(overlay_surface->width && overlay_surface->height
                     && (overlay_rgb || !((overlay_surface->width | overlay_surface->height) & 1u)),
                 "the overlay needs an even, non-empty geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
+            // The overlay's own region is what gets scaled into the output
+            // rectangle. FFmpeg leaves it null, which means the whole surface;
+            // a client that names one composites part of a surface. On a
+            // Y'CbCr overlay it has to be even on both axes for the same
+            // reason the output rectangle does.
+            ov_crop = { 0, 0, static_cast<uint16_t>(overlay_surface->width),
+                static_cast<uint16_t>(overlay_surface->height) };
+            if (blend->region_set) {
+                ov_crop = blend->region;
+                iris::require(ov_crop.x >= 0 && ov_crop.y >= 0 && ov_crop.width > 0 && ov_crop.height > 0
+                        && static_cast<uint32_t>(ov_crop.x) + static_cast<uint32_t>(ov_crop.width)
+                            <= overlay_surface->width
+                        && static_cast<uint32_t>(ov_crop.y) + static_cast<uint32_t>(ov_crop.height)
+                            <= overlay_surface->height,
+                    "the overlay region is outside the overlay surface", VA_STATUS_ERROR_INVALID_PARAMETER);
+                iris::require(overlay_rgb || !((ov_crop.x | ov_crop.y | ov_crop.width | ov_crop.height) & 1),
+                    "the overlay region must be even", VA_STATUS_ERROR_INVALID_PARAMETER);
+            }
         }
 
         // Captured under the lock; the waits themselves happen below, outside
@@ -537,6 +572,10 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         oj.dst_y = dst.layout.data_offset;
         oj.overlay_width = overlay_surface->width;
         oj.overlay_height = overlay_surface->height;
+        oj.overlay_x = static_cast<uint32_t>(ov_crop.x);
+        oj.overlay_row = static_cast<uint32_t>(ov_crop.y);
+        oj.overlay_crop_width = ov_crop.width;
+        oj.overlay_crop_height = ov_crop.height;
         oj.x = static_cast<uint32_t>(rect.x);
         oj.y = static_cast<uint32_t>(rect.y);
         oj.width = rect.width;
@@ -555,6 +594,12 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
             oj.standard = 2;
         else
             oj.standard = 0;
+        // The overlay is sampled with the method the pass that blends it
+        // names, over that pass's own region rather than the whole source.
+        oj.interpolation = blend->interpolation;
+        // The composite encodes its result, so it has to know which range the
+        // client means; the scale carries codes through and does not.
+        oj.full_range = job.output_full_range;
         oj.alpha = blend->global_alpha;
         ran = iris::vpp::overlay_rgb(oj);
     } else if (ran && blend) {
@@ -580,6 +625,10 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         oj.dst_y = dst.layout.data_offset;
         oj.overlay_width = overlay_surface->width;
         oj.overlay_height = overlay_surface->height;
+        oj.overlay_x = static_cast<uint32_t>(ov_crop.x);
+        oj.overlay_row = static_cast<uint32_t>(ov_crop.y);
+        oj.overlay_crop_width = ov_crop.width;
+        oj.overlay_crop_height = ov_crop.height;
         oj.x = static_cast<uint32_t>(rect.x);
         oj.y = static_cast<uint32_t>(rect.y);
         oj.width = rect.width;
@@ -590,6 +639,8 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         // scratch is NV12 and the overlay was checked against the output.
         oj.bytes = base.layout.fourcc == VA_FOURCC_P010 ? 2 : 1;
         oj.premultiplied = blend->premultiplied;
+        oj.interpolation = blend->interpolation;
+        oj.full_range = job.output_full_range;
         oj.alpha = blend->global_alpha;
         ran = iris::vpp::overlay(oj);
     } else if (ran && (!tone_map || tonemap_to_scratch)) {

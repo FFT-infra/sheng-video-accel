@@ -6,7 +6,8 @@
 // that rectangle becomes
 //
 //     out = alpha * overlay + (1 - alpha) * main          (straight alpha)
-//     out = overlay + (1 - alpha) * main                  (premultiplied)
+//     out = alpha * overlay + (1 - alpha) * main          (premultiplied,
+//                     with `overlay` already carrying the pixel's own alpha)
 //
 // The straight-alpha mix happens in one space. RGBA and Y'CbCr are both
 // affine functions of RGB, but the chroma pair of the YUV side carries an
@@ -27,16 +28,33 @@
 // The RGB sample is read as a 32-bit word. VA names the fourcc in memory
 // order, so VA_FOURCC_BGRA (DRM_FORMAT_ARGB8888 on a little-endian host) is
 // B in the low byte and VA_FOURCC_RGBA (DRM_FORMAT_ABGR8888) is R there; the
-// `bgra` push constant selects. The alpha byte is not read: VA's blend state
-// carries one global alpha, and per-pixel alpha is not a blend flag this
-// driver advertises.
+// `bgra` push constant selects.
 //
-// The overlay sample position is the same swscale point map the scale kernel
-// uses, over the rectangle instead of the whole output. Each invocation owns
-// one 32-bit destination word: four luma samples and two chroma pairs for
-// NV12, two luma samples and one chroma pair for P010. The rectangle is even
-// on both axes, so every 2x2 luma block is wholly inside it or wholly
-// outside, and a destination chroma cell is never half blended.
+// The alpha byte is the layer's own coverage, and VA says it participates
+// exactly when the blend state names VA_BLEND_PREMULTIPLIED_ALPHA ("RGBA
+// surfaces only"): a client that hands the processor a packed surface with a
+// real alpha channel gets the picture that channel describes rather than a
+// flat rectangle, and a client that does not name the flag gets the global
+// alpha alone, so an opaque image whose alpha byte happens to be zero is not
+// made invisible. The layer's alpha is then the product of the two, and
+// because the colours already carry it the mix is
+// out = alpha * overlay + (1 - alpha * a) * main.
+//
+// The overlay is sampled from its own region (o_x, o_row, o_crop_w,
+// o_crop_h), so a client can composite part of a surface. The sample
+// position is the same tap model the scale kernel uses, over the rectangle
+// instead of the whole output: the point map when `interp` is 0, the
+// four-tap blend when it is 1, the area average when it is 2 and the cubic
+// when it is 3. Each invocation owns one 32-bit destination word: four luma
+// samples and two chroma pairs for NV12, two luma samples and one chroma
+// pair for P010. The rectangle is even on both axes, so every 2x2 luma block
+// is wholly inside it or wholly outside, and a destination chroma cell is
+// never half blended.
+//
+// `full` selects a full-range destination: the codes are then 0..255 (or
+// 0..1023) with no 16..235 window and no 128 +- 112 chroma span, and a
+// limited-range overlay converted into that space would otherwise be
+// crushed into the middle of it.
 
 #version 450
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -59,6 +77,12 @@ layout(push_constant) uniform Params {
     uint bytes, bgra, premult;
     // Colour standard of the Y'CbCr side: 0 BT.709, 1 BT.601, 2 BT.2020.
     uint standard;
+    // Whether the destination is full range, and which interpolation method
+    // samples the overlay.
+    uint full, interp;
+    // The overlay region this layer reads: origin and size inside the
+    // overlay surface.
+    uint o_x, o_row, o_crop_w, o_crop_h;
     float alpha;
 } p;
 
@@ -89,14 +113,117 @@ uint pick(uint i, uint inc)
     return (i * inc + (inc >> 1)) >> 16;
 }
 
-// The overlay pixel as RGB in 0..1.
-vec3 rgb_at(uint px, uint py)
+// The overlay pixel's 32-bit word, at a point of the overlay's own region.
+uint pixel_at(uint px, uint py)
 {
-    uint w = o[(p.o_y + py * p.o_stride + px * 4u) >> 2];
+    return o[(p.o_y + (p.o_row + py) * p.o_stride + (p.o_x + px) * 4u) >> 2];
+}
+
+// The overlay pixel as RGB in 0..1.
+vec3 rgb_of(uint w)
+{
     float r = float(p.bgra != 0u ? (w >> 16) & 255u : w & 255u);
     float b = float(p.bgra != 0u ? w & 255u : (w >> 16) & 255u);
     float g = float((w >> 8) & 255u);
     return vec3(r, g, b) / 255.0;
+}
+
+// The overlay pixel's own alpha in 0..1: the high byte VA gives every packed
+// RGBA format, read when the blend state says the colours are premultiplied.
+float alpha_of(uint w)
+{
+    return p.premult != 0u ? float(w >> 24) / 255.0 : 1.0;
+}
+
+// The method one axis actually runs: the client's own, or the driver's pick
+// when it asked for "advanced" — the area average when the axis shrinks, where
+// a two-tap filter aliases, and the cubic when it grows.
+uint method(uint src, uint dst)
+{
+    if (p.interp != 4u)
+        return p.interp;
+    if (src > dst)
+        return 2u;
+    if (src < dst)
+        return 3u;
+    return 1u;
+}
+
+// Up to four (index, weight) taps for one axis of the overlay's region. The
+// point map is one tap, the area average covers the destination sample's
+// footprint, bilinear and the cubic read around the centre.
+int axis_taps(uint d, uint dst, uint src, uint m, out int idx[4], out float wgt[4])
+{
+    if (m == 0u) {
+        uint inc = ((src << 16) + (dst >> 1)) / dst;
+        idx[0] = int((d * inc + (inc >> 1)) >> 16);
+        wgt[0] = 1.0;
+        return 1;
+    }
+    if (m == 2u) {
+        uint a = (d * src) / dst;
+        uint b = ((d + 1u) * src + dst - 1u) / dst;
+        if (b <= a)
+            b = a + 1u;
+        b = min(b, src);
+        a = min(a, b - 1u);
+        uint n = b - a;
+        if (n <= 4u) {
+            for (int i = 0; i < 4; ++i) {
+                idx[i] = min(int(a) + i, int(b) - 1);
+                wgt[i] = 1.0 / float(n);
+            }
+            return int(n);
+        }
+        for (int i = 0; i < 4; ++i) {
+            idx[i] = int(a) + int((uint(i) * (n - 1u)) / 3u);
+            wgt[i] = 0.25;
+        }
+        return 4;
+    }
+    float v = clamp((float(d) + 0.5) * (float(src) / float(dst)) - 0.5, 0.0, float(src - 1u));
+    uint i0 = uint(floor(v));
+    float f = v - float(i0);
+    if (m == 1u) {
+        idx[0] = int(i0);
+        idx[1] = int(min(i0 + 1u, src - 1u));
+        wgt[0] = 1.0 - f;
+        wgt[1] = f;
+        return 2;
+    }
+    float f2 = f * f, f3 = f2 * f;
+    vec4 w = vec4(-0.5 * f3 + f2 - 0.5 * f, 1.5 * f3 - 2.5 * f2 + 1.0,
+        -1.5 * f3 + 2.0 * f2 + 0.5 * f, 0.5 * f3 - 0.5 * f2);
+    for (int i = 0; i < 4; ++i) {
+        idx[i] = clamp(int(i0) - 1 + i, 0, int(src) - 1);
+        wgt[i] = w[i];
+    }
+    return 4;
+}
+
+// The overlay colour and alpha at destination offset (dx, dy) inside the
+// rectangle, in 0..1 RGB and 0..1 alpha.
+void sample_overlay(uint dx, uint dy, out vec3 rgb, out float a)
+{
+    int xi[4], yi[4];
+    float xw[4], yw[4];
+    int nx = axis_taps(dx, p.r_w, p.o_crop_w, method(p.o_crop_w, p.r_w), xi, xw);
+    int ny = axis_taps(dy, p.r_h, p.o_crop_h, method(p.o_crop_h, p.r_h), yi, yw);
+    vec3 sum = vec3(0.0);
+    float asum = 0.0;
+    for (int j = 0; j < ny; ++j) {
+        vec3 rowsum = vec3(0.0);
+        float arow = 0.0;
+        for (int i = 0; i < nx; ++i) {
+            uint w = pixel_at(uint(xi[i]), uint(yi[j]));
+            rowsum += xw[i] * rgb_of(w);
+            arow += xw[i] * alpha_of(w);
+        }
+        sum += yw[j] * rowsum;
+        asum += yw[j] * arow;
+    }
+    rgb = sum;
+    a = clamp(asum, 0.0, 1.0);
 }
 
 // Normalised luma and the two chroma offsets for the picture's standard.
@@ -114,11 +241,19 @@ vec3 to_ycbcr(vec3 rgb)
     return vec3(y, (rgb.b - y) / (2.0 * (1.0 - kb)), (rgb.r - y) / (2.0 * (1.0 - kr)));
 }
 
-vec3 blend(vec3 overlay, vec3 main)
+// The mix at one pixel. `overlay` is the sampled colour and `a` the sampled
+// alpha byte, which is 1.0 when the picture is not premultiplied. The layer's
+// coverage is the global alpha times that byte; a premultiplied colour already
+// carries the byte but not the global alpha, so it is scaled by the global one
+// and the main surface by the product. Scaling the colour too is what makes a
+// fully transparent sample reproduce the main surface instead of leaving a
+// quarter of it behind.
+vec3 blend(vec3 overlay, vec3 main, float a)
 {
+    float layer = p.alpha * a;
     if (p.premult != 0u)
-        return overlay + (1.0 - p.alpha) * main;
-    return p.alpha * overlay + (1.0 - p.alpha) * main;
+        return p.alpha * overlay + (1.0 - layer) * main;
+    return layer * overlay + (1.0 - layer) * main;
 }
 
 // The code that carries zero and the distance to 1.0, per bit depth: the
@@ -126,14 +261,16 @@ vec3 blend(vec3 overlay, vec3 main)
 // range scaled by four.
 float luma_zero()
 {
-    return p.bytes == 1u ? 16.0 : 64.0;
+    return p.full != 0u ? 0.0 : (p.bytes == 1u ? 16.0 : 64.0);
 }
 
 float luma_span()
 {
-    return p.bytes == 1u ? 219.0 : 876.0;
+    return p.full != 0u ? (p.bytes == 1u ? 255.0 : 1023.0) : (p.bytes == 1u ? 219.0 : 876.0);
 }
 
+// The chroma midpoint is the same code in both ranges: 128 for eight bits,
+// 512 for ten.
 float chroma_zero()
 {
     return p.bytes == 1u ? 128.0 : 512.0;
@@ -141,7 +278,7 @@ float chroma_zero()
 
 float chroma_span()
 {
-    return p.bytes == 1u ? 224.0 : 896.0;
+    return p.full != 0u ? (p.bytes == 1u ? 255.0 : 1023.0) : (p.bytes == 1u ? 224.0 : 896.0);
 }
 
 bool inside(uint x, uint y)
@@ -161,17 +298,16 @@ void main()
         return;
 
     if (row < p.dst_height) {
-        uint hx = step(p.o_width, p.r_w);
-        uint hy = step(p.o_height, p.r_h);
         uint packed = 0u;
         for (uint k = 0u; k < per_word; ++k) {
             uint dx = min(word * per_word + k, p.dst_width - 1u);
             float m = (code(p.m_y + (row + p.m_row) * p.m_stride + (dx + p.m_x) * p.bytes) - luma_zero())
                 / luma_span();
             if (inside(dx, row)) {
-                uint ox = pick(dx - p.r_x, hx);
-                uint oy = pick(row - p.r_y, hy);
-                m = blend(to_ycbcr(rgb_at(ox, oy)), vec3(m, 0.0, 0.0)).x;
+                vec3 rgb;
+                float a;
+                sample_overlay(dx - p.r_x, row - p.r_y, rgb, a);
+                m = blend(to_ycbcr(rgb), vec3(m, 0.0, 0.0), a).x;
             }
             packed |= code_bits(luma_zero() + luma_span() * m) << (k * 8u * p.bytes);
         }
@@ -184,18 +320,29 @@ void main()
         // own half-scale coordinates are.
         uint rx = p.r_x >> 1, ry = p.r_y >> 1;
         uint rw = p.r_w >> 1, rh = p.r_h >> 1;
-        uint ow = p.o_width >> 1, oh = p.o_height >> 1;
-        uint hx = step(ow, rw);
-        uint hy = step(oh, rh);
         uint packed = 0u;
         for (uint k = 0u; k < cells; ++k) {
             uint cx = min(word * cells + k, cw - 1u);
             uint m_off = p.m_uv + (cy + (p.m_row >> 1)) * p.m_stride + (cx + (p.m_x >> 1)) * 2u * p.bytes;
             vec2 m = (vec2(code(m_off), code(m_off + p.bytes)) - chroma_zero()) / chroma_span();
             if (cx >= rx && cx < rx + rw && cy >= ry && cy < ry + rh) {
-                uint ox = pick(cx - rx, hx);
-                uint oy = pick(cy - ry, hy);
-                m = blend(to_ycbcr(rgb_at(ox, oy)), vec3(0.0, m)).yz;
+                // The chroma cell covers the 2x2 luma block, so its overlay
+                // sample is the same block's: the alpha is the block's mean,
+                // which is what makes a half-transparent edge blend its chroma
+                // as far as its luma.
+                vec3 rgb = vec3(0.0);
+                float a2 = 0.0;
+                for (uint j = 0u; j < 2u; ++j)
+                    for (uint i = 0u; i < 2u; ++i) {
+                        vec3 one;
+                        float oa;
+                        sample_overlay((cx - rx) * 2u + i, (cy - ry) * 2u + j, one, oa);
+                        rgb += one;
+                        a2 += oa;
+                    }
+                rgb *= 0.25;
+                a2 *= 0.25;
+                m = blend(to_ycbcr(rgb), vec3(0.0, m), a2).yz;
             }
             float u = chroma_zero() + chroma_span() * m.x;
             float v = chroma_zero() + chroma_span() * m.y;

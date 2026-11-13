@@ -175,7 +175,8 @@ struct Context {
         uint32_t rotation = VA_ROTATION_NONE;
         uint32_t mirror = VA_MIRROR_NONE;
         // The scale kernel's interpolation method, already reduced from
-        // VA_FILTER_INTERPOLATION_*: 0 is the point map, 1 the four-tap blend.
+        // VA_FILTER_INTERPOLATION_*: 0 is the point map, 1 the four-tap blend,
+        // 4 the driver's own per-axis pick.
         uint32_t interpolation = 0;
         // How many filter buffers the pipeline names. One is supported, and
         // only the HDR10 tone mapper; the parameters arrive as their own
@@ -187,6 +188,15 @@ struct Context {
         int input_standard = VAProcColorStandardNone;
         int output_standard = VAProcColorStandardNone;
         bool explicit_colour_properties_equal = true;
+        // The range each end names, from input_color_properties and
+        // output_color_properties. The composite encodes its result into the
+        // output range, and a premultiplied overlay's neutral code depends on
+        // it; the scale carries codes through unchanged, so there the two
+        // ends only have to agree. Unknown is neither, and matches anything.
+        bool input_full_range = false;
+        bool output_full_range = false;
+        bool input_range_unknown = true;
+        bool output_range_unknown = true;
         // The blend state of the VABlendState this buffer named. Only the
         // second (overlay) pass carries one, and its two flags are the only
         // blending the driver runs: a global alpha, and whether the overlay's
