@@ -6914,3 +6914,62 @@ the compute primitive; neither advertises `VAProfileNone` /
 `VAEntrypointVideoProc`, no VPP vtable hooks, context, buffer types 41/42 or
 filters are wired in `src/`, and `data/iris-codec-capabilities.json` is
 unchanged.
+
+## VA video processor wired end to end (2026-11-13)
+
+The two entries above stop at "neither advertises `VAProfileNone` /
+`VAEntrypointVideoProc`". This one wires them: the three `vtable_vpp` queries,
+a context that opens no node and owns no session, buffer types 41 and 42, and
+an `endPicture` that resolves the source and output surface DMA-BUFs and
+dispatches the pinned NV12 2x nearest kernel.
+
+The backend is one operation. Crop, rotation, blending, filters, colour
+conversion, a ratio other than 2x and a second pipeline buffer in one picture
+all fail the picture with a VA status instead of being dropped. The output
+surface reports pixels only after the dispatch fence signals, so `vaGetImage`
+and `hwdownload` cannot read a half-written frame. The entrypoint is
+advertised only when the build found Vulkan and the client sets
+`V4L2_VA_VPP`; without the opt-in `vaCreateConfig` answers
+`VA_STATUS_ERROR_UNSUPPORTED_PROFILE` (12) and the client is refused.
+
+`test/vulkan-vpp/scale_vaapi_gate.sh` is the gate. One 128x128 NV12 frame is
+uploaded, scaled to 256x256 by FFmpeg's `scale_vaapi`, downloaded with
+`hwdownload`, and compared with swscale `flags=neighbor` on the same input;
+the same client then runs without the opt-in and must fail. swscale's nearest
+2x map is the map the kernel runs, so this is a byte-for-byte oracle, not a
+tolerance.
+
+Recorded run `run-20261113T032443Z` (`test/remote/gate.sh -- sh
+test/vulkan-vpp/scale_vaapi_gate.sh`), guard `complete`, exit 0:
+
+| stage | sha256 of the raw NV12 |
+| --- | --- |
+| swscale `flags=neighbor` 128x128 -> 256x256 | `6070d81c88964f4eee42a53ccbfeb9abfdaadf99d4dd992ed8a387921c6d37f5` |
+| `hwupload,scale_vaapi,hwdownload` | `6070d81c88964f4eee42a53ccbfeb9abfdaadf99d4dd992ed8a387921c6d37f5` |
+
+The trace for that picture shows the pipeline, not only a success status:
+
+```
+va create_context id=8 profile=-1 256x256 entrypoint=videoproc
+va begin_picture ctx=8 surface=5 entrypoint=videoproc
+va end_picture ctx=8 surface=5 entrypoint=videoproc src=1 128x128->256x256
+va destroy_context id=8 entrypoint=videoproc
+```
+
+Without `V4L2_VA_VPP` the same run reported `createConfig: VPP not
+advertised`, `va error where=createConfig status=12`, and exited 1.
+
+Identity: source commit `40c7daa`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot
+`3356e00e-5a48-4718-8dc1-868fa5cc559d`, module `b90bd823`, decoder and encoder
+nodes resolved by `iris_driver` QUERYCAP name (`/dev/video17` /
+`/dev/video18`), render node `/dev/dri/renderD128`. One VPP picture; no decode
+frames and no drops (the context has no session). The runtime used a
+**build-tree override** (`LIBVA_DRIVERS_PATH=build/src`, driver
+`36f761b848bc10fb1b29a4be0f8a27403ee1eee244c9c0adbbbe771b3959dbb0`); the
+installed `/usr/lib64/dri/v4l2_drv_video.so` (`323c07cb`) was not loaded and
+does not yet carry the entrypoint. Guard battery 78% discharging at start,
+peak 41 °C. The embedded shader header is regenerated from the pinned
+`nv12_scale.spv` and compared by `test/run-static-checks.sh`, and Vulkan is an
+optional meson dependency, so a build without it compiles and does not
+advertise the entrypoint.
