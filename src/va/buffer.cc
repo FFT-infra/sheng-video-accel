@@ -37,6 +37,10 @@ VAStatus createBuffer(VADriverContextP ctx, VAContextID, VABufferType type, unsi
     // The coded buffer's capacity is `size`; the bytes land in `payload`
     // when vaEndPicture returns, and mapBuffer hands out the segment.
     case VAEncCodedBufferType:
+    // VideoProc: the pipeline parameters, and filter parameter buffers a
+    // client may create even though no filter is implemented.
+    case VAProcPipelineParameterBufferType:
+    case VAProcFilterParameterBufferType:
         break;
     default:
         return VA_STATUS_ERROR_UNSUPPORTED_BUFFERTYPE;

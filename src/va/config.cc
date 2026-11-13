@@ -28,6 +28,11 @@ VAStatus queryConfigProfiles(VADriverContextP ctx, VAProfile* profiles, int* cou
     std::lock_guard<std::recursive_mutex> lock(d.mutex);
     std::set<VAProfile> all = d.capabilities.profiles;
     all.insert(d.capabilities.encode_profiles.begin(), d.capabilities.encode_profiles.end());
+    // VAProfileNone carries no bitstream; it exists only so a client can open
+    // a VideoProc config. Advertised only when the backend is built in and
+    // the client opted in.
+    if (vpp_available(d))
+        all.insert(VAProfileNone);
     int n = 0;
     for (VAProfile profile : all)
         if (n < static_cast<int>(kMaxProfiles))
@@ -43,6 +48,12 @@ VAStatus queryConfigEntrypoints(VADriverContextP ctx, VAProfile profile, VAEntry
     // Decode first: FFmpeg's encode path walks the list and skips VLD, so
     // the order is only about what a human reads in vainfo.
     int n = 0;
+    if (profile == VAProfileNone) {
+        if (vpp_available(d))
+            entrypoints[n++] = VAEntrypointVideoProc;
+        *count = n;
+        return VA_STATUS_SUCCESS;
+    }
     if (d.capabilities.profiles.count(profile))
         entrypoints[n++] = VAEntrypointVLD;
     if (d.capabilities.encode_profiles.count(profile) && n < static_cast<int>(kMaxEntrypoints))
@@ -57,6 +68,7 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
     auto& d = data(ctx);
     const bool decode = d.capabilities.profiles.count(profile) && entrypoint == VAEntrypointVLD;
     const bool encode = d.capabilities.encode_profiles.count(profile) && entrypoint == VAEntrypointEncSlice;
+    const bool vpp = profile == VAProfileNone && entrypoint == VAEntrypointVideoProc && vpp_available(d);
     for (int i = 0; i < count; ++i) {
         switch (attributes[i].type) {
         case VAConfigAttribRTFormat:
@@ -64,8 +76,8 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
                 attributes[i].value = VA_RT_FORMAT_YUV420;
                 if (p010_decode_profile(profile) && d.capabilities.p010)
                     attributes[i].value |= VA_RT_FORMAT_YUV420_10;
-            } else if (encode) {
-                // The encoder's raw port is NV12; P010 is not an option.
+            } else if (encode || vpp) {
+                // Both raw ports are NV12; the processor has no 10-bit path.
                 attributes[i].value = VA_RT_FORMAT_YUV420;
             } else {
                 attributes[i].value = VA_ATTRIB_NOT_SUPPORTED;
@@ -75,10 +87,10 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
             attributes[i].value = decode ? VA_DEC_SLICE_MODE_NORMAL : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribMaxPictureWidth:
-            attributes[i].value = (decode || encode) ? d.capabilities.max_width : VA_ATTRIB_NOT_SUPPORTED;
+            attributes[i].value = (decode || encode || vpp) ? d.capabilities.max_width : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribMaxPictureHeight:
-            attributes[i].value = (decode || encode) ? d.capabilities.max_height : VA_ATTRIB_NOT_SUPPORTED;
+            attributes[i].value = (decode || encode || vpp) ? d.capabilities.max_height : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribRateControl:
             // CQP is what FFmpeg picks when the client gives no bitrate;
@@ -125,9 +137,13 @@ VAStatus createConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entr
     return guarded(ctx, "createConfig", [&] {
         auto& d = data(ctx);
         std::lock_guard<std::recursive_mutex> lock(d.mutex);
-        iris::require(entrypoint == VAEntrypointVLD || entrypoint == VAEntrypointEncSlice, "unsupported entrypoint",
-            VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT);
-        if (entrypoint == VAEntrypointVLD) {
+        iris::require(entrypoint == VAEntrypointVLD || entrypoint == VAEntrypointEncSlice
+                || entrypoint == VAEntrypointVideoProc,
+            "unsupported entrypoint", VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT);
+        if (entrypoint == VAEntrypointVideoProc) {
+            iris::require(profile == VAProfileNone && vpp_available(d), "VPP not advertised",
+                VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
+        } else if (entrypoint == VAEntrypointVLD) {
             iris::require(d.capabilities.profiles.count(profile) > 0, "profile not advertised",
                 VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
         } else {
@@ -144,7 +160,12 @@ VAStatus createConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entr
             if (attributes[i].type == VAConfigAttribRateControl && attributes[i].value != VA_ATTRIB_NOT_SUPPORTED)
                 rate_control = attributes[i].value;
         }
-        if (entrypoint == VAEntrypointEncSlice) {
+        if (entrypoint == VAEntrypointVideoProc) {
+            // The processor's two ports are NV12 here; advertise and accept
+            // only that RT format.
+            iris::require(rt_format == VA_RT_FORMAT_YUV420, "VPP needs YUV420",
+                VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+        } else if (entrypoint == VAEntrypointEncSlice) {
             // One bit, chosen by the client from what getConfigAttributes
             // advertised.
             iris::require((rate_control & (VA_RC_CBR | VA_RC_VBR | VA_RC_CQP)) != 0,

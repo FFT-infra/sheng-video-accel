@@ -52,6 +52,7 @@ Options Options::from_environment()
         else if (std::strcmp(publish, "import") == 0)
             options.publish = PublishOverride::Import;
     }
+    options.vpp_enabled = env("V4L2_VA_VPP") != nullptr;
     if (const char* dump = env("V4L2_VA_DUMP"))
         options.dump_dir = dump;
     return options;

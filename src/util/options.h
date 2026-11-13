@@ -28,6 +28,10 @@ struct Options {
     int cold_start_timeout_ms = 30000;
     CopyMode copy_mode = CopyMode::Gpu;
     PublishOverride publish = PublishOverride::Auto;
+    // Opt in to the VA video-processing entrypoint (VAProfileNone /
+    // VAEntrypointVideoProc). Off by default so a VPP-capable build does not
+    // change the decode/encode surface any client already qualified against.
+    bool vpp_enabled = false;
     // Directory to write each submitted access unit into; empty disables.
     std::string dump_dir;
 

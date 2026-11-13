@@ -5,6 +5,7 @@
 
 #include "driver.h"
 
+#include "../iris/vpp/scale.h"
 #include "../util/error.h"
 
 #include <algorithm>
@@ -86,6 +87,11 @@ iris::Publish publish_policy(const DriverData& d, const Surface& surface, const 
     // A pre-exporting client (Chrome) gets its own buffer decoded into when
     // the kernel and the session allow it, and the GPU copy otherwise.
     return session.supports_import() ? iris::Publish::Import : iris::Publish::Copy;
+}
+
+bool vpp_available(const DriverData& d)
+{
+    return d.options.vpp_enabled && iris::vpp::compiled_in();
 }
 
 iris::StableBuffer& ensure_stable(DriverData& d, Surface& surface)
@@ -307,6 +313,16 @@ extern "C" VAStatus __attribute__((visibility("default"))) VA_DRIVER_INIT_FUNC(V
     vtable->vaSetSubpictureGlobalAlpha = setSubpictureGlobalAlpha;
     vtable->vaAssociateSubpicture = associateSubpicture;
     vtable->vaDeassociateSubpicture = deassociateSubpicture;
+
+    // The VPP vtable is separate and may be absent on an older libva. Only
+    // fill it in when this build and the client both opted in; otherwise a
+    // client that probes VAProfileNone gets nothing to call.
+    if (ctx->vtable_vpp && vpp_available(*d)) {
+        ctx->vtable_vpp->version = VA_DRIVER_VTABLE_VPP_VERSION;
+        ctx->vtable_vpp->vaQueryVideoProcFilters = queryVideoProcFilters;
+        ctx->vtable_vpp->vaQueryVideoProcFilterCaps = queryVideoProcFilterCaps;
+        ctx->vtable_vpp->vaQueryVideoProcPipelineCaps = queryVideoProcPipelineCaps;
+    }
 
     ctx->pDriverData = d;
     return VA_STATUS_SUCCESS;

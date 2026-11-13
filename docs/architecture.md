@@ -316,7 +316,9 @@ src/
     config.cc         profiles/entrypoints from the capability table
     surface.cc        create/destroy/sync/query/export/derive/getImage
     picture.cc        begin/render/end -> codec translator -> Session::submit,
-                      or for an EncSlice context -> EncoderSession::encode
+                      or for an EncSlice context -> EncoderSession::encode,
+                      or for a VideoProc context -> iris::vpp::scale_2x
+    vpp.cc            the three vtable_vpp queries; no GPU probe
     image.cc          images and subpictures (minimal); derive aliases a surface
   iris/               the only code that touches /dev/videoN
     device.{h,cc}     Device interface (ioctl/poll/mmap virtuals) + real implementation;
@@ -333,6 +335,9 @@ src/
     gpu_copy.{h,cc}   EGL/GLES blit on one worker thread, view cache by Frame id
     alloc.{h,cc}      StableBuffer allocation (MSM GEM -> dma-heap), or a
                       duplicate of a client's DMA-BUF for an imported surface
+    vpp/scale.{h,cc}  optional Vulkan compute video processor: imports two
+                      surface DMA-BUFs, runs the pinned NV12 2x nearest kernel
+                      embedded from test/vulkan-vpp/nv12_scale.spv
   codec/              VA parameters -> bytestream the firmware accepts; pure functions
     bitwriter.h
     h264.cc           SPS/PPS synthesis, AU assembly
@@ -376,6 +381,19 @@ scripts/
 not survive; MPEG2/VP8 translators leave with them (no Iris node advertises
 those formats).
 
+The video processor is a fourth context kind but not a fourth node:
+`VAProfileNone` / `VAEntrypointVideoProc` opens no V4L2 node and owns no
+session. `vaEndPicture` resolves the two surface DMA-BUFs and runs the pinned
+NV12 2x nearest kernel; every other pipeline operation (crop, rotation,
+blending, filters, colour conversion, a ratio other than 2x) fails the
+picture instead of being dropped. The entrypoint is advertised only when the
+build found Vulkan and the client set `V4L2_VA_VPP` (§6), so an installed
+decode/encode client sees the surface it qualified against. The kernel and the
+VA surface path are gated separately in §9:
+`test/vulkan-vpp/nv12_scale_gate.sh` checks every pixel of the primitive and
+`test/vulkan-vpp/scale_vaapi_gate.sh` checks a `scale_vaapi` + `hwdownload`
+frame against swscale.
+
 ## 6. Environment surface
 
 Read once in `VA_DRIVER_INIT_FUNC`, stored in `Options`, passed down.
@@ -388,9 +406,10 @@ Read once in `VA_DRIVER_INIT_FUNC`, stored in `Options`, passed down.
 | `V4L2_VA_SYNC_TIMEOUT_MS` | `2000` | Bounded `vaSyncSurface` wait; first frame of a cold session gets `30000`. |
 | `V4L2_VA_COPY` | `gpu` | Copy engine for persistent exports: `gpu` or `cpu`. |
 | `V4L2_VA_PUBLISH` | `auto` | Force `copy`, `direct` or `import` for diagnostics. |
+| `V4L2_VA_VPP` | off | Opt in to the `VAProfileNone` / `VAEntrypointVideoProc` entrypoint. Off keeps the decode/encode surface unchanged. |
 | `V4L2_VA_DUMP` | off | Directory for submitted access units. |
 
-Seven switches, down from eighteen. `test/iris-env-doc-check.sh` keeps README
+Eight switches, down from eighteen. `test/iris-env-doc-check.sh` keeps README
 and `options.cc` in sync by name, not by sentence.
 
 ## 7. Threading and locking
@@ -495,12 +514,16 @@ import token=<n> failed: no client buffer
 va create_surfaces count=<n> <w>x<h> fourcc=<fourcc> imported=0|1 fd=<n>
 va create_context id=<n> profile=<id> <w>x<h> targets=<n> mode=<name>
 va create_context id=<n> profile=<id> <w>x<h> entrypoint=encslice codec=<fourcc>
+va create_context id=<n> profile=-1 <w>x<h> entrypoint=videoproc
 va destroy_context id=<n> pending=<n>
 va destroy_context id=<n> entrypoint=encslice frames=<n>
+va destroy_context id=<n> entrypoint=videoproc
 va begin_picture ctx=<n> surface=<n>
 va begin_picture ctx=<n> surface=<n> entrypoint=encslice
+va begin_picture ctx=<n> surface=<n> entrypoint=videoproc
 va end_picture ctx=<n> surface=<n> bytes=<n> seq_start=0|1
 va end_picture ctx=<n> surface=<n> entrypoint=encslice submitted token=<n>
+va end_picture ctx=<n> surface=<n> entrypoint=videoproc src=<n> <w>x<h>-><w>x<h>
 encode open node=<path> codec=<fourcc> raw=<w>x<h> crop=<w>x<h> mode=cbr|vbr|cqp
             gop=<n> rate=<num>/<den>
 encode frame index=<n> bytes=<n> idr=0|1 promoted=0|1    (idr=1 covers both the
@@ -574,6 +597,13 @@ Client memory entering through `vaCreateSurfaces2` (DRM_PRIME_2 or PRIME_1,
 them). The allocation chain behind those surfaces is gated on the target by
 `test/iris-alloc-chain.sh` (§3.4); it is not a Meson test because every rung
 below the first needs an MSM render node.
+
+The video processor is gated at two levels. `test/vulkan-vpp/nv12_scale_gate.sh`
+checks the NV12 2x nearest kernel byte for byte against a CPU oracle over both
+DMA-BUF origins; `test/vulkan-vpp/scale_vaapi_gate.sh` checks a `scale_vaapi` +
+`hwdownload` frame against swscale on the same input and checks that the
+entrypoint is refused without `V4L2_VA_VPP`. The SPIR-V the driver embeds is
+regenerated from the pinned module and compared by `test/run-static-checks.sh`.
 
 ## 10. Invariants (the ones tests exist for)
 

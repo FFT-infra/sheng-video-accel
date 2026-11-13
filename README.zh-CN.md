@@ -87,6 +87,7 @@ cd packaging/arch && makepkg -si
 | `V4L2_VA_SYNC_TIMEOUT_MS` | 2000 | session 等待超时时间（毫秒） |
 | `V4L2_VA_COPY` | gpu | 拷贝引擎选择（`gpu` 或 `cpu`） |
 | `V4L2_VA_PUBLISH` | auto | 强制指定发布模式（`auto`、`direct`、`import`、`copy`） |
+| `V4L2_VA_VPP` | off | 启用 `VAProfileNone` / `VAEntrypointVideoProc` 入口（2x NV12 缩放） |
 | `V4L2_VA_DUMP` | off | 提交的码流单元转储目录路径 |
 
 GStreamer 的 VA 插件（`libgstva`）在注册任何元素之前会按厂商字符串过滤 VA 驱动，本驱动的字符串不在白名单里：`gst-inspect-1.0 va` 报 `0 features`，`vaav1dec` 元素不存在。`GST_VA_ALL_DRIVERS=1` 是插件自带的绕过开关，设置后元素才会注册；libva 仍然通过 `msm_drv_video.so` 符号链接加载本驱动，不涉及任何 `LIBVA_*` 变量。`test/iris-gstreamer-gate.sh` 在平板上验证这两种状态。

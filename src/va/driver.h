@@ -16,6 +16,13 @@
 #include "../util/options.h"
 #include "../util/trace.h"
 
+extern "C" {
+#include <va/va.h>
+#include <va/va_backend.h>
+#include <va/va_backend_vpp.h>
+#include <va/va_vpp.h>
+}
+
 #include <map>
 #include <memory>
 #include <mutex>
@@ -23,11 +30,6 @@
 #include <set>
 #include <string>
 #include <vector>
-
-extern "C" {
-#include <va/va.h>
-#include <va/va_backend.h>
-}
 
 namespace va {
 
@@ -63,8 +65,11 @@ struct Surface {
     // A decode error or a released-while-pending token. Reported by
     // syncSurface until the surface starts a new picture.
     bool failed = false;
+    // Pixels this driver produced through a VideoProc picture, not a decode
+    // completion. vaGetImage reads `stable`; no session owns the surface.
+    bool vpp_pixels = false;
     bool rendering() const { return target.pending; }
-    bool has_pixels() const { return target.completed && (target.frame || stable); }
+    bool has_pixels() const { return (target.completed || vpp_pixels) && (target.frame || stable); }
 };
 
 struct Buffer {
@@ -142,7 +147,21 @@ struct Context {
     };
     std::map<VASurfaceID, EncSubmitted> enc_submitted;
 
+    // VideoProc state: one picture, one VAProcPipelineParameterBuffer. The
+    // client's pointers are only valid until vaEndPicture, so the regions it
+    // names are resolved to values in renderPicture and the buffer is not
+    // kept. The backend only scales 2x NV12; anything else fails the picture.
+    struct VppJob {
+        VASurfaceID source = VA_INVALID_ID;
+        VARectangle region = {};
+        bool region_set = false;
+        VARectangle output_region = {};
+        bool output_region_set = false;
+    };
+    std::optional<VppJob> vpp;
+
     bool encoding() const { return entrypoint == VAEntrypointEncSlice; }
+    bool video_proc() const { return entrypoint == VAEntrypointVideoProc; }
 };
 
 // What the decoder and encoder nodes offered when the driver was initialised.
@@ -180,6 +199,10 @@ struct DriverData {
 };
 
 inline DriverData& data(VADriverContextP ctx) { return *static_cast<DriverData*>(ctx->pDriverData); }
+
+// The VPP entrypoint may be advertised: the build has the Vulkan backend and
+// the client opted in with V4L2_VA_VPP. Never probes the GPU.
+bool vpp_available(const DriverData& d);
 
 // Translate an iris::Error / std::exception into a VA status, logging once.
 VAStatus report(VADriverContextP ctx, const char* where, const std::exception& error);
@@ -285,5 +308,12 @@ VAStatus associateSubpicture(VADriverContextP ctx, VASubpictureID id, VASurfaceI
     short srcy, unsigned short srcw, unsigned short srch, short dstx, short dsty, unsigned short dstw,
     unsigned short dsth, unsigned flags);
 VAStatus deassociateSubpicture(VADriverContextP ctx, VASubpictureID id, VASurfaceID* surfaces, int count);
+
+// Video processing (VAProfileNone / VAEntrypointVideoProc, vtable_vpp).
+VAStatus queryVideoProcFilters(VADriverContextP ctx, VAContextID id, VAProcFilterType* filters, unsigned* count);
+VAStatus queryVideoProcFilterCaps(VADriverContextP ctx, VAContextID id, VAProcFilterType type, void* caps,
+    unsigned* count);
+VAStatus queryVideoProcPipelineCaps(VADriverContextP ctx, VAContextID id, VABufferID* filters, unsigned count,
+    VAProcPipelineCaps* caps);
 
 } // namespace va

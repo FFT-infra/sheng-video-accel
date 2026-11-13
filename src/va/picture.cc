@@ -7,6 +7,7 @@
 #include "driver.h"
 
 #include "../codec/av1_dpb.h"
+#include "../iris/vpp/scale.h"
 #include "../util/error.h"
 
 #include <algorithm>
@@ -85,6 +86,164 @@ void submit(DriverData& d, Context& c, Surface& s, const iris::codec::AccessUnit
     c.session->submit(au.bytes.data(), au.bytes.size(), s.target);
 }
 
+// The buffer that holds a surface's current pixels: a completed decode frame
+// when it has one, else the stable DMA-BUF (an hwupload target, or a previous
+// VideoProc picture's output).
+struct Pixels {
+    int fd = -1;
+    unsigned size = 0;
+    iris::Layout layout;
+};
+
+Pixels pixels_of(DriverData& d, Surface& s)
+{
+    Pixels p;
+    if (s.target.frame) {
+        p.fd = s.target.frame->fd();
+        p.size = s.target.frame->length();
+        p.layout = s.target.frame->layout();
+    } else {
+        iris::StableBuffer& stable = ensure_stable(d, s);
+        p.fd = stable.fd();
+        p.size = stable.size();
+        p.layout = stable.layout();
+    }
+    return p;
+}
+
+// Copy the client's pipeline parameters and refuse every operation the
+// compute kernel does not run. The struct's pointers are valid only until
+// vaEndPicture, so the regions are dereferenced here rather than kept.
+void accept_vpp_pipeline(Context& c, const Buffer& b)
+{
+    // One picture is one scale. Several pipeline buffers describe compositing
+    // into several output regions, which the kernel does not do; dropping all
+    // but the last would publish a picture the client did not ask for.
+    iris::require(!c.vpp.has_value(), "one VideoProc pipeline per picture is supported",
+        VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    iris::require(b.size >= sizeof(VAProcPipelineParameterBuffer), "pipeline buffer too small",
+        VA_STATUS_ERROR_INVALID_PARAMETER);
+    VAProcPipelineParameterBuffer p = {};
+    std::memcpy(&p, b.data.data(), sizeof(p));
+
+    iris::require(p.num_filters == 0, "VPP filters are not supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    iris::require(p.forward_references == nullptr && p.num_forward_references == 0,
+        "VPP forward references are not supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    iris::require(p.backward_references == nullptr && p.num_backward_references == 0,
+        "VPP backward references are not supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    iris::require(p.additional_outputs == nullptr && p.num_additional_outputs == 0,
+        "VPP additional outputs are not supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    iris::require(p.blend_state == nullptr, "VPP blending is not supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    iris::require(p.output_hdr_metadata == nullptr, "VPP HDR metadata is not supported",
+        VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    iris::require(p.rotation_state == VA_ROTATION_NONE, "VPP rotation is not supported",
+        VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    iris::require(p.mirror_state == VA_MIRROR_NONE, "VPP mirroring is not supported",
+        VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    iris::require((p.pipeline_flags & ~VA_PROC_PIPELINE_FAST) == 0, "unsupported VPP pipeline flag",
+        VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    // Scaling mode is only a hint, so every VA_FILTER_SCALING_* value is
+    // accepted. A specific interpolation method (bilinear or advanced) asks
+    // for a filter the nearest-neighbour kernel does not implement.
+    iris::require((p.filter_flags & VA_FILTER_INTERPOLATION_MASK) == 0
+            || (p.filter_flags & VA_FILTER_INTERPOLATION_MASK) == VA_FILTER_INTERPOLATION_NEAREST_NEIGHBOR,
+        "VPP interpolation method is not supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+
+    // No colour conversion: input and output must name the same standard,
+    // and when the client supplies explicit properties they must match.
+    const int input_standard = static_cast<int>(p.surface_color_standard);
+    const int output_standard = static_cast<int>(p.output_color_standard);
+    iris::require(input_standard >= 0 && input_standard < VAProcColorStandardCount,
+        "invalid input colour standard", VA_STATUS_ERROR_INVALID_PARAMETER);
+    iris::require(output_standard >= 0 && output_standard < VAProcColorStandardCount,
+        "invalid output colour standard", VA_STATUS_ERROR_INVALID_PARAMETER);
+    iris::require(p.surface_color_standard == p.output_color_standard,
+        "VPP colour conversion is not supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    if (p.surface_color_standard == VAProcColorStandardExplicit)
+        iris::require(std::memcmp(&p.input_color_properties, &p.output_color_properties,
+                          sizeof(VAProcColorProperties)) == 0,
+            "VPP colour conversion is not supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+
+    Context::VppJob job;
+    job.source = p.surface;
+    if (p.surface_region) {
+        job.region = *p.surface_region;
+        job.region_set = true;
+    }
+    if (p.output_region) {
+        job.output_region = *p.output_region;
+        job.output_region_set = true;
+    }
+    c.vpp = job;
+}
+
+// Run one VideoProc picture: the source comes from the pipeline buffer, the
+// target is the surface vaBeginPicture named. Synchronous — scale_2x waits
+// for its fence, so a successful vaEndPicture means the pixels are there.
+VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_id,
+    const std::shared_ptr<Surface>& target)
+{
+    iris::require(c.vpp.has_value(), "VideoProc picture has no pipeline parameters",
+        VA_STATUS_ERROR_INVALID_PARAMETER);
+    const Context::VppJob job = *c.vpp;
+
+    Pixels src, dst;
+    // Keep the source alive across the dispatch: the fd captured below is
+    // closed when its Surface dies, and a client that destroys the source
+    // while this picture is running must not pull the buffer out from under
+    // the import.
+    std::shared_ptr<Surface> source;
+    {
+        std::lock_guard<std::recursive_mutex> lock(d.mutex);
+        source = surface(d, job.source);
+        iris::require(source.get() != target.get(), "VPP source and output are the same surface",
+            VA_STATUS_ERROR_INVALID_PARAMETER);
+        iris::require(source->fourcc == VA_FOURCC_NV12 && target->fourcc == VA_FOURCC_NV12,
+            "VPP input and output must be NV12", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+        iris::require(source->target.frame || source->stable, "VPP source holds no pixels",
+            VA_STATUS_ERROR_OPERATION_FAILED);
+
+        // The kernel is a fixed 2x map with no crop, so a region that is not
+        // the whole surface is a picture it cannot produce.
+        if (job.region_set)
+            iris::require(job.region.x == 0 && job.region.y == 0 && job.region.width == source->width
+                    && job.region.height == source->height,
+                "VPP processes the whole source surface", VA_STATUS_ERROR_INVALID_PARAMETER);
+        if (job.output_region_set)
+            iris::require(job.output_region.x == 0 && job.output_region.y == 0
+                    && job.output_region.width == target->width && job.output_region.height == target->height,
+                "VPP fills the whole output surface", VA_STATUS_ERROR_INVALID_PARAMETER);
+        iris::require(target->width == 2 * source->width && target->height == 2 * source->height,
+            "the VPP backend scales exactly 2x", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+
+        src = pixels_of(d, *source);
+        dst = pixels_of(d, *target);
+    }
+
+    iris::vpp::ScaleJob sj;
+    sj.src_fd = src.fd;
+    sj.dst_fd = dst.fd;
+    sj.src_size = src.size;
+    sj.dst_size = dst.size;
+    sj.src_stride = src.layout.stride;
+    sj.dst_stride = dst.layout.stride;
+    sj.src_uv = src.layout.chroma_offset();
+    sj.dst_uv = dst.layout.chroma_offset();
+    sj.src_y = src.layout.data_offset;
+    sj.dst_y = dst.layout.data_offset;
+    sj.width = target->width;
+    sj.height = target->height;
+    if (!iris::vpp::scale_2x(sj)) {
+        target->failed = true;
+        throw iris::Error(VA_STATUS_ERROR_OPERATION_FAILED, "Vulkan VPP scale failed");
+    }
+    target->vpp_pixels = true;
+    target->failed = false;
+    d.trace("va end_picture ctx=%u surface=%u entrypoint=videoproc src=%u %ux%u->%ux%u", ctx_id, dst_id,
+        job.source, src.layout.width, src.layout.height, target->width, target->height);
+    return VA_STATUS_SUCCESS;
+}
+
 } // namespace
 
 VAStatus createContext(VADriverContextP ctx, VAConfigID config, int width, int height, int flags,
@@ -101,8 +260,9 @@ VAStatus createContext(VADriverContextP ctx, VAConfigID config, int width, int h
             iris::require(it != d.configs.end(), "invalid config", VA_STATUS_ERROR_INVALID_CONFIG);
             cfg = it->second;
             // Defer copy-engine creation until an actual context is requested,
-            // keeping capability queries thread-free.
-            if (!d.copier) {
+            // keeping capability queries thread-free. A VideoProc context
+            // never copies: its pixels arrive from the compute kernel.
+            if (!d.copier && cfg.entrypoint != VAEntrypointVideoProc) {
                 if (d.options.copy_mode == iris::CopyMode::Gpu)
                     d.copier = iris::make_gpu_copy(d.render_fd);
                 if (!d.copier)
@@ -133,6 +293,17 @@ VAStatus createContext(VADriverContextP ctx, VAConfigID config, int width, int h
             d.contexts[*id] = c;
             d.trace("va create_context id=%u profile=%d %ux%u entrypoint=encslice codec=%.4s", *id, cfg.profile,
                 c->width, c->height, reinterpret_cast<const char*>(&ec.codec));
+            return VA_STATUS_SUCCESS;
+        }
+
+        if (cfg.entrypoint == VAEntrypointVideoProc) {
+            // No node, no translator, no session: vaEndPicture runs the
+            // compute kernel. The render targets carry no meaning here, so
+            // the context keeps only the geometry the client declared.
+            std::lock_guard<std::recursive_mutex> lock(d.mutex);
+            *id = d.next_id++;
+            d.contexts[*id] = c;
+            d.trace("va create_context id=%u profile=-1 %ux%u entrypoint=videoproc", *id, c->width, c->height);
             return VA_STATUS_SUCCESS;
         }
 
@@ -205,6 +376,17 @@ VAStatus destroyContext(VADriverContextP ctx, VAContextID id)
             c->encoder.reset();
             return VA_STATUS_SUCCESS;
         }
+        if (c->video_proc()) {
+            // Nothing to drain: every VPP picture completed before its
+            // vaEndPicture returned.
+            std::lock_guard<std::recursive_mutex> lock(d.mutex);
+            d.contexts.erase(id);
+            for (auto& s : owned)
+                if (s->owner == id)
+                    s->owner = VA_INVALID_ID;
+            d.trace("va destroy_context id=%u entrypoint=videoproc", id);
+            return VA_STATUS_SUCCESS;
+        }
         unsigned pending = 0;
         for (auto& s : owned)
             pending += s->rendering() ? 1 : 0;
@@ -261,6 +443,9 @@ VAStatus beginPicture(VADriverContextP ctx, VAContextID id, VASurfaceID surface_
                 iris::require(s->width <= c->width && s->height <= c->height,
                     "encode surface exceeds the context", VA_STATUS_ERROR_INVALID_SURFACE);
             }
+            if (c->video_proc())
+                iris::require(s->fourcc == VA_FOURCC_NV12, "VPP surfaces must be NV12",
+                    VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
             // A surface may move between contexts (FFmpeg's pool); it just
             // becomes the new context's target. A pending picture on another
             // context is released there first.
@@ -270,6 +455,10 @@ VAStatus beginPicture(VADriverContextP ctx, VAContextID id, VASurfaceID surface_
             }
             s->owner = id;
             c->current = surface_id;
+            // Whatever entrypoint starts the picture, the pixels the previous
+            // one left on this surface are gone. A decode reused as a VPP
+            // output (or the reverse) must not read the old frame back.
+            s->vpp_pixels = false;
             if (c->encoding()) {
                 // Per-picture state; the sequence parameters survive, since
                 // a client may render them with the IDR only.
@@ -278,12 +467,20 @@ VAStatus beginPicture(VADriverContextP ctx, VAContextID id, VASurfaceID surface_
                 c->enc_picture.slices.clear();
                 c->enc_picture.surface_width = s->width;
                 c->enc_picture.surface_height = s->height;
+            } else if (c->video_proc()) {
+                // A new picture replaces whatever this surface held.
+                c->vpp.reset();
+                s->failed = false;
             } else {
                 c->picture = {};
                 c->picture.surface_width = s->width;
                 c->picture.surface_height = s->height;
                 c->picture.surface_id = surface_id;
             }
+        }
+        if (c->video_proc()) {
+            d.trace("va begin_picture ctx=%u surface=%u entrypoint=videoproc", id, surface_id);
+            return VA_STATUS_SUCCESS;
         }
         if (c->encoding()) {
             d.trace("va begin_picture ctx=%u surface=%u entrypoint=encslice", id, surface_id);
@@ -338,6 +535,20 @@ VAStatus renderPicture(VADriverContextP ctx, VAContextID id, VABufferID* buffers
                 default:
                     throw iris::Error(VA_STATUS_ERROR_UNSUPPORTED_BUFFERTYPE,
                         "buffer type not accepted by an encode renderPicture");
+                }
+            }
+            return VA_STATUS_SUCCESS;
+        }
+        if (c->video_proc()) {
+            for (int i = 0; i < count; ++i) {
+                auto b = buffer(d, buffers[i]);
+                switch (b->type) {
+                case VAProcPipelineParameterBufferType:
+                    accept_vpp_pipeline(*c, *b);
+                    break;
+                default:
+                    throw iris::Error(VA_STATUS_ERROR_UNSUPPORTED_BUFFERTYPE,
+                        "buffer type not accepted by a VideoProc renderPicture");
                 }
             }
             return VA_STATUS_SUCCESS;
@@ -439,6 +650,8 @@ VAStatus endPicture(VADriverContextP ctx, VAContextID id)
                 static_cast<unsigned long long>(ticket.timestamp_us));
             return VA_STATUS_SUCCESS;
         }
+        if (c->video_proc())
+            return run_vpp(d, *c, id, current, s);
         // The VA buffers referenced by c->picture stay valid until the
         // client destroys them, which VA forbids before vaEndPicture returns.
         try {

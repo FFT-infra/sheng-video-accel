@@ -25,6 +25,7 @@ core_sources = [
 	'iris/publish.cc',
 	'iris/session.cc',
 	'iris/encode.cc',
+	'iris/vpp/scale.cc',
 	'codec/h264.cc',
 	'codec/hevc.cc',
 	'codec/vp9.cc',
@@ -39,6 +40,10 @@ if have_gpu_copy
 	core_sources += 'iris/gpu_copy.cc'
 	core_deps += [egl_dep, glesv2_dep, gbm_dep]
 	core_cpp_args += '-DIRIS_HAVE_GPU_COPY'
+endif
+if have_vulkan_vpp
+	core_deps += vulkan_dep
+	core_cpp_args += '-DIRIS_HAVE_VULKAN_VPP'
 endif
 
 iris_core = static_library('iris-core',
@@ -64,5 +69,6 @@ v4l2_drv_video = shared_module('v4l2_drv_video',
 		'va/picture.cc',
 		'va/buffer.cc',
 		'va/image.cc',
+		'va/vpp.cc',
 	],
 	dependencies: [iris_core_dep])

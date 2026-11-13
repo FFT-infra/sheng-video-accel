@@ -51,6 +51,12 @@ run vpp-spv-scale-pinned grep -Fq 'nv12_scale.spv' "$test_dir/vulkan-vpp/SHA256S
 # The scale gate must stay a per-pixel oracle, not a spot check: a stride or
 # chroma-offset bug can otherwise hide behind a handful of sampled bytes.
 run vpp-scale-pixel-oracle grep -Fq 'check_pixels(src, dst, &g)' "$test_dir/vulkan-vpp/nv12_scale_probe.c"
+# The driver embeds the shader, so the array in src/ is a second copy of the
+# pinned binary. Regenerate it from the .spv and require an identical file; a
+# hand edit here would ship a kernel no gate ever measured.
+run vpp-spv-header sh -c 'python3 "$1" "$2" | cmp -s - "$3"' sh \
+    "$test_dir/vulkan-vpp/spv-to-header.py" "$test_dir/vulkan-vpp/nv12_scale.spv" \
+    "$root/src/iris/vpp/nv12_scale_spv.h"
 
 echo "== remote gate command transport"
 # The guard backgrounds its child. A `sh -s` child fed by a heredoc reads
@@ -61,7 +67,7 @@ run gate-command-file grep -Fq 'remote_cmd' "$test_dir/remote/gate.sh"
 run gate-no-stdin-child sh -c '! grep -Fq "guard.sh -- sh -s" "$1"' sh "$test_dir/remote/gate.sh"
 
 echo "== python syntax"
-for script in "$test_dir"/*.py "$test_dir"/remote/*.py; do
+for script in "$test_dir"/*.py "$test_dir"/remote/*.py "$test_dir"/vulkan-vpp/*.py; do
     [ -f "$script" ] || continue
     run "syntax $(basename "$script")" python3 -m py_compile "$script"
 done

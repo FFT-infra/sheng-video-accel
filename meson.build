@@ -47,6 +47,19 @@ egl_dep = dependency('egl', required: false)
 glesv2_dep = dependency('glesv2', required: false)
 gbm_dep = dependency('gbm', required: false)
 have_gpu_copy = egl_dep.found() and glesv2_dep.found() and gbm_dep.found()
+# Vulkan compute backend for the VA video processor (docs/architecture.md
+# §5). Optional like the GPU copy engine: CI has no Vulkan SDK, and there
+# the VPP entrypoint is simply not advertised. pkg-config is the usual
+# source; a bare libvulkan plus the headers is accepted when a distribution
+# ships no .pc file.
+vulkan_dep = dependency('vulkan', required: false)
+if not vulkan_dep.found()
+	vulkan_lib = cc.find_library('vulkan', required: false)
+	if vulkan_lib.found() and cc.has_header('vulkan/vulkan.h')
+		vulkan_dep = declare_dependency(dependencies: vulkan_lib)
+	endif
+endif
+have_vulkan_vpp = vulkan_dep.found()
 kernel_dep = declare_dependency(include_directories : get_option('kernel_headers'))
 
 va_api_version_array = libva_dep.version().split('.')
