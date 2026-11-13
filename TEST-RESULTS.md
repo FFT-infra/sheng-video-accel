@@ -6564,7 +6564,7 @@ QP offsets or a reference count. Mapping the table's `rejected` list onto that:
 
 | Rejected entry | Node-level fact | Verdict |
 | --- | --- | --- |
-| B-frames | `video_b_frames` accepts 1 | **this driver pins it to 0** (`src/iris/encode.cc:176`); VA's encode interface has no field to request B-frames, so the entry stays as the surface's behaviour, not as a hardware limit |
+| B-frames | `video_b_frames` accepts 1, with B-frame min/max QP controls for both codecs | **this driver pins it to 0** (`src/iris/encode.cc:176`), and the translators refuse a B slice (`src/codec/encode_h264.cc`, `encode_hevc.cc`). A client can ask: `VAConfigAttribEncMaxRefFrames` carries `l1_ref_frame`, `VAEncPictureParameterBufferH264.picture_type` names a B picture and `VAEncSliceParameterBufferH264.RefPicList1` names its forward reference, so the entry is this driver's policy rather than a hardware or interface limit |
 | packed headers | no V4L2 equivalent; `prepend_sps_and_pps_to_idr` is the node's own mechanism | interface-level, unchanged |
 | multi-slice | no control | not requestable through V4L2 |
 | weighted prediction, scaling lists, chroma QP offsets | no controls | not requestable; the firmware default applies |
