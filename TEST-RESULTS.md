@@ -7460,10 +7460,12 @@ browser paths were re-run on it with `LIBVA_DRIVERS_PATH` unset:
 
 All five at commit `2817112`, `source_dirty=0`, guard `complete`, exit 0; battery
 54 % discharging through the set, thermal peak 46.1 °C, boot `4b73926c…`
-unchanged from the first run to the last. Three earlier attempts in this set are
-recorded `interrupted` because the gates were invoked without
-`IRIS_REAL_CLIP_DIR` and the browser clip arguments and exited 2 before doing
-any work; they are a record of the mis-invocation, not of the driver.
+unchanged from the first run to the last. Three earlier attempts in this set
+(`run-20261113T093644Z`, `run-20261113T093758Z`, `run-20261113T093835Z`) are
+recorded `interrupted` with empty child output because the gates were invoked
+without `IRIS_REAL_CLIP_DIR` and the browser clip arguments and exited 2, 1 and
+2 before doing any work; they are a record of the mis-invocation, not of the
+driver.
 
 ### The real client
 
