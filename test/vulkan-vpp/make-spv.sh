@@ -8,6 +8,7 @@
 #   copy.spv          flat read/write prereq (prereq.sh / probe.c)
 #   nv12_scale.spv    NV12 nearest scale with crop (nv12_scale_gate.sh /
 #                     nv12_scale_probe.c, crop_vaapi_gate.sh)
+#   p010_scale.spv    the same kernel for P010 surfaces (p010_scale_gate.sh)
 #
 # Usage: test/vulkan-vpp/make-spv.sh [-c]
 #   -c  check that both current .spv files match a fresh compile and
@@ -32,7 +33,7 @@ scratch=${TMPDIR:-$HOME/Lab/Bridge/tmp}
 work=$(mktemp -d "$scratch/vpp-spv.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
-names="copy nv12_scale"
+names="copy nv12_scale p010_scale"
 for name in $names; do
     "$glslang" -V --target-env vulkan1.1 -o "$work/$name.spv" "$here/$name.comp" >/dev/null
 done

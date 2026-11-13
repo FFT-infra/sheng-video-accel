@@ -317,7 +317,7 @@ src/
     surface.cc        create/destroy/sync/query/export/derive/getImage
     picture.cc        begin/render/end -> codec translator -> Session::submit,
                       or for an EncSlice context -> EncoderSession::encode,
-                      or for a VideoProc context -> iris::vpp::scale_nv12
+                      or for a VideoProc context -> iris::vpp::scale_nv12_or_p010
     vpp.cc            the three vtable_vpp queries; no GPU probe
     image.cc          images and subpictures (minimal); derive aliases a surface
   iris/               the only code that touches /dev/videoN
@@ -336,8 +336,9 @@ src/
     alloc.{h,cc}      StableBuffer allocation (MSM GEM -> dma-heap), or a
                       duplicate of a client's DMA-BUF for an imported surface
     vpp/scale.{h,cc}  optional Vulkan compute video processor: imports two
-                      surface DMA-BUFs, runs the pinned NV12 nearest kernel
-                      embedded from test/vulkan-vpp/nv12_scale.spv
+                      surface DMA-BUFs, runs the pinned nearest kernel for
+                      the surface's sample width, embedded from
+                      test/vulkan-vpp/{nv12,p010}_scale.spv
   codec/              VA parameters -> bytestream the firmware accepts; pure functions
     bitwriter.h
     h264.cc           SPS/PPS synthesis, AU assembly

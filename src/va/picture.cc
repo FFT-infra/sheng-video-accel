@@ -178,7 +178,7 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
 }
 
 // Run one VideoProc picture: the source comes from the pipeline buffer, the
-// target is the surface vaBeginPicture named. Synchronous — scale_nv12 waits
+// target is the surface vaBeginPicture named. Synchronous — scale_nv12_or_p010 waits
 // for its fence, so a successful vaEndPicture means the pixels are there.
 VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_id,
     const std::shared_ptr<Surface>& target)
@@ -199,8 +199,12 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         source = surface(d, job.source);
         iris::require(source.get() != target.get(), "VPP source and output are the same surface",
             VA_STATUS_ERROR_INVALID_PARAMETER);
-        iris::require(source->fourcc == VA_FOURCC_NV12 && target->fourcc == VA_FOURCC_NV12,
-            "VPP input and output must be NV12", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+        // Both ends carry the same sample width: the kernels scale, they do
+        // not convert bit depth.
+        iris::require(source->fourcc == target->fourcc
+                && (source->fourcc == VA_FOURCC_NV12 || source->fourcc == VA_FOURCC_P010),
+            "VPP input and output must share one NV12 or P010 format",
+            VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
         iris::require(source->target.frame || source->stable, "VPP source holds no pixels",
             VA_STATUS_ERROR_OPERATION_FAILED);
 
@@ -220,8 +224,8 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
             iris::require(job.output_region.x == 0 && job.output_region.y == 0
                     && job.output_region.width == target->width && job.output_region.height == target->height,
                 "VPP fills the whole output surface", VA_STATUS_ERROR_INVALID_PARAMETER);
-        // Both ends are NV12, so both geometries must be even. The ratio itself
-        // is free: the kernel samples at swscale's point positions.
+        // 4:2:0 subsampling makes both geometries even on either format. The
+        // ratio itself is free: the kernel samples at swscale's point positions.
         iris::require(source->width && source->height && target->width && target->height
                 && !((source->width | source->height | target->width | target->height) & 1u),
             "VPP needs an even, non-empty geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
@@ -247,7 +251,8 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
     sj.src_height = static_cast<uint32_t>(crop.height);
     sj.width = target->width;
     sj.height = target->height;
-    if (!iris::vpp::scale_nv12(sj)) {
+    sj.bytes = source->fourcc == VA_FOURCC_P010 ? 2 : 1;
+    if (!iris::vpp::scale_nv12_or_p010(sj)) {
         target->failed = true;
         throw iris::Error(VA_STATUS_ERROR_OPERATION_FAILED, "Vulkan VPP scale failed");
     }

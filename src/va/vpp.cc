@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 //
 // The three queries on the VPP vtable. They describe what the compute
-// backend runs — one NV12 nearest-neighbour scale at the requested ratio, no
-// filters, no rotation, no blending — and nothing here creates a VkInstance or
-// opens a node, so a client can query them during GPU sandbox initialisation.
+// backend runs — one nearest-neighbour scale at the requested ratio from an
+// optional crop, in NV12 or P010, no filters, no rotation, no blending — and
+// nothing here creates a VkInstance or opens a node, so a client can query
+// them during GPU sandbox initialisation.
 
 #include "driver.h"
 
@@ -22,8 +23,10 @@ namespace {
 VAProcColorStandardType kStandards[] = { VAProcColorStandardNone, VAProcColorStandardBT601,
     VAProcColorStandardBT709, VAProcColorStandardBT2020, VAProcColorStandardExplicit };
 
-// The kernel reads and writes NV12. P010 has no path in the compute shader.
-uint32_t kPixelFormats[] = { VA_FOURCC_NV12 };
+// One kernel per sample width, chosen from the surfaces the picture names.
+// P010 is listed only when the decoder node reported 10-bit capture formats.
+uint32_t kPixelFormatsNv12[] = { VA_FOURCC_NV12 };
+uint32_t kPixelFormatsNv12P010[] = { VA_FOURCC_NV12, VA_FOURCC_P010 };
 
 } // namespace
 
@@ -76,10 +79,11 @@ VAStatus queryVideoProcPipelineCaps(VADriverContextP ctx, VAContextID id, VABuff
     caps->blend_flags = 0;
     caps->mirror_flags = 0;
     caps->num_additional_outputs = 0;
-    caps->num_input_pixel_formats = 1;
-    caps->input_pixel_format = kPixelFormats;
-    caps->num_output_pixel_formats = 1;
-    caps->output_pixel_format = kPixelFormats;
+    const bool p010 = d.capabilities.p010;
+    caps->num_input_pixel_formats = p010 ? 2 : 1;
+    caps->input_pixel_format = p010 ? kPixelFormatsNv12P010 : kPixelFormatsNv12;
+    caps->num_output_pixel_formats = p010 ? 2 : 1;
+    caps->output_pixel_format = p010 ? kPixelFormatsNv12P010 : kPixelFormatsNv12;
     caps->min_input_width = std::max(kVppMinGeometry, d.capabilities.min_width);
     caps->min_input_height = std::max(kVppMinGeometry, d.capabilities.min_height);
     caps->max_input_width = d.capabilities.max_width;

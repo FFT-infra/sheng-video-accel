@@ -69,47 +69,59 @@ mkdir -p "$work"
 # swscale's point positions, so `scale_vaapi=w=W:h=H` must be byte-identical
 # to `scale=WxH:flags=neighbor` in every case. Equal geometry is not here:
 # FFmpeg's scale_vaapi passes such a frame through without a VPP picture.
+# The P010 list runs the same comparison in 10 bits: same-depth scaling only,
+# since a picture whose two ends disagree on bit depth is refused.
 cases="64x64:128x128 64x64:96x96 64x64:32x32 128x128:16x16 128x128:200x150 62x34:46x26 1280x720:854x480 1280x720:1920x1080"
+p010_cases="64x64:128x128 128x128:96x96 1280x720:854x480"
 
 failed=0
-for c in $cases; do
-    src=${c%%:*}
-    dst=${c#*:}
+run_case() {
+    pix=$1
+    src=$2
+    dst=$3
     sw=${src%x*}
     sh_=${src#*x}
     dw=${dst%x*}
     dh=${dst#*x}
-    echo "== $src -> $dst"
+    tag=$pix-$src-$dst
+    echo "== $pix $src -> $dst"
     ffmpeg -y -hide_banner -loglevel error -f lavfi -i "testsrc2=size=$src:rate=1" \
-        -frames:v 1 -pix_fmt nv12 -f rawvideo "$work/src-$src.nv12"
-    ffmpeg -y -hide_banner -loglevel error -f rawvideo -pix_fmt nv12 -s "$src" \
-        -i "$work/src-$src.nv12" -vf "scale=$dst:flags=neighbor" -f rawvideo "$work/ref-$src-$dst.nv12"
-    ref_hash=$(sha256sum "$work/ref-$src-$dst.nv12" | cut -d' ' -f1)
+        -frames:v 1 -pix_fmt "$pix" -f rawvideo "$work/src-$pix-$src.raw"
+    ffmpeg -y -hide_banner -loglevel error -f rawvideo -pix_fmt "$pix" -s "$src" \
+        -i "$work/src-$pix-$src.raw" -vf "scale=$dst:flags=neighbor" -f rawvideo "$work/ref-$tag.raw"
+    ref_hash=$(sha256sum "$work/ref-$tag.raw" | cut -d' ' -f1)
     if ! env LIBVA_DRIVER_NAME=v4l2 $driver_env \
             LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_VPP=1 V4L2_VA_TRACE=1 \
             timeout 120 ffmpeg -y -xerror -hide_banner -loglevel error \
-            -vaapi_device "$render" -f rawvideo -pix_fmt nv12 -s "$src" -i "$work/src-$src.nv12" \
-            -vf "format=nv12,hwupload,scale_vaapi=w=$dw:h=$dh,hwdownload,format=nv12" \
-            -f rawvideo "$work/hw-$src-$dst.nv12" 2>"$work/$src-$dst.trace"; then
-        sed -n '1,40p' "$work/$src-$dst.trace" >&2 || true
-        printf 'case=%s->%s exit=1 (scale_vaapi failed)\n' "$src" "$dst"
+            -vaapi_device "$render" -f rawvideo -pix_fmt "$pix" -s "$src" -i "$work/src-$pix-$src.raw" \
+            -vf "format=$pix,hwupload,scale_vaapi=w=$dw:h=$dh,hwdownload,format=$pix" \
+            -f rawvideo "$work/hw-$tag.raw" 2>"$work/$tag.trace"; then
+        sed -n '1,40p' "$work/$tag.trace" >&2 || true
+        printf 'case=%s exit=1 (scale_vaapi failed)\n' "$tag"
         failed=1
-        continue
+        return
     fi
-    hw_hash=$(sha256sum "$work/hw-$src-$dst.nv12" | cut -d' ' -f1)
-    ends=$(grep -c 'entrypoint=videoproc' "$work/$src-$dst.trace" || true)
+    hw_hash=$(sha256sum "$work/hw-$tag.raw" | cut -d' ' -f1)
+    ends=$(grep -c 'entrypoint=videoproc' "$work/$tag.trace" || true)
     rc=0
-    cmp "$work/ref-$src-$dst.nv12" "$work/hw-$src-$dst.nv12" || rc=$?
+    cmp "$work/ref-$tag.raw" "$work/hw-$tag.raw" || rc=$?
     if [ "$ends" -lt 3 ]; then
         echo "only $ends videoproc records; expected create, begin and end" >&2
         rc=1
     fi
-    if grep -Eq 'va error|Vulkan VPP scale failed' "$work/$src-$dst.trace"; then
-        grep -E 'va error|Vulkan VPP scale failed' "$work/$src-$dst.trace" >&2
+    if grep -Eq 'va error|Vulkan VPP scale failed' "$work/$tag.trace"; then
+        grep -E 'va error|Vulkan VPP scale failed' "$work/$tag.trace" >&2
         rc=1
     fi
-    printf 'case=%s->%s exit=%s ref=%s hw=%s videoproc=%s\n' "$src" "$dst" "$rc" "$ref_hash" "$hw_hash" "$ends"
+    printf 'case=%s exit=%s ref=%s hw=%s videoproc=%s\n' "$tag" "$rc" "$ref_hash" "$hw_hash" "$ends"
     [ "$rc" -eq 0 ] || failed=1
+}
+
+for c in $cases; do
+    run_case nv12 "${c%%:*}" "${c#*:}"
+done
+for c in $p010_cases; do
+    run_case p010le "${c%%:*}" "${c#*:}"
 done
 [ "$failed" -eq 0 ] || fail "VPP output differs from swscale neighbor for at least one ratio"
 
@@ -126,10 +138,22 @@ if grep -q 'entrypoint=videoproc' "$work/default.trace"; then
     fail "videoproc appeared without the opt-in"
 fi
 
+echo "== a picture whose ends disagree on bit depth is refused"
+if env LIBVA_DRIVER_NAME=v4l2 $driver_env \
+        LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_VPP=1 V4L2_VA_TRACE=1 \
+        timeout 120 ffmpeg -y -xerror -hide_banner -loglevel error \
+        -vaapi_device "$render" -f rawvideo -pix_fmt p010le -s 64x64 \
+        -i "$work/src-p010le-64x64.raw" \
+        -vf 'format=p010le,hwupload,scale_vaapi=w=128:h=128,hwdownload,format=nv12' \
+        -f rawvideo "$work/mixed.raw" 2>"$work/mixed.trace"; then
+    fail "a P010 source scaled to NV12 output ran; the kernels do not convert bit depth"
+fi
+
 printf 'driver_path=%s\n' "$driver_path"
 printf 'driver_source=%s\n' "$([ -n "$driver_env" ] && echo build-tree || echo installed-package)"
 printf 'driver_sha256=%s\n' "$driver_hash"
 printf 'decoder=%s\n' "$device"
 printf 'cases=%s\n' "$(echo "$cases" | wc -w)"
+printf 'p010_cases=%s\n' "$(echo "$p010_cases" | wc -w)"
 printf 'oracle=swscale:flags=neighbor byte-identical for every case\n'
-echo "PASS va-vpp ratios=$(echo "$cases" | wc -w) exact driver=$driver_hash"
+echo "PASS va-vpp ratios=$(echo "$cases" | wc -w) p010=$(echo "$p010_cases" | wc -w) exact driver=$driver_hash"

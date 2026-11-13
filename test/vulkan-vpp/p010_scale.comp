@@ -1,0 +1,87 @@
+// SPDX-License-Identifier: MIT
+//
+// P010 nearest-neighbour scale (optionally from a crop) for the VA video
+// processor: the 10-bit sibling of nv12_scale.comp. Same sample map, same
+// crop semantics, same rule that one invocation owns one 32-bit destination
+// word so no two invocations race.
+//
+// A P010 sample is a 16-bit little-endian word with the ten bits at the top
+// (the low six are zero), so a 32-bit word holds two samples instead of four
+// and a chroma word holds one (u,v) pair instead of two. The sample map is
+// swscale's SWS_POINT:
+//
+//     xInc = ((src << 16) + (dst >> 1)) / dst
+//     src_index(i) = (i * xInc + (xInc >> 1)) >> 16
+//
+// Both ends have the same bit depth: the driver refuses a picture whose
+// source and output formats differ, because swscale's own 10-to-8 conversion
+// dithers by a count that depends on the sample position and this kernel has
+// no business reproducing that.
+
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0, std430) readonly buffer Src { uint s[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Dst { uint d[]; };
+layout(push_constant) uniform Params {
+    uint src_stride, src_uv, dst_stride, dst_uv;
+    uint src_y, dst_y;
+    uint src_x, src_row;
+    uint src_w, src_h, dst_w, dst_h;
+} p;
+
+// `off` is a byte offset and is always even: P010 samples are 16-bit and the
+// plane bases and strides come from the same 128-byte-aligned layout NV12 uses.
+uint sample16(uint off)
+{
+    return (s[off >> 2] >> ((off & 3u) << 3)) & 0xffffu;
+}
+
+uint step(uint src, uint dst)
+{
+    return ((src << 16) + (dst >> 1)) / dst;
+}
+
+uint pick(uint i, uint inc)
+{
+    return (i * inc + (inc >> 1)) >> 16;
+}
+
+void main()
+{
+    uint word = gl_GlobalInvocationID.x;
+    uint row = gl_GlobalInvocationID.y;
+    if (row >= p.dst_h + (p.dst_h >> 1))
+        return;
+
+    if (row < p.dst_h) {
+        // Two luma samples per word.
+        if (word >= ((p.dst_w + 1u) >> 1))
+            return;
+        uint inc = step(p.src_w, p.dst_w);
+        uint base = p.src_y + (p.src_row + pick(row, step(p.src_h, p.dst_h))) * p.src_stride;
+        uint packed = 0u;
+        for (uint k = 0u; k < 2u; ++k) {
+            uint dx = word * 2u + k;
+            uint sx = p.src_x + pick(min(dx, p.dst_w - 1u), inc);
+            packed |= sample16(base + sx * 2u) << (k * 16u);
+        }
+        d[(p.dst_y + row * p.dst_stride + word * 4u) >> 2] = packed;
+    } else {
+        // Chroma samples are interleaved u,v; a word holds the pair at
+        // destination pair index `word`.
+        uint cy = row - p.dst_h;
+        uint cw = p.dst_w >> 1;
+        if (word >= ((cw + 1u) >> 1))
+            return;
+        uint inc = step(p.src_w >> 1, cw);
+        uint srow = (p.src_row >> 1) + pick(cy, step(p.src_h >> 1, p.dst_h >> 1));
+        uint base = p.src_uv + srow * p.src_stride;
+        uint packed = 0u;
+        for (uint k = 0u; k < 2u; ++k) {
+            uint cx = word * 2u + k;
+            uint sx = p.src_x + pick(min(cx, cw - 1u), inc) * 2u;
+            packed |= sample16(base + sx) << (k * 16u);
+        }
+        d[(p.dst_uv + cy * p.dst_stride + word * 4u) >> 2] = packed;
+    }
+}

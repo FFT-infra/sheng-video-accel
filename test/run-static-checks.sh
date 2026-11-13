@@ -44,10 +44,12 @@ echo "== VPP SPIR-V pin"
 # Both Vulkan gates run only on the target (CI has no GPU), so the checked-in
 # SPIR-V binaries are pinned by hash here. A stale or hand-edited .spv must
 # fail a host check rather than silently change what the target gate measures.
-# SHA256SUMS lists copy.spv (flat read/write prereq) and nv12_scale.spv (the
-# 2x NV12 scale primitive); sha256sum -c verifies every entry.
+# SHA256SUMS lists copy.spv (flat read/write prereq), nv12_scale.spv (the
+# nearest NV12 scale with crop) and p010_scale.spv (the same map for P010);
+# sha256sum -c verifies every entry.
 run vpp-spv-pin sh -c 'cd "$1" && sha256sum -c SHA256SUMS' sh "$test_dir/vulkan-vpp"
 run vpp-spv-scale-pinned grep -Fq 'nv12_scale.spv' "$test_dir/vulkan-vpp/SHA256SUMS"
+run vpp-spv-p010-pinned grep -Fq 'p010_scale.spv' "$test_dir/vulkan-vpp/SHA256SUMS"
 # The scale gate must stay a per-pixel oracle, not a spot check: a stride or
 # chroma-offset bug can otherwise hide behind a handful of sampled bytes.
 run vpp-scale-pixel-oracle grep -Fq 'check_pixels(src, dst, &g)' "$test_dir/vulkan-vpp/nv12_scale_probe.c"
@@ -57,6 +59,9 @@ run vpp-scale-pixel-oracle grep -Fq 'check_pixels(src, dst, &g)' "$test_dir/vulk
 run vpp-spv-header sh -c 'python3 "$1" "$2" | cmp -s - "$3"' sh \
     "$test_dir/vulkan-vpp/spv-to-header.py" "$test_dir/vulkan-vpp/nv12_scale.spv" \
     "$root/src/iris/vpp/nv12_scale_spv.h"
+run vpp-spv-p010-header sh -c 'python3 "$1" "$2" | cmp -s - "$3"' sh \
+    "$test_dir/vulkan-vpp/spv-to-header.py" "$test_dir/vulkan-vpp/p010_scale.spv" \
+    "$root/src/iris/vpp/p010_scale_spv.h"
 
 echo "== remote gate command transport"
 # The guard backgrounds its child. A `sh -s` child fed by a heredoc reads

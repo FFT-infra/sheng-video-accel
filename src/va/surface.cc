@@ -349,16 +349,16 @@ VAStatus querySurfaceAttributes(VADriverContextP ctx, VAConfigID config, VASurfa
     // the profile can decode into rather than the one the config defaulted to.
     add(VASurfaceAttribPixelFormat, VA_FOURCC_NV12, VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
     const VAProfile profile = it->second.profile;
-    // The encoder's raw port is NV12 only; P010 is a decode-only format here.
-    // A VideoProc surface is NV12 only as well: the compute kernel has no
-    // 10-bit path, and p010_decode_profile() is false for VAProfileNone.
+    // The encoder's raw port is NV12 only. A decode surface follows the
+    // profile, and a VideoProc surface follows the config's RT format: the
+    // processor scales P010 as well as NV12, one kernel per sample width.
     const bool encoding = it->second.entrypoint == VAEntrypointEncSlice;
-    if (!encoding && d.capabilities.p010 && p010_decode_profile(profile))
-        add(VASurfaceAttribPixelFormat, VA_FOURCC_P010, VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
     // A VideoProc config creates the render target, not a decoded picture, so
     // its floor is the kernel's rather than the node's; a client scaling down
     // to a thumbnail is otherwise refused before the driver is called.
     const bool vpp = profile == VAProfileNone && it->second.entrypoint == VAEntrypointVideoProc;
+    if (!encoding && d.capabilities.p010 && (p010_decode_profile(profile) || vpp))
+        add(VASurfaceAttribPixelFormat, VA_FOURCC_P010, VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
     const unsigned min_geometry = vpp ? kVppMinGeometry : d.capabilities.min_width;
     add(VASurfaceAttribMinWidth, static_cast<int>(min_geometry), VA_SURFACE_ATTRIB_GETTABLE);
     add(VASurfaceAttribMaxWidth, static_cast<int>(d.capabilities.max_width), VA_SURFACE_ATTRIB_GETTABLE);

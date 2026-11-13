@@ -2,7 +2,8 @@
 //
 // Vulkan compute backend for the VA video processor. Two surface DMA-BUFs
 // (source and destination) are imported as dedicated external memory and the
-// pinned NV12 nearest-neighbour kernel runs over them. This is the same
+// pinned nearest-neighbour kernel for the surface's sample width runs over
+// them (nv12_scale.spv, or p010_scale.spv for 10-bit surfaces). This is the same
 // import path the flat read/write prereq and the per-pixel scale gate prove
 // on the target; the kernel is embedded from test/vulkan-vpp/nv12_scale.spv
 // and samples the source at swscale's point positions, so `scale_vaapi=w=W:h=H`
@@ -17,6 +18,7 @@
 #ifdef IRIS_HAVE_VULKAN_VPP
 
 #include "nv12_scale_spv.h"
+#include "p010_scale_spv.h"
 
 #include <vulkan/vulkan.h>
 
@@ -194,10 +196,14 @@ bool make_job(Job& j, const ScaleJob& job, VkPhysicalDevice* physical_out, uint3
     if (!j.ok(vkCreateDevice(*physical_out, &device_info, nullptr, &j.device)))
         return false;
 
+    // One kernel per sample width. Both read the same push-constant block;
+    // only the word packing differs.
+    const uint32_t* code = job.bytes == 2 ? kP010ScaleSpv : kNv12ScaleSpv;
+    const size_t code_words = job.bytes == 2 ? kP010ScaleSpvWords : kNv12ScaleSpvWords;
     VkShaderModuleCreateInfo shader_info = {};
     shader_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    shader_info.codeSize = static_cast<size_t>(kNv12ScaleSpvWords) * 4;
-    shader_info.pCode = kNv12ScaleSpv;
+    shader_info.codeSize = code_words * 4;
+    shader_info.pCode = code;
     if (!j.ok(vkCreateShaderModule(j.device, &shader_info, nullptr, &j.shader)))
         return false;
 
@@ -325,11 +331,13 @@ bool dispatch(Job& j, const ScaleJob& job, uint32_t family, uint32_t memory_type
     PushParams push = { job.src_stride, job.src_uv, job.dst_stride, job.dst_uv, job.src_y, job.dst_y,
         job.src_x, job.src_y_offset, job.src_width, job.src_height, job.width, job.height };
     vkCmdPushConstants(command, j.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-    // One invocation per destination 32-bit word: four luma pixels of one row,
-    // or two chroma pairs of one chroma row. The grid covers the luma rows and
-    // the half-height chroma plane in one dispatch, and is rounded up so a
-    // geometry that is not a multiple of the 8x8 workgroup is still complete.
-    const uint32_t words = (job.width + 3) / 4;
+    // One invocation per destination 32-bit word: four luma pixels of one row
+    // and two chroma pairs (8-bit), or two luma samples and one chroma pair
+    // (P010). The grid covers the luma rows and the half-height chroma plane
+    // in one dispatch, rounded up so a geometry that is not a multiple of the
+    // 8x8 workgroup is still complete; the kernel's own bounds test drops the
+    // extra invocations.
+    const uint32_t words = job.bytes == 2 ? (job.width + 1) / 2 : (job.width + 3) / 4;
     const uint32_t rows = job.height + job.height / 2;
     vkCmdDispatch(command, (words + 7) / 8, (rows + 7) / 8, 1);
     vkEndCommandBuffer(command);
@@ -354,14 +362,16 @@ bool compiled_in()
     return true;
 }
 
-bool scale_nv12(const ScaleJob& job)
+bool scale_nv12_or_p010(const ScaleJob& job)
 {
     if (job.src_fd < 0 || job.dst_fd < 0 || !job.width || !job.height || !job.src_width || !job.src_height)
         return false;
-    // NV12 carries one chroma pair per 2x2 luma block on both ends, and the
-    // word writes assume it. The crop origin has to be even for the same
+    // NV12 and P010 carry one chroma pair per 2x2 luma block on both ends, and
+    // the word writes assume it. The crop origin has to be even for the same
     // reason: an odd column would land between two chroma samples.
     if ((job.width | job.height | job.src_width | job.src_height | job.src_x | job.src_y_offset) & 1u)
+        return false;
+    if (job.bytes != 1 && job.bytes != 2)
         return false;
 
     Job j;
@@ -386,7 +396,7 @@ bool compiled_in()
     return false;
 }
 
-bool scale_nv12(const ScaleJob&)
+bool scale_nv12_or_p010(const ScaleJob&)
 {
     return false;
 }

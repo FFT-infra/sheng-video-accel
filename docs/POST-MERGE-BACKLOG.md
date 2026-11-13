@@ -552,7 +552,9 @@ query hooks, `VAProfileNone` + `VAEntrypointVideoProc` config and context
 behind `V4L2_VA_VPP`, buffer types 41 and 42, and `endPicture` dispatching the
 pinned SPIR-V over the source and output surface DMA-BUFs. A VideoProc
 context opens no node and owns no session. It samples inside the surface region the client names, so a crop is a
-first-class picture rather than a post-step. Everything the kernel does not
+first-class picture rather than a post-step, and it runs the same map on
+P010 with a second kernel (same-depth only: a mixed-depth picture is
+refused, because swscale's own 10-to-8 conversion dithers). Everything the kernel does not
 do (rotation, blending, filters, colour conversion, a second pipeline buffer
 in one picture) fails the picture with a VA status instead of being
 approximated. Vulkan stays an optional meson dependency, so CI builds the stub

@@ -76,9 +76,15 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
                 attributes[i].value = VA_RT_FORMAT_YUV420;
                 if (p010_decode_profile(profile) && d.capabilities.p010)
                     attributes[i].value |= VA_RT_FORMAT_YUV420_10;
-            } else if (encode || vpp) {
-                // Both raw ports are NV12; the processor has no 10-bit path.
+            } else if (encode) {
+                // The encoder's raw port is NV12 only.
                 attributes[i].value = VA_RT_FORMAT_YUV420;
+            } else if (vpp) {
+                // The processor scales either width; a picture whose two ends
+                // disagree on bit depth is refused at endPicture.
+                attributes[i].value = VA_RT_FORMAT_YUV420;
+                if (d.capabilities.p010)
+                    attributes[i].value |= VA_RT_FORMAT_YUV420_10;
             } else {
                 attributes[i].value = VA_ATTRIB_NOT_SUPPORTED;
             }
@@ -153,6 +159,8 @@ VAStatus createConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entr
         uint32_t rt_format = VA_RT_FORMAT_YUV420;
         if (entrypoint == VAEntrypointVLD && d.capabilities.p010 && p010_decode_profile(profile))
             rt_format |= VA_RT_FORMAT_YUV420_10;
+        if (entrypoint == VAEntrypointVideoProc && d.capabilities.p010)
+            rt_format |= VA_RT_FORMAT_YUV420_10;
         uint32_t rate_control = VA_RC_VBR;
         for (int i = 0; i < count; ++i) {
             if (attributes[i].type == VAConfigAttribRTFormat && attributes[i].value != VA_ATTRIB_NOT_SUPPORTED)
@@ -161,10 +169,11 @@ VAStatus createConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entr
                 rate_control = attributes[i].value;
         }
         if (entrypoint == VAEntrypointVideoProc) {
-            // The processor's two ports are NV12 here; advertise and accept
-            // only that RT format.
-            iris::require(rt_format == VA_RT_FORMAT_YUV420, "VPP needs YUV420",
-                VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+            // One bit per config: the client names the depth of the surfaces it
+            // will create, and the picture refuses a mismatch.
+            iris::require((rt_format & (VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10)) != 0
+                    && !(rt_format & ~(VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10)),
+                "VPP needs YUV420 or YUV420_10", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
         } else if (entrypoint == VAEntrypointEncSlice) {
             // One bit, chosen by the client from what getConfigAttributes
             // advertised.

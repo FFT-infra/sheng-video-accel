@@ -23,18 +23,21 @@ def main() -> None:
         print(f"FAIL {sys.argv[1]} is not a non-empty SPIR-V word stream", file=sys.stderr)
         sys.exit(1)
     words = [int.from_bytes(data[i:i + 4], "little") for i in range(0, len(data), 4)]
+    module = pathlib.Path(sys.argv[1]).name
+    # nv12_scale.spv -> kNv12ScaleSpv, p010_scale.spv -> kP010ScaleSpv
+    symbol = "k" + "".join(part.capitalize() for part in pathlib.Path(module).stem.split("_")) + "Spv"
     out = []
     out.append("// SPDX-License-Identifier: MIT\n")
-    out.append("// Generated from test/vulkan-vpp/nv12_scale.spv by spv-to-header.py.\n")
+    out.append(f"// Generated from test/vulkan-vpp/{module} by spv-to-header.py.\n")
     out.append("// Do not edit by hand; run-static-checks.sh verifies this against the pinned module.\n")
     out.append("#pragma once\n")
     out.append("#include <cstdint>\n")
     out.append("namespace iris {\n")
-    out.append("inline constexpr uint32_t kNv12ScaleSpv[] = {\n")
+    out.append(f"inline constexpr uint32_t {symbol}[] = {{\n")
     for i in range(0, len(words), 8):
         out.append("    " + ", ".join(f"0x{w:08x}u" for w in words[i:i + 8]) + ",\n")
     out.append("};\n")
-    out.append(f"inline constexpr uint32_t kNv12ScaleSpvWords = {len(words)};\n")
+    out.append(f"inline constexpr uint32_t {symbol}Words = {len(words)};\n")
     out.append("} // namespace iris\n")
     text = "".join(out)
     if len(sys.argv) >= 3:

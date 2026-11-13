@@ -28,6 +28,9 @@ struct ScaleJob {
     uint32_t src_x = 0, src_y_offset = 0;
     uint32_t src_width = 0, src_height = 0;
     uint32_t width = 0, height = 0;
+    // Bytes per sample on both ends: 1 for NV12, 2 for P010. Source and
+    // destination must agree; the kernels do not convert bit depth.
+    uint32_t bytes = 1;
 };
 
 // True when this driver was built with the Vulkan VPP backend. Capability
@@ -35,10 +38,11 @@ struct ScaleJob {
 // Chromium's GPU-sandbox init is not allowed (docs/architecture.md §7).
 bool compiled_in();
 
-// Dispatch the pinned NV12 kernel over the two imported DMA-BUFs. Returns
-// false when the backend is unavailable or the device rejected the job; the
-// VA layer must then fail the picture and never publish partial pixels.
-bool scale_nv12(const ScaleJob& job);
+// Dispatch the pinned kernel (NV12 or P010, selected by ScaleJob::bytes) over
+// the two imported DMA-BUFs. Returns false when the backend is unavailable or
+// the device rejected the job; the VA layer must then fail the picture and
+// never publish partial pixels.
+bool scale_nv12_or_p010(const ScaleJob& job);
 
 } // namespace vpp
 } // namespace iris
