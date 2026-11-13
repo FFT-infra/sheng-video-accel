@@ -1359,12 +1359,18 @@ int main(int argc, char** argv)
     if (argc >= 2 && std::strcmp(argv[1], "overlay") == 0)
         return run_overlay(argc - 2, argv + 2);
 
-    // The last argument may name an interpolation method; everything before it
-    // is positional, so the shape of the call does not depend on it.
+    // The interpolation method and the refusal switch are options anywhere on
+    // the command line; the twelve arguments before them are positional.
     unsigned filter_flags = 0;
     const char* interp = nullptr;
+    bool expect_refusal = false;
     for (int i = 1; i < argc; i++) {
-        if (std::strncmp(argv[i], "--interp=", 9) == 0) {
+        // Options are scanned, not positionally assumed: an option that only
+        // counts when it lands in the right slot is an option that silently
+        // stops being passed once a second one is added.
+        if (std::strcmp(argv[i], "--expect-refusal") == 0)
+            expect_refusal = true;
+        else if (std::strncmp(argv[i], "--interp=", 9) == 0) {
             interp = argv[i] + 9;
             if (std::strcmp(interp, "nearest") == 0)
                 filter_flags = VA_FILTER_INTERPOLATION_NEAREST_NEIGHBOR;
@@ -1378,7 +1384,6 @@ int main(int argc, char** argv)
             }
         }
     }
-    const bool expect_refusal = argc == 13 && std::strcmp(argv[12], "--expect-refusal") == 0;
     if (argc != 12 && !expect_refusal && interp == nullptr) {
         std::fprintf(stderr, "usage: %s <render-node> <src.raw> <srcW> <srcH> <cropW> <cropH> <cropX> "
                              "<cropY> <dstW> <dstH> <out.raw> [--expect-refusal] "
@@ -1466,16 +1471,21 @@ int main(int argc, char** argv)
     check(status == VA_STATUS_SUCCESS, "create the pipeline buffer");
 
     check(vaBeginPicture(display, context, dst_surface) == VA_STATUS_SUCCESS, "vaBeginPicture");
-    check(vaRenderPicture(display, context, &pipeline_buffer, 1) == VA_STATUS_SUCCESS, "vaRenderPicture");
+    // A refusal can land at either call: the pipeline buffer is judged when it
+    // is rendered, and anything that needs both passes is judged at the end.
+    // Counting only the end would report a driver that refused correctly as a
+    // driver that ran the picture.
+    const VAStatus render_status = vaRenderPicture(display, context, &pipeline_buffer, 1);
     status = vaEndPicture(display, context);
 
     if (expect_refusal) {
-        const bool refused = status != VA_STATUS_SUCCESS;
-        std::printf("%s vaEndPicture refused the picture (status 0x%x)\n", refused ? "PASS" : "FAIL",
-            static_cast<unsigned>(status));
+        const bool refused = status != VA_STATUS_SUCCESS || render_status != VA_STATUS_SUCCESS;
+        std::printf("%s the picture was refused (render 0x%x, end 0x%x)\n", refused ? "PASS" : "FAIL",
+            static_cast<unsigned>(render_status), static_cast<unsigned>(status));
         if (!refused)
             ++failures;
     } else {
+        check(render_status == VA_STATUS_SUCCESS, "vaRenderPicture");
         check(status == VA_STATUS_SUCCESS, "vaEndPicture");
         std::vector<uint8_t> output;
         if (status == VA_STATUS_SUCCESS)
