@@ -86,7 +86,7 @@ opaque:160x96:64x48:16:16:64:48:1.00 \
 scale:128x72:64x48:34:12:32:24:0.60 \
 p010:128x72:32x24:64:48:32:24:0.50:--p010 \
 ragged:318x178:64x48:100:50:64:48:0.25 \
-padded:128x72:64x48:16:16:64:48:0.35:--pad 16"
+padded:128x72:64x48:16:16:64:48:0.35:--pad=16"
 
 failed=0
 count=0
@@ -97,8 +97,8 @@ for entry in $cases; do
     w=${1%x*} h=${1#*x}
     ow=${2%x*} oh=${2#*x}
     rx=$3 ry=$4 rw=$5 rh=$6 alpha=$7
-    # Everything after the alpha is a probe flag, and a flag may take a value,
-    # so it stays a word list rather than one field.
+    # Everything after the alpha is a probe flag. A flag that takes a value
+    # spells it --name=value, so a case stays one field in the list above.
     shift 7
     flags="$*"
     count=$((count + 1))

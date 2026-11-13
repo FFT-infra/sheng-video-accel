@@ -28,7 +28,7 @@
 //   iris-va-vpp-probe overlay <render-node> <W> <H> <ovW> <ovH> <x> <y>
 //                     <rw> <rh> <alpha> <out.raw>
 //                     [--p010] [--premultiplied] [--luma-key] [--third]
-//                     [--blend-first] [--main-crop] [--pad <columns>]
+//                     [--blend-first] [--main-crop] [--pad=<columns>]
 //                     [--expect-refusal]
 //
 // The third mode submits two pipeline buffers in one picture, the way
@@ -688,7 +688,7 @@ void overlay_usage(const char* argv0)
     std::fprintf(stderr,
         "usage: %s overlay <render-node> <W> <H> <ovW> <ovH> <x> <y> <rw> <rh> <alpha> <out.raw>\n"
         "                 [--p010] [--premultiplied] [--luma-key] [--third] [--blend-first]\n"
-        "                 [--main-crop] [--pad <columns>]\n"
+        "                 [--main-crop] [--pad=<columns>]\n"
         "                 [--expect-refusal]\n",
         argv0);
 }
@@ -726,8 +726,8 @@ int run_overlay(int argc, char** argv)
             blend_first = true;
         else if (std::strcmp(argv[i], "--main-crop") == 0)
             main_crop = true;
-        else if (std::strcmp(argv[i], "--pad") == 0 && i + 1 < argc)
-            pad = static_cast<unsigned>(std::atoi(argv[++i]));
+        else if (std::strncmp(argv[i], "--pad=", 6) == 0)
+            pad = static_cast<unsigned>(std::atoi(argv[i] + 6));
         else if (std::strcmp(argv[i], "--expect-refusal") == 0)
             expect_refusal = true;
         else {
