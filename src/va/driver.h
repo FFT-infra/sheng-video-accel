@@ -173,6 +173,9 @@ struct Context {
         bool output_region_set = false;
         uint32_t rotation = VA_ROTATION_NONE;
         uint32_t mirror = VA_MIRROR_NONE;
+        // The scale kernel's interpolation method, already reduced from
+        // VA_FILTER_INTERPOLATION_*: 0 is the point map, 1 the four-tap blend.
+        uint32_t interpolation = 0;
         // How many filter buffers the pipeline names. One is supported, and
         // only the HDR10 tone mapper; the parameters arrive as their own
         // buffer, which is why the peak lives beside the job and not in it.

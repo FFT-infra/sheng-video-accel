@@ -4,9 +4,11 @@
 // VAProfileNone, the compute kernel that produces its pixels must be proven
 // byte-exact against a CPU oracle on the target. This probe dispatches the
 // scale kernel named on its command line (nv12_scale.spv or p010_scale.spv)
-// over two imported DMA-BUFs and checks every destination pixel against a
-// nearest-neighbour oracle that uses swscale's point positions and VA's
-// rotation order, plus that the source is unchanged.
+// over two imported DMA-BUFs and checks every destination pixel against an
+// oracle that uses swscale's point positions and VA's rotation order, plus that
+// the source is unchanged. With --interp 1 the oracle is the four-tap bilinear
+// blend the kernel runs instead, compared within one code because GLSL does not
+// pin the rounding of that sum.
 //
 // The plane geometry is the Iris CAPTURE layout (src/iris/alloc.cc:
 // stable_layout -> src/util/prime.cc:plane_layout): 128-byte luma pitch for
@@ -18,7 +20,8 @@
 // exactly like the flat read/write prereq.
 //
 // Usage: scale_probe <scale.spv> <heap|msm> [render-node] [WxH WxH
-//                     [CROP_WxH+X+Y]] [--rot 0..3] [--p010]
+//                     [CROP_WxH+X+Y]] [--rot 0..3] [--mirror 0..3]
+//                     [--interp 0|1] [--p010]
 // The size pair is [source destination] and defaults to 64x32 128x64.
 // Exit 0 only when compute runs, both fds import, and every destination pixel
 // matches the oracle for that origin. Build and run on the target, never in
@@ -65,6 +68,8 @@ struct geometry {
     // VA_MIRROR_HORIZONTAL as bit 0 and VA_MIRROR_VERTICAL as bit 1, applied to
     // the rotated rectangle and before the scale.
     unsigned mirror;
+    // 0 is the point map, 1 the four-tap bilinear blend.
+    unsigned interp;
 };
 
 // plane_layout in src/util/prime.cc: luma pitch aligned to 128 bytes (256 for
@@ -83,6 +88,7 @@ static struct geometry geometry(unsigned src_w, unsigned src_h, unsigned dst_w, 
     g.bytes = bytes;
     g.rot = 0;
     g.mirror = 0;
+    g.interp = 0;
     g.src_stride = align_up(src_w * bytes, 128 * bytes);
     g.src_uv = g.src_stride * align_up(src_h, 32);
     // stable_layout rounds the total up to 4 KiB; the DMA-BUF the driver
@@ -152,11 +158,26 @@ static unsigned sample_at(const volatile uint8_t* p, unsigned off, unsigned byte
     return bytes == 2 ? (unsigned)p[off] | ((unsigned)p[off + 1] << 8) : p[off];
 }
 
-static void fill_source(volatile uint8_t* src, unsigned size, unsigned bytes)
+// The ten-bit code a P010 word carries at the top, or the byte itself. The
+// bilinear model blends codes, because that is what the kernel blends: a
+// padded word is not a number a client reads.
+static unsigned code_at(const volatile uint8_t* p, unsigned off, unsigned bytes)
+{
+    const unsigned w = sample_at(p, off, bytes);
+    return bytes == 2 ? w >> 6 : w;
+}
+
+
+// Fill the source with a pattern in which every byte offset holds a different
+// code, so an offset bug reads the wrong value. A non-zero `constant` fills the
+// whole plane with that one code instead: a scale of a constant picture must
+// stay that constant whatever the weights are, which is what proves they sum to
+// one rather than merely to something close.
+static void fill_source(volatile uint8_t* src, unsigned size, unsigned bytes, unsigned constant)
 {
     if (bytes == 2) {
         for (unsigned i = 0; i < size; i += 2) {
-            const unsigned sample = ((i * 37u + 11u) ^ (i >> 5)) & 0x3ffu;
+            const unsigned sample = constant ? constant : (((i * 37u + 11u) ^ (i >> 5)) & 0x3ffu);
             const unsigned word = sample << 6; // legal P010: low six bits zero
             src[i] = (uint8_t)word;
             src[i + 1] = (uint8_t)(word >> 8);
@@ -164,15 +185,15 @@ static void fill_source(volatile uint8_t* src, unsigned size, unsigned bytes)
         return;
     }
     for (unsigned i = 0; i < size; i++)
-        src[i] = (uint8_t)((i * 37u + 11u) ^ (i >> 5));
+        src[i] = (uint8_t)(constant ? constant : ((i * 37u + 11u) ^ (i >> 5)));
 }
 
-static unsigned source_changed(const volatile uint8_t* src, unsigned size, unsigned bytes)
+static unsigned source_changed(const volatile uint8_t* src, unsigned size, unsigned bytes, unsigned constant)
 {
     unsigned changed = 0;
     if (bytes == 2) {
         for (unsigned i = 0; i < size; i += 2) {
-            const unsigned sample = ((i * 37u + 11u) ^ (i >> 5)) & 0x3ffu;
+            const unsigned sample = constant ? constant : (((i * 37u + 11u) ^ (i >> 5)) & 0x3ffu);
             const unsigned word = sample << 6;
             if (src[i] != (uint8_t)word || src[i + 1] != (uint8_t)(word >> 8))
                 changed++;
@@ -180,7 +201,7 @@ static unsigned source_changed(const volatile uint8_t* src, unsigned size, unsig
         return changed;
     }
     for (unsigned i = 0; i < size; i++)
-        if (src[i] != (uint8_t)((i * 37u + 11u) ^ (i >> 5)))
+        if (src[i] != (uint8_t)(constant ? constant : ((i * 37u + 11u) ^ (i >> 5))))
             changed++;
     return changed;
 }
@@ -304,17 +325,113 @@ struct push_params {
     uint32_t src_w, src_h, dst_w, dst_h;
     uint32_t rot;
     uint32_t mirror;
+    uint32_t interp;
 };
 
-// Byte-exact nearest-neighbour oracle over every destination pixel. Checks
-// luma and both chroma channels. `src` is the CPU view of the source DMA-BUF
-// this gate just filled, so a wrong stride/offset/subsample/rotation in the
-// shader lands on a different pattern sample and fails here.
+// One source sample of a plane as the mirror-then-unrotate order leaves it.
+// `chroma` selects the half-size plane and `comp` the u or v byte of an
+// interleaved pair, so the luma and chroma loops below share one address path.
+static unsigned plane_at(const volatile uint8_t* src, const struct geometry* g, unsigned chroma, unsigned rx,
+    unsigned ry, unsigned comp)
+{
+    const unsigned w = chroma ? g->crop_w / 2 : g->crop_w;
+    const unsigned h = chroma ? g->crop_h / 2 : g->crop_h;
+    const unsigned rw = (g->rot & 1u) ? h : w;
+    const unsigned rh = (g->rot & 1u) ? w : h;
+    unsigned sx, sy;
+    mirror_at(g->mirror, rw, rh, &rx, &ry);
+    unrotate(g->rot, rx, ry, w, h, &sx, &sy);
+    unsigned off;
+    if (chroma)
+        off = g->src_uv + (g->crop_y / 2 + sy) * g->src_stride + g->crop_x * g->bytes + sx * 2 * g->bytes
+            + comp * g->bytes;
+    else
+        off = (g->crop_y + sy) * g->src_stride + (g->crop_x + sx) * g->bytes;
+    return sample_at(src, off, g->bytes);
+}
+
+// The code that sample carries: a P010 word's ten bits at the top, or the byte
+// itself. The bilinear model blends these, because that is what the kernel
+// blends.
+static unsigned code_plane(const volatile uint8_t* src, const struct geometry* g, unsigned chroma, unsigned rx,
+    unsigned ry, unsigned comp)
+{
+    const unsigned w = chroma ? g->crop_w / 2 : g->crop_w;
+    const unsigned h = chroma ? g->crop_h / 2 : g->crop_h;
+    const unsigned rw = (g->rot & 1u) ? h : w;
+    const unsigned rh = (g->rot & 1u) ? w : h;
+    unsigned sx, sy;
+    mirror_at(g->mirror, rw, rh, &rx, &ry);
+    unrotate(g->rot, rx, ry, w, h, &sx, &sy);
+    unsigned off;
+    if (chroma)
+        off = g->src_uv + (g->crop_y / 2 + sy) * g->src_stride + g->crop_x * g->bytes + sx * 2 * g->bytes
+            + comp * g->bytes;
+    else
+        off = (g->crop_y + sy) * g->src_stride + (g->crop_x + sx) * g->bytes;
+    return code_at(src, off, g->bytes);
+}
+
+// The centre of destination sample `d` of `dst` inside a `src`-sized axis,
+// clamped to the source's extent. The kernel computes the same expression in
+// single precision; the model keeps it in double so the comparison measures
+// the kernel and not a copy of its rounding.
+static double axis_pos(unsigned d, unsigned dst, unsigned src)
+{
+    const double v = ((double)d + 0.5) * ((double)src / (double)dst) - 0.5;
+    if (v < 0.0)
+        return 0.0;
+    if (v > (double)(src - 1u))
+        return (double)(src - 1u);
+    return v;
+}
+
+// VA mirrors in the rotated plane, so the reflection applies to the continuous
+// position rather than to an already-rounded index.
+static double mirror_pos(double v, unsigned size, unsigned on)
+{
+    return on ? (double)(size - 1u) - v : v;
+}
+
+// The four-tap blend of the kernel's bilinear path, in double.
+static double plane_blend(const volatile uint8_t* src, const struct geometry* g, unsigned chroma, unsigned comp,
+    unsigned dx, unsigned dy, unsigned dw, unsigned dh)
+{
+    const unsigned w = chroma ? g->crop_w / 2 : g->crop_w;
+    const unsigned h = chroma ? g->crop_h / 2 : g->crop_h;
+    const unsigned rw = (g->rot & 1u) ? h : w;
+    const unsigned rh = (g->rot & 1u) ? w : h;
+    const double x = mirror_pos(axis_pos(dx, dw, rw), rw, g->mirror & 1u);
+    const double y = mirror_pos(axis_pos(dy, dh, rh), rh, g->mirror & 2u);
+    const unsigned x0 = (unsigned)x, y0 = (unsigned)y;
+    const unsigned x1 = x0 + 1 < rw ? x0 + 1 : rw - 1;
+    const unsigned y1 = y0 + 1 < rh ? y0 + 1 : rh - 1;
+    const double fx = x - (double)x0, fy = y - (double)y0;
+    // The blend runs on codes, not on the padded words the kernel reads: a
+    // P010 word keeps its ten bits at the top, and mixing the words would leave
+    // bits in the low six that no client reads and no encoder expects.
+    const double a = (1.0 - fx) * (double)code_plane(src, g, chroma, x0, y0, comp)
+        + fx * (double)code_plane(src, g, chroma, x1, y0, comp);
+    const double b = (1.0 - fx) * (double)code_plane(src, g, chroma, x0, y1, comp)
+        + fx * (double)code_plane(src, g, chroma, x1, y1, comp);
+    return (1.0 - fy) * a + fy * b;
+}
+
+// Per-sample oracle over every destination pixel, luma and both chroma
+// channels. `src` is the CPU view of the source DMA-BUF this gate just filled,
+// so a wrong stride/offset/subsample/rotation in the shader lands on a
+// different pattern sample and fails here. The point map is compared exactly;
+// the bilinear path allows one code, because GLSL leaves the implementation
+// free to contract the four-tap sum into fused multiply-adds while the model
+// sums in double. A structural mistake (a wrong tap, a missing weight, a
+// transposed plane, a skipped clamp) moves a sample far further than one code.
 static unsigned check_pixels(const volatile uint8_t* src, const volatile uint8_t* dst, const struct geometry* g)
 {
-    unsigned bad = 0;
+    unsigned bad = 0, worst = 0;
     const unsigned bpp = g->bytes;
-    const unsigned pair_bytes = 2 * bpp; // one interleaved (u,v) pair
+    const unsigned pair_bytes = 2 * bpp;
+    const unsigned full = bpp == 2 ? 1023u : 255u;
+    const unsigned tol = g->interp ? 1u : 0u;
     // A quarter turn transposes the sampled rectangle, so the point map runs
     // on that size and each point is then taken back to the source.
     const unsigned rot_w = (g->rot & 1u) ? g->crop_h : g->crop_w;
@@ -322,49 +439,64 @@ static unsigned check_pixels(const volatile uint8_t* src, const volatile uint8_t
     const unsigned xinc = point_step(rot_w, g->dst_w);
     const unsigned yinc = point_step(rot_h, g->dst_h);
     for (unsigned dy = 0; dy < g->dst_h; dy++) {
-        const unsigned ry = point_pick(dy, yinc);
         for (unsigned dx = 0; dx < g->dst_w; dx++) {
-            unsigned sx, sy;
-            unsigned rx = point_pick(dx, xinc), my = ry;
-            mirror_at(g->mirror, rot_w, rot_h, &rx, &my);
-            unrotate(g->rot, rx, my, g->crop_w, g->crop_h, &sx, &sy);
-            const unsigned off = (g->crop_y + sy) * g->src_stride + (g->crop_x + sx) * bpp;
-            const unsigned want = sample_at(src, off, bpp);
-            const unsigned got = sample_at(dst, dy * g->dst_stride + dx * bpp, bpp);
-            if (got != want) {
+            unsigned want, got;
+            if (g->interp) {
+                const double v = plane_blend(src, g, 0, 0, dx, dy, g->dst_w, g->dst_h);
+                want = (unsigned)(v + 0.5);
+                if (want > full)
+                    want = full;
+                got = code_at(dst, dy * g->dst_stride + dx * bpp, bpp);
+            } else {
+                want = plane_at(src, g, 0, point_pick(dx, xinc), point_pick(dy, yinc), 0);
+                got = sample_at(dst, dy * g->dst_stride + dx * bpp, bpp);
+            }
+            const unsigned diff = got > want ? got - want : want - got;
+            if (diff > worst)
+                worst = diff;
+            if (diff > tol) {
                 if (bad < 8)
                     fprintf(stderr, "  luma (%u,%u): got %u want %u\n", dx, dy, got, want);
                 bad++;
             }
         }
     }
-    const unsigned cw = g->crop_w / 2, ch = g->crop_h / 2;
     const unsigned dw = g->dst_w / 2, dh = g->dst_h / 2;
-    const unsigned crw = (g->rot & 1u) ? ch : cw;
-    const unsigned crh = (g->rot & 1u) ? cw : ch;
+    const unsigned crw = (g->rot & 1u) ? (g->crop_h / 2) : (g->crop_w / 2);
+    const unsigned crh = (g->rot & 1u) ? (g->crop_w / 2) : (g->crop_h / 2);
     const unsigned cxinc = point_step(crw, dw);
     const unsigned cyinc = point_step(crh, dh);
     for (unsigned cy = 0; cy < dh; cy++) {
-        const unsigned ry = point_pick(cy, cyinc);
         for (unsigned cx = 0; cx < dw; cx++) {
-            unsigned sx, sy;
-            unsigned rx = point_pick(cx, cxinc), my = ry;
-            mirror_at(g->mirror, crw, crh, &rx, &my);
-            unrotate(g->rot, rx, my, cw, ch, &sx, &sy);
-            const unsigned off = g->src_uv + (g->crop_y / 2 + sy) * g->src_stride + g->crop_x * bpp
-                + sx * pair_bytes;
-            const unsigned wu = sample_at(src, off, bpp);
-            const unsigned wv = sample_at(src, off + bpp, bpp);
             const unsigned d = g->dst_uv + cy * g->dst_stride + cx * pair_bytes;
-            const unsigned gu = sample_at(dst, d, bpp);
-            const unsigned gv = sample_at(dst, d + bpp, bpp);
-            if (gu != wu || gv != wv) {
-                if (bad < 8)
-                    fprintf(stderr, "  chroma (%u,%u): got (%u,%u) want (%u,%u)\n", cx, cy, gu, gv, wu, wv);
-                bad += (gu != wu) + (gv != wv);
+            const unsigned ru = sample_at(dst, d, bpp);
+            const unsigned rv = sample_at(dst, d + bpp, bpp);
+            for (unsigned comp = 0; comp < 2; comp++) {
+                unsigned want, got;
+                if (g->interp) {
+                    const double v = plane_blend(src, g, 1, comp, cx, cy, dw, dh);
+                    want = (unsigned)(v + 0.5);
+                    if (want > full)
+                        want = full;
+                    got = code_at(dst, d + comp * bpp, bpp);
+                } else {
+                    want = plane_at(src, g, 1, point_pick(cx, cxinc), point_pick(cy, cyinc), comp);
+                    got = comp ? rv : ru;
+                }
+                const unsigned diff = got > want ? got - want : want - got;
+                if (diff > worst)
+                    worst = diff;
+                if (diff > tol) {
+                    if (bad < 8)
+                        fprintf(stderr, "  chroma (%u,%u) %c: got %u want %u\n", cx, cy, comp ? 'v' : 'u', got,
+                            want);
+                    bad++;
+                }
             }
         }
     }
+    if (worst > tol)
+        fprintf(stderr, "  worst deviation %u code(s), tolerance %u\n", worst, tol);
     return bad;
 }
 
@@ -372,7 +504,7 @@ int main(int argc, char** argv)
 {
     const char* positional[8] = {};
     unsigned npos = 0;
-    unsigned bytes = 1, rot = 0, mirror = 0;
+    unsigned bytes = 1, rot = 0, mirror = 0, interp = 0, constant = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--p010") == 0) {
             bytes = 2;
@@ -380,6 +512,10 @@ int main(int argc, char** argv)
             rot = (unsigned)strtoul(argv[++i], NULL, 10);
         } else if (strcmp(argv[i], "--mirror") == 0 && i + 1 < argc) {
             mirror = (unsigned)strtoul(argv[++i], NULL, 10);
+        } else if (strcmp(argv[i], "--interp") == 0 && i + 1 < argc) {
+            interp = (unsigned)strtoul(argv[++i], NULL, 10);
+        } else if (strcmp(argv[i], "--constant") == 0 && i + 1 < argc) {
+            constant = (unsigned)strtoul(argv[++i], NULL, 10);
         } else if (npos < sizeof(positional) / sizeof(positional[0])) {
             positional[npos++] = argv[i];
         } else {
@@ -389,7 +525,8 @@ int main(int argc, char** argv)
     }
     if (npos < 2) {
         fprintf(stderr,
-            "usage: %s <scale.spv> <heap|msm> [render-node] [WxH WxH [CROP_WxH+X+Y]] [--rot 0..3] [--mirror 0..3] [--p010]\n",
+            "usage: %s <scale.spv> <heap|msm> [render-node] [WxH WxH [CROP_WxH+X+Y]] [--rot 0..3] [--mirror 0..3]"
+            " [--interp 0|1] [--constant N] [--p010]\n",
             argv[0]);
         return 2;
     }
@@ -399,6 +536,18 @@ int main(int argc, char** argv)
     }
     if (mirror > 3) {
         fprintf(stderr, "FAIL --mirror must be 0..3\n");
+        return 2;
+    }
+    // The two methods the kernel implements: the point map and the four-tap
+    // blend. The driver refuses the third, so the probe has nothing to model.
+    if (interp > 1) {
+        fprintf(stderr, "FAIL --interp must be 0 or 1\n");
+        return 2;
+    }
+    // A constant picture proves the weights sum to one; the code has to be
+    // representable in both sample widths the probe gates.
+    if (constant > (bytes == 2 ? 1023u : 255u)) {
+        fprintf(stderr, "FAIL --constant must fit the sample width\n");
         return 2;
     }
     const char* origin = positional[1];
@@ -416,6 +565,7 @@ int main(int argc, char** argv)
     struct geometry g = geometry(src_w, src_h, dst_w, dst_h, bytes);
     g.rot = rot;
     g.mirror = mirror;
+    g.interp = interp;
     if (npos >= 6) {
         unsigned crop_w = 0, crop_h = 0, crop_x = 0, crop_y = 0;
         if (sscanf(positional[5], "%ux%u+%u+%u", &crop_w, &crop_h, &crop_x, &crop_y) != 4) {
@@ -455,7 +605,7 @@ int main(int argc, char** argv)
     sync_cpu(dst_fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE);
     // Distinct sample per address so an offset bug reads the wrong value, and
     // a sentinel in the destination so an unwritten word cannot look correct.
-    fill_source(src, g.src_size, g.bytes);
+    fill_source(src, g.src_size, g.bytes, constant);
     for (unsigned i = 0; i < g.dst_size; i++)
         dst[i] = 0xcdu;
     sync_cpu(src_fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE);
@@ -641,7 +791,8 @@ int main(int argc, char** argv)
         .dst_w = g.dst_w,
         .dst_h = g.dst_h,
         .rot = g.rot,
-        .mirror = g.mirror };
+        .mirror = g.mirror,
+        .interp = g.interp };
     vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
     // One invocation per destination word: four luma pixels and two chroma
     // pairs (NV12), or two luma samples and one chroma pair (P010). The grid
@@ -661,16 +812,20 @@ int main(int argc, char** argv)
     sync_cpu(src_fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ);
     const unsigned bad = check_pixels(src, dst, &g);
     // The source must be unchanged: the shader reads it only.
-    const unsigned changed = source_changed(src, g.src_size, g.bytes);
+    const unsigned changed = source_changed(src, g.src_size, g.bytes, constant);
     sync_cpu(dst_fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
     sync_cpu(src_fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
     if (bad || changed) {
         fprintf(stderr, "FAIL origin=%s pixels_wrong=%u src_changed=%u\n", origin, bad, changed);
         return 1;
     }
-    printf("PASS origin=%s %s rot=%u mirror=%u scale=%ux%u->%ux%u crop=%ux%u+%u+%u exact bytes=%u src=unchanged\n",
-        origin, bytes == 2 ? "p010" : "nv12", g.rot, g.mirror, g.src_w, g.src_h, g.dst_w, g.dst_h, g.crop_w,
-        g.crop_h, g.crop_x, g.crop_y, g.dst_size);
+    // `exact` names the comparison: the point map is byte-exact, the bilinear
+    // blend is within one code of its model.
+    printf("PASS origin=%s %s rot=%u mirror=%u interp=%s scale=%ux%u->%ux%u crop=%ux%u+%u+%u %s bytes=%u "
+           "src=unchanged\n",
+        origin, bytes == 2 ? "p010" : "nv12", g.rot, g.mirror, g.interp ? "bilinear" : "nearest", g.src_w, g.src_h,
+        g.dst_w, g.dst_h, g.crop_w, g.crop_h, g.crop_x, g.crop_y,
+        constant ? "constant-invariant" : g.interp ? "within-1" : "exact", g.dst_size);
 
     vkDestroyFence(dev, fence, NULL);
     vkFreeCommandBuffers(dev, cmdp, 1, &cb);

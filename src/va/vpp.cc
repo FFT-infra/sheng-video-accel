@@ -106,7 +106,10 @@ VAStatus queryVideoProcPipelineCaps(VADriverContextP ctx, VAContextID id, VABuff
     // call, which is why they are static.
     *caps = {};
     caps->pipeline_flags = 0;
-    caps->filter_flags = 0;
+    // The two interpolation methods with a kernel. The unspecified method is
+    // 0 and always usable; "advanced" has no kernel, so it is not set here and
+    // a picture that asks for it is refused rather than approximated.
+    caps->filter_flags = VA_FILTER_INTERPOLATION_NEAREST_NEIGHBOR | VA_FILTER_INTERPOLATION_BILINEAR;
     caps->num_forward_references = 0;
     caps->num_backward_references = 0;
     caps->input_color_standards = kStandards;

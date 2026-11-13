@@ -5,13 +5,16 @@
 //
 //   iris-va-vpp-probe <render-node> <src.raw> <srcW> <srcH>
 //                     <cropW> <cropH> <cropX> <cropY> <dstW> <dstH> <out.raw>
-//                     [--expect-refusal]
+//                     [--expect-refusal] [--interp=nearest|bilinear|advanced]
 //
 // It uploads the NV12 frame through a derived image, creates a
 // VAProfileNone / VAEntrypointVideoProc context, submits a
 // VAProcPipelineParameterBuffer whose surface_region is the crop, ends the
 // picture and downloads the result with vaGetImage. FFmpeg 8.1 has no
 // crop_vaapi filter, so this is the only client that can ask for a region.
+// `--interp` names the interpolation method in filter_flags: `bilinear` must
+// run, `advanced` must be refused, and the caps must advertise exactly the two
+// methods that have a kernel.
 //
 //   iris-va-vpp-probe tonemap <render-node> <W> <H> <peak-nits> <out.raw>
 //                     [--source-nv12] [--no-filter] [--rotate]
@@ -1356,10 +1359,30 @@ int main(int argc, char** argv)
     if (argc >= 2 && std::strcmp(argv[1], "overlay") == 0)
         return run_overlay(argc - 2, argv + 2);
 
+    // The last argument may name an interpolation method; everything before it
+    // is positional, so the shape of the call does not depend on it.
+    unsigned filter_flags = 0;
+    const char* interp = nullptr;
+    for (int i = 1; i < argc; i++) {
+        if (std::strncmp(argv[i], "--interp=", 9) == 0) {
+            interp = argv[i] + 9;
+            if (std::strcmp(interp, "nearest") == 0)
+                filter_flags = VA_FILTER_INTERPOLATION_NEAREST_NEIGHBOR;
+            else if (std::strcmp(interp, "bilinear") == 0)
+                filter_flags = VA_FILTER_INTERPOLATION_BILINEAR;
+            else if (std::strcmp(interp, "advanced") == 0)
+                filter_flags = VA_FILTER_INTERPOLATION_ADVANCED;
+            else {
+                std::fprintf(stderr, "--interp must be nearest, bilinear or advanced\n");
+                return 2;
+            }
+        }
+    }
     const bool expect_refusal = argc == 13 && std::strcmp(argv[12], "--expect-refusal") == 0;
-    if (argc != 12 && !expect_refusal) {
+    if (argc != 12 && !expect_refusal && interp == nullptr) {
         std::fprintf(stderr, "usage: %s <render-node> <src.raw> <srcW> <srcH> <cropW> <cropH> <cropX> "
-                             "<cropY> <dstW> <dstH> <out.raw> [--expect-refusal]\n",
+                             "<cropY> <dstW> <dstH> <out.raw> [--expect-refusal] "
+                             "[--interp=nearest|bilinear|advanced]\n",
             argv[0]);
         return 2;
     }
@@ -1416,9 +1439,26 @@ int main(int argc, char** argv)
         &dst_surface, 1, &context);
     check(status == VA_STATUS_SUCCESS, "create a VideoProc context");
 
+    // What the caps advertise is the driver's claim; the picture below is what
+    // it actually runs. Checking both here keeps the two from drifting apart:
+    // a method in the caps without a kernel is over-advertising, and a method
+    // with a kernel but not in the caps is invisible to a client that asks.
+    {
+        VAProcPipelineCaps caps = {};
+        check(vaQueryVideoProcPipelineCaps(display, context, nullptr, 0, &caps) == VA_STATUS_SUCCESS,
+            "query the VideoProc pipeline caps");
+        check((caps.filter_flags & VA_FILTER_INTERPOLATION_NEAREST_NEIGHBOR) != 0,
+            "the caps offer nearest-neighbour interpolation");
+        check((caps.filter_flags & VA_FILTER_INTERPOLATION_BILINEAR) != 0,
+            "the caps offer bilinear interpolation");
+        check((caps.filter_flags & VA_FILTER_INTERPOLATION_ADVANCED) == 0,
+            "no advanced interpolation is advertised");
+    }
+
     VAProcPipelineParameterBuffer pipeline = {};
     pipeline.surface = src_surface;
     pipeline.surface_region = &region;
+    pipeline.filter_flags = filter_flags;
     VABufferID pipeline_buffer = VA_INVALID_ID;
     status = vaCreateBuffer(display, context, VAProcPipelineParameterBufferType, sizeof(pipeline), 1, &pipeline,
         &pipeline_buffer);
@@ -1430,7 +1470,7 @@ int main(int argc, char** argv)
 
     if (expect_refusal) {
         const bool refused = status != VA_STATUS_SUCCESS;
-        std::printf("%s vaEndPicture refused the region (status 0x%x)\n", refused ? "PASS" : "FAIL",
+        std::printf("%s vaEndPicture refused the picture (status 0x%x)\n", refused ? "PASS" : "FAIL",
             static_cast<unsigned>(status));
         if (!refused)
             ++failures;
@@ -1457,7 +1497,7 @@ int main(int argc, char** argv)
     if (failures)
         std::printf("FAIL iris-va-vpp-probe %d check(s)\n", failures);
     else
-        std::printf("PASS iris-va-vpp-probe crop=%ux%u+%d+%d -> %ux%u\n", region.width, region.height,
-            region.x, region.y, dst_w, dst_h);
+        std::printf("PASS iris-va-vpp-probe crop=%ux%u+%d+%d -> %ux%u interp=%s\n", region.width, region.height,
+            region.x, region.y, dst_w, dst_h, interp ? interp : "default");
     return failures ? 1 : 0;
 }

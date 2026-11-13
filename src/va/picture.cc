@@ -199,10 +199,14 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
     iris::require((p.pipeline_flags & ~VA_PROC_PIPELINE_FAST) == 0, "unsupported VPP pipeline flag",
         VA_STATUS_ERROR_UNSUPPORTED_FILTER);
     // Scaling mode is only a hint, so every VA_FILTER_SCALING_* value is
-    // accepted. A specific interpolation method (bilinear or advanced) asks
-    // for a filter the nearest-neighbour kernel does not implement.
-    iris::require((p.filter_flags & VA_FILTER_INTERPOLATION_MASK) == 0
-            || (p.filter_flags & VA_FILTER_INTERPOLATION_MASK) == VA_FILTER_INTERPOLATION_NEAREST_NEIGHBOR,
+    // accepted. Two of the three interpolation methods have a kernel: the
+    // unspecified one is this driver's default (the point map), the
+    // nearest-neighbour one is the same point map under its own name, and
+    // bilinear is the four-tap blend. "Advanced" has no kernel, so it is
+    // refused rather than approximated by the bilinear one.
+    const unsigned interpolation = p.filter_flags & VA_FILTER_INTERPOLATION_MASK;
+    iris::require(interpolation == 0 || interpolation == VA_FILTER_INTERPOLATION_NEAREST_NEIGHBOR
+            || interpolation == VA_FILTER_INTERPOLATION_BILINEAR,
         "VPP interpolation method is not supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
 
     // No colour conversion: input and output must name the same standard,
@@ -223,6 +227,7 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
     job.source = p.surface;
     job.rotation = p.rotation_state;
     job.mirror = p.mirror_state;
+    job.interpolation = interpolation == VA_FILTER_INTERPOLATION_BILINEAR ? 1u : 0u;
     job.filters = p.num_filters;
     job.input_standard = input_standard;
     job.output_standard = output_standard;
@@ -609,6 +614,7 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         sj.rotation = job.rotation;
         // Mirroring is the step after the rotation and before the scale.
         sj.mirror = job.mirror;
+        sj.interpolation = job.interpolation;
         ran = iris::vpp::scale_nv12_or_p010(sj);
     }
     if (!ran) {

@@ -338,9 +338,10 @@ src/
     alloc.{h,cc}      StableBuffer allocation (MSM GEM -> dma-heap), or a
                       duplicate of a client's DMA-BUF for an imported surface
     vpp/scale.{h,cc}  optional Vulkan compute video processor: imports two
-                      surface DMA-BUFs, runs the pinned nearest kernel for
+                      surface DMA-BUFs, runs the pinned scale kernel for
                       the surface's sample width, embedded from
-                      test/vulkan-vpp/{nv12,p010}_scale.spv
+                      test/vulkan-vpp/{nv12,p010}_scale.spv (nearest point map
+                      and the four-tap bilinear blend)
   codec/              VA parameters -> bytestream the firmware accepts; pure functions
     bitwriter.h
     h264.cc           SPS/PPS synthesis, AU assembly
@@ -387,12 +388,19 @@ those formats).
 The video processor is a fourth context kind but not a fourth node:
 `VAProfileNone` / `VAEntrypointVideoProc` opens no V4L2 node and owns no
 session. `vaEndPicture` resolves the two surface DMA-BUFs and runs the pinned
-nearest kernel for the surface's sample width at the requested ratio over the
+scale kernel for the surface's sample width at the requested ratio over the
 surface region the client names, after the clockwise quarter turn and the
 mirroring the client names — VA orders rotation, then mirroring, then the
-scale — sampling where swscale samples; a picture that names the HDR10 tone
-mapper instead runs `iris::vpp::tonemap_hdr10_to_sdr` over the two DMA-BUFs and
-converts P010 BT.2020/PQ to NV12 BT.709 at the surface's own size; a picture
+scale — sampling where swscale samples. The interpolation method comes from
+`filter_flags`: the unspecified method and the nearest-neighbour flag are both
+the point map, `VA_FILTER_INTERPOLATION_BILINEAR` blends the four samples
+around the destination sample's centre, and the "advanced" method fails the
+picture because no kernel implements it; the pipeline caps advertise exactly
+the two methods that have one. On a P010 surface the blend runs on the ten-bit
+code and not on the padded word, so a mixed sample keeps the low six bits
+clear. A picture that names the HDR10 tone mapper instead runs
+`iris::vpp::tonemap_hdr10_to_sdr` over the two DMA-BUFs and converts P010
+BT.2020/PQ to NV12 BT.709 at the surface's own size; a picture
 whose second pipeline buffer names a `VABlendState` runs
 `iris::vpp::overlay` over three DMA-BUFs, keeping the main surface in place and
 mixing the overlay into an even rectangle of it on the coded values of both
@@ -414,7 +422,10 @@ build found Vulkan and the client set `V4L2_VA_VPP` (§6), so an installed
 decode/encode client sees the surface it qualified against. The kernel and the
 VA surface path are gated separately in §9:
 `test/vulkan-vpp/nv12_scale_gate.sh` and `test/vulkan-vpp/p010_scale_gate.sh`
-check every pixel of the primitive and
+check every pixel of the primitive, for both interpolation methods — the point
+map byte for byte, the bilinear blend within one code of its model plus a
+constant picture and a 1:1 scale as the two invariants the weights must satisfy
+— and
 `test/vulkan-vpp/scale_vaapi_gate.sh` checks a `scale_vaapi` + `hwdownload`
 frame against swscale; `test/vulkan-vpp/crop_vaapi_gate.sh` checks a
 `surface_region` picture against `crop,scale=...:flags=neighbor`, and

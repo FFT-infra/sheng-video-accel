@@ -2,12 +2,15 @@
 //
 // Vulkan compute backend for the VA video processor. Two surface DMA-BUFs
 // (source and destination) are imported as dedicated external memory and the
-// pinned nearest-neighbour kernel for the surface's sample width runs over
-// them (nv12_scale.spv, or p010_scale.spv for 10-bit surfaces). This is the same
+// pinned scale kernel for the surface's sample width runs over them
+// (nv12_scale.spv, or p010_scale.spv for 10-bit surfaces). This is the same
 // import path the flat read/write prereq and the per-pixel scale gate prove
 // on the target; the kernel is embedded from test/vulkan-vpp/nv12_scale.spv
 // and samples the source at swscale's point positions, so `scale_vaapi=w=W:h=H`
-// reproduces `scale=WxH:flags=neighbor` byte for byte. Rotation is a clockwise
+// reproduces `scale=WxH:flags=neighbor` byte for byte. One kernel serves both
+// interpolation methods the driver advertises: the point map, and the
+// four-tap bilinear blend a client asks for with VA_FILTER_INTERPOLATION_
+// BILINEAR. Rotation is a clockwise
 // quarter turn applied before the scale, as VA specifies, and the same kernel
 // reproduces FFmpeg's `transpose` filter. A third kernel, tonemap.spv, converts
 // a P010 HDR10 surface to SDR NV12; it does not scale, crop or rotate, and its
@@ -59,6 +62,7 @@ struct PushParams {
     uint32_t src_width, src_height, dst_width, dst_height;
     uint32_t rotation;
     uint32_t mirror;
+    uint32_t interp;
 };
 
 // Must mirror the push-constant block in test/vulkan-vpp/overlay_rgb.comp.
@@ -490,6 +494,10 @@ bool scale_nv12_or_p010(const ScaleJob& job)
     // Horizontal and vertical, each in the rotated plane.
     if (job.mirror > 3u)
         return false;
+    // Two methods: the point map and the four-tap blend. The VA layer maps
+    // the client's filter_flags onto these two and refuses the third.
+    if (job.interpolation > 1u)
+        return false;
 
     // One kernel per sample width. Both read the same push-constant block;
     // only the word packing differs.
@@ -504,7 +512,7 @@ bool scale_nv12_or_p010(const ScaleJob& job)
     if (ok) {
         const PushParams push = { job.src_stride, job.src_uv, job.dst_stride, job.dst_uv, job.src_y, job.dst_y,
             job.src_x, job.src_y_offset, job.src_width, job.src_height, job.width, job.height, job.rotation,
-            job.mirror };
+            job.mirror, job.interpolation };
         // One invocation per destination 32-bit word: four luma pixels of one
         // row and two chroma pairs (8-bit), or two luma samples and one chroma
         // pair (P010). The grid covers the luma rows and the half-height

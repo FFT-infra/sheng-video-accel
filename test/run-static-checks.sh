@@ -60,6 +60,18 @@ run vpp-scale-pixel-oracle grep -Fq 'check_pixels(src, dst, &g)' "$test_dir/vulk
 # helper would leave a gate compiling nothing.
 run vpp-p010-gate-uses-probe grep -Fq 'scale_probe.c' "$test_dir/vulkan-vpp/p010_scale_gate.sh"
 run vpp-rotate-gate-uses-driver grep -Fq 'transpose_vaapi' "$test_dir/vulkan-vpp/transpose_vaapi_gate.sh"
+# The bilinear method is advertised in the pipeline caps, so both scale gates
+# have to measure it: the blend against its model, and the two invariants that
+# hold whatever the ratio is.
+for gate in nv12_scale_gate p010_scale_gate; do
+    run "vpp-$gate-bilinear" grep -Fq -- '--interp 1' "$test_dir/vulkan-vpp/$gate.sh"
+    run "vpp-$gate-bilinear-constant" grep -Fq -- '--constant' "$test_dir/vulkan-vpp/$gate.sh"
+done
+# The driver maps the client's filter_flags onto the kernel's two methods, and
+# the caps must advertise exactly those two. A silent widening here would
+# advertise "advanced", which has no kernel.
+run vpp-bilinear-accepted grep -Fq 'VA_FILTER_INTERPOLATION_BILINEAR' "$root/src/va/picture.cc"
+run vpp-bilinear-advertised grep -Fq 'VA_FILTER_INTERPOLATION_BILINEAR' "$root/src/va/vpp.cc"
 # The tone mapper has no byte-exact reference, so the gate's verdict is the
 # probe's own model; a gate that stopped comparing, or a probe whose model went
 # missing, would leave the kernel unmeasured.

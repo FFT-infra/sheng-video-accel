@@ -51,6 +51,12 @@ layout(push_constant) uniform Params {
     // VA_MIRROR_HORIZONTAL as bit 0 and VA_MIRROR_VERTICAL as bit 1, applied
     // after the rotation.
     uint mirror;
+    // 0 samples the point map above, which is swscale's `flags=neighbor`
+    // exactly. 1 blends the four samples around the destination sample's
+    // centre, which is what VA_FILTER_INTERPOLATION_BILINEAR asks for. The
+    // driver maps the client's filter_flags onto this and refuses the
+    // unspecified "advanced" method rather than approximating it.
+    uint interp;
 } p;
 
 uint src_byte(uint off)
@@ -102,6 +108,78 @@ uvec2 unrotate(uint rx, uint ry, uint w, uint h)
     return uvec2(rx, ry);
 }
 
+// One source sample of the rotated plane, mirrored, as a source address.
+uint luma_at(uint rx, uint ry)
+{
+    uvec2 at = unrotate(rx, ry, p.src_w, p.src_h);
+    return src_byte(p.src_y + (p.src_row + at.y) * p.src_stride + p.src_x + at.x);
+}
+
+uint chroma_at(uint rx, uint ry, uint c)
+{
+    uvec2 at = unrotate(rx, ry, p.src_w >> 1, p.src_h >> 1);
+    uint base = p.src_uv + (p.src_row >> 1) * p.src_stride + p.src_x;
+    return src_byte(base + at.y * p.src_stride + at.x * 2u + c);
+}
+
+// Continuous position of destination sample `d` of `dst` inside a `src`-sized
+// axis: the centre of the destination sample mapped back into the source,
+// clamped to the source's own extent. A 1:1 scale lands on the sample itself,
+// so bilinear and nearest agree there.
+float axis_pos(uint d, uint dst, uint src)
+{
+    float v = (float(d) + 0.5) * (float(src) / float(dst)) - 0.5;
+    return clamp(v, 0.0, float(src - 1u));
+}
+
+// VA mirrors after the rotation, so a mirror reflects the continuous position
+// in the rotated plane and not an already-rounded index.
+float mirror_pos(float v, uint size, bool on)
+{
+    return on ? float(size - 1u) - v : v;
+}
+
+
+// One luma code at destination column `dx`, luma row `row`. The nearest path is
+// the point map above; the bilinear path samples the destination sample's own
+// centre, so a constant picture stays constant and a 1:1 scale is the identity.
+uint luma_px(uint dx, uint row, uvec2 r, uint hx, uint hy)
+{
+    if (p.interp == 0u) {
+        uvec2 rp = mirror_at(uvec2(pick(dx, hx), pick(row, hy)), r);
+        return luma_at(rp.x, rp.y);
+    }
+    float x = mirror_pos(axis_pos(dx, p.dst_w, r.x), r.x, (p.mirror & 1u) != 0u);
+    float y = mirror_pos(axis_pos(row, p.dst_h, r.y), r.y, (p.mirror & 2u) != 0u);
+    uint x0 = uint(floor(x)), y0 = uint(floor(y));
+    uint x1 = min(x0 + 1u, r.x - 1u), y1 = min(y0 + 1u, r.y - 1u);
+    float fx = x - float(x0), fy = y - float(y0);
+    float v = (1.0 - fx) * (1.0 - fy) * float(luma_at(x0, y0))
+            + fx * (1.0 - fy) * float(luma_at(x1, y0))
+            + (1.0 - fx) * fy * float(luma_at(x0, y1))
+            + fx * fy * float(luma_at(x1, y1));
+    return uint(clamp(v + 0.5, 0.0, 255.0));
+}
+
+// The same for one chroma component of destination chroma column `cx`.
+uint chroma_px(uint cx, uint cy, uvec2 r, uint hx, uint hy, uint dw, uint dh, uint c)
+{
+    if (p.interp == 0u) {
+        uvec2 rp = mirror_at(uvec2(pick(cx, hx), pick(cy, hy)), r);
+        return chroma_at(rp.x, rp.y, c);
+    }
+    float x = mirror_pos(axis_pos(cx, dw, r.x), r.x, (p.mirror & 1u) != 0u);
+    float y = mirror_pos(axis_pos(cy, dh, r.y), r.y, (p.mirror & 2u) != 0u);
+    uint x0 = uint(floor(x)), y0 = uint(floor(y));
+    uint x1 = min(x0 + 1u, r.x - 1u), y1 = min(y0 + 1u, r.y - 1u);
+    float fx = x - float(x0), fy = y - float(y0);
+    float v = (1.0 - fx) * (1.0 - fy) * float(chroma_at(x0, y0, c))
+            + fx * (1.0 - fy) * float(chroma_at(x1, y0, c))
+            + (1.0 - fx) * fy * float(chroma_at(x0, y1, c))
+            + fx * fy * float(chroma_at(x1, y1, c));
+    return uint(clamp(v + 0.5, 0.0, 255.0));
+}
+
 void main()
 {
     uint word = gl_GlobalInvocationID.x;
@@ -118,15 +196,12 @@ void main()
         uvec2 r = rotated(p.src_w, p.src_h);
         uint hx = step(r.x, p.dst_w);
         uint hy = step(r.y, p.dst_h);
-        uint ry = pick(row, hy);
         uint packed = 0u;
         for (uint k = 0u; k < 4u; ++k) {
             uint dx = word * 4u + k;
             // Columns past the visible width land in the row padding; clamp so
             // the read stays inside the source plane.
-            uvec2 rp = mirror_at(uvec2(pick(min(dx, p.dst_w - 1u), hx), ry), r);
-            uvec2 at = unrotate(rp.x, rp.y, p.src_w, p.src_h);
-            packed |= src_byte(p.src_y + (p.src_row + at.y) * p.src_stride + p.src_x + at.x) << (k * 8u);
+            packed |= luma_px(min(dx, p.dst_w - 1u), row, r, hx, hy) << (k * 8u);
         }
         d[(p.dst_y + row * p.dst_stride + word * 4u) >> 2] = packed;
     } else {
@@ -134,21 +209,17 @@ void main()
         uint cw = p.src_w >> 1;
         uint ch = p.src_h >> 1;
         uint dw = p.dst_w >> 1;
+        uint dh = p.dst_h >> 1;
         uvec2 r = rotated(cw, ch);
         uint hx = step(r.x, dw);
-        uint hy = step(r.y, p.dst_h >> 1);
-        uint ry = pick(cy, hy);
-        // The crop origin is even, so the chroma origin is exactly src_x/2
-        // pairs — that is, src_x bytes into the interleaved row.
-        uint base = p.src_uv + (p.src_row >> 1) * p.src_stride + p.src_x;
+        uint hy = step(r.y, dh);
         uint packed = 0u;
         for (uint k = 0u; k < 2u; ++k) {
             uint cx = word * 2u + k;
-            uvec2 rp = mirror_at(uvec2(pick(min(cx, dw - 1u), hx), ry), r);
-            uvec2 at = unrotate(rp.x, rp.y, cw, ch);
-            uint off = base + at.y * p.src_stride + at.x * 2u;
-            packed |= src_byte(off) << (k * 16u);
-            packed |= src_byte(off + 1u) << (k * 16u + 8u);
+            uint u = chroma_px(min(cx, dw - 1u), cy, r, hx, hy, dw, dh, 0u);
+            uint v = chroma_px(min(cx, dw - 1u), cy, r, hx, hy, dw, dh, 1u);
+            packed |= u << (k * 16u);
+            packed |= v << (k * 16u + 8u);
         }
         d[(p.dst_uv + cy * p.dst_stride + word * 4u) >> 2] = packed;
     }

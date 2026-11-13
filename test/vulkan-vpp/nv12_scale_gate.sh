@@ -18,6 +18,16 @@
 # plausible-but-wrong frame. p010_scale_gate.sh runs the same map for 10-bit
 # surfaces.
 #
+# A second pass over a smaller matrix runs the same kernel with the four-tap
+# bilinear method (--interp 1), which the driver advertises as
+# VA_FILTER_INTERPOLATION_BILINEAR. There the oracle is the same blend in
+# double, compared within one code: GLSL does not pin the rounding of the
+# four-tap sum, and one code is far below the distance a wrong tap, a missing
+# weight or a transposed plane would produce. Two cases bracket it from the
+# other side: a constant picture must come out that constant at every ratio
+# (the weights sum to one), and a 1:1 scale must reproduce the nearest map
+# byte for byte (at a sample centre both methods pick the same sample).
+#
 # This is evidence for the VPP slice's load-bearing kernel only. It does not
 # advertise VAProfileNone/VAEntrypointVideoProc, wire a VPP context, or touch
 # data/iris-codec-capabilities.json. Target prerequisites match prereq.sh
@@ -103,6 +113,24 @@ cases="
 2x2:64x64:-:0
 "
 
+# Bilinear cases: the same ratios, crops, rotations and mirrors, plus the two
+# invariants the weights have to satisfy. `constant` is the code a
+# `--constant` case fills the source with.
+bilinear_cases="
+64x32:128x64:-:0:0
+64x32:96x48:-:0:0
+64x32:42x22:-:0:0
+128x72:86x48:-:0:0
+64x32:32x16:-:0:0
+64x32:96x48:48x24+8+4:0:0
+128x72:96x48:96x40+16+16:1:0
+128x72:56x96:-:3:2
+64x32:64x32:-:0:1
+64x32:128x64:-:0:3
+64x64:2x2:-:0:0
+62x34:62x34:-:0:0
+"
+
 failed=0
 printf 'spv_sha256=%s\n' "$spv_hash"
 printf 'render_node=%s\n' "$render"
@@ -124,8 +152,37 @@ for origin in heap msm; do
     done
 done
 
+echo "== bilinear"
+for origin in heap msm; do
+    echo "== origin: $origin"
+    for c in $bilinear_cases; do
+        old_ifs=$IFS
+        IFS=:
+        set -- $c
+        IFS=$old_ifs
+        src=$1 dst=$2 crop=$3 rot=$4 mirror=${5:-0}
+        set -- "$here/nv12_scale.spv" "$origin" "$render" "$src" "$dst"
+        [ "$crop" = - ] || set -- "$@" "$crop"
+        rc=0
+        "$work/probe" "$@" --rot "$rot" --mirror "$mirror" --interp 1 || rc=$?
+        printf 'case=%s %s->%s crop=%s rot=%s mirror=%s interp=bilinear exit=%s\n' "$origin" "$src" "$dst" \
+            "$crop" "$rot" "$mirror" "$rc"
+        [ "$rc" -eq 0 ] || failed=1
+    done
+done
+
+# A constant picture, at a ratio whose weights are all non-trivial: 200 from
+# 64 is not an integer step, so every destination sample sits between two
+# sources.
+for origin in heap msm; do
+    rc=0
+    "$work/probe" "$here/nv12_scale.spv" "$origin" "$render" 64x32 200x100 --interp 1 --constant 77 || rc=$?
+    printf 'case=%s 64x32->200x100 constant=77 interp=bilinear exit=%s\n' "$origin" "$rc"
+    [ "$rc" -eq 0 ] || failed=1
+done
+
 if [ "$failed" -ne 0 ]; then
     echo "FAIL nv12-scale cases are not all byte-exact" >&2
     exit 1
 fi
-echo "PASS nv12-scale cases=$(echo $cases | wc -w) origins=2 pixels_exact spv=$spv_hash render=$render"
+echo "PASS nv12-scale cases=$(echo $cases | wc -w) bilinear=$(echo $bilinear_cases | wc -w) origins=2 pixels_exact spv=$spv_hash render=$render"

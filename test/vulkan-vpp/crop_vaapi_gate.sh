@@ -14,8 +14,16 @@
 # so the two must agree byte for byte — including the frames where the crop is
 # not the whole surface and the scale is not 1:1.
 #
-# The last case asks for an odd region, which the driver must refuse rather
-# than round.
+# The same client then runs one picture with filter_flags naming the bilinear
+# method, which the driver advertises and implements. There is no byte-exact
+# software reference for it here: swscale widens its support when it
+# downsamples, so `flags=bilinear` is a different filter at these ratios. What
+# this gate can prove about the method without a per-pixel model is that the
+# picture runs and the driver reports the method it ran; the per-pixel model is
+# nv12_scale_gate.sh's, over the kernel's own buffers.
+#
+# The last two cases ask for what the driver must refuse rather than round: an
+# odd region, and the "advanced" interpolation method, which has no kernel.
 
 set -eu
 
@@ -101,6 +109,30 @@ for c in $cases; do
     [ "$rc" -eq 0 ] || failed=1
 done
 [ "$failed" -eq 0 ] || fail "a cropped picture differs from crop,scale:flags=neighbor"
+
+echo "== bilinear through the same client"
+if ! env LIBVA_DRIVER_NAME=v4l2 $driver_env LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_VPP=1 V4L2_VA_TRACE=1 \
+        timeout 120 "$probe" "$render" "$work/src-128x72.nv12" 128 72 128 72 0 0 86 48 \
+        "$work/bilinear.nv12" --interp=bilinear >"$work/bilinear.log" 2>"$work/bilinear.trace"; then
+    sed -n '1,20p' "$work/bilinear.log" >&2 || true
+    fail "a bilinear picture failed"
+fi
+grep -q 'the caps offer bilinear interpolation' "$work/bilinear.log" \
+    || fail "the caps do not advertise bilinear interpolation"
+grep -q 'no advanced interpolation is advertised' "$work/bilinear.log" \
+    || fail "the caps advertise an interpolation method with no kernel"
+printf 'case=bilinear caps=advertised picture=ran size=%s\n' "$(sha256sum "$work/bilinear.nv12" | cut -d' ' -f1)"
+
+echo "== the advanced method is refused, not approximated"
+if env LIBVA_DRIVER_NAME=v4l2 $driver_env LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_VPP=1 V4L2_VA_TRACE=1 \
+        timeout 120 "$probe" "$render" "$work/src-128x72.nv12" 128 72 128 72 0 0 86 48 \
+        "$work/advanced.nv12" --interp=advanced --expect-refusal >"$work/advanced.log" \
+        2>"$work/advanced.trace"; then
+    :
+else
+    sed -n '1,20p' "$work/advanced.log" >&2 || true
+    fail "the driver did not refuse VA_FILTER_INTERPOLATION_ADVANCED"
+fi
 
 echo "== an odd region is refused, not rounded"
 if env LIBVA_DRIVER_NAME=v4l2 $driver_env LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_VPP=1 V4L2_VA_TRACE=1 \

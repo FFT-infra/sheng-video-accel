@@ -13,14 +13,13 @@
 namespace iris {
 namespace vpp {
 
-// One nearest-neighbour NV12 or P010 scale at any ratio, from an optional
-// crop of the source, with an optional clockwise rotation. Geometry is in
-// bytes and follows Layout (src/iris/slots.h): chroma_offset is the byte
-// offset of the UV plane, data_offset is the luma start. src_x/src_y_offset is
-// where the sampled rectangle begins inside the source surface;
-// src_width/src_height is that rectangle's size, and width/height is the
-// destination. All four are even (NV12 stores one chroma pair per 2x2 luma
-// block).
+// One NV12 or P010 scale at any ratio, from an optional crop of the source,
+// with an optional clockwise rotation. Geometry is in bytes and follows Layout
+// (src/iris/slots.h): chroma_offset is the byte offset of the UV plane,
+// data_offset is the luma start. src_x/src_y_offset is where the sampled
+// rectangle begins inside the source surface; src_width/src_height is that
+// rectangle's size, and width/height is the destination. All four are even
+// (NV12 stores one chroma pair per 2x2 luma block).
 struct ScaleJob {
     int src_fd = -1, dst_fd = -1;
     uint32_t src_size = 0, dst_size = 0;
@@ -41,6 +40,13 @@ struct ScaleJob {
     // Bytes per sample on both ends: 1 for NV12, 2 for P010. Source and
     // destination must agree; the kernels do not convert bit depth.
     uint32_t bytes = 1;
+    // VA_FILTER_INTERPOLATION_* as the kernel sees it: 0 is the point map
+    // (swscale's `flags=neighbor`), 1 blends the four samples around the
+    // destination sample's centre. The unspecified and nearest-neighbour
+    // methods are both 0 — the point map is this driver's default — and the
+    // "advanced" method has no kernel here, so the VA layer refuses it instead
+    // of silently running the bilinear one.
+    uint32_t interpolation = 0;
 };
 
 // One HDR10 P010 picture to SDR NV12: the source is BT.2020 primaries with the

@@ -16,6 +16,13 @@
 # 2 * x of the chroma row. A crop at the origin cannot tell that apart from a
 # pair at two bytes, which is why every crop case here starts away from it.
 #
+# The second pass runs the same matrix with the four-tap bilinear method
+# (--interp 1), compared within one code of a double-precision model of the
+# blend, plus the two invariants: a constant 10-bit picture stays that constant
+# at any ratio, and a 1:1 scale reproduces the point map byte for byte. The
+# clamp is the 10-bit one here, so a kernel that reused the 8-bit saturation
+# would fail on any highlight sample above 255.
+#
 # This is evidence for the VPP slice's kernel only. It advertises nothing.
 # Target prerequisites match nv12_scale_gate.sh.
 
@@ -73,6 +80,18 @@ cases="
 64x32:96x48:48x24+8+4:0:3
 "
 
+bilinear_cases="
+64x32:128x64:-:0:0
+64x32:96x48:-:0:0
+128x72:86x48:-:0:0
+128x72:96x40:96x40+16+16:0:0
+64x32:96x48:48x24+8+4:0:0
+64x32:32x64:-:1:0
+128x72:96x48:-:3:2
+64x32:64x64:-:0:1
+64x64:2x2:-:0:0
+"
+
 failed=0
 printf 'spv_sha256=%s\n' "$spv_hash"
 printf 'render_node=%s\n' "$render"
@@ -94,8 +113,37 @@ for origin in heap msm; do
     done
 done
 
+echo "== bilinear"
+for origin in heap msm; do
+    echo "== origin: $origin"
+    for c in $bilinear_cases; do
+        old_ifs=$IFS
+        IFS=:
+        set -- $c
+        IFS=$old_ifs
+        src=$1 dst=$2 crop=$3 rot=$4 mirror=${5:-0}
+        set -- "$here/p010_scale.spv" "$origin" "$render" "$src" "$dst"
+        [ "$crop" = - ] || set -- "$@" "$crop"
+        rc=0
+        "$work/probe" "$@" --rot "$rot" --mirror "$mirror" --interp 1 --p010 || rc=$?
+        printf 'case=%s %s->%s crop=%s rot=%s mirror=%s interp=bilinear exit=%s\n' "$origin" "$src" "$dst" \
+            "$crop" "$rot" "$mirror" "$rc"
+        [ "$rc" -eq 0 ] || failed=1
+    done
+done
+
+# 1023 is the largest 10-bit code; a constant picture of it proves both the
+# weights and the clamp in one case.
+for origin in heap msm; do
+    rc=0
+    "$work/probe" "$here/p010_scale.spv" "$origin" "$render" 64x32 200x100 --interp 1 --constant 1023 --p010 \
+        || rc=$?
+    printf 'case=%s 64x32->200x100 constant=1023 interp=bilinear exit=%s\n' "$origin" "$rc"
+    [ "$rc" -eq 0 ] || failed=1
+done
+
 if [ "$failed" -ne 0 ]; then
     echo "FAIL p010-scale cases are not all byte-exact" >&2
     exit 1
 fi
-echo "PASS p010-scale cases=$(echo $cases | wc -w) origins=2 pixels_exact spv=$spv_hash render=$render"
+echo "PASS p010-scale cases=$(echo $cases | wc -w) bilinear=$(echo $bilinear_cases | wc -w) origins=2 pixels_exact spv=$spv_hash render=$render"
