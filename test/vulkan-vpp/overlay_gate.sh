@@ -97,7 +97,10 @@ for entry in $cases; do
     w=${1%x*} h=${1#*x}
     ow=${2%x*} oh=${2#*x}
     rx=$3 ry=$4 rw=$5 rh=$6 alpha=$7
-    flags=${8:-}
+    # Everything after the alpha is a probe flag, and a flag may take a value,
+    # so it stays a word list rather than one field.
+    shift 7
+    flags="$*"
     count=$((count + 1))
     echo "== $tag ${w}x${h} overlay ${ow}x${oh} rect ${rw}x${rh}+$rx,$ry alpha=$alpha $flags"
     rc=0
