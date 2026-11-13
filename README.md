@@ -62,10 +62,20 @@ costs 16-19 % less client CPU per process (0.27/0.42/0.40 s against
 a copy is actually requested. The sibling's published table is SC8280XP and is
 not comparable with these SM8550 numbers.
 
+Across six 1080p codecs on the same node, H.264, HEVC 8-bit and VP9 decode are
+at parity (+1.1 to +1.3 %); AV1 decode is 9.8 % faster at 8 bits and 11.5 % at
+10 bits, with 35 % and 77 % less client CPU; HEVC 10-bit is 2.4 % behind while
+using 16 % less CPU. Decoding 1080p HEVC into H.264 runs at parity with 23 %
+less client CPU. Kodi playback of 1080p and 4K is at parity in wall time, with
+6 % less CPU at 4K.
+
 The VA video processor scales 1080p to 720p at 536 fps on 0.54 s of client CPU
 per 900 frames, against 287 fps and 8.4 s for
 `hwdownload,format=nv12,scale=1280:720` behind the same hardware decode: the
-scale runs on the GPU instead of a copy out to the CPU. It is opt-in
+scale runs on the GPU instead of a copy out to the CPU. Against the sibling's
+Vulkan backend, built from the same sources with its VPP option, throughput is
+a tie (540 against 536 fps) with 14 % less client CPU; the sibling refuses
+mirroring and YUV overlays, which this driver renders. VPP is opt-in
 (`V4L2_VA_VPP`).
 
 ## Requirements

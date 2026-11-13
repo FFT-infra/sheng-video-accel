@@ -8455,3 +8455,115 @@ What this does not prove: no gamepad or input-to-photon latency, no HEVC
 session (HEVC was probed but not streamed), no AV1 encode, one display output
 (DSI-1), and loopback only, so the 1 ms network latency says nothing about a
 real Wi-Fi link.
+
+## Codec sweep, Kodi, transcoding and the VPP head-to-head (2026-11-14)
+
+Same node and boot as the pinned-clock record above: `sheng`, boot
+`4b73926c-a774-4ae4-8968-d0a26b20a9c3`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, decoder `/dev/video0` and encoder
+`/dev/video1` by QUERYCAP name `iris_driver`. This driver
+`f74ea6ad0defee68`; the sibling is `f7dd97109f3a9965` for decode, encode,
+transcode and Kodi, and `d420cb64b2dab420` for the VPP comparison — the same
+sibling sources configured with `-Dvulkan_vpp=enabled`, because the artifact
+used elsewhere here had Vulkan VPP compiled out. glslang 16.2.0 was installed
+on the tablet only to build that comparison artifact. FFmpeg 8.1.3, Kodi
+22.0-RC1, Moonlight 6.2.0. CPU policies 0/3/7 in `performance` at
+2016000/2803200/2956800 Hz, GPU `3d00000.gpu` in `userspace` at 680000000 Hz,
+five interleaved rounds per cell, thermal zones 27-52 °C, battery 82-83 %
+discharging, no firmware reset.
+
+### Decode, six codecs at 1080p
+
+300-frame `testsrc2` clips, GOP 60, about 10 Mbps: H.264 and HEVC from x264 /
+x265 ultrafast with `bframes=0`, HEVC Main10 as `yuv420p10le`, VP9 realtime
+with `lag-in-frames=0`, AV1 from SVT-AV1 (preset 12 maps to 10) at 8 and 10
+bits. Decode is `-hwaccel vaapi -hwaccel_output_format vaapi -f null -`, so
+there is no download and no rendering. utime is the client process's user
+time for the 300 frames.
+
+| codec | this driver | sibling | change | this driver utime | sibling utime |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| H.264 | 738.2 fps | 729.6 fps | +1.2 % | 0.073 s | 0.089 s |
+| HEVC Main | 554.3 fps | 547.0 fps | +1.3 % | 0.115 s | 0.150 s |
+| HEVC Main10 | 490.4 fps | 502.2 fps | -2.4 % | 0.118 s | 0.140 s |
+| VP9 Profile 0 | 477.1 fps | 471.8 fps | +1.1 % | 0.053 s | 0.052 s |
+| AV1 Main 8-bit | 468.9 fps | 427.2 fps | +9.8 % | 0.028 s | 0.044 s |
+| AV1 Main 10-bit | 411.0 fps | 368.5 fps | +11.5 % | 0.029 s | 0.125 s |
+
+HEVC Main10 is the one cell behind, and ten further interleaved rounds
+confirmed it: this driver 0.596-0.618 s against 0.584-0.602 s over 300
+frames, slower in 10 of 10 rounds. `strace -c -f` over 60 frames shows the
+successful work is identical (140 dequeue calls here, 141 there) but this
+driver issues 219 failing `VIDIOC_DQBUF` calls against 143, and 111
+`VIDIOC_DQEVENT` against 74; the extra attempts cost 0.046 s of kernel time
+against 0.041 s. Its client CPU is still 16 % lower on that cell. The sync
+path carries the Import and decode-order contracts, so it was left alone
+rather than reshaped for 2.4 % in one profile.
+
+AV1 is the opposite case: the 8-bit stream decodes 9.8 % faster and the
+10-bit stream 11.5 % faster, and the 10-bit client CPU is 4.4x lower than the
+sibling's. On this client our AV1 path publishes `direct` (13 direct, 14
+drop, 6 invisible in a 30-frame trace) and its CPU per frame stays at the
+8-bit cost, while the sibling's doubles at 10 bits.
+
+### Transcode
+
+1080p HEVC Main decoded and encoded to H.264 5 Mbps, GOP 60,
+`-async_depth 4`, null muxer, five interleaved rounds: this driver 436.9 fps
+on 0.121 s utime, sibling 435.0 fps on 0.157 s. Throughput is a tie; the
+client CPU is 23 % lower.
+
+### Kodi playback
+
+`kodi --test` on each clip, three alternating rounds, child rusage for CPU.
+Wall time is launch to exit, so it includes Kodi's own startup (about 2.5 s
+here) rather than video duration alone.
+
+| clip | this driver wall | sibling wall | this driver CPU | sibling CPU |
+| --- | ---: | ---: | ---: | ---: |
+| H.264 1080p, 10 s | 12.52 s | 12.88 s | 2.019 s | 1.982 s |
+| HEVC 1080p, 10 s | 12.51 s | 12.53 s | 1.963 s | 1.977 s |
+| HEVC 4K, 16 s | 18.92 s | 18.82 s | 2.668 s | 2.848 s |
+
+Playback is at parity in wall time. CPU is within 2 % at 1080p, where Kodi's
+rendering and startup dominate, and 6 % lower at 4K, where the decoder's
+share is visible. A single 13.6 s sibling launch appears in the mean; that is
+the spread of Kodi's own startup, not decode time.
+
+### Streaming latency
+
+Sunshine H.264 at 1920x1080 and 60 fps, two 22 s sessions per
+driver: incoming 60.20-60.34 fps here and 60.15-60.41 fps there, rendered
+59.68-59.78 against 59.63-59.71, host processing latency 6.9 and 8.1 ms
+against 8.0 and 8.1 ms, no dropped frames in any session. This driver's
+sessions ran with its trace enabled while the sibling's did not, so the
+6.9 ms is the conservative side of that comparison.
+
+### VPP against the sibling's Vulkan backend
+
+Both drivers scale 1080p to 720p through their own Vulkan kernels on the same
+900-frame clip with the same command, five interleaved rounds: this driver
+540.0 fps (538.3-542.5) on 0.541 s utime, the sibling 535.6 fps (521.1-545.1)
+on 0.619 s. Throughput is a tie inside the run-to-run spread; the client CPU
+is lower in all five rounds (median 0.526 against 0.612 s).
+
+The same two builds differ on operations the sibling's README marks
+unsupported, and each was checked directly on the target:
+
+| operation | this driver | sibling `d420cb64` |
+| --- | --- | --- |
+| `transpose_vaapi=dir=hflip`, 30 frames | renders 30/30 | refused, -22 |
+| YUV overlay (`overlay_vaapi`, NV12 upload), 30 frames | renders 30/30 | refused, -22 |
+| two chained YUV overlays, 30 frames | renders 30/30 | refused, -22 |
+
+The sibling's support text names "no mirroring" and "YUV overlays ... are
+unsupported", so those refusals are its design, not a build accident. Its
+VPP does advertise crop, scale, rotation, bit-depth conversion, RGB overlays
+and HDR tone mapping, which this driver also implements, with three
+interpolation methods and stacked RGB overlays in addition.
+
+What this does not prove: one synthetic clip per codec, so bitrate and scene
+complexity are sampled once; the AV1 sweep is 1080p only; the sibling VPP
+artifact is a local build with its documented option, not its distribution
+package; Kodi CPU includes startup and rendering; streaming is loopback with
+no power or long-window claim; and no client was driven through its GUI.
