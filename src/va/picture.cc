@@ -332,8 +332,10 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
                     && (source->fourcc == VA_FOURCC_NV12 || source->fourcc == VA_FOURCC_P010),
                 "VPP input and output must share one NV12 or P010 format",
                 VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
-        iris::require(source->target.frame || source->stable, "VPP source holds no pixels",
-            VA_STATUS_ERROR_OPERATION_FAILED);
+        // A pending decode has neither a frame nor a stable buffer yet; its
+        // pixels arrive at the wait below.
+        iris::require(source->target.pending || source->target.frame || source->stable,
+            "VPP source holds no pixels", VA_STATUS_ERROR_OPERATION_FAILED);
 
         // A surface region is the crop: the kernel samples inside that
         // rectangle and scales it to the whole output. Its origin and size
@@ -390,7 +392,8 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
                 "the overlay is a third surface", VA_STATUS_ERROR_INVALID_PARAMETER);
             iris::require(overlay_surface->fourcc == target->fourcc,
                 "the overlay shares the output's format", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
-            iris::require(overlay_surface->target.frame || overlay_surface->stable,
+            iris::require(overlay_surface->target.pending || overlay_surface->target.frame
+                    || overlay_surface->stable,
                 "the overlay surface holds no pixels", VA_STATUS_ERROR_OPERATION_FAILED);
             rect = blend->output_region;
             iris::require(rect.x >= 0 && rect.y >= 0 && rect.width > 0 && rect.height > 0
