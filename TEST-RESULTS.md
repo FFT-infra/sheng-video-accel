@@ -7511,3 +7511,76 @@ failure was a client contract the probe had modelled from the code:
    source's pending decode outside the driver mutex (`661dbb5`), and a source
    with neither a frame nor a stable buffer passes the pixel check as pending
    (`b971f26`).
+
+## The tone mapper runs before the scale, the mirror and the blend (2026-11-13)
+
+Until this build a tone-mapped picture was the tone mapper alone: a crop, a
+scale, a quarter turn, a mirror or a second buffer was refused with
+`VA_STATUS_ERROR_UNSUPPORTED_FILTER`. The conversion does not move pixels, so
+those are separate passes rather than a conflict. The picture now runs the
+tone mapper into a scratch NV12 surface at the source's own size and hands
+that surface to the scale pass or to the blend pass, in the order the VA
+pipeline buffer documents (rotation, mirroring, scaling).
+
+Three smaller corrections ride along in the same processor: the pipeline caps
+answer a query that names the tone mapper with P010 in and NV12 out
+(BT.2020/BT.709) instead of the unfiltered format list; the geometry floor
+drops from 16x16 to 2x2, because the kernel writes one 32-bit word per
+invocation inside a 128-byte-aligned row and never needed the decoder's
+minimum; and a picture whose output aliases its input through two surfaces
+over one DMA-BUF is refused by `st_dev`/`st_ino` rather than by object
+identity.
+
+**Build-tree artifact**, not the installed package. Source commit `681b21d`,
+tracked source `02aec978…`, driver `cc0d022b…`, `source_dirty=0` for every
+run. Boot `4b73926c-a774-4ae4-8968-d0a26b20a9c3`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, module `b90bd823…`, decoder node resolved by
+`iris_driver` QUERYCAP at `/dev/video0`, encoder at `/dev/video1`. The runs
+pin the pass chain and the kernels; decode and encode were not re-qualified
+against this artifact, and the installed package on the target is still
+`fe3a1822`.
+
+| Gate | Run | Cases | Result |
+| --- | --- | ---: | --- |
+| `tonemap_gate.sh` | `run-20261113T101907Z` | 11 + 3 refusals | every frame within 1 code of the documented pipeline, the 2x2 thumbnail exact |
+| `overlay_gate.sh` | `run-20261113T101943Z` | 7 + 2 endpoints + 8 refusals | within 1 code, the tone-mapped composite included |
+| `nv12_scale_gate.sh` | `run-20261113T102018Z` | 27 x 2 origins | byte-exact, `spv=5425102c…` |
+| `p010_scale_gate.sh` | `run-20261113T102054Z` | 12 x 2 origins | byte-exact, `spv=957a0e4f…` |
+| `crop_vaapi_gate.sh` | `run-20261113T102129Z` | 3 | hardware and reference hashes identical |
+| `scale_vaapi_gate.sh` | `run-20261113T102205Z` | 8 ratios, 3 P010 | exact |
+| `transpose_vaapi_gate.sh` | `run-20261113T102240Z` | 19, 7 directions, 2 formats | exact |
+
+The tone-map cases are `sdrwhite`, `mastering4000`, `ragged` (318x178),
+`rotate90`, `rotate270`, `halfturn`, `hflip`, `vflip`, `bothflips`,
+`crop-scale` (crop 64x48 of 128x72 into 32x24) and `thumbnail` (64x64 into
+2x2). `halfturn` and `bothflips` produce the same hash, which is the
+geometry: a half turn is a flip on both axes. The refusals are an NV12
+source, a filter without its parameters, and an odd crop.
+
+### Mirroring, from the same artifact
+
+`transpose_vaapi` asks for the mirroring bits through
+`pipeline_caps.mirror_flags` and refuses any direction the driver does not
+advertise, so its 19 cases are the mirroring gate as well: `hflip`, `vflip`,
+`clock_flip` and `cclock_flip` match FFmpeg's software `hflip`/`vflip`
+chains byte for byte, on NV12 and P010. The kernel gates carry the same
+mapping over imported DMA-BUFs (`nv12` cases with `mirror=1..3` on both
+origins). The first build-tree run of the transpose gate was
+`run-20261113T095809Z` at `d7398bf`; this one supersedes it.
+
+### HEVC encode attributes
+
+FFmpeg's `vaapi_encode_h265.c` asks for `VAConfigAttribEncHEVCFeatures` and
+`VAConfigAttribEncHEVCBlockSizes`; the driver answered both with
+`VA_ATTRIB_NOT_SUPPORTED` and FFmpeg logged "Driver does not advertise
+encoder features, using guessed defaults" on every HEVC encode. The firmware
+writes the parameter sets, so the honest answer comes from its own bitstream:
+`ffmpeg -bsf:v trace_headers` over a 1080p `hevc_vaapi` stream reports
+`log2_min_luma_coding_block_size_minus3=0`, `log2_diff_max_min_luma_coding_
+block_size=2`, `log2_min_luma_transform_block_size_minus2=0`,
+`log2_diff_max_min_luma_transform_block_size=3`, both transform hierarchy
+depths 0, `amp_enabled_flag=0`, `sample_adaptive_offset_enabled_flag=1`,
+`sps_temporal_mvp_enabled_flag=1`, `cu_qp_delta_enabled_flag=1` and
+`deblocking_filter_override_enabled_flag=1`. The driver now returns exactly
+those as REQUIRED/SUPPORTED with a 32x32 CTB, and the same encode runs
+without the two warnings.
