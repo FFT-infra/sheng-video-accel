@@ -12,9 +12,10 @@
 // VAProcPipelineParameterBuffer whose surface_region is the crop, ends the
 // picture and downloads the result with vaGetImage. FFmpeg 8.1 has no
 // crop_vaapi filter, so this is the only client that can ask for a region.
-// `--interp` names the interpolation method in filter_flags: `bilinear` must
-// run, `advanced` must be refused, and the caps must advertise exactly the two
-// methods that have a kernel.
+// `--interp` names the interpolation method in filter_flags. All three have a
+// kernel and each must run as itself: `nearest` is the point map, `bilinear`
+// the four-tap blend, `advanced` the driver's own pick. The caps name the best
+// of the three.
 //
 //   iris-va-vpp-probe tonemap <render-node> <W> <H> <peak-nits> <out.raw>
 //                     [--source-nv12] [--no-filter] [--rotate]
@@ -1455,10 +1456,8 @@ int main(int argc, char** argv)
         // filter_flags carries one interpolation value, not a set of bits:
         // nearest | bilinear is the advanced value, so "both bits set" would
         // mean the opposite of what it looks like.
-        check((caps.filter_flags & VA_FILTER_INTERPOLATION_MASK) == VA_FILTER_INTERPOLATION_BILINEAR,
-            "the caps name bilinear interpolation as the method the driver runs");
-        check((caps.filter_flags & VA_FILTER_INTERPOLATION_MASK) != VA_FILTER_INTERPOLATION_ADVANCED,
-            "no advanced interpolation is advertised");
+        check((caps.filter_flags & VA_FILTER_INTERPOLATION_MASK) == VA_FILTER_INTERPOLATION_ADVANCED,
+            "the caps name advanced interpolation, the best method the driver runs");
     }
 
     VAProcPipelineParameterBuffer pipeline = {};

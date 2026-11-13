@@ -496,7 +496,9 @@ bool scale_nv12_or_p010(const ScaleJob& job)
         return false;
     // Two methods: the point map and the four-tap blend. The VA layer maps
     // the client's filter_flags onto these two and refuses the third.
-    if (job.interpolation > 1u)
+    // 0 point map, 1 bilinear, 4 the driver's own pick (area when shrinking,
+    // cubic when enlarging). 2 and 3 are internal to the kernel's pick.
+    if (job.interpolation > 1u && job.interpolation != 4u)
         return false;
 
     // One kernel per sample width. Both read the same push-constant block;

@@ -199,14 +199,16 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
     iris::require((p.pipeline_flags & ~VA_PROC_PIPELINE_FAST) == 0, "unsupported VPP pipeline flag",
         VA_STATUS_ERROR_UNSUPPORTED_FILTER);
     // Scaling mode is only a hint, so every VA_FILTER_SCALING_* value is
-    // accepted. Two of the three interpolation methods have a kernel: the
+    // accepted. All three interpolation methods have a kernel now: the
     // unspecified one is this driver's default (the point map), the
-    // nearest-neighbour one is the same point map under its own name, and
-    // bilinear is the four-tap blend. "Advanced" has no kernel, so it is
-    // refused rather than approximated by the bilinear one.
+    // nearest-neighbour one is the same point map under its own name,
+    // bilinear is the four-tap blend, and "advanced" is the driver's own
+    // pick — the area average when an axis shrinks, where a two-tap filter
+    // aliases, and the cubic when it grows.
     const unsigned interpolation = p.filter_flags & VA_FILTER_INTERPOLATION_MASK;
     iris::require(interpolation == 0 || interpolation == VA_FILTER_INTERPOLATION_NEAREST_NEIGHBOR
-            || interpolation == VA_FILTER_INTERPOLATION_BILINEAR,
+            || interpolation == VA_FILTER_INTERPOLATION_BILINEAR
+            || interpolation == VA_FILTER_INTERPOLATION_ADVANCED,
         "VPP interpolation method is not supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
 
     // No colour conversion: input and output must name the same standard,
@@ -227,7 +229,9 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
     job.source = p.surface;
     job.rotation = p.rotation_state;
     job.mirror = p.mirror_state;
-    job.interpolation = interpolation == VA_FILTER_INTERPOLATION_BILINEAR ? 1u : 0u;
+    job.interpolation = interpolation == VA_FILTER_INTERPOLATION_BILINEAR      ? 1u
+        : interpolation == VA_FILTER_INTERPOLATION_ADVANCED                    ? 4u
+                                                                              : 0u;
     job.filters = p.num_filters;
     job.input_standard = input_standard;
     job.output_standard = output_standard;

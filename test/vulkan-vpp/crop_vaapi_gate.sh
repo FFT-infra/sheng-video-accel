@@ -117,22 +117,26 @@ if ! env LIBVA_DRIVER_NAME=v4l2 $driver_env LIBVA_V4L2_VIDEO_PATH="$device" V4L2
     sed -n '1,20p' "$work/bilinear.log" >&2 || true
     fail "a bilinear picture failed"
 fi
-grep -q 'the caps name bilinear interpolation' "$work/bilinear.log" \
-    || fail "the caps do not name bilinear interpolation"
-grep -q 'no advanced interpolation is advertised' "$work/bilinear.log" \
-    || fail "the caps name the advanced method, which has no kernel"
+grep -q 'the caps name advanced interpolation' "$work/bilinear.log" \
+    || fail "the caps do not name advanced interpolation"
 printf 'case=bilinear caps=advertised picture=ran size=%s\n' "$(sha256sum "$work/bilinear.nv12" | cut -d' ' -f1)"
 
-echo "== the advanced method is refused, not approximated"
+# Advanced is the driver's own pick: the area average when an axis shrinks and
+# the cubic when it grows. It has to run, and it has to differ from the point
+# map on a downscale, or "advanced" is a name for nothing.
+echo "== the advanced method runs its own kernel"
 if env LIBVA_DRIVER_NAME=v4l2 $driver_env LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_VPP=1 V4L2_VA_TRACE=1 \
         timeout 120 "$probe" "$render" "$work/src-128x72.nv12" 128 72 128 72 0 0 86 48 \
-        "$work/advanced.nv12" --interp=advanced --expect-refusal >"$work/advanced.log" \
-        2>"$work/advanced.trace"; then
+        "$work/advanced.nv12" --interp=advanced >"$work/advanced.log" 2>"$work/advanced.trace"; then
     :
 else
     sed -n '1,20p' "$work/advanced.log" >&2 || true
-    fail "the driver did not refuse VA_FILTER_INTERPOLATION_ADVANCED"
+    fail "the driver did not run VA_FILTER_INTERPOLATION_ADVANCED"
 fi
+if cmp -s "$work/advanced.nv12" "$work/bilinear.nv12"; then
+    fail "advanced and bilinear produced the same frame on a downscale"
+fi
+printf 'case=advanced size=%s\n' "$(sha256sum "$work/advanced.nv12" | cut -d' ' -f1)"
 
 echo "== an odd region is refused, not rounded"
 if env LIBVA_DRIVER_NAME=v4l2 $driver_env LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_VPP=1 V4L2_VA_TRACE=1 \

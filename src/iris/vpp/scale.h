@@ -40,12 +40,13 @@ struct ScaleJob {
     // Bytes per sample on both ends: 1 for NV12, 2 for P010. Source and
     // destination must agree; the kernels do not convert bit depth.
     uint32_t bytes = 1;
-    // VA_FILTER_INTERPOLATION_* as the kernel sees it: 0 is the point map
+    // VA_FILTER_INTERPOLATION_* as the kernel sees it. 0 is the point map
     // (swscale's `flags=neighbor`), 1 blends the four samples around the
-    // destination sample's centre. The unspecified and nearest-neighbour
-    // methods are both 0 — the point map is this driver's default — and the
-    // "advanced" method has no kernel here, so the VA layer refuses it instead
-    // of silently running the bilinear one.
+    // destination sample's centre, 4 is VA's "advanced": the driver picks per
+    // axis, which is the area average when the axis shrinks and the cubic when
+    // it grows. The unspecified and nearest-neighbour methods are both 0 —
+    // the point map is this driver's default. 2 and 3 are the advanced pick's
+    // own values and are not reachable from a client's filter_flags.
     uint32_t interpolation = 0;
 };
 

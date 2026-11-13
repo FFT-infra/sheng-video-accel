@@ -92,6 +92,33 @@ bilinear_cases="
 64x64:2x2:-:0:0
 "
 
+# The area average (shrinking), the cubic (enlarging) and the driver's own
+# per-axis pick. The 10-bit codes go through the same taps; what differs is
+# that the blend runs on the code rather than on the padded word, which the
+# probe's model checks byte for byte.
+area_cases="
+64x32:32x16:-:0:0
+64x32:42x22:-:0:0
+128x72:86x48:-:0:0
+128x72:96x48:-:3:2
+64x32:96x48:48x24+8+4:0:0
+64x64:2x2:-:0:0
+"
+cubic_cases="
+64x32:128x64:-:0:0
+64x32:96x48:-:0:0
+2x2:64x64:-:0:0
+64x32:64x64:-:0:1
+128x72:96x48:-:3:2
+"
+advanced_cases="
+64x32:32x16:-:0:0
+64x32:128x64:-:0:0
+128x72:86x48:-:0:0
+128x72:96x48:-:3:2
+64x32:96x48:48x24+8+4:0:0
+"
+
 failed=0
 printf 'spv_sha256=%s\n' "$spv_hash"
 printf 'render_node=%s\n' "$render"
@@ -142,8 +169,44 @@ for origin in heap msm; do
     [ "$rc" -eq 0 ] || failed=1
 done
 
+for method in area cubic advanced; do
+    echo "== $method"
+    eval "list=\$${method}_cases"
+    for origin in heap msm; do
+        echo "== origin: $origin"
+        for c in $list; do
+            old_ifs=$IFS
+            IFS=:
+            set -- $c
+            IFS=$old_ifs
+            src=$1 dst=$2 crop=$3 rot=$4 mirror=${5:-0}
+            set -- "$here/p010_scale.spv" "$origin" "$render" "$src" "$dst"
+            [ "$crop" = - ] || set -- "$@" "$crop"
+            rc=0
+            case $method in
+                area) "$work/probe" "$@" --rot "$rot" --mirror "$mirror" --interp 2 --p010 || rc=$? ;;
+                cubic) "$work/probe" "$@" --rot "$rot" --mirror "$mirror" --interp 3 --p010 || rc=$? ;;
+                advanced) "$work/probe" "$@" --rot "$rot" --mirror "$mirror" --interp 4 --p010 || rc=$? ;;
+            esac
+            printf 'case=%s %s->%s crop=%s rot=%s mirror=%s interp=%s exit=%s\n' "$origin" "$src" "$dst" \
+                "$crop" "$rot" "$mirror" "$method" "$rc"
+            [ "$rc" -eq 0 ] || failed=1
+        done
+    done
+done
+
+for origin in heap msm; do
+    for interp in 2 3 4; do
+        rc=0
+        "$work/probe" "$here/p010_scale.spv" "$origin" "$render" 64x32 200x100 --interp "$interp" \
+            --constant 1023 --p010 || rc=$?
+        printf 'case=%s 64x32->200x100 constant=1023 interp=%s exit=%s\n' "$origin" "$interp" "$rc"
+        [ "$rc" -eq 0 ] || failed=1
+    done
+done
+
 if [ "$failed" -ne 0 ]; then
     echo "FAIL p010-scale cases are not all byte-exact" >&2
     exit 1
 fi
-echo "PASS p010-scale cases=$(echo $cases | wc -w) bilinear=$(echo $bilinear_cases | wc -w) origins=2 pixels_exact spv=$spv_hash render=$render"
+echo "PASS p010-scale cases=$(echo $cases | wc -w) bilinear=$(echo $bilinear_cases | wc -w) area=$(echo $area_cases | wc -w) cubic=$(echo $cubic_cases | wc -w) advanced=$(echo $advanced_cases | wc -w) origins=2 pixels_exact spv=$spv_hash render=$render"

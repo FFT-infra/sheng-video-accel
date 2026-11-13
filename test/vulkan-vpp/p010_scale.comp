@@ -135,39 +135,125 @@ uint pad16(uint code)
     return code << 6u;
 }
 
-uint luma_px(uint dx, uint row, uvec2 r, uint hx, uint hy)
+// The half-open source interval [lo, hi) that destination sample `d` of `dst`
+// covers on a `src`-sized axis, reflected when the axis is mirrored.
+void span_axis(uint d, uint dst, uint src, bool on, out uint lo, out uint hi)
 {
-    if (p.interp == 0u) {
-        uvec2 rp = mirror_at(uvec2(pick(dx, hx), pick(row, hy)), r);
-        return luma_at(rp.x, rp.y);
+    uint a = (d * src) / dst;
+    uint b = ((d + 1u) * src + dst - 1u) / dst;
+    if (b <= a)
+        b = a + 1u;
+    b = min(b, src);
+    a = min(a, b - 1u);
+    if (on) {
+        lo = src - b;
+        hi = src - a;
+    } else {
+        lo = a;
+        hi = b;
     }
-    float x = mirror_pos(axis_pos(dx, p.dst_w, r.x), r.x, (p.mirror & 1u) != 0u);
-    float y = mirror_pos(axis_pos(row, p.dst_h, r.y), r.y, (p.mirror & 2u) != 0u);
-    uint x0 = uint(floor(x)), y0 = uint(floor(y));
-    uint x1 = min(x0 + 1u, r.x - 1u), y1 = min(y0 + 1u, r.y - 1u);
-    float fx = x - float(x0), fy = y - float(y0);
-    float v = (1.0 - fx) * (1.0 - fy) * float(code16(luma_at(x0, y0)))
-            + fx * (1.0 - fy) * float(code16(luma_at(x1, y0)))
-            + (1.0 - fx) * fy * float(code16(luma_at(x0, y1)))
-            + fx * fy * float(code16(luma_at(x1, y1)));
+}
+
+// Catmull-Rom weights for the four taps around one fractional position; they
+// sum to one, so a constant picture stays constant.
+vec4 cubic_weights(float f)
+{
+    float f2 = f * f, f3 = f2 * f;
+    return vec4(-0.5 * f3 + f2 - 0.5 * f, 1.5 * f3 - 2.5 * f2 + 1.0,
+        -1.5 * f3 + 2.0 * f2 + 0.5 * f, 0.5 * f3 - 0.5 * f2);
+}
+
+// 0 the point map, 1 bilinear, 2 the area average, 3 the cubic; 4 asks the
+// driver to choose per axis, which is what VA_FILTER_INTERPOLATION_ADVANCED
+// means here: area when the axis shrinks, cubic when it grows.
+uint method(uint src, uint dst)
+{
+    if (p.interp != 4u)
+        return p.interp;
+    if (src > dst)
+        return 2u;
+    if (src < dst)
+        return 3u;
+    return 1u;
+}
+
+// Up to four (index, weight) taps for one axis. Every method is expressed as
+// taps, so the two-dimensional result is one outer product and no method has
+// a path of its own.
+int axis_taps(uint d, uint dst, uint src, bool mirrored, uint m, out int idx[4], out float wgt[4])
+{
+    if (m == 0u) {
+        uint inc = ((src << 16) + (dst >> 1)) / dst;
+        uint at = pick(d, inc);
+        idx[0] = int(mirrored ? src - 1u - at : at);
+        wgt[0] = 1.0;
+        return 1;
+    }
+    if (m == 2u) {
+        uint lo, hi;
+        span_axis(d, dst, src, mirrored, lo, hi);
+        uint n = hi - lo;
+        if (n <= 4u) {
+            for (int i = 0; i < 4; ++i) {
+                idx[i] = min(int(lo) + i, int(hi) - 1);
+                wgt[i] = 1.0 / float(n);
+            }
+            return int(n);
+        }
+        for (int i = 0; i < 4; ++i) {
+            idx[i] = int(lo) + int((uint(i) * (n - 1u)) / 3u);
+            wgt[i] = 0.25;
+        }
+        return 4;
+    }
+    float v = axis_pos(d, dst, src);
+    v = mirror_pos(v, src, mirrored);
+    uint i0 = uint(floor(v));
+    float f = v - float(i0);
+    if (m == 1u) {
+        idx[0] = int(i0);
+        idx[1] = int(min(i0 + 1u, src - 1u));
+        wgt[0] = 1.0 - f;
+        wgt[1] = f;
+        return 2;
+    }
+    vec4 w = cubic_weights(f);
+    for (int i = 0; i < 4; ++i) {
+        idx[i] = clamp(int(i0) - 1 + i, 0, int(src) - 1);
+        wgt[i] = w[i];
+    }
+    return 4;
+}
+
+uint luma_px(uint dx, uint row, uvec2 r, uint mx, uint my)
+{
+    int xi[4], yi[4];
+    float xw[4], yw[4];
+    int nx = axis_taps(dx, p.dst_w, r.x, (p.mirror & 1u) != 0u, mx, xi, xw);
+    int ny = axis_taps(row, p.dst_h, r.y, (p.mirror & 2u) != 0u, my, yi, yw);
+    float v = 0.0;
+    for (int j = 0; j < ny; ++j) {
+        float rowsum = 0.0;
+        for (int i = 0; i < nx; ++i)
+            rowsum += xw[i] * float(code16(luma_at(uint(xi[i]), uint(yi[j]))));
+        v += yw[j] * rowsum;
+    }
     return pad16(uint(clamp(v + 0.5, 0.0, 1023.0)));
 }
 
-uint chroma_px(uint cx, uint cy, uvec2 r, uint hx, uint hy, uint pairs, uint dh, uint c)
+uint chroma_px(uint cx, uint cy, uvec2 r, uint mx, uint my, uint pairs, uint dh, uint c)
 {
-    if (p.interp == 0u) {
-        uvec2 rp = mirror_at(uvec2(pick(cx, hx), pick(cy, hy)), r);
-        return chroma_at(rp.x, rp.y, c);
+    int xi[4], yi[4];
+    float xw[4], yw[4];
+    int nx = axis_taps(cx, pairs, r.x, (p.mirror & 1u) != 0u, mx, xi, xw);
+    int ny = axis_taps(cy, dh, r.y, (p.mirror & 2u) != 0u, my, yi, yw);
+    float v = 0.0;
+    for (int j = 0; j < ny; ++j) {
+        float rowsum = 0.0;
+        for (int i = 0; i < nx; ++i)
+            rowsum += xw[i] * float(code16(chroma_at(uint(xi[i]), uint(yi[j]), c)));
+        v += yw[j] * rowsum;
     }
-    float x = mirror_pos(axis_pos(cx, pairs, r.x), r.x, (p.mirror & 1u) != 0u);
-    float y = mirror_pos(axis_pos(cy, dh, r.y), r.y, (p.mirror & 2u) != 0u);
-    uint x0 = uint(floor(x)), y0 = uint(floor(y));
-    uint x1 = min(x0 + 1u, r.x - 1u), y1 = min(y0 + 1u, r.y - 1u);
-    float fx = x - float(x0), fy = y - float(y0);
-    float v = (1.0 - fx) * (1.0 - fy) * float(code16(chroma_at(x0, y0, c)))
-            + fx * (1.0 - fy) * float(code16(chroma_at(x1, y0, c)))
-            + (1.0 - fx) * fy * float(code16(chroma_at(x0, y1, c)))
-            + fx * fy * float(code16(chroma_at(x1, y1, c)));
     return pad16(uint(clamp(v + 0.5, 0.0, 1023.0)));
 }
 
@@ -183,12 +269,11 @@ void main()
         if (word >= ((p.dst_w + 1u) >> 1))
             return;
         uvec2 r = rotated(p.src_w, p.src_h);
-        uint hx = step(r.x, p.dst_w);
-        uint hy = step(r.y, p.dst_h);
+        uint mx = method(r.x, p.dst_w), my = method(r.y, p.dst_h);
         uint packed = 0u;
         for (uint k = 0u; k < 2u; ++k) {
             uint dx = word * 2u + k;
-            packed |= luma_px(min(dx, p.dst_w - 1u), row, r, hx, hy) << (k * 16u);
+            packed |= luma_px(min(dx, p.dst_w - 1u), row, r, mx, my) << (k * 16u);
         }
         d[(p.dst_y + row * p.dst_stride + word * 4u) >> 2] = packed;
     } else {
@@ -202,10 +287,9 @@ void main()
         uint cw = p.src_w >> 1;
         uint ch = p.src_h >> 1;
         uvec2 r = rotated(cw, ch);
-        uint hx = step(r.x, pairs);
-        uint hy = step(r.y, p.dst_h >> 1);
+        uint mx = method(r.x, pairs), my = method(r.y, p.dst_h >> 1);
         d[(p.dst_uv + cy * p.dst_stride + word * 4u) >> 2]
-            = chroma_px(min(word, pairs - 1u), cy, r, hx, hy, pairs, p.dst_h >> 1, 0u)
-            | (chroma_px(min(word, pairs - 1u), cy, r, hx, hy, pairs, p.dst_h >> 1, 1u) << 16u);
+            = chroma_px(min(word, pairs - 1u), cy, r, mx, my, pairs, p.dst_h >> 1, 0u)
+            | (chroma_px(min(word, pairs - 1u), cy, r, mx, my, pairs, p.dst_h >> 1, 1u) << 16u);
     }
 }

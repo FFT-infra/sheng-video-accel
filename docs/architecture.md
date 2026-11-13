@@ -394,13 +394,17 @@ mirroring the client names — VA orders rotation, then mirroring, then the
 scale — sampling where swscale samples. The interpolation method comes from
 `filter_flags`: the unspecified method and the nearest-neighbour flag are both
 the point map, `VA_FILTER_INTERPOLATION_BILINEAR` blends the four samples
-around the destination sample's centre, and the "advanced" method fails the
-picture because no kernel implements it. The pipeline caps name bilinear: the
-field carries one method rather than a bit set, and nearest | bilinear is the
-advanced value, so advertising "both" would advertise the method with no
-kernel. On a P010 surface the blend runs on the ten-bit
-code and not on the padded word, so a mixed sample keeps the low six bits
-clear. A picture that names the HDR10 tone mapper instead runs
+around the destination sample's centre, and `VA_FILTER_INTERPOLATION_ADVANCED`
+is the driver's own per-axis pick — the area average when an axis shrinks,
+which is the only one of them that does not alias, and a four-tap Catmull-Rom
+cubic when it grows. The pipeline caps name advanced: the field carries one
+method rather than a bit set, and nearest | bilinear is the advanced value, so
+the word cannot describe a set and the highest method the driver runs is what
+a client that wants the best one asks for. Every method is written as up to
+four (index, weight) taps per axis and evaluated as one outer product, so the
+two axes are chosen independently and the separable order does not change the
+result. On a P010 surface the blend runs on the ten-bit code and not on the
+padded word, so a mixed sample keeps the low six bits clear. A picture that names the HDR10 tone mapper instead runs
 `iris::vpp::tonemap_hdr10_to_sdr` over the two DMA-BUFs and converts P010
 BT.2020/PQ to NV12 BT.709 at the surface's own size; a picture
 whose second pipeline buffer names a `VABlendState` runs

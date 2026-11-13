@@ -132,6 +132,33 @@ bilinear_cases="
 62x34:62x34:-:0:0
 "
 
+# The area average and the cubic, plus the driver's own per-axis pick. Area is
+# exact when shrinking, so its cases are downscales; the cubic is for
+# enlargement. `--interp 4` is what VA_FILTER_INTERPOLATION_ADVANCED maps to
+# and must match whichever of the two the ratio selects.
+area_cases="
+64x32:32x16:-:0:0
+64x32:42x22:-:0:0
+128x72:86x48:-:0:0
+128x72:56x96:-:3:2
+64x32:96x48:48x24+8+4:0:0
+64x64:2x2:-:0:0
+"
+cubic_cases="
+64x32:128x64:-:0:0
+64x32:96x48:-:0:0
+2x2:64x64:-:0:0
+64x32:128x64:-:0:3
+128x72:56x96:-:3:2
+"
+advanced_cases="
+64x32:32x16:-:0:0
+64x32:128x64:-:0:0
+128x72:86x48:-:0:0
+128x72:56x96:-:3:2
+64x32:96x48:48x24+8+4:0:0
+"
+
 failed=0
 printf 'spv_sha256=%s\n' "$spv_hash"
 printf 'render_node=%s\n' "$render"
@@ -182,8 +209,48 @@ for origin in heap msm; do
     [ "$rc" -eq 0 ] || failed=1
 done
 
+# The area average, the cubic and the driver's own pick, each against the same
+# double-precision model the bilinear cases use.
+for method in area cubic advanced; do
+    echo "== $method"
+    eval "list=\$${method}_cases"
+    for origin in heap msm; do
+        echo "== origin: $origin"
+        for c in $list; do
+            old_ifs=$IFS
+            IFS=:
+            set -- $c
+            IFS=$old_ifs
+            src=$1 dst=$2 crop=$3 rot=$4 mirror=${5:-0}
+            set -- "$here/nv12_scale.spv" "$origin" "$render" "$src" "$dst"
+            [ "$crop" = - ] || set -- "$@" "$crop"
+            rc=0
+            case $method in
+                area) "$work/probe" "$@" --rot "$rot" --mirror "$mirror" --interp 2 || rc=$? ;;
+                cubic) "$work/probe" "$@" --rot "$rot" --mirror "$mirror" --interp 3 || rc=$? ;;
+                advanced) "$work/probe" "$@" --rot "$rot" --mirror "$mirror" --interp 4 || rc=$? ;;
+            esac
+            printf 'case=%s %s->%s crop=%s rot=%s mirror=%s interp=%s exit=%s\n' "$origin" "$src" "$dst" \
+                "$crop" "$rot" "$mirror" "$method" "$rc"
+            [ "$rc" -eq 0 ] || failed=1
+        done
+    done
+done
+
+# A constant picture under every method: the weights sum to one, so the
+# picture has to come through unchanged whatever the taps are.
+for origin in heap msm; do
+    for interp in 2 3 4; do
+        rc=0
+        "$work/probe" "$here/nv12_scale.spv" "$origin" "$render" 64x32 200x100 --interp "$interp" \
+            --constant 77 || rc=$?
+        printf 'case=%s 64x32->200x100 constant=77 interp=%s exit=%s\n' "$origin" "$interp" "$rc"
+        [ "$rc" -eq 0 ] || failed=1
+    done
+done
+
 if [ "$failed" -ne 0 ]; then
     echo "FAIL nv12-scale cases are not all byte-exact" >&2
     exit 1
 fi
-echo "PASS nv12-scale cases=$(echo $cases | wc -w) bilinear=$(echo $bilinear_cases | wc -w) origins=2 pixels_exact spv=$spv_hash render=$render"
+echo "PASS nv12-scale cases=$(echo $cases | wc -w) bilinear=$(echo $bilinear_cases | wc -w) area=$(echo $area_cases | wc -w) cubic=$(echo $cubic_cases | wc -w) advanced=$(echo $advanced_cases | wc -w) origins=2 pixels_exact spv=$spv_hash render=$render"

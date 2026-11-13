@@ -67,11 +67,17 @@ for gate in nv12_scale_gate p010_scale_gate; do
     run "vpp-$gate-bilinear" grep -Fq -- '--interp 1' "$test_dir/vulkan-vpp/$gate.sh"
     run "vpp-$gate-bilinear-constant" grep -Fq -- '--constant' "$test_dir/vulkan-vpp/$gate.sh"
 done
-# The driver maps the client's filter_flags onto the kernel's two methods, and
-# the caps must advertise exactly those two. A silent widening here would
-# advertise "advanced", which has no kernel.
+# The driver maps the client's filter_flags onto the kernel's methods. All
+# three are accepted and the caps name the best of them; a method the caps name
+# without a kernel would be over-advertising.
 run vpp-bilinear-accepted grep -Fq 'VA_FILTER_INTERPOLATION_BILINEAR' "$root/src/va/picture.cc"
-run vpp-bilinear-advertised grep -Fq 'VA_FILTER_INTERPOLATION_BILINEAR' "$root/src/va/vpp.cc"
+run vpp-advanced-accepted grep -Fq 'VA_FILTER_INTERPOLATION_ADVANCED' "$root/src/va/picture.cc"
+run vpp-advanced-advertised grep -Fq 'VA_FILTER_INTERPOLATION_ADVANCED' "$root/src/va/vpp.cc"
+# Advanced is a real kernel (the area average on a downscale, the cubic on an
+# upscale), so the gate has to prove it runs and that it differs from bilinear.
+run vpp-advanced-gate grep -Fq -- '--interp=advanced' "$test_dir/vulkan-vpp/crop_vaapi_gate.sh"
+run vpp-advanced-differs grep -Fq 'advanced and bilinear produced the same frame' \
+    "$test_dir/vulkan-vpp/crop_vaapi_gate.sh"
 # The tone mapper has no byte-exact reference, so the gate's verdict is the
 # probe's own model; a gate that stopped comparing, or a probe whose model went
 # missing, would leave the kernel unmeasured.

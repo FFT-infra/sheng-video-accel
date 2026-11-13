@@ -39,8 +39,9 @@ constexpr unsigned kMaxEntrypoints = 2;
 constexpr unsigned kMaxAttributes = 8;
 // What vaMaxNumImageFormats reports, and therefore the largest list
 // queryImageFormats may fill: a client sizes its array from this number.
-// NV12 and P010 for the codecs, BGRA and RGBA for the processor's overlays.
-constexpr unsigned kMaxImageFormats = 4;
+// NV12 and P010 for the codecs, I420 as the planar form of the same 4:2:0
+// picture, BGRA and RGBA for the processor's overlays.
+constexpr unsigned kMaxImageFormats = 5;
 constexpr unsigned kMaxSubpictureFormats = 1;
 constexpr unsigned kMaxDisplayAttributes = 1;
 

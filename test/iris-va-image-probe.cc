@@ -84,6 +84,34 @@ VAImage make_image(VADisplay display)
     return image;
 }
 
+VAImage make_i420_image(VADisplay display, unsigned width, unsigned height)
+{
+    VAImageFormat format = {};
+    format.fourcc = VA_FOURCC_I420;
+    format.byte_order = VA_LSB_FIRST;
+    format.bits_per_pixel = 12;
+    VAImage image = {};
+    if (vaCreateImage(display, &format, width, height, &image) != VA_STATUS_SUCCESS)
+        image.image_id = VA_INVALID_ID;
+    return image;
+}
+
+// The same picture in the two chroma layouts, written out here so the probe
+// compares the driver against a definition rather than against itself. NV12
+// keeps (u, v) as one pair per 2x2 block; I420 keeps u and v in two planes.
+std::vector<uint8_t> nv12_to_i420(const std::vector<uint8_t>& nv12, unsigned width, unsigned height)
+{
+    std::vector<uint8_t> i420(nv12.size(), 0);
+    const unsigned luma = width * height, chroma = width / 2 * (height / 2);
+    std::memcpy(i420.data(), nv12.data(), luma);
+    for (unsigned y = 0; y < height / 2; ++y)
+        for (unsigned x = 0; x < width / 2; ++x) {
+            i420[luma + y * (width / 2) + x] = nv12[luma + y * width + x * 2];
+            i420[luma + chroma + y * (width / 2) + x] = nv12[luma + y * width + x * 2 + 1];
+        }
+    return i420;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -194,7 +222,85 @@ int main(int argc, char** argv)
         });
     check(derived_read, "derived-image write -> vaGetImage is byte-identical");
 
-    // 4. Refusals.
+    // 4. I420, the planar form of the same 4:2:0 picture. The surface is NV12
+    //    and always will be, so both directions are a chroma translation the
+    //    image path does, checked against the definition above rather than
+    //    against another driver call.
+    std::vector<uint8_t> planar = nv12_to_i420(source, kWidth, kHeight);
+    VAImage planar_image = make_i420_image(display, kWidth, kHeight);
+    check(planar_image.image_id != VA_INVALID_ID, "createImage with VA_FOURCC_I420");
+    check(planar_image.num_planes == 3, "an I420 image has three planes");
+    bool planar_layout = planar_image.num_planes == 3
+        && planar_image.pitches[0] == kWidth && planar_image.pitches[1] == kWidth / 2
+        && planar_image.pitches[2] == kWidth / 2
+        && planar_image.offsets[1] == kWidth * kHeight
+        && planar_image.offsets[2] == kWidth * kHeight + kWidth / 2 * (kHeight / 2)
+        && planar_image.data_size == kWidth * kHeight * 3 / 2;
+    check(planar_layout, "the I420 image is three tightly packed planes");
+
+    const bool planar_ok = planar_image.image_id != VA_INVALID_ID
+        && with_image(display, planar_image, [&](uint8_t* data, size_t size) {
+               std::memcpy(data, planar.data(), std::min<size_t>(size, planar.size()));
+           });
+    check(planar_ok, "fill the I420 image");
+    status = vaPutImage(display, surface, planar_image.image_id, 0, 0, kWidth, kHeight, 0, 0, kWidth,
+        kHeight);
+    check(status == VA_STATUS_SUCCESS, "vaPutImage accepts an I420 image for an NV12 surface");
+    VAImage reread = make_image(display);
+    status = vaGetImage(display, surface, 0, 0, kWidth, kHeight, reread.image_id);
+    bool planar_upload = false;
+    if (status == VA_STATUS_SUCCESS)
+        with_image(display, reread, [&](uint8_t* data, size_t size) {
+            planar_upload = std::memcmp(data, source.data(), std::min<size_t>(size, source.size())) == 0;
+        });
+    check(planar_upload, "an I420 upload lands as the same NV12 picture");
+
+    // The other direction: the surface holds NV12 and the client asks for
+    // I420. The chroma planes have to come out de-interleaved.
+    status = vaGetImage(display, surface, 0, 0, kWidth, kHeight, planar_image.image_id);
+    check(status == VA_STATUS_SUCCESS, "vaGetImage writes an I420 image from an NV12 surface");
+    bool planar_read = false;
+    if (status == VA_STATUS_SUCCESS)
+        with_image(display, planar_image, [&](uint8_t* data, size_t size) {
+            planar_read = std::memcmp(data, planar.data(), std::min<size_t>(size, planar.size())) == 0;
+        });
+    check(planar_read, "an I420 read is the planar form of the same picture");
+
+    // A region in I420 has to translate the same way, or the two directions
+    // would agree only for whole frames.
+    std::vector<uint8_t> patch_nv12(kWidth * kHeight * 3 / 2, 0);
+    fill(patch_nv12, 0xc0);
+    std::vector<uint8_t> patch_i420 = nv12_to_i420(patch_nv12, kWidth, kHeight);
+    VAImage patch_image = make_i420_image(display, kWidth, kHeight);
+    const bool patch_ok = patch_image.image_id != VA_INVALID_ID
+        && with_image(display, patch_image, [&](uint8_t* data, size_t size) {
+               std::memcpy(data, patch_i420.data(), std::min<size_t>(size, patch_i420.size()));
+           });
+    check(patch_ok, "fill an I420 image for a region upload");
+    status = vaPutImage(display, surface, patch_image.image_id, 16, 16, 32, 32, 16, 16, 32, 32);
+    check(status == VA_STATUS_SUCCESS, "vaPutImage uploads an I420 region");
+    std::vector<uint8_t> region_after(kWidth * kHeight * 3 / 2);
+    status = vaGetImage(display, surface, 0, 0, kWidth, kHeight, reread.image_id);
+    if (status == VA_STATUS_SUCCESS)
+        with_image(display, reread, [&](uint8_t* data, size_t size) {
+            std::memcpy(region_after.data(), data, std::min<size_t>(size, region_after.size()));
+        });
+    bool region_translated = status == VA_STATUS_SUCCESS;
+    for (unsigned y = 16; region_translated && y < 48; ++y)
+        for (unsigned x = 16; x < 48; ++x)
+            region_translated = region_after[y * kWidth + x] == patch_nv12[y * kWidth + x];
+    for (unsigned y = 8; region_translated && y < 24; ++y)
+        for (unsigned x = 8; region_translated; ++x) {
+            if (x == 24)
+                break;
+            region_translated = region_after[kWidth * kHeight + y * kWidth + x * 2]
+                    == patch_nv12[kWidth * kHeight + y * kWidth + x * 2]
+                && region_after[kWidth * kHeight + y * kWidth + x * 2 + 1]
+                    == patch_nv12[kWidth * kHeight + y * kWidth + x * 2 + 1];
+        }
+    check(region_translated, "an I420 region upload interleaves where dx/dy asked");
+
+    // 5. Refusals.
     status = vaPutImage(display, surface, uploaded.image_id, 0, 0, 32, 32, 0, 0, 64, 64);
     check(status == VA_STATUS_ERROR_UNIMPLEMENTED, "vaPutImage refuses to scale");
     status = vaPutImage(display, surface, uploaded.image_id, 1, 0, 32, 32, 0, 0, 32, 32);
@@ -207,12 +313,15 @@ int main(int argc, char** argv)
     vaDestroyImage(display, uploaded.image_id);
     vaDestroyImage(display, region.image_id);
     vaDestroyImage(display, fetched.image_id);
+    vaDestroyImage(display, reread.image_id);
+    vaDestroyImage(display, planar_image.image_id);
+    vaDestroyImage(display, patch_image.image_id);
     vaTerminate(display);
     close(fd);
 
     if (failures)
         std::printf("FAIL iris-va-image-probe %d check(s)\n", failures);
     else
-        std::printf("PASS iris-va-image-probe: putImage, region upload and the derived-image path\n");
+        std::printf("PASS iris-va-image-probe: putImage, region upload, the derived-image path and I420\n");
     return failures ? 1 : 0;
 }

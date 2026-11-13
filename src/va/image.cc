@@ -33,11 +33,28 @@ bool rgb_fourcc(uint32_t fourcc)
     return fourcc == VA_FOURCC_BGRA || fourcc == VA_FOURCC_RGBA;
 }
 
+// I420 is the same 4:2:0 picture as NV12 with the chroma pair stored as two
+// separate planes instead of interleaved bytes. The surfaces the driver
+// decodes into are always NV12, so an I420 image is a client-side layout the
+// two copy paths translate, not a second surface format.
+bool planar_chroma(uint32_t fourcc)
+{
+    return fourcc == VA_FOURCC_I420;
+}
+
 unsigned bytes_of(uint32_t fourcc)
 {
     if (fourcc == VA_FOURCC_P010)
         return 2;
     return rgb_fourcc(fourcc) ? 4 : 1;
+}
+
+// An image the copy paths can move between a surface and a client buffer:
+// the surface's own format, or I420 for the same 8-bit 4:2:0 picture.
+bool compatible(uint32_t image_fourcc, uint32_t surface_fourcc)
+{
+    return image_fourcc == surface_fourcc
+        || (planar_chroma(image_fourcc) && surface_fourcc == VA_FOURCC_NV12);
 }
 
 // The packed BGRA/RGBA surface the processor composes from is one plane of
@@ -72,6 +89,20 @@ void fill_image(VAImage& image, uint32_t fourcc, unsigned width, unsigned height
         image.pitches[0] = width * bytes;
         image.offsets[0] = 0;
         image.data_size = image.pitches[0] * height;
+        image.num_palette_entries = 0;
+        image.entry_bytes = 0;
+        return;
+    }
+    if (planar_chroma(fourcc)) {
+        // Three planes, each at its own pitch: the luma plane, then U and V
+        // as one byte per 2x2 block.
+        image.num_planes = 3;
+        image.pitches[0] = (width + 1) & ~1u;
+        image.pitches[1] = image.pitches[2] = image.pitches[0] / 2;
+        image.offsets[0] = 0;
+        image.offsets[1] = image.pitches[0] * height;
+        image.offsets[2] = image.offsets[1] + image.pitches[1] * ((height + 1) / 2);
+        image.data_size = image.offsets[2] + image.pitches[2] * ((height + 1) / 2);
         image.num_palette_entries = 0;
         image.entry_bytes = 0;
         return;
@@ -128,7 +159,7 @@ void copy_pixels(DriverData& d, Surface& s, const VAImage& image, uint8_t* desti
         layout = s.stable->layout();
         fd = s.stable->fd();
     }
-    iris::require(layout.fourcc == image.format.fourcc, "image format does not match the surface",
+    iris::require(compatible(image.format.fourcc, layout.fourcc), "image format does not match the surface",
         VA_STATUS_ERROR_INVALID_IMAGE_FORMAT);
     const unsigned bytes = bytes_of(layout.fourcc);
     const unsigned width = std::min<unsigned>(image.width, layout.width);
@@ -142,9 +173,24 @@ void copy_pixels(DriverData& d, Surface& s, const VAImage& image, uint8_t* desti
         iris::dma_buf_cpu_sync(fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
         return;
     }
-    for (unsigned row = 0; row < (height + 1) / 2; ++row)
-        std::memcpy(destination + image.offsets[1] + static_cast<size_t>(row) * image.pitches[1],
-            source + layout.chroma_offset() + static_cast<size_t>(row) * layout.stride, ((width + 1) & ~1u) * bytes);
+    const unsigned chroma_width = (width + 1) & ~1u;
+    const uint8_t* uv = source + layout.chroma_offset();
+    if (planar_chroma(image.format.fourcc)) {
+        // De-interleave the surface's (u, v) pairs into two planes.
+        for (unsigned row = 0; row < (height + 1) / 2; ++row) {
+            const uint8_t* line = uv + static_cast<size_t>(row) * layout.stride;
+            uint8_t* u = destination + image.offsets[1] + static_cast<size_t>(row) * image.pitches[1];
+            uint8_t* v = destination + image.offsets[2] + static_cast<size_t>(row) * image.pitches[2];
+            for (unsigned col = 0; col < chroma_width / 2; ++col) {
+                u[col] = line[col * 2];
+                v[col] = line[col * 2 + 1];
+            }
+        }
+    } else {
+        for (unsigned row = 0; row < (height + 1) / 2; ++row)
+            std::memcpy(destination + image.offsets[1] + static_cast<size_t>(row) * image.pitches[1],
+                uv + static_cast<size_t>(row) * layout.stride, chroma_width * bytes);
+    }
     iris::dma_buf_cpu_sync(fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
 }
 
@@ -161,6 +207,12 @@ VAStatus queryImageFormats(VADriverContextP ctx, VAImageFormat* formats, int* co
     VAImageFormat list[kMaxImageFormats] = {};
     int n = 0;
     list[n].fourcc = VA_FOURCC_NV12;
+    list[n].byte_order = VA_LSB_FIRST;
+    list[n].bits_per_pixel = 12;
+    ++n;
+    // The same picture with the chroma pair split into two planes; the copy
+    // paths translate it to and from the surface's NV12.
+    list[n].fourcc = VA_FOURCC_I420;
     list[n].byte_order = VA_LSB_FIRST;
     list[n].bits_per_pixel = 12;
     ++n;
@@ -192,7 +244,7 @@ VAStatus createImage(VADriverContextP ctx, VAImageFormat* format, int width, int
         auto& d = data(ctx);
         iris::require(format
                 && (format->fourcc == VA_FOURCC_NV12 || format->fourcc == VA_FOURCC_P010
-                    || rgb_fourcc(format->fourcc)),
+                    || planar_chroma(format->fourcc) || rgb_fourcc(format->fourcc)),
             "image format not supported", VA_STATUS_ERROR_INVALID_IMAGE_FORMAT);
         iris::require(width > 0 && height > 0, "image geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
         *image = {};
@@ -364,7 +416,7 @@ VAStatus putImage(VADriverContextP ctx, VASurfaceID id, VAImageID image_id, int 
         if (!rgb_fourcc(image.format.fourcc))
             iris::require(!((sx | sy | dx | dy | sw | sh) & 1u),
                 "vaPutImage regions are even for 4:2:0", VA_STATUS_ERROR_INVALID_PARAMETER);
-        iris::require(image.format.fourcc == s->fourcc, "image format does not match the surface",
+        iris::require(compatible(image.format.fourcc, s->fourcc), "image format does not match the surface",
             VA_STATUS_ERROR_INVALID_IMAGE_FORMAT);
         if (s->rendering())
             syncSurface(ctx, id);
@@ -385,7 +437,7 @@ VAStatus putImage(VADriverContextP ctx, VASurfaceID id, VAImageID image_id, int 
                 fd = stable.fd();
             }
         }
-        iris::require(destination != nullptr && layout.fourcc == image.format.fourcc,
+        iris::require(destination != nullptr && compatible(image.format.fourcc, layout.fourcc),
             "surface memory does not match the image", VA_STATUS_ERROR_INVALID_IMAGE_FORMAT);
 
         const unsigned bytes = bytes_of(layout.fourcc);
@@ -404,12 +456,30 @@ VAStatus putImage(VADriverContextP ctx, VASurfaceID id, VAImageID image_id, int 
             s->failed = false;
             return VA_STATUS_SUCCESS;
         }
-        for (unsigned row = 0; row < sh / 2; ++row)
-            std::memcpy(destination + layout.chroma_offset() + static_cast<size_t>(dy / 2 + row) * layout.stride
-                    + static_cast<size_t>(dx) * bytes,
-                source + image.offsets[1] + static_cast<size_t>(sy / 2 + row) * image.pitches[1]
-                    + static_cast<size_t>(sx) * bytes,
-                static_cast<size_t>(sw) * bytes);
+        const unsigned chroma_width = sw & ~1u;
+        uint8_t* uv = destination + layout.chroma_offset();
+        if (planar_chroma(image.format.fourcc)) {
+            // Interleave the client's two planes into the surface's pairs.
+            for (unsigned row = 0; row < sh / 2; ++row) {
+                uint8_t* line = uv + static_cast<size_t>(dy / 2 + row) * layout.stride
+                    + static_cast<size_t>(dx);
+                const uint8_t* u = source + image.offsets[1]
+                    + static_cast<size_t>(sy / 2 + row) * image.pitches[1] + static_cast<size_t>(sx) / 2;
+                const uint8_t* v = source + image.offsets[2]
+                    + static_cast<size_t>(sy / 2 + row) * image.pitches[2] + static_cast<size_t>(sx) / 2;
+                for (unsigned col = 0; col < chroma_width / 2; ++col) {
+                    line[col * 2] = u[col];
+                    line[col * 2 + 1] = v[col];
+                }
+            }
+        } else {
+            for (unsigned row = 0; row < sh / 2; ++row)
+                std::memcpy(uv + static_cast<size_t>(dy / 2 + row) * layout.stride
+                        + static_cast<size_t>(dx) * bytes,
+                    source + image.offsets[1] + static_cast<size_t>(sy / 2 + row) * image.pitches[1]
+                        + static_cast<size_t>(sx) * bytes,
+                    static_cast<size_t>(sw) * bytes);
+        }
         iris::dma_buf_cpu_sync(fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE);
 
         std::lock_guard<std::recursive_mutex> lock(d.mutex);

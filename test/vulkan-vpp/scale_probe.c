@@ -6,9 +6,10 @@
 // scale kernel named on its command line (nv12_scale.spv or p010_scale.spv)
 // over two imported DMA-BUFs and checks every destination pixel against an
 // oracle that uses swscale's point positions and VA's rotation order, plus that
-// the source is unchanged. With --interp 1 the oracle is the four-tap bilinear
-// blend the kernel runs instead, compared within one code because GLSL does not
-// pin the rounding of that sum.
+// the source is unchanged. With any other --interp the oracle is the method the
+// kernel runs instead — bilinear, the area average, the cubic, or the driver's
+// per-axis pick — compared within one code because GLSL does not pin the
+// rounding of a weighted sum.
 //
 // The plane geometry is the Iris CAPTURE layout (src/iris/alloc.cc:
 // stable_layout -> src/util/prime.cc:plane_layout): 128-byte luma pitch for
@@ -21,7 +22,7 @@
 //
 // Usage: scale_probe <scale.spv> <heap|msm> [render-node] [WxH WxH
 //                     [CROP_WxH+X+Y]] [--rot 0..3] [--mirror 0..3]
-//                     [--interp 0|1] [--p010]
+//                     [--interp 0..4] [--p010]
 // The size pair is [source destination] and defaults to 64x32 128x64.
 // Exit 0 only when compute runs, both fds import, and every destination pixel
 // matches the oracle for that origin. Build and run on the target, never in
@@ -68,7 +69,8 @@ struct geometry {
     // VA_MIRROR_HORIZONTAL as bit 0 and VA_MIRROR_VERTICAL as bit 1, applied to
     // the rotated rectangle and before the scale.
     unsigned mirror;
-    // 0 is the point map, 1 the four-tap bilinear blend.
+    // 0 the point map, 1 the four-tap bilinear blend, 2 the area average,
+    // 3 the cubic, 4 the driver's pick per axis.
     unsigned interp;
 };
 
@@ -384,28 +386,127 @@ static double mirror_pos(double v, unsigned size, unsigned on)
     return on ? (double)(size - 1u) - v : v;
 }
 
-// The four-tap blend of the kernel's bilinear path, in double.
-static double plane_blend(const volatile uint8_t* src, const struct geometry* g, unsigned chroma, unsigned comp,
+// Which method runs on one axis: 0 the point map, 1 bilinear, 2 the area
+// average, 3 the cubic. 4 is VA's "advanced", where the kernel picks per axis.
+static unsigned axis_method(unsigned interp, unsigned src, unsigned dst)
+{
+    if (interp != 4u)
+        return interp;
+    if (src > dst)
+        return 2u;
+    if (src < dst)
+        return 3u;
+    return 1u;
+}
+
+// The half-open source interval [lo, hi) destination sample `d` of `dst`
+// covers on a `src`-sized axis, reflected when the axis is mirrored.
+static void span_axis(unsigned d, unsigned dst, unsigned src, unsigned mirrored, unsigned* lo, unsigned* hi)
+{
+    unsigned a = (d * src) / dst;
+    unsigned b = ((d + 1u) * src + dst - 1u) / dst;
+    if (b <= a)
+        b = a + 1u;
+    if (b > src)
+        b = src;
+    if (a > b - 1u)
+        a = b - 1u;
+    if (mirrored) {
+        *lo = src - b;
+        *hi = src - a;
+    } else {
+        *lo = a;
+        *hi = b;
+    }
+}
+
+// Catmull-Rom weights, the same expression the kernel evaluates.
+static void cubic_weights(double f, double w[4])
+{
+    const double f2 = f * f, f3 = f2 * f;
+    w[0] = -0.5 * f3 + f2 - 0.5 * f;
+    w[1] = 1.5 * f3 - 2.5 * f2 + 1.0;
+    w[2] = -1.5 * f3 + 2.0 * f2 + 0.5 * f;
+    w[3] = 0.5 * f3 - 0.5 * f2;
+}
+
+// Up to four (index, weight) taps for one axis, the kernel's axis_taps.
+static int axis_taps(unsigned interp, unsigned d, unsigned dst, unsigned src, unsigned mirrored, int idx[4],
+    double wgt[4])
+{
+    const unsigned m = axis_method(interp, src, dst);
+    if (m == 0u) {
+        const unsigned inc = ((src << 16) + (dst >> 1)) / dst;
+        const unsigned at = (d * inc + (inc >> 1)) >> 16;
+        idx[0] = (int)(mirrored ? src - 1u - at : at);
+        wgt[0] = 1.0;
+        return 1;
+    }
+    if (m == 2u) {
+        unsigned lo, hi;
+        span_axis(d, dst, src, mirrored, &lo, &hi);
+        const unsigned n = hi - lo;
+        if (n <= 4u) {
+            for (int i = 0; i < 4; ++i) {
+                const unsigned at = lo + (unsigned)i < hi ? lo + (unsigned)i : hi - 1u;
+                idx[i] = (int)at;
+                wgt[i] = 1.0 / (double)n;
+            }
+            return (int)n;
+        }
+        for (int i = 0; i < 4; ++i) {
+            idx[i] = (int)(lo + ((unsigned)i * (n - 1u)) / 3u);
+            wgt[i] = 0.25;
+        }
+        return 4;
+    }
+    const double v = mirror_pos(axis_pos(d, dst, src), src, mirrored);
+    const unsigned i0 = (unsigned)v;
+    const double f = v - (double)i0;
+    if (m == 1u) {
+        idx[0] = (int)i0;
+        idx[1] = (int)(i0 + 1u < src ? i0 + 1u : src - 1u);
+        wgt[0] = 1.0 - f;
+        wgt[1] = f;
+        return 2;
+    }
+    double w[4];
+    cubic_weights(f, w);
+    for (int i = 0; i < 4; ++i) {
+        int at = (int)i0 - 1 + i;
+        if (at < 0)
+            at = 0;
+        if (at > (int)src - 1)
+            at = (int)src - 1;
+        idx[i] = at;
+        wgt[i] = w[i];
+    }
+    return 4;
+}
+
+// The value one destination sample takes, in double: the outer product of the
+// two axes' taps, which is every method the kernel runs. The model keeps the
+// arithmetic in double so the comparison measures the kernel and not a copy of
+// its rounding.
+static double plane_method(const volatile uint8_t* src, const struct geometry* g, unsigned chroma, unsigned comp,
     unsigned dx, unsigned dy, unsigned dw, unsigned dh)
 {
     const unsigned w = chroma ? g->crop_w / 2 : g->crop_w;
     const unsigned h = chroma ? g->crop_h / 2 : g->crop_h;
     const unsigned rw = (g->rot & 1u) ? h : w;
     const unsigned rh = (g->rot & 1u) ? w : h;
-    const double x = mirror_pos(axis_pos(dx, dw, rw), rw, g->mirror & 1u);
-    const double y = mirror_pos(axis_pos(dy, dh, rh), rh, g->mirror & 2u);
-    const unsigned x0 = (unsigned)x, y0 = (unsigned)y;
-    const unsigned x1 = x0 + 1 < rw ? x0 + 1 : rw - 1;
-    const unsigned y1 = y0 + 1 < rh ? y0 + 1 : rh - 1;
-    const double fx = x - (double)x0, fy = y - (double)y0;
-    // The blend runs on codes, not on the padded words the kernel reads: a
-    // P010 word keeps its ten bits at the top, and mixing the words would leave
-    // bits in the low six that no client reads and no encoder expects.
-    const double a = (1.0 - fx) * (double)code_plane(src, g, chroma, x0, y0, comp)
-        + fx * (double)code_plane(src, g, chroma, x1, y0, comp);
-    const double b = (1.0 - fx) * (double)code_plane(src, g, chroma, x0, y1, comp)
-        + fx * (double)code_plane(src, g, chroma, x1, y1, comp);
-    return (1.0 - fy) * a + fy * b;
+    int xi[4], yi[4];
+    double xw[4], yw[4];
+    const int nx = axis_taps(g->interp, dx, dw, rw, g->mirror & 1u, xi, xw);
+    const int ny = axis_taps(g->interp, dy, dh, rh, g->mirror & 2u, yi, yw);
+    double v = 0.0;
+    for (int j = 0; j < ny; ++j) {
+        double row = 0.0;
+        for (int i = 0; i < nx; ++i)
+            row += xw[i] * (double)code_plane(src, g, chroma, (unsigned)xi[i], (unsigned)yi[j], comp);
+        v += yw[j] * row;
+    }
+    return v;
 }
 
 // Per-sample oracle over every destination pixel, luma and both chroma
@@ -426,11 +527,11 @@ static unsigned check_pixels(const volatile uint8_t* src, const volatile uint8_t
     // on that size and each point is then taken back to the source.
     const unsigned rot_w = (g->rot & 1u) ? g->crop_h : g->crop_w;
     const unsigned rot_h = (g->rot & 1u) ? g->crop_w : g->crop_h;
-    // The point map is byte-exact. The blend allows one code, because GLSL may
-    // contract the four-tap sum into fused multiply-adds while the model sums
-    // in double. At 1:1 there is nothing to blend — the centre lands on the
-    // sample and the weights are 1 and 0 — so the two methods must agree
-    // exactly there, and that case is compared byte for byte.
+    // The point map is byte-exact. Every other method allows one code, because
+    // GLSL may contract the weighted sum into fused multiply-adds while the
+    // model sums in double. At 1:1 there is nothing to blend — the centre
+    // lands on the sample and the weights are 1 and 0 — so every method must
+    // agree exactly there, and that case is compared byte for byte.
     const unsigned one_to_one = g->dst_w == rot_w && g->dst_h == rot_h;
     const unsigned tol = (g->interp && !one_to_one) ? 1u : 0u;
     const unsigned xinc = point_step(rot_w, g->dst_w);
@@ -439,7 +540,7 @@ static unsigned check_pixels(const volatile uint8_t* src, const volatile uint8_t
         for (unsigned dx = 0; dx < g->dst_w; dx++) {
             unsigned want, got;
             if (g->interp) {
-                const double v = plane_blend(src, g, 0, 0, dx, dy, g->dst_w, g->dst_h);
+                const double v = plane_method(src, g, 0, 0, dx, dy, g->dst_w, g->dst_h);
                 want = (unsigned)(v + 0.5);
                 if (want > full)
                     want = full;
@@ -473,7 +574,7 @@ static unsigned check_pixels(const volatile uint8_t* src, const volatile uint8_t
             for (unsigned comp = 0; comp < 2; comp++) {
                 unsigned want, got;
                 if (g->interp) {
-                    const double v = plane_blend(src, g, 1, comp, cx, cy, dw, dh);
+                    const double v = plane_method(src, g, 1, comp, cx, cy, dw, dh);
                     want = (unsigned)(v + 0.5);
                     if (want > full)
                         want = full;
@@ -527,7 +628,7 @@ int main(int argc, char** argv)
     if (npos < 2) {
         fprintf(stderr,
             "usage: %s <scale.spv> <heap|msm> [render-node] [WxH WxH [CROP_WxH+X+Y]] [--rot 0..3] [--mirror 0..3]"
-            " [--interp 0|1] [--constant N] [--p010]\n",
+            " [--interp 0..4] [--constant N] [--p010]\n",
             argv[0]);
         return 2;
     }
@@ -539,10 +640,10 @@ int main(int argc, char** argv)
         fprintf(stderr, "FAIL --mirror must be 0..3\n");
         return 2;
     }
-    // The two methods the kernel implements: the point map and the four-tap
-    // blend. The driver refuses the third, so the probe has nothing to model.
-    if (interp > 1) {
-        fprintf(stderr, "FAIL --interp must be 0 or 1\n");
+    // The methods the kernel implements: 0 the point map, 1 bilinear, 2 the
+    // area average, 3 the cubic, and 4 the driver's own pick per axis.
+    if (interp > 4) {
+        fprintf(stderr, "FAIL --interp must be 0..4\n");
         return 2;
     }
     // A constant picture proves the weights sum to one; the code has to be
@@ -820,11 +921,12 @@ int main(int argc, char** argv)
         fprintf(stderr, "FAIL origin=%s pixels_wrong=%u src_changed=%u\n", origin, bad, changed);
         return 1;
     }
-    // `exact` names the comparison: the point map is byte-exact, the bilinear
-    // blend is within one code of its model.
+    // The trailing word names the comparison: the point map is byte-exact,
+    // every other method is within one code of its model.
+    static const char* const kMethods[] = { "nearest", "bilinear", "area", "cubic", "advanced" };
     printf("PASS origin=%s %s rot=%u mirror=%u interp=%s scale=%ux%u->%ux%u crop=%ux%u+%u+%u %s bytes=%u "
            "src=unchanged\n",
-        origin, bytes == 2 ? "p010" : "nv12", g.rot, g.mirror, g.interp ? "bilinear" : "nearest", g.src_w, g.src_h,
+        origin, bytes == 2 ? "p010" : "nv12", g.rot, g.mirror, kMethods[g.interp & 7u], g.src_w, g.src_h,
         g.dst_w, g.dst_h, g.crop_w, g.crop_h, g.crop_x, g.crop_y,
         constant ? "constant-invariant" : g.interp ? "within-1" : "exact", g.dst_size);
 

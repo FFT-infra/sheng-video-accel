@@ -108,11 +108,11 @@ VAStatus queryVideoProcPipelineCaps(VADriverContextP ctx, VAContextID id, VABuff
     caps->pipeline_flags = 0;
     // The interpolation method is a value in a field, not a set of bits:
     // nearest (0x1000) | bilinear (0x2000) is exactly the "advanced" value
-    // (0x3000), so the two cannot both be advertised. Name the method the
-    // kernel runs when a client asks for the best one, which is bilinear; the
-    // unspecified method and nearest are still accepted from a client, and
-    // "advanced" has no kernel and is refused.
-    caps->filter_flags = VA_FILTER_INTERPOLATION_BILINEAR;
+    // (0x3000), so a client cannot read a set out of this word. Name the
+    // highest method the driver runs, which is what a client that wants the
+    // best available asks for; the other two are still accepted, and each one
+    // runs as itself rather than as an approximation of this.
+    caps->filter_flags = VA_FILTER_INTERPOLATION_ADVANCED;
     caps->num_forward_references = 0;
     caps->num_backward_references = 0;
     caps->input_color_standards = kStandards;
