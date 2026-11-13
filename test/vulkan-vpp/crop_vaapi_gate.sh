@@ -117,10 +117,10 @@ if ! env LIBVA_DRIVER_NAME=v4l2 $driver_env LIBVA_V4L2_VIDEO_PATH="$device" V4L2
     sed -n '1,20p' "$work/bilinear.log" >&2 || true
     fail "a bilinear picture failed"
 fi
-grep -q 'the caps offer bilinear interpolation' "$work/bilinear.log" \
-    || fail "the caps do not advertise bilinear interpolation"
+grep -q 'the caps name bilinear interpolation' "$work/bilinear.log" \
+    || fail "the caps do not name bilinear interpolation"
 grep -q 'no advanced interpolation is advertised' "$work/bilinear.log" \
-    || fail "the caps advertise an interpolation method with no kernel"
+    || fail "the caps name the advanced method, which has no kernel"
 printf 'case=bilinear caps=advertised picture=ran size=%s\n' "$(sha256sum "$work/bilinear.nv12" | cut -d' ' -f1)"
 
 echo "== the advanced method is refused, not approximated"

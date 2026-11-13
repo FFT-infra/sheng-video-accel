@@ -1447,11 +1447,12 @@ int main(int argc, char** argv)
         VAProcPipelineCaps caps = {};
         check(vaQueryVideoProcPipelineCaps(display, context, nullptr, 0, &caps) == VA_STATUS_SUCCESS,
             "query the VideoProc pipeline caps");
-        check((caps.filter_flags & VA_FILTER_INTERPOLATION_NEAREST_NEIGHBOR) != 0,
-            "the caps offer nearest-neighbour interpolation");
-        check((caps.filter_flags & VA_FILTER_INTERPOLATION_BILINEAR) != 0,
-            "the caps offer bilinear interpolation");
-        check((caps.filter_flags & VA_FILTER_INTERPOLATION_ADVANCED) == 0,
+        // filter_flags carries one interpolation value, not a set of bits:
+        // nearest | bilinear is the advanced value, so "both bits set" would
+        // mean the opposite of what it looks like.
+        check((caps.filter_flags & VA_FILTER_INTERPOLATION_MASK) == VA_FILTER_INTERPOLATION_BILINEAR,
+            "the caps name bilinear interpolation as the method the driver runs");
+        check((caps.filter_flags & VA_FILTER_INTERPOLATION_MASK) != VA_FILTER_INTERPOLATION_ADVANCED,
             "no advanced interpolation is advertised");
     }
 

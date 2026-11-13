@@ -106,10 +106,13 @@ VAStatus queryVideoProcPipelineCaps(VADriverContextP ctx, VAContextID id, VABuff
     // call, which is why they are static.
     *caps = {};
     caps->pipeline_flags = 0;
-    // The two interpolation methods with a kernel. The unspecified method is
-    // 0 and always usable; "advanced" has no kernel, so it is not set here and
-    // a picture that asks for it is refused rather than approximated.
-    caps->filter_flags = VA_FILTER_INTERPOLATION_NEAREST_NEIGHBOR | VA_FILTER_INTERPOLATION_BILINEAR;
+    // The interpolation method is a value in a field, not a set of bits:
+    // nearest (0x1000) | bilinear (0x2000) is exactly the "advanced" value
+    // (0x3000), so the two cannot both be advertised. Name the method the
+    // kernel runs when a client asks for the best one, which is bilinear; the
+    // unspecified method and nearest are still accepted from a client, and
+    // "advanced" has no kernel and is refused.
+    caps->filter_flags = VA_FILTER_INTERPOLATION_BILINEAR;
     caps->num_forward_references = 0;
     caps->num_backward_references = 0;
     caps->input_color_standards = kStandards;

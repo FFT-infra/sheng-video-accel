@@ -395,8 +395,10 @@ scale — sampling where swscale samples. The interpolation method comes from
 `filter_flags`: the unspecified method and the nearest-neighbour flag are both
 the point map, `VA_FILTER_INTERPOLATION_BILINEAR` blends the four samples
 around the destination sample's centre, and the "advanced" method fails the
-picture because no kernel implements it; the pipeline caps advertise exactly
-the two methods that have one. On a P010 surface the blend runs on the ten-bit
+picture because no kernel implements it. The pipeline caps name bilinear: the
+field carries one method rather than a bit set, and nearest | bilinear is the
+advanced value, so advertising "both" would advertise the method with no
+kernel. On a P010 surface the blend runs on the ten-bit
 code and not on the padded word, so a mixed sample keeps the low six bits
 clear. A picture that names the HDR10 tone mapper instead runs
 `iris::vpp::tonemap_hdr10_to_sdr` over the two DMA-BUFs and converts P010
