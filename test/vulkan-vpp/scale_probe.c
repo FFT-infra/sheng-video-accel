@@ -328,26 +328,30 @@ struct push_params {
     uint32_t interp;
 };
 
-// One source sample of a plane as the mirror-then-unrotate order leaves it.
-// `chroma` selects the half-size plane and `comp` the u or v byte of an
-// interleaved pair, so the luma and chroma loops below share one address path.
-static unsigned plane_at(const volatile uint8_t* src, const struct geometry* g, unsigned chroma, unsigned rx,
-    unsigned ry, unsigned comp)
+// The byte offset of a source sample of a plane, from a point of the rotated
+// plane. The caller mirrors, because the two methods mirror different things:
+// the point map reflects the rounded index, the blend reflects the continuous
+// position before it rounds. `chroma` selects the half-size plane and `comp`
+// the u or v byte of an interleaved pair, so the luma and chroma loops share
+// one address path.
+static unsigned plane_offset(const struct geometry* g, unsigned chroma, unsigned rx, unsigned ry, unsigned comp)
 {
     const unsigned w = chroma ? g->crop_w / 2 : g->crop_w;
     const unsigned h = chroma ? g->crop_h / 2 : g->crop_h;
-    const unsigned rw = (g->rot & 1u) ? h : w;
-    const unsigned rh = (g->rot & 1u) ? w : h;
     unsigned sx, sy;
-    mirror_at(g->mirror, rw, rh, &rx, &ry);
     unrotate(g->rot, rx, ry, w, h, &sx, &sy);
-    unsigned off;
     if (chroma)
-        off = g->src_uv + (g->crop_y / 2 + sy) * g->src_stride + g->crop_x * g->bytes + sx * 2 * g->bytes
+        return g->src_uv + (g->crop_y / 2 + sy) * g->src_stride + g->crop_x * g->bytes + sx * 2 * g->bytes
             + comp * g->bytes;
-    else
-        off = (g->crop_y + sy) * g->src_stride + (g->crop_x + sx) * g->bytes;
-    return sample_at(src, off, g->bytes);
+    return (g->crop_y + sy) * g->src_stride + (g->crop_x + sx) * g->bytes;
+}
+
+// The whole sample word at a point of the rotated plane: what the point map
+// compares, byte for byte.
+static unsigned plane_at(const volatile uint8_t* src, const struct geometry* g, unsigned chroma, unsigned rx,
+    unsigned ry, unsigned comp)
+{
+    return sample_at(src, plane_offset(g, chroma, rx, ry, comp), g->bytes);
 }
 
 // The code that sample carries: a P010 word's ten bits at the top, or the byte
@@ -356,20 +360,7 @@ static unsigned plane_at(const volatile uint8_t* src, const struct geometry* g, 
 static unsigned code_plane(const volatile uint8_t* src, const struct geometry* g, unsigned chroma, unsigned rx,
     unsigned ry, unsigned comp)
 {
-    const unsigned w = chroma ? g->crop_w / 2 : g->crop_w;
-    const unsigned h = chroma ? g->crop_h / 2 : g->crop_h;
-    const unsigned rw = (g->rot & 1u) ? h : w;
-    const unsigned rh = (g->rot & 1u) ? w : h;
-    unsigned sx, sy;
-    mirror_at(g->mirror, rw, rh, &rx, &ry);
-    unrotate(g->rot, rx, ry, w, h, &sx, &sy);
-    unsigned off;
-    if (chroma)
-        off = g->src_uv + (g->crop_y / 2 + sy) * g->src_stride + g->crop_x * g->bytes + sx * 2 * g->bytes
-            + comp * g->bytes;
-    else
-        off = (g->crop_y + sy) * g->src_stride + (g->crop_x + sx) * g->bytes;
-    return code_at(src, off, g->bytes);
+    return code_at(src, plane_offset(g, chroma, rx, ry, comp), g->bytes);
 }
 
 // The centre of destination sample `d` of `dst` inside a `src`-sized axis,
@@ -448,7 +439,9 @@ static unsigned check_pixels(const volatile uint8_t* src, const volatile uint8_t
                     want = full;
                 got = code_at(dst, dy * g->dst_stride + dx * bpp, bpp);
             } else {
-                want = plane_at(src, g, 0, point_pick(dx, xinc), point_pick(dy, yinc), 0);
+                unsigned rx = point_pick(dx, xinc), ry = point_pick(dy, yinc);
+                mirror_at(g->mirror, rot_w, rot_h, &rx, &ry);
+                want = plane_at(src, g, 0, rx, ry, 0);
                 got = sample_at(dst, dy * g->dst_stride + dx * bpp, bpp);
             }
             const unsigned diff = got > want ? got - want : want - got;
@@ -480,7 +473,9 @@ static unsigned check_pixels(const volatile uint8_t* src, const volatile uint8_t
                         want = full;
                     got = code_at(dst, d + comp * bpp, bpp);
                 } else {
-                    want = plane_at(src, g, 1, point_pick(cx, cxinc), point_pick(cy, cyinc), comp);
+                    unsigned rx = point_pick(cx, cxinc), ry = point_pick(cy, cyinc);
+                    mirror_at(g->mirror, crw, crh, &rx, &ry);
+                    want = plane_at(src, g, 1, rx, ry, comp);
                     got = comp ? rv : ru;
                 }
                 const unsigned diff = got > want ? got - want : want - got;
