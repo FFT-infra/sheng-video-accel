@@ -33,6 +33,12 @@
 // word holds two (u,v) pairs. No 16-bit storage extension is needed. The plane
 // base and stride are 4-byte aligned by the CAPTURE layout (128-byte pitch,
 // page-aligned data offset), which is what makes a word write legal.
+//
+// The source may be ten bits: `src_wide` says so, and the conversion is the
+// exact one swscale applies — `code >> 2` before any filtering, so a 10-bit
+// code with its low two bits clear round-trips an 8-bit picture unchanged. The
+// driver dispatches p010_scale.spv for a ten-bit destination, so this kernel
+// only ever packs eight-bit words.
 
 #version 450
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -64,12 +70,32 @@ layout(push_constant) uniform Params {
     // into a staircase. The driver picks between them by ratio; a client only
     // ever names bilinear or nearest, and both are honoured as themselves.
     uint interp;
+    // Non-zero when the source is ten bits too, so the kernel converts bit
+    // depth as well as scaling. This module always packs an eight-bit
+    // destination; p010_scale.comp is the one that packs ten.
+    uint src_wide;
 } p;
+
+// One source code as the eight-bit code this kernel packs: a ten-bit source
+// drops its two low bits, an eight-bit one is the code itself.
+uint to_dst(uint code)
+{
+    return p.src_wide != 0u ? code >> 2 : code;
+}
 
 uint src_byte(uint off)
 {
     uint w = s[off >> 2];
     return (w >> ((off & 3u) << 3)) & 255u;
+}
+
+// A source sample as its own code: one byte for eight bits, or the ten bits at
+// the top of a 16-bit word brought down to a plain 0..1023 code.
+uint src_code(uint off)
+{
+    if (p.src_wide == 0u)
+        return src_byte(off);
+    return ((s[off >> 2] >> ((off & 3u) << 3)) & 0xffffu) >> 6;
 }
 
 // 16.16 source step per destination sample, rounded to nearest like swscale.
@@ -115,18 +141,20 @@ uvec2 unrotate(uint rx, uint ry, uint w, uint h)
     return uvec2(rx, ry);
 }
 
-// One source sample of the rotated plane, mirrored, as a source address.
+// One source sample of the rotated plane, mirrored, already converted to the
+// destination's bit depth so the filter weights run on one scale.
 uint luma_at(uint rx, uint ry)
 {
     uvec2 at = unrotate(rx, ry, p.src_w, p.src_h);
-    return src_byte(p.src_y + (p.src_row + at.y) * p.src_stride + p.src_x + at.x);
+    return to_dst(src_code(p.src_y + (p.src_row + at.y) * p.src_stride
+        + (p.src_x + at.x) * (1u + p.src_wide)));
 }
 
 uint chroma_at(uint rx, uint ry, uint c)
 {
     uvec2 at = unrotate(rx, ry, p.src_w >> 1, p.src_h >> 1);
-    uint base = p.src_uv + (p.src_row >> 1) * p.src_stride + p.src_x;
-    return src_byte(base + at.y * p.src_stride + at.x * 2u + c);
+    uint base = p.src_uv + (p.src_row >> 1) * p.src_stride + p.src_x * (1u + p.src_wide);
+    return to_dst(src_code(base + at.y * p.src_stride + (at.x * 2u + c) * (1u + p.src_wide)));
 }
 
 // Continuous position of destination sample `d` of `dst` inside a `src`-sized

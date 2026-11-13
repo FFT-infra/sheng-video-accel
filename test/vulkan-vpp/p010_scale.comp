@@ -13,10 +13,9 @@
 //     xInc = ((src << 16) + (dst >> 1)) / dst
 //     src_index(i) = (i * xInc + (xInc >> 1)) >> 16
 //
-// Both ends have the same bit depth: the driver refuses a picture whose
-// source and output formats differ, because swscale's own 10-to-8 conversion
-// dithers by a count that depends on the sample position and this kernel has
-// no business reproducing that.
+// This kernel packs a ten-bit destination. Its source may be either depth:
+// `src_wide` says which, and an eight-bit source is shifted up by two, which
+// is the exact conversion swscale applies in the other direction.
 //
 // The crop origin is in luma pixels and even. A chroma pair spans two luma
 // columns and four bytes here (one 16-bit u, one 16-bit v), so the origin
@@ -39,15 +38,24 @@ layout(push_constant) uniform Params {
     uint mirror;
     // 0 samples the point map above (swscale's `flags=neighbor`). 1 blends the
     // four samples around the destination sample's centre, which is what
-    // VA_FILTER_INTERPOLATION_BILINEAR asks for.
+    // VA_FILTER_INTERPOLATION_BILINEAR asks for. 2 is the area average and 3
+    // the cubic; 4 lets the driver pick per axis.
     uint interp;
+    // Non-zero when the source is ten bits too. The destination is always ten
+    // here.
+    uint src_wide;
 } p;
 
-// `off` is a byte offset and is always even: P010 samples are 16-bit and the
-// plane bases and strides come from the same 128-byte-aligned layout NV12 uses.
-uint sample16(uint off)
+// One source sample as a ten-bit code: the top ten bits of its 16-bit word
+// when the source is wide, or an eight-bit byte shifted up by two — the exact
+// conversion swscale applies in the other direction, so a 10-bit code whose
+// low two bits are clear round-trips an 8-bit picture unchanged. `off` is a
+// byte offset; a P010 sample is two bytes and an NV12 one is a byte.
+uint to_dst(uint off)
 {
-    return (s[off >> 2] >> ((off & 3u) << 3)) & 0xffffu;
+    if (p.src_wide != 0u)
+        return ((s[off >> 2] >> ((off & 3u) << 3)) & 0xffffu) >> 6;
+    return ((s[off >> 2] >> ((off & 3u) << 3)) & 255u) << 2;
 }
 
 uint step(uint src, uint dst)
@@ -90,19 +98,21 @@ uvec2 unrotate(uint rx, uint ry, uint w, uint h)
     return uvec2(rx, ry);
 }
 
-// One source sample of the rotated plane as a P010 16-bit code. A luma sample
-// is two bytes, a chroma sample is one half of a u,v pair that spans four.
+// One source sample of the rotated plane as a ten-bit code. A wide source's
+// luma sample is two bytes, a chroma sample is one half of a u,v pair that
+// spans four; an eight-bit source is one byte per sample and two per pair.
 uint luma_at(uint rx, uint ry)
 {
     uvec2 at = unrotate(rx, ry, p.src_w, p.src_h);
-    return sample16(p.src_y + (p.src_row + at.y) * p.src_stride + (p.src_x + at.x) * 2u);
+    return to_dst(p.src_y + (p.src_row + at.y) * p.src_stride + (p.src_x + at.x) * (1u + p.src_wide));
 }
 
 uint chroma_at(uint rx, uint ry, uint c)
 {
     uvec2 at = unrotate(rx, ry, p.src_w >> 1, p.src_h >> 1);
-    uint off = p.src_uv + ((p.src_row >> 1) + at.y) * p.src_stride + p.src_x * 2u + at.x * 4u;
-    return sample16(off + c * 2u);
+    uint off = p.src_uv + ((p.src_row >> 1) + at.y) * p.src_stride
+        + (p.src_x + at.x * 2u) * (1u + p.src_wide);
+    return to_dst(off + c * (1u + p.src_wide));
 }
 
 // Continuous position of destination sample `d` of `dst` inside a `src`-sized
@@ -125,11 +135,6 @@ float mirror_pos(float v, uint size, bool on)
 // blend therefore happens on the code, not on the padded word: averaging two
 // padded words and rounding would leave bits in the low six, which is not a
 // legal P010 sample.
-uint code16(uint word)
-{
-    return word >> 6u;
-}
-
 uint pad16(uint code)
 {
     return code << 6u;
@@ -235,7 +240,7 @@ uint luma_px(uint dx, uint row, uvec2 r, uint mx, uint my)
     for (int j = 0; j < ny; ++j) {
         float rowsum = 0.0;
         for (int i = 0; i < nx; ++i)
-            rowsum += xw[i] * float(code16(luma_at(uint(xi[i]), uint(yi[j]))));
+            rowsum += xw[i] * float(luma_at(uint(xi[i]), uint(yi[j])));
         v += yw[j] * rowsum;
     }
     return pad16(uint(clamp(v + 0.5, 0.0, 1023.0)));
@@ -251,7 +256,7 @@ uint chroma_px(uint cx, uint cy, uvec2 r, uint mx, uint my, uint pairs, uint dh,
     for (int j = 0; j < ny; ++j) {
         float rowsum = 0.0;
         for (int i = 0; i < nx; ++i)
-            rowsum += xw[i] * float(code16(chroma_at(uint(xi[i]), uint(yi[j]), c)));
+            rowsum += xw[i] * float(chroma_at(uint(xi[i]), uint(yi[j]), c));
         v += yw[j] * rowsum;
     }
     return pad16(uint(clamp(v + 0.5, 0.0, 1023.0)));

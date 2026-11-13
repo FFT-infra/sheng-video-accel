@@ -63,6 +63,10 @@ struct PushParams {
     uint32_t rotation;
     uint32_t mirror;
     uint32_t interp;
+    // Non-zero when the source is ten bits. The destination's depth is the
+    // module's own — each kernel packs one word width — so only the source
+    // needs saying. The kernel converts bit depth as well as scaling.
+    uint32_t src_wide;
 };
 
 // Must mirror the push-constant block in test/vulkan-vpp/overlay_rgb.comp.
@@ -491,7 +495,7 @@ bool scale_nv12_or_p010(const ScaleJob& job)
     // reason: an odd column would land between two chroma samples.
     if ((job.width | job.height | job.src_width | job.src_height | job.src_x | job.src_y_offset) & 1u)
         return false;
-    if (job.bytes != 1 && job.bytes != 2)
+    if ((job.src_bytes != 1 && job.src_bytes != 2) || (job.dst_bytes != 1 && job.dst_bytes != 2))
         return false;
     if (job.rotation > kRotate270)
         return false;
@@ -505,25 +509,27 @@ bool scale_nv12_or_p010(const ScaleJob& job)
     if (job.interpolation > 1u && job.interpolation != 4u)
         return false;
 
-    // One kernel per sample width. Both read the same push-constant block;
-    // only the word packing differs.
-    const bool wide = job.bytes == 2;
+    // One kernel, selected by the destination's sample width: an eight-bit
+    // destination packs four luma samples per word, a ten-bit one packs two.
+    // The source's depth is a push constant, so either kernel converts depth
+    // as well as scaling.
+    const bool dst_wide = job.dst_bytes == 2;
     const PlaneBuffers buffers = { job.src_fd, job.dst_fd, job.src_size, job.dst_size };
 
     Job j;
     VkPhysicalDevice physical = VK_NULL_HANDLE;
     uint32_t family = 0, memory_type = 0;
-    bool ok = make_job(j, buffers, wide ? kP010ScaleSpv : kNv12ScaleSpv,
-        wide ? kP010ScaleSpvWords : kNv12ScaleSpvWords, sizeof(PushParams), &physical, &family, &memory_type);
+    bool ok = make_job(j, buffers, dst_wide ? kP010ScaleSpv : kNv12ScaleSpv,
+        dst_wide ? kP010ScaleSpvWords : kNv12ScaleSpvWords, sizeof(PushParams), &physical, &family, &memory_type);
     if (ok) {
         const PushParams push = { job.src_stride, job.src_uv, job.dst_stride, job.dst_uv, job.src_y, job.dst_y,
             job.src_x, job.src_y_offset, job.src_width, job.src_height, job.width, job.height, job.rotation,
-            job.mirror, job.interpolation };
+            job.mirror, job.interpolation, job.src_bytes == 2 ? 1u : 0u };
         // One invocation per destination 32-bit word: four luma pixels of one
         // row and two chroma pairs (8-bit), or two luma samples and one chroma
         // pair (P010). The grid covers the luma rows and the half-height
         // chroma plane in one dispatch.
-        const uint32_t words = wide ? (job.width + 1) / 2 : (job.width + 3) / 4;
+        const uint32_t words = dst_wide ? (job.width + 1) / 2 : (job.width + 3) / 4;
         const uint32_t rows = job.height + job.height / 2;
         ok = dispatch(j, &push, sizeof(push), (words + 7) / 8, (rows + 7) / 8, family);
     }

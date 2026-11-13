@@ -159,6 +159,22 @@ advanced_cases="
 64x32:96x48:48x24+8+4:0:0
 "
 
+# Bit-depth conversion: the source is ten bits and the destination is this
+# kernel's eight. The conversion is `code >> 2` before any filtering, which is
+# the exact conversion swscale applies, so the point map stays byte-exact and
+# the weighted methods still agree with the same double model. The crop origin
+# stays even, and it is a luma origin on both ends: a chroma pair spans two
+# luma columns whether the samples are one byte or two.
+down_cases="
+64x32:128x64:-:0:0
+64x32:32x16:-:0:0
+128x72:86x48:-:0:0
+64x32:96x48:48x24+8+4:0:0
+64x32:64x64:-:2:0
+128x72:96x48:-:1:1
+128x72:56x96:-:3:2
+"
+
 failed=0
 printf 'spv_sha256=%s\n' "$spv_hash"
 printf 'render_node=%s\n' "$render"
@@ -249,8 +265,40 @@ for origin in heap msm; do
     done
 done
 
+# A ten-bit source into this kernel's eight-bit destination: the same ratio,
+# crop, rotation and mirror matrix under the point map and the bilinear blend,
+# so the conversion is exercised on both the exact and the weighted path. The
+# constant case is the widest 10-bit code whose low two bits are clear, which
+# is the only kind that survives `code >> 2` without rounding.
+for origin in heap msm; do
+    for c in $down_cases; do
+        old_ifs=$IFS
+        IFS=:
+        set -- $c
+        IFS=$old_ifs
+        src=$1 dst=$2 crop=$3 rot=$4 mirror=${5:-0}
+        set -- "$here/nv12_scale.spv" "$origin" "$render" "$src" "$dst"
+        [ "$crop" = - ] || set -- "$@" "$crop"
+        rc=0
+        "$work/probe" "$@" --rot "$rot" --mirror "$mirror" --down || rc=$?
+        printf 'case=%s %s->%s crop=%s rot=%s mirror=%s down exit=%s\n' "$origin" "$src" "$dst" "$crop" \
+            "$rot" "$mirror" "$rc"
+        [ "$rc" -eq 0 ] || failed=1
+        rc=0
+        "$work/probe" "$@" --rot "$rot" --mirror "$mirror" --interp 1 --down || rc=$?
+        printf 'case=%s %s->%s crop=%s rot=%s mirror=%s down interp=bilinear exit=%s\n' "$origin" "$src" \
+            "$dst" "$crop" "$rot" "$mirror" "$rc"
+        [ "$rc" -eq 0 ] || failed=1
+    done
+    rc=0
+    "$work/probe" "$here/nv12_scale.spv" "$origin" "$render" 64x32 200x100 --interp 1 --constant 1020 --down \
+        || rc=$?
+    printf 'case=%s 64x32->200x100 constant=1020 down interp=bilinear exit=%s\n' "$origin" "$rc"
+    [ "$rc" -eq 0 ] || failed=1
+done
+
 if [ "$failed" -ne 0 ]; then
     echo "FAIL nv12-scale cases are not all byte-exact" >&2
     exit 1
 fi
-echo "PASS nv12-scale cases=$(echo $cases | wc -w) bilinear=$(echo $bilinear_cases | wc -w) area=$(echo $area_cases | wc -w) cubic=$(echo $cubic_cases | wc -w) advanced=$(echo $advanced_cases | wc -w) origins=2 pixels_exact spv=$spv_hash render=$render"
+echo "PASS nv12-scale cases=$(echo $cases | wc -w) bilinear=$(echo $bilinear_cases | wc -w) area=$(echo $area_cases | wc -w) cubic=$(echo $cubic_cases | wc -w) advanced=$(echo $advanced_cases | wc -w) down=$(echo $down_cases | wc -w) origins=2 pixels_exact spv=$spv_hash render=$render"

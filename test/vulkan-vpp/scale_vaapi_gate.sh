@@ -69,32 +69,47 @@ mkdir -p "$work"
 # swscale's point positions, so `scale_vaapi=w=W:h=H` must be byte-identical
 # to `scale=WxH:flags=neighbor` in every case. Equal geometry is not here:
 # FFmpeg's scale_vaapi passes such a frame through without a VPP picture.
-# The P010 list runs the same comparison in 10 bits: same-depth scaling only,
-# since a picture whose two ends disagree on bit depth is refused.
+# The P010 list runs the same comparison in 10 bits. The cross-depth list runs
+# a P010 source into an NV12 output and back; the oracle is the software chain
+# `scale` then `format`, which equals the kernel's convert-then-pick because a
+# point map selects one source sample — converting before or after the pick is
+# the same sample. `scale_vaapi=format=` is what makes FFmpeg ask for the other
+# depth on the output surface.
 cases="64x64:128x128 64x64:96x96 64x64:32x32 128x128:16x16 128x128:200x150 62x34:46x26 1280x720:854x480 1280x720:1920x1080"
 p010_cases="64x64:128x128 128x128:96x96 1280x720:854x480"
+down_cases="64x64:128x128 64x64:32x32 128x128:200x150 1280x720:854x480"
+up_cases="64x64:128x128 64x64:96x96 128x128:200x150 1280x720:854x480"
 
 failed=0
+# `pix` is the source's format, `out` the destination's. They differ only in
+# the cross-depth cases, where the oracle is the software chain in that same
+# order — `scale` then `format` — and equals the kernel's `format`-equivalent
+# shift then point map because a point map picks one source sample: converting
+# before or after the pick is the same sample.
 run_case() {
     pix=$1
     src=$2
     dst=$3
-    sw=${src%x*}
-    sh_=${src#*x}
+    out=${4:-$1}
     dw=${dst%x*}
     dh=${dst#*x}
-    tag=$pix-$src-$dst
-    echo "== $pix $src -> $dst"
+    tag=$pix-$out-$src-$dst
+    echo "== $pix $src -> $out $dst"
     ffmpeg -y -hide_banner -loglevel error -f lavfi -i "testsrc2=size=$src:rate=1" \
         -frames:v 1 -pix_fmt "$pix" -f rawvideo "$work/src-$pix-$src.raw"
     ffmpeg -y -hide_banner -loglevel error -f rawvideo -pix_fmt "$pix" -s "$src" \
-        -i "$work/src-$pix-$src.raw" -vf "scale=$dst:flags=neighbor" -f rawvideo "$work/ref-$tag.raw"
+        -i "$work/src-$pix-$src.raw" -vf "scale=$dst:flags=neighbor" -pix_fmt "$out" \
+        -f rawvideo "$work/ref-$tag.raw"
     ref_hash=$(sha256sum "$work/ref-$tag.raw" | cut -d' ' -f1)
+    # A cross-depth picture asks for the output depth on the scale itself; at
+    # one depth there is nothing to name and the option stays out.
+    scale_opts="w=$dw:h=$dh"
+    [ "$pix" = "$out" ] || scale_opts="$scale_opts:format=$out"
     if ! env LIBVA_DRIVER_NAME=v4l2 $driver_env \
             LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_VPP=1 V4L2_VA_TRACE=1 \
             timeout 120 ffmpeg -y -xerror -hide_banner -loglevel error \
             -vaapi_device "$render" -f rawvideo -pix_fmt "$pix" -s "$src" -i "$work/src-$pix-$src.raw" \
-            -vf "format=$pix,hwupload,scale_vaapi=w=$dw:h=$dh,hwdownload,format=$pix" \
+            -vf "format=$pix,hwupload,scale_vaapi=$scale_opts,hwdownload,format=$out" \
             -f rawvideo "$work/hw-$tag.raw" 2>"$work/$tag.trace"; then
         sed -n '1,40p' "$work/$tag.trace" >&2 || true
         printf 'case=%s exit=1 (scale_vaapi failed)\n' "$tag"
@@ -123,6 +138,15 @@ done
 for c in $p010_cases; do
     run_case p010le "${c%%:*}" "${c#*:}"
 done
+# A ten-bit source into an eight-bit output: the kernel drops the two low bits
+# before it samples, which is the conversion swscale applies.
+for c in $down_cases; do
+    run_case p010le "${c%%:*}" "${c#*:}" nv12
+done
+# And the other way: an eight-bit source into a ten-bit output, `code << 2`.
+for c in $up_cases; do
+    run_case nv12 "${c%%:*}" "${c#*:}" p010le
+done
 [ "$failed" -eq 0 ] || fail "VPP output differs from swscale neighbor for at least one ratio"
 
 echo "== opt-in is required: the same client is refused without V4L2_VA_VPP"
@@ -138,15 +162,18 @@ if grep -q 'entrypoint=videoproc' "$work/default.trace"; then
     fail "videoproc appeared without the opt-in"
 fi
 
-echo "== a picture whose ends disagree on bit depth is refused"
+echo "== an unsupported output format is still refused"
+# The cross-depth pairs above are the ones the kernels implement. A third
+# format has no surface path at all, so the same client must fail rather than
+# quietly produce pixels: this proves the format gate is still a gate.
 if env LIBVA_DRIVER_NAME=v4l2 $driver_env \
         LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_VPP=1 V4L2_VA_TRACE=1 \
         timeout 120 ffmpeg -y -xerror -hide_banner -loglevel error \
         -vaapi_device "$render" -f rawvideo -pix_fmt p010le -s 64x64 \
         -i "$work/src-p010le-64x64.raw" \
-        -vf 'format=p010le,hwupload,scale_vaapi=w=128:h=128,hwdownload,format=nv12' \
+        -vf 'format=p010le,hwupload,scale_vaapi=w=128:h=128:format=yuv420p10le,hwdownload,format=yuv420p10le' \
         -f rawvideo "$work/mixed.raw" 2>"$work/mixed.trace"; then
-    fail "a P010 source scaled to NV12 output ran; the kernels do not convert bit depth"
+    fail "a P010 source scaled to a YUV420P10 output ran; the driver exposes no such surface format"
 fi
 
 printf 'driver_path=%s\n' "$driver_path"
@@ -155,5 +182,7 @@ printf 'driver_sha256=%s\n' "$driver_hash"
 printf 'decoder=%s\n' "$device"
 printf 'cases=%s\n' "$(echo "$cases" | wc -w)"
 printf 'p010_cases=%s\n' "$(echo "$p010_cases" | wc -w)"
+printf 'down_cases=%s\n' "$(echo "$down_cases" | wc -w)"
+printf 'up_cases=%s\n' "$(echo "$up_cases" | wc -w)"
 printf 'oracle=swscale:flags=neighbor byte-identical for every case\n'
-echo "PASS va-vpp ratios=$(echo "$cases" | wc -w) p010=$(echo "$p010_cases" | wc -w) exact driver=$driver_hash"
+echo "PASS va-vpp ratios=$(echo "$cases" | wc -w) p010=$(echo "$p010_cases" | wc -w) down=$(echo "$down_cases" | wc -w) up=$(echo "$up_cases" | wc -w) exact driver=$driver_hash"

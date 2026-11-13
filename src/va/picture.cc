@@ -377,17 +377,16 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         source = surface(d, job.source);
         iris::require(source.get() != target.get(), "VPP source and output are the same surface",
             VA_STATUS_ERROR_INVALID_PARAMETER);
-        // A scale carries the same sample width on both ends: those kernels
-        // do not convert bit depth. The tone mapper is the one converter,
-        // P010 in and NV12 out.
+        // The tone mapper is fixed: P010 in, NV12 out. Everything else is an
+        // NV12 or P010 surface on each end, at either depth, because the scale
+        // kernel converts bit depth with the same exact shift swscale uses.
         if (tone_map)
             iris::require(source->fourcc == VA_FOURCC_P010 && target->fourcc == VA_FOURCC_NV12,
                 "tone mapping needs a P010 source and an NV12 output", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
         else
-            iris::require(source->fourcc == target->fourcc
-                    && (source->fourcc == VA_FOURCC_NV12 || source->fourcc == VA_FOURCC_P010),
-                "VPP input and output must share one NV12 or P010 format",
-                VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+            iris::require((source->fourcc == VA_FOURCC_NV12 || source->fourcc == VA_FOURCC_P010)
+                    && (target->fourcc == VA_FOURCC_NV12 || target->fourcc == VA_FOURCC_P010),
+                "VPP input and output must each be NV12 or P010", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
         // A pending decode has neither a frame nor a stable buffer yet; its
         // pixels arrive at the wait below.
         iris::require(source->target.pending || source->target.frame || source->stable,
@@ -662,8 +661,10 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         sj.width = target->width;
         sj.height = target->height;
         // `base` is the surface the pass reads: the source, or the tone
-        // mapper's NV12 scratch output.
-        sj.bytes = base.layout.fourcc == VA_FOURCC_P010 ? 2 : 1;
+        // mapper's NV12 scratch output. The two ends are named separately, so
+        // a picture that changes bit depth scales and converts in one pass.
+        sj.src_bytes = base.layout.fourcc == VA_FOURCC_P010 ? 2 : 1;
+        sj.dst_bytes = dst.layout.fourcc == VA_FOURCC_P010 ? 2 : 1;
         // The rotation happens before the scale, so a quarter turn swaps the
         // sampled rectangle's dimensions and the point map runs on that.
         sj.rotation = job.rotation;

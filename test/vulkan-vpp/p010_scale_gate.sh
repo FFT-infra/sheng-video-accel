@@ -119,6 +119,22 @@ advanced_cases="
 64x32:96x48:48x24+8+4:0:0
 "
 
+# Bit-depth conversion: the source is eight bits and the destination is this
+# kernel's ten. The conversion is `code << 2` before any filtering, the exact
+# conversion swscale applies in that direction, so the point map stays
+# byte-exact and the weighted methods agree with the same double model. An
+# eight-bit source halves the source pitch and chroma pair size, which is what
+# the address path has to get right.
+up_cases="
+64x32:128x64:-:0:0
+64x32:32x16:-:0:0
+128x72:86x48:-:0:0
+64x32:96x48:48x24+8+4:0:0
+64x32:64x64:-:2:0
+128x72:96x48:-:1:1
+128x72:56x96:-:3:2
+"
+
 failed=0
 printf 'spv_sha256=%s\n' "$spv_hash"
 printf 'render_node=%s\n' "$render"
@@ -205,8 +221,40 @@ for origin in heap msm; do
     done
 done
 
+# An eight-bit source into this kernel's ten-bit destination: the same matrix
+# under the point map and the bilinear blend, so both the exact and the
+# weighted path see the conversion. The constant case is 255, the top of the
+# source's range, which must come out as 1020 — the largest 10-bit code `code
+# << 2` can produce.
+for origin in heap msm; do
+    for c in $up_cases; do
+        old_ifs=$IFS
+        IFS=:
+        set -- $c
+        IFS=$old_ifs
+        src=$1 dst=$2 crop=$3 rot=$4 mirror=${5:-0}
+        set -- "$here/p010_scale.spv" "$origin" "$render" "$src" "$dst"
+        [ "$crop" = - ] || set -- "$@" "$crop"
+        rc=0
+        "$work/probe" "$@" --rot "$rot" --mirror "$mirror" --up || rc=$?
+        printf 'case=%s %s->%s crop=%s rot=%s mirror=%s up exit=%s\n' "$origin" "$src" "$dst" "$crop" \
+            "$rot" "$mirror" "$rc"
+        [ "$rc" -eq 0 ] || failed=1
+        rc=0
+        "$work/probe" "$@" --rot "$rot" --mirror "$mirror" --interp 1 --up || rc=$?
+        printf 'case=%s %s->%s crop=%s rot=%s mirror=%s up interp=bilinear exit=%s\n' "$origin" "$src" \
+            "$dst" "$crop" "$rot" "$mirror" "$rc"
+        [ "$rc" -eq 0 ] || failed=1
+    done
+    rc=0
+    "$work/probe" "$here/p010_scale.spv" "$origin" "$render" 64x32 200x100 --interp 1 --constant 255 --up \
+        || rc=$?
+    printf 'case=%s 64x32->200x100 constant=255 up interp=bilinear exit=%s\n' "$origin" "$rc"
+    [ "$rc" -eq 0 ] || failed=1
+done
+
 if [ "$failed" -ne 0 ]; then
     echo "FAIL p010-scale cases are not all byte-exact" >&2
     exit 1
 fi
-echo "PASS p010-scale cases=$(echo $cases | wc -w) bilinear=$(echo $bilinear_cases | wc -w) area=$(echo $area_cases | wc -w) cubic=$(echo $cubic_cases | wc -w) advanced=$(echo $advanced_cases | wc -w) origins=2 pixels_exact spv=$spv_hash render=$render"
+echo "PASS p010-scale cases=$(echo $cases | wc -w) bilinear=$(echo $bilinear_cases | wc -w) area=$(echo $area_cases | wc -w) cubic=$(echo $cubic_cases | wc -w) advanced=$(echo $advanced_cases | wc -w) up=$(echo $up_cases | wc -w) origins=2 pixels_exact spv=$spv_hash render=$render"

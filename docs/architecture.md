@@ -404,7 +404,14 @@ a client that wants the best one asks for. Every method is written as up to
 four (index, weight) taps per axis and evaluated as one outer product, so the
 two axes are chosen independently and the separable order does not change the
 result. On a P010 surface the blend runs on the ten-bit code and not on the
-padded word, so a mixed sample keeps the low six bits clear. A picture that names the HDR10 tone mapper instead runs
+padded word, so a mixed sample keeps the low six bits clear. The kernel is
+selected by the destination's sample width, and the source's depth is a push
+constant: a source of the other depth is converted before any filtering, which
+is `code >> 2` coming down to eight bits and `code << 2` going up to ten — the
+conversion swscale applies, exact in both directions for a picture whose low
+two bits are clear. Because a point map picks one source sample, converting
+before the pick and converting after it are the same sample, so a cross-depth
+picture is byte-identical to `scale` then `format`. A picture that names the HDR10 tone mapper instead runs
 `iris::vpp::tonemap_hdr10_to_sdr` over the two DMA-BUFs and converts P010
 BT.2020/PQ to NV12 BT.709 at the surface's own size; a picture
 whose second pipeline buffer names a `VABlendState` runs
@@ -679,7 +686,9 @@ DMA-BUF origins and a matrix of ratios, crops and rotations;
 including a crop away from the origin, which is the only geometry that
 separates a chroma pair at four bytes from one at two;
 `test/vulkan-vpp/scale_vaapi_gate.sh` checks `scale_vaapi` + `hwdownload`
-frames against swscale over the same ratios;
+frames against swscale over the same ratios, in both directions across bit
+depth: a P010 source into an NV12 output and an NV12 source into a P010 output
+must match `scale` then `format` byte for byte;
 `test/vulkan-vpp/transpose_vaapi_gate.sh` checks every direction the pipeline
 caps advertise — three quarter turns, a horizontal and a vertical mirror, and a
 quarter turn with each — against the software filters, in NV12 and P010. Both

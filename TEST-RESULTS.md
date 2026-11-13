@@ -7960,3 +7960,61 @@ reference at any ratio — like the bilinear path, its evidence is the tap model
 plus the endpoints, not an equivalence with a reference filter. Full-range
 output is checked against the same model that defines it; no client was
 measured consuming a full-range frame from this driver.
+
+## Bit-depth conversion in the VPP scale (2026-11-13, branch `feat/absorb-upstream-advantages`)
+
+The processor refused a picture whose two ends disagreed on bit depth, on the
+reasoning that swscale's 10-to-8 path dithers by a count that depends on the
+sample position. That reasoning does not hold for the default path: FFmpeg
+picks the dither from `sws_flags`, and with the point map and no dither flag
+the conversion is a plain `code >> 2`. Measured on the host before any code
+changed (`~/Lab/Bridge/tmp/bitdepth2/`): a P010 frame converted to NV12 differs
+from `(word >> 6) >> 2` on 0 of 4096 luma and 0 of 2048 chroma samples, and
+`code << 2` in the other direction is exact for a code whose low two bits are
+clear.
+
+Both kernels now take a `src_wide` push constant and convert before any
+filtering, so the destination's depth is the module's own — `nv12_scale.spv`
+packs four samples per word, `p010_scale.spv` two — and the source's is free.
+A point map picks one source sample, so converting before the pick and after
+it are the same sample; that is why a cross-depth picture is byte-identical to
+`scale` then `format` rather than merely close.
+
+### The gates
+
+Source `8686e62` with this change in the working tree (`source_dirty=1`),
+driver `11ce0c15…` (build-tree override, `LIBVA_DRIVERS_PATH=build/src`),
+boot `4b73926c…`, kernel `7.2.6-sm8550-g42f3b40-iris1`, module `b90bd823…`,
+decoder resolved by `iris_driver` QUERYCAP to `/dev/video0`, encoder to
+`/dev/video1`.
+
+| gate | run | cases | verdict |
+| --- | --- | --- | --- |
+| `nv12_scale_gate.sh` | `135141Z` | 27 + 12 bilinear + 6 area + 5 cubic + 5 advanced + 7 down, 2 origins | `PASS`, exact |
+| `p010_scale_gate.sh` | `135224Z` | 12 + 9 bilinear + 6 area + 5 cubic + 5 advanced + 7 up, 2 origins | `PASS`, exact |
+| `scale_vaapi_gate.sh` | `135601Z` | 8 NV12 + 3 P010 + 4 down + 4 up | `PASS`, byte-identical to swscale |
+
+The `down` list runs a P010 source into the eight-bit kernel and the `up` list
+an NV12 source into the ten-bit one, each under the point map and the bilinear
+blend, over ratios, crops, rotations and mirrors, against a model that applies
+the same shift. The constant cases bracket them: 1020 is the widest 10-bit
+code that survives `code >> 2` without rounding and must come out as 255, and
+255 is the top of the eight-bit range and must come out as 1020.
+
+The four VA-level down cases and the four up cases are the ones a client can
+reach: `scale_vaapi=w=W:h=H:format=` asks FFmpeg for the other depth on the
+output surface, and every output frame matched `scale` then `format` byte for
+byte, including a 1280x720 frame each way. An unsupported output format
+(`yuv420p10le`, which no surface path in this driver exposes) is still refused,
+so the format gate is still a gate.
+
+### What this does not prove
+
+The conversion is proven for the exact shift and nothing else. A client that
+sets `SWS_DITHER_AUTO` or a dithering flag on the software side gets a
+different picture than this driver produces, and no FFmpeg run here exercised
+that. FFmpeg's `scale_vaapi` cannot name a dither, so the mismatch is not
+reachable through it; it is reachable for a client comparing against a
+software chain that dithered. The chroma planes go through the same shift
+without the chroma-specific rounding swscale applies when the two depths have
+different chroma sample positions, which NV12 and P010 do not.

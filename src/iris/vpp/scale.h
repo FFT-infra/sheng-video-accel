@@ -37,9 +37,12 @@ struct ScaleJob {
     // applied to the rotated rectangle and before the scale, which is the order
     // the VA pipeline buffer documents.
     uint32_t mirror = 0;
-    // Bytes per sample on both ends: 1 for NV12, 2 for P010. Source and
-    // destination must agree; the kernels do not convert bit depth.
-    uint32_t bytes = 1;
+    // Bytes per sample on each end: 1 for eight bits, 2 for ten (P010). They
+    // are independent, so the kernel converts bit depth as well as scaling —
+    // the same exact conversion swscale applies, `code << 2` up and `code >> 2`
+    // down, which round-trips a picture whose low two bits are clear.
+    uint32_t src_bytes = 1;
+    uint32_t dst_bytes = 1;
     // VA_FILTER_INTERPOLATION_* as the kernel sees it. 0 is the point map
     // (swscale's `flags=neighbor`), 1 blends the four samples around the
     // destination sample's centre, 4 is VA's "advanced": the driver picks per
@@ -152,7 +155,7 @@ struct OverlayRgbJob {
 // Chromium's GPU-sandbox init is not allowed (docs/architecture.md §7).
 bool compiled_in();
 
-// Dispatch the pinned kernel (NV12 or P010, selected by ScaleJob::bytes) over
+// Dispatch the pinned kernel (one per destination sample width) over
 // the two imported DMA-BUFs. Returns false when the backend is unavailable or
 // the device rejected the job; the VA layer must then fail the picture and
 // never publish partial pixels.
