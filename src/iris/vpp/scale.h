@@ -13,16 +13,19 @@
 namespace iris {
 namespace vpp {
 
-// One nearest-neighbour NV12 scale at any ratio. Geometry is in bytes and
-// follows Layout (src/iris/slots.h): chroma_offset is the byte offset of the
-// UV plane, data_offset is the luma start. src_width/src_height and
-// width/height are the visible source and destination sizes, both even (NV12
-// stores one chroma pair per 2x2 luma block).
+// One nearest-neighbour NV12 scale at any ratio, from an optional crop of the
+// source. Geometry is in bytes and follows Layout (src/iris/slots.h):
+// chroma_offset is the byte offset of the UV plane, data_offset is the luma
+// start. src_x/src_y_offset is where the sampled rectangle begins inside the
+// source surface; src_width/src_height is that rectangle's size, and
+// width/height is the destination. All four are even (NV12 stores one chroma
+// pair per 2x2 luma block).
 struct ScaleJob {
     int src_fd = -1, dst_fd = -1;
     uint32_t src_size = 0, dst_size = 0;
     uint32_t src_stride = 0, src_uv = 0, dst_stride = 0, dst_uv = 0;
     uint32_t src_y = 0, dst_y = 0;
+    uint32_t src_x = 0, src_y_offset = 0;
     uint32_t src_width = 0, src_height = 0;
     uint32_t width = 0, height = 0;
 };

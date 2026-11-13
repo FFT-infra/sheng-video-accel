@@ -65,19 +65,32 @@ cc -std=c11 -O2 -Wall -Wextra -x c "$here/nv12_scale_probe.c" \
 # Ratios a client can ask for: upscale, downscale, identity, integral and
 # fractional steps. The oracle is the same integer map swscale uses, so a
 # green case is a byte-level equivalence with `scale=WxH:flags=neighbor`.
+# The last four cases add a crop (`src:dst:WxH+X+Y`), which is what a VA
+# surface region means: the sampled rectangle starts at X,Y inside the source.
 cases="64x32:128x64 64x32:96x48 64x32:32x16 64x32:42x22 64x32:200x100 62x34:62x34 128x72:86x48"
+crop_cases="64x32:128x64:32x16+0+0 64x32:96x48:48x24+8+4 64x32:32x16:16x16+16+8 128x72:86x48:96x40+16+16"
 
 failed=0
 printf 'spv_sha256=%s\n' "$spv_hash"
 printf 'render_node=%s\n' "$render"
 for origin in heap msm; do
     echo "== origin: $origin"
-    for c in $cases; do
+    for c in $cases $crop_cases; do
         src=${c%%:*}
-        dst=${c#*:}
+        rest=${c#*:}
+        dst=${rest%%:*}
+        crop=''
+        case "$rest" in
+            *:*) crop=${rest#*:} ;;
+        esac
         rc=0
-        "$work/probe" "$here/nv12_scale.spv" "$origin" "$render" "$src" "$dst" || rc=$?
-        printf 'case=%s %s->%s exit=%s\n' "$origin" "$src" "$dst" "$rc"
+        if [ -n "$crop" ]; then
+            "$work/probe" "$here/nv12_scale.spv" "$origin" "$render" "$src" "$dst" "$crop" || rc=$?
+        else
+            "$work/probe" "$here/nv12_scale.spv" "$origin" "$render" "$src" "$dst" || rc=$?
+        fi
+        printf 'case=%s %s->%s%s exit=%s\n' "$origin" "$src" "$dst" \
+            "$([ -n "$crop" ] && echo " crop=$crop")" "$rc"
         [ "$rc" -eq 0 ] || failed=1
     done
 done
@@ -86,4 +99,4 @@ if [ "$failed" -ne 0 ]; then
     echo "FAIL nv12-scale ratios are not all byte-exact" >&2
     exit 1
 fi
-echo "PASS nv12-scale ratios=$(echo $cases | wc -w) origins=2 pixels_exact spv=$spv_hash render=$render"
+echo "PASS nv12-scale ratios=$(echo $cases | wc -w) crops=$(echo $crop_cases | wc -w) origins=2 pixels_exact spv=$spv_hash render=$render"

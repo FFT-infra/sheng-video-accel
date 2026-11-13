@@ -37,9 +37,11 @@ int dup_fd(int fd)
     return fcntl(fd, F_DUPFD_CLOEXEC, 0);
 }
 
+// Must mirror the push-constant block in test/vulkan-vpp/nv12_scale.comp.
 struct PushParams {
     uint32_t src_stride, src_uv, dst_stride, dst_uv;
     uint32_t src_y, dst_y;
+    uint32_t src_x, src_row;
     uint32_t src_width, src_height, dst_width, dst_height;
 };
 
@@ -321,7 +323,7 @@ bool dispatch(Job& j, const ScaleJob& job, uint32_t family, uint32_t memory_type
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, j.pipeline);
     vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, j.pipeline_layout, 0, 1, &set, 0, nullptr);
     PushParams push = { job.src_stride, job.src_uv, job.dst_stride, job.dst_uv, job.src_y, job.dst_y,
-        job.src_width, job.src_height, job.width, job.height };
+        job.src_x, job.src_y_offset, job.src_width, job.src_height, job.width, job.height };
     vkCmdPushConstants(command, j.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
     // One invocation per destination 32-bit word: four luma pixels of one row,
     // or two chroma pairs of one chroma row. The grid covers the luma rows and
@@ -357,8 +359,9 @@ bool scale_nv12(const ScaleJob& job)
     if (job.src_fd < 0 || job.dst_fd < 0 || !job.width || !job.height || !job.src_width || !job.src_height)
         return false;
     // NV12 carries one chroma pair per 2x2 luma block on both ends, and the
-    // word writes assume it.
-    if ((job.width | job.height | job.src_width | job.src_height) & 1u)
+    // word writes assume it. The crop origin has to be even for the same
+    // reason: an odd column would land between two chroma samples.
+    if ((job.width | job.height | job.src_width | job.src_height | job.src_x | job.src_y_offset) & 1u)
         return false;
 
     Job j;

@@ -384,15 +384,17 @@ those formats).
 The video processor is a fourth context kind but not a fourth node:
 `VAProfileNone` / `VAEntrypointVideoProc` opens no V4L2 node and owns no
 session. `vaEndPicture` resolves the two surface DMA-BUFs and runs the pinned
-NV12 nearest kernel at the requested ratio, sampling where swscale samples;
-every other pipeline operation (crop, rotation, blending, filters, colour
+NV12 nearest kernel at the requested ratio over the surface region the client
+names, sampling where swscale samples;
+every other pipeline operation (rotation, blending, filters, colour
 conversion) fails the picture instead of being dropped. The entrypoint is advertised only when the
 build found Vulkan and the client set `V4L2_VA_VPP` (§6), so an installed
 decode/encode client sees the surface it qualified against. The kernel and the
 VA surface path are gated separately in §9:
 `test/vulkan-vpp/nv12_scale_gate.sh` checks every pixel of the primitive and
 `test/vulkan-vpp/scale_vaapi_gate.sh` checks a `scale_vaapi` + `hwdownload`
-frame against swscale.
+frame against swscale; `test/vulkan-vpp/crop_vaapi_gate.sh` checks a
+`surface_region` picture against `crop,scale=...:flags=neighbor`.
 
 ## 6. Environment surface
 

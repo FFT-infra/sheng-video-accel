@@ -551,9 +551,10 @@ The VA plumbing that WP4 listed as remaining is implemented on
 query hooks, `VAProfileNone` + `VAEntrypointVideoProc` config and context
 behind `V4L2_VA_VPP`, buffer types 41 and 42, and `endPicture` dispatching the
 pinned SPIR-V over the source and output surface DMA-BUFs. A VideoProc
-context opens no node and owns no session. Everything the kernel does not do
-(crop, rotation, blending, filters, colour conversion, a second pipeline
-buffer in one picture) fails the picture with a VA status instead of being
+context opens no node and owns no session. It samples inside the surface region the client names, so a crop is a
+first-class picture rather than a post-step. Everything the kernel does not
+do (rotation, blending, filters, colour conversion, a second pipeline buffer
+in one picture) fails the picture with a VA status instead of being
 approximated. Vulkan stays an optional meson dependency, so CI builds the stub
 and advertises nothing.
 

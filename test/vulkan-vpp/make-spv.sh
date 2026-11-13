@@ -6,8 +6,8 @@
 # the pin at run time instead of compiling on the device.
 #
 #   copy.spv          flat read/write prereq (prereq.sh / probe.c)
-#   nv12_scale.spv    NV12 2x scale primitive (nv12_scale_gate.sh /
-#                     nv12_scale_probe.c)
+#   nv12_scale.spv    NV12 nearest scale with crop (nv12_scale_gate.sh /
+#                     nv12_scale_probe.c, crop_vaapi_gate.sh)
 #
 # Usage: test/vulkan-vpp/make-spv.sh [-c]
 #   -c  check that both current .spv files match a fresh compile and

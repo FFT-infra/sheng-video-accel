@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 //
-// NV12 nearest-neighbour scale for the VA video processor. The two DMA-BUFs
+// NV12 nearest-neighbour scale (optionally from a crop) for the VA video
+// processor. The two DMA-BUFs
 // are bound as flat uint[] storage buffers and every address (stride, luma and
 // chroma offsets, source and destination geometry) comes from push constants,
 // so this is the same kernel the driver dispatches, not a shader with one test
@@ -31,6 +32,10 @@ layout(set = 0, binding = 1, std430) writeonly buffer Dst { uint d[]; };
 layout(push_constant) uniform Params {
     uint src_stride, src_uv, dst_stride, dst_uv;
     uint src_y, dst_y;
+    // Crop origin in source pixels. VA hands a surface region to the
+    // processor, and the sampled rectangle starts there; both coordinates
+    // are even because a 4:2:0 chroma sample covers two luma columns.
+    uint src_x, src_row;
     uint src_w, src_h, dst_w, dst_h;
 } p;
 
@@ -65,13 +70,13 @@ void main()
 
     if (row < p.dst_h) {
         uint inc = step(p.src_w, p.dst_w);
-        uint base = p.src_y + pick(row, step(p.src_h, p.dst_h)) * p.src_stride;
+        uint base = p.src_y + (p.src_row + pick(row, step(p.src_h, p.dst_h))) * p.src_stride;
         uint packed = 0u;
         for (uint k = 0u; k < 4u; ++k) {
             uint dx = word * 4u + k;
             // Columns past the visible width land in the row padding; clamp so
             // the read stays inside the source plane.
-            uint sx = pick(min(dx, p.dst_w - 1u), inc);
+            uint sx = p.src_x + pick(min(dx, p.dst_w - 1u), inc);
             packed |= src_byte(base + sx) << (k * 8u);
         }
         d[(p.dst_y + row * p.dst_stride + word * 4u) >> 2] = packed;
@@ -79,12 +84,14 @@ void main()
         uint cy = row - p.dst_h;
         uint cw = p.dst_w >> 1;
         uint inc = step(p.src_w >> 1, cw);
-        uint srow = pick(cy, step(p.src_h >> 1, p.dst_h >> 1));
+        // The crop origin is even, so the chroma origin is exactly src_x/2
+        // pairs — that is, src_x bytes into the interleaved row.
+        uint srow = (p.src_row >> 1) + pick(cy, step(p.src_h >> 1, p.dst_h >> 1));
         uint base = p.src_uv + srow * p.src_stride;
         uint packed = 0u;
         for (uint k = 0u; k < 2u; ++k) {
             uint cx = word * 2u + k;
-            uint sx = pick(min(cx, cw - 1u), inc) * 2u;
+            uint sx = p.src_x + pick(min(cx, cw - 1u), inc) * 2u;
             packed |= src_byte(base + sx) << (k * 16u);
             packed |= src_byte(base + sx + 1u) << (k * 16u + 8u);
         }

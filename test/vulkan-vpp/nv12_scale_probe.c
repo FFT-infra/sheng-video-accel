@@ -49,6 +49,9 @@ static unsigned align_up(unsigned v, unsigned a)
 
 struct geometry {
     unsigned src_w, src_h, dst_w, dst_h;
+    // The rectangle the kernel samples: the whole source unless a crop is
+    // given. src_w/src_h is the surface; crop_w/crop_h the region inside it.
+    unsigned crop_x, crop_y, crop_w, crop_h;
     unsigned src_stride, src_uv, src_size;
     unsigned dst_stride, dst_uv, dst_size;
 };
@@ -60,6 +63,10 @@ static struct geometry geometry(unsigned src_w, unsigned src_h, unsigned dst_w, 
     g.src_h = src_h;
     g.dst_w = dst_w;
     g.dst_h = dst_h;
+    g.crop_x = 0;
+    g.crop_y = 0;
+    g.crop_w = src_w;
+    g.crop_h = src_h;
     g.src_stride = align_up(src_w, 128);
     g.src_uv = g.src_stride * align_up(src_h, 32);
     // stable_layout rounds the total up to 4 KiB; the DMA-BUF the driver
@@ -200,6 +207,7 @@ static VkDeviceMemory import_dmabuf(VkDevice dev, uint32_t mtype, VkMemoryRequir
 struct push_params {
     uint32_t src_stride, src_uv, dst_stride, dst_uv;
     uint32_t src_y, dst_y;
+    uint32_t src_x, src_row;
     uint32_t src_w, src_h, dst_w, dst_h;
 };
 
@@ -210,12 +218,12 @@ struct push_params {
 static unsigned check_pixels(const volatile uint8_t* src, const volatile uint8_t* dst, const struct geometry* g)
 {
     unsigned bad = 0;
-    const unsigned yinc = point_step(g->src_h, g->dst_h);
-    const unsigned xinc = point_step(g->src_w, g->dst_w);
+    const unsigned yinc = point_step(g->crop_h, g->dst_h);
+    const unsigned xinc = point_step(g->crop_w, g->dst_w);
     for (unsigned dy = 0; dy < g->dst_h; dy++) {
-        unsigned so = point_pick(dy, yinc) * g->src_stride;
+        unsigned so = (g->crop_y + point_pick(dy, yinc)) * g->src_stride;
         for (unsigned dx = 0; dx < g->dst_w; dx++) {
-            uint8_t want = src[so + point_pick(dx, xinc)];
+            uint8_t want = src[so + g->crop_x + point_pick(dx, xinc)];
             uint8_t got = dst[dy * g->dst_stride + dx];
             if (got != want) {
                 if (bad < 8)
@@ -224,13 +232,13 @@ static unsigned check_pixels(const volatile uint8_t* src, const volatile uint8_t
             }
         }
     }
-    const unsigned cyinc = point_step(g->src_h / 2, g->dst_h / 2);
-    const unsigned cxinc = point_step(g->src_w / 2, g->dst_w / 2);
+    const unsigned cyinc = point_step(g->crop_h / 2, g->dst_h / 2);
+    const unsigned cxinc = point_step(g->crop_w / 2, g->dst_w / 2);
     for (unsigned cy = 0; cy < g->dst_h / 2; cy++) {
-        unsigned su = g->src_uv + point_pick(cy, cyinc) * g->src_stride;
+        unsigned su = g->src_uv + (g->crop_y / 2 + point_pick(cy, cyinc)) * g->src_stride;
         unsigned du = g->dst_uv + cy * g->dst_stride;
         for (unsigned cx = 0; cx < g->dst_w / 2; cx++) {
-            unsigned pair = su + point_pick(cx, cxinc) * 2;
+            unsigned pair = su + g->crop_x + point_pick(cx, cxinc) * 2;
             uint8_t wu = src[pair], wv = src[pair + 1];
             uint8_t gu = dst[du + cx * 2], gv = dst[du + cx * 2 + 1];
             if (gu != wu || gv != wv) {
@@ -246,7 +254,9 @@ static unsigned check_pixels(const volatile uint8_t* src, const volatile uint8_t
 int main(int argc, char** argv)
 {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <nv12_scale.spv> <heap|msm> [render-node] [WxH WxH]\n", argv[0]);
+        fprintf(stderr,
+            "usage: %s <nv12_scale.spv> <heap|msm> [render-node] [WxH WxH [CROP_WxH+X+Y]]\n",
+            argv[0]);
         return 2;
     }
     const char* origin = argv[2];
@@ -261,7 +271,23 @@ int main(int argc, char** argv)
         fprintf(stderr, "FAIL sizes must be even and non-zero (NV12)\n");
         return 2;
     }
-    const struct geometry g = geometry(src_w, src_h, dst_w, dst_h);
+    struct geometry g = geometry(src_w, src_h, dst_w, dst_h);
+    if (argc >= 7) {
+        unsigned crop_w = 0, crop_h = 0, crop_x = 0, crop_y = 0;
+        if (sscanf(argv[6], "%ux%u+%u+%u", &crop_w, &crop_h, &crop_x, &crop_y) != 4) {
+            fprintf(stderr, "FAIL crop must be WxH+X+Y\n");
+            return 2;
+        }
+        if (!crop_w || !crop_h || ((crop_w | crop_h | crop_x | crop_y) & 1u)
+            || crop_x + crop_w > src_w || crop_y + crop_h > src_h) {
+            fprintf(stderr, "FAIL crop must be even, non-empty and inside the source\n");
+            return 2;
+        }
+        g.crop_w = crop_w;
+        g.crop_h = crop_h;
+        g.crop_x = crop_x;
+        g.crop_y = crop_y;
+    }
 
     int (*alloc)(size_t, const char*);
     if (strcmp(origin, "heap") == 0)
@@ -464,8 +490,10 @@ int main(int argc, char** argv)
         .dst_uv = g.dst_uv,
         .src_y = 0,
         .dst_y = 0,
-        .src_w = g.src_w,
-        .src_h = g.src_h,
+        .src_x = g.crop_x,
+        .src_row = g.crop_y,
+        .src_w = g.crop_w,
+        .src_h = g.crop_h,
         .dst_w = g.dst_w,
         .dst_h = g.dst_h };
     vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
@@ -496,8 +524,8 @@ int main(int argc, char** argv)
         fprintf(stderr, "FAIL origin=%s pixels_wrong=%u src_changed=%u\n", origin, bad, changed);
         return 1;
     }
-    printf("PASS origin=%s scale=%ux%u->%ux%u exact bytes=%u src=unchanged\n", origin, g.src_w, g.src_h,
-        g.dst_w, g.dst_h, g.dst_size);
+    printf("PASS origin=%s scale=%ux%u->%ux%u crop=%ux%u+%u+%u exact bytes=%u src=unchanged\n", origin,
+        g.src_w, g.src_h, g.dst_w, g.dst_h, g.crop_w, g.crop_h, g.crop_x, g.crop_y, g.dst_size);
 
     vkDestroyFence(dev, fence, NULL);
     vkFreeCommandBuffers(dev, cmdp, 1, &cb);

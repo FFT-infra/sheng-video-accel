@@ -57,6 +57,18 @@ if va_drm_dep.found()
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
 
+# Hardware probe, built but not registered as a meson test: submits one
+# VideoProc picture with a surface region. FFmpeg has no crop_vaapi filter, so
+# this is the only client that can ask the driver for a crop; the gate compares
+# the result with `crop,scale=...:flags=neighbor`.
+if va_drm_dep.found()
+  executable(
+    'iris-va-vpp-probe',
+    'iris-va-vpp-probe.cc',
+    dependencies: [va_drm_dep],
+    cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+endif
+
 # Hardware probe, built but not registered as a meson test: it needs the
 # encoder node. Answers whether the loop-filter controls exist and whether a
 # deblocking request the firmware cannot honour is refused, which is the §10

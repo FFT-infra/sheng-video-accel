@@ -188,6 +188,7 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
     const Context::VppJob job = *c.vpp;
 
     Pixels src, dst;
+    VARectangle crop = {};
     // Keep the source alive across the dispatch: the fd captured below is
     // closed when its Surface dies, and a client that destroys the source
     // while this picture is running must not pull the buffer out from under
@@ -203,12 +204,18 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         iris::require(source->target.frame || source->stable, "VPP source holds no pixels",
             VA_STATUS_ERROR_OPERATION_FAILED);
 
-        // The kernel scales the whole frame and has no crop, so a region that
-        // is not the whole surface is a picture it cannot produce.
+        // A surface region is the crop: the kernel samples inside that
+        // rectangle and scales it to the whole output. Its origin and size
+        // must be even, because a 4:2:0 chroma sample covers a 2x2 luma block.
+        crop = { 0, 0, static_cast<uint16_t>(source->width), static_cast<uint16_t>(source->height) };
         if (job.region_set)
-            iris::require(job.region.x == 0 && job.region.y == 0 && job.region.width == source->width
-                    && job.region.height == source->height,
-                "VPP processes the whole source surface", VA_STATUS_ERROR_INVALID_PARAMETER);
+            crop = job.region;
+        iris::require(crop.x >= 0 && crop.y >= 0 && crop.width > 0 && crop.height > 0
+                && static_cast<uint32_t>(crop.x) + static_cast<uint32_t>(crop.width) <= source->width
+                && static_cast<uint32_t>(crop.y) + static_cast<uint32_t>(crop.height) <= source->height,
+            "VPP source region is outside the surface", VA_STATUS_ERROR_INVALID_PARAMETER);
+        iris::require(!((crop.x | crop.y | crop.width | crop.height) & 1),
+            "VPP source region must be even", VA_STATUS_ERROR_INVALID_PARAMETER);
         if (job.output_region_set)
             iris::require(job.output_region.x == 0 && job.output_region.y == 0
                     && job.output_region.width == target->width && job.output_region.height == target->height,
@@ -234,8 +241,10 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
     sj.dst_uv = dst.layout.chroma_offset();
     sj.src_y = src.layout.data_offset;
     sj.dst_y = dst.layout.data_offset;
-    sj.src_width = source->width;
-    sj.src_height = source->height;
+    sj.src_x = static_cast<uint32_t>(crop.x);
+    sj.src_y_offset = static_cast<uint32_t>(crop.y);
+    sj.src_width = static_cast<uint32_t>(crop.width);
+    sj.src_height = static_cast<uint32_t>(crop.height);
     sj.width = target->width;
     sj.height = target->height;
     if (!iris::vpp::scale_nv12(sj)) {
