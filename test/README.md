@@ -23,6 +23,7 @@ On the tablet, run the following verification gates:
 - `test/remote/gate.sh -- command`: runs any target gate remotely under the experiment guard and writes `summary.json` (schema `qualcomm-iris-vaapi/target-run-v1`) with the boot, kernel, module hash, driver hash, resolved decoder and encoder names, exit status and guard state, plus the command's captured output in `guard/command.stdout`. Set `IRIS_REMOTE_HOST`; it does not deploy, so the recorded hashes are what the target actually holds. The command is landed in a per-run script and read by path: a heredoc fed to the guard's backgrounded `sh -s` child gets `/dev/null` for stdin and would run nothing while still reporting exit 0.
 - `test/vulkan-vpp/prereq.sh`: VPP prerequisite gate. On the target it builds a SPIR-V compute pipeline, imports two DMA-BUF fds as Vulkan external memory (one read, one written with coherent CPU read-back) and checks exact shader output for both DMA-BUF origins the driver uses (MSM GEM PRIME fd and system DMA heap). Run it through `test/remote/gate.sh`. Needs a Vulkan ICD, `libvulkan`, libdrm + `msm_drm.h`, Vulkan headers, a system DMA heap, an MSM render node, `cc` and `pkg-config`; CI has no GPU, so `run-static-checks.sh` only verifies the `SHA256SUMS` hash pin and script syntax. `make-spv.sh` regenerates both SPIR-V binaries on a host with `glslangValidator`.
 - `test/vulkan-vpp/nv12_scale_gate.sh`: NV12 scale primitive gate. The prereq above proves a flat DMA-BUF can be a compute source and destination; this one proves the NV12 plane math a real VPP output needs. It dispatches `nv12_scale.spv` over two imported DMA-BUFs laid out exactly like the Iris CAPTURE NV12 buffers (128-byte stride, 32-row luma, 16-row chroma behind luma) and checks **every** destination byte against a CPU oracle that uses swscale's point positions, over a ratio matrix and both DMA-BUF origins, with a distinct byte per source address so a wrong stride, offset, subsample or sample position cannot pass. Run it through `test/remote/gate.sh`. Needs the same target prerequisites plus `spirv-val`; CI has no GPU, so it stays out of `meson test` and `run-static-checks.sh` only pins `nv12_scale.spv`, checks script syntax, and asserts the per-pixel oracle is intact. This is evidence for the VPP kernel only: it advertises no `VAProfileNone` / `VAEntrypointVideoProc` and changes no capability.
+- `test/iris-va-image-gate.sh`: the upload half of the image API. Runs `iris-va-image-probe` (full-frame and regional `vaPutImage`, a derived-image write, and the three refusals) and then four `hwupload,hwdownload` round trips through FFmpeg — NV12 at 64x64 and 128x72, P010 at 64x64, NV12 at 32x32 — each compared byte for byte with the input. `IRIS_GATE_INSTALLED=1` runs the same cases from `/usr/lib64/dri` with no `LIBVA_DRIVERS_PATH`; `IRIS_IMAGE_PROBE` names the probe binary when the build tree is not beside the driver.
 - `test/iris-gstreamer-gate.sh --clip ...`: the client-side GStreamer half. Checks that libgstva's vendor allowlist is what keeps `gst-inspect-1.0 va` at 0 features and that `GST_VA_ALL_DRIVERS=1` registers the elements, then compares `vaav1dec` frame hashes with the software decode and decodes back what `vah264enc` and `vah265enc` produced. The decode comparison muxes the element's I420; a raw `fdsink` dump is not comparable because it ignores `GstVideoMeta`'s plane offset.
 - `test/iris-matrix.sh`: framemd5 output equivalence against software.
 - `test/iris-real-clip-gate.sh`: real 120-frame AV1 clip and the in-context DRC clip against software framemd5, with the session's completion and publish counts. Needs `IRIS_REAL_CLIP_DIR` holding the clips and software baselines; opt-in from `test/iris-hardware-suite.sh`. `IRIS_REAL_CLIP_SET=4k` runs only the short 3840x2160 AV1 Import probe; `all` does not include it. A guarded 4K probe is not a thermal, power or long-window result.
@@ -41,7 +42,7 @@ whichever of `vaSyncSurface`, `vaSyncBuffer` and `vaMapBuffer` arrives first
 takes the access unit, and the others succeed with those bytes rather than
 replacing them with an empty answer.
 
-Two probes build with the tree and run on the target only:
+These probes build with the tree and run on the target only:
 
 - `test/iris-import-probe.cc <decoder-node> <stream.264>`: the Import
   acceptance program — proves the firmware writes picture k into the k-th
@@ -58,6 +59,12 @@ Two probes build with the tree and run on the target only:
   PRIME_1 import, that the surface aliases the client's bytes, that an
   encode from it matches the same picture from a driver-allocated surface,
   and that a wrong pitch is refused.
+- `test/iris-va-image-probe.cc <render-node>`: the upload half of the image
+  API with no decode involved — a full-frame `vaPutImage` and a regional one,
+  a derived-image write, `vaGetImage` after each, and the refusals
+  (`vaPutImage` does not scale; 4:2:0 regions are even and inside both
+  surfaces). `test/iris-va-image-gate.sh` runs it and then the same two
+  routes through FFmpeg's `hwupload,hwdownload`.
 - `test/iris-encode-control-probe.cc <encoder-node>`: which loop-filter
   controls the node exposes, and that a deblocking request it cannot honour
   is refused rather than ignored.

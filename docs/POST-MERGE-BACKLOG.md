@@ -574,9 +574,13 @@ geometry is not a gap: FFmpeg passes such a frame through without calling the
 driver. The one behaviour this work surfaced and did not change is that a
 surface written through a derived image (an upload with no filter) still fails
 `vaGetImage`, because `has_pixels()` only counts decoded and VideoProc
-completions; the previous installed driver fails the same command, and
-`vaPutImage` is unimplemented. Relaxing that for client-written surfaces is the
-candidate fix and needs its own gate.
+completions, and `vaPutImage` was unimplemented. Both are fixed and gated:
+`vaPutImage` copies whole frames and even regions, a derived-image write and a
+`vaPutImage` both count as pixels, and `test/iris-va-image-gate.sh` proves the
+API contract plus four `hwupload,hwdownload` round trips
+(`TEST-RESULTS.md` §"Client pixels: `vaPutImage`, and a read-back that used to
+refuse"). The previous installed build fails the same gate ten checks of
+fourteen, which is the negative control.
 
 ### WP5 RGB import — done, verdict "no RGB import code"
 

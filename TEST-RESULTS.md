@@ -7082,3 +7082,56 @@ the same command the same way, and `vaPutImage` is `VA_STATUS_ERROR_UNIMPLEMENTE
 No client in this project's gates reads back an uploaded surface, so the
 behaviour is recorded rather than changed here; relaxing `has_pixels()` for
 client-written surfaces is the candidate fix and needs its own gate.
+
+## Client pixels: `vaPutImage`, and a read-back that used to refuse (2026-11-13)
+
+`format=nv12,hwupload,hwdownload` with no filter between them exited at
+`vaGetImage` with `surface has no decoded pixels`. The upload worked: FFmpeg
+derives the surface, maps that view and writes the frame into it. What was
+missing is the other half — `Surface::has_pixels()` counted decode completions
+and VideoProc pictures only, so nothing told `vaGetImage` the pixels were
+there. `vaPutImage`, the second upload route, was
+`VA_STATUS_ERROR_UNIMPLEMENTED`.
+
+`vaPutImage` now copies a client image into the surface's memory: whole frame
+or an even region, image and surface formats must match, and scaling is
+refused with `VA_STATUS_ERROR_UNIMPLEMENTED`. A derived image handed out
+before the surface held a decoded frame — and every `vaPutImage` — marks the
+surface as client-written, which is the third term in `has_pixels()`.
+
+### The gate
+
+`test/iris-va-image-probe.cc` drives the public API: a full-frame
+`vaPutImage` → `vaGetImage` round trip, a 32x32 region at (16,16) with the rest
+of the surface left alone, a derived-image write with no `vaPutImage` at all,
+and three refusals (scale, odd 4:2:0 offset, region past the surface).
+`test/iris-va-image-gate.sh` runs the probe, then four `hwupload,hwdownload`
+round trips through FFmpeg: NV12 64x64, NV12 128x72 (odd chroma row count),
+P010 64x64 and NV12 32x32.
+
+| check | result |
+| --- | --- |
+| probe | 14/14 PASS |
+| nv12 64x64 round trip | exit 0, sha256 `e3b611e4b7daa213bd2e1e1a08ba60afb3f2479f3c43793f1914298610f7e400` |
+| nv12 128x72 round trip | exit 0, sha256 `cb1b634377d6426ca6f5beb95b4b42c38add416c25cebce49413934e8bb908c2` |
+| p010 64x64 round trip | exit 0, sha256 `ee46c1eebcc8fa3076a0a330528c3eaee86ae689f9f12f312d1f024990868f93` |
+| nv12 32x32 round trip | exit 0, sha256 `a5ddec719d3c971229a22cb59f5d3f18581118a836b5a0011ec5929fb762c98d` |
+
+Run `run-20261113T051637Z`, guard `complete`, exit 0, source commit `c6acb33`,
+driver `f19aeea769312e1aa8a1f19b6fe7eb2b9c876c02996357fb192e3604d9636aae`
+from `build/src`. Each round-trip digest is the digest of the input frame:
+the gate compares the bytes, and the table names what came back.
+
+### The same gate on the previous driver
+
+The gate is not self-confirming. Run against the `323c07cb` build kept as the
+rollback copy, with the same probe binary and its own `LIBVA_DRIVERS_PATH`, it
+fails ten of fourteen probe checks and prints the original symptom three times
+(`libva error: getImage: surface has no decoded pixels`); the ffmpeg half never
+runs. Run `run-20261113T051731Z`, guard `complete`, exit 1.
+
+Identity for the pair: kernel `7.2.6-sm8550-g42f3b40-iris1`, module
+`b90bd823fdab98957739ad2196eb4016f5a264f2280d22735963e40c8488c715`, boot
+`972c13d1-1848-4bb3-8c9b-ce60c74376cb`, decoder and encoder nodes resolved by
+`iris_driver` QUERYCAP name (`/dev/video17`, `/dev/video18`), battery 93 %
+discharging, thermal maximum 43.0 °C, no reset and no thermal breach.
