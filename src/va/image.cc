@@ -219,6 +219,12 @@ VAStatus deriveImage(VADriverContextP ctx, VASurfaceID id, VAImage* image)
             d.buffers[view.buf] = b;
             d.images[view.image_id] = view;
             ++s->derived_images;
+            // A surface derived before it ever held a decoded frame is the
+            // client's own memory: an upload maps this view and writes the
+            // frame into it. Reading it back must not demand a decode
+            // completion that will never arrive.
+            if (!s->target.frame)
+                s->client_pixels = true;
         }
         *image = view;
         return VA_STATUS_SUCCESS;
@@ -260,9 +266,83 @@ VAStatus getImage(VADriverContextP ctx, VASurfaceID id, int x, int y, unsigned w
     });
 }
 
-VAStatus putImage(VADriverContextP, VASurfaceID, VAImageID, int, int, unsigned, unsigned, int, int, unsigned, unsigned)
+// Client pixels in, surface memory out. No scaling and no bit-depth
+// conversion: the image's format must match the surface's, so what lands is
+// exactly the client's bytes. This is the path a client that creates its own
+// VAImage takes to fill a surface (FFmpeg falls back to it when the surface
+// is not derivable); without it an upload has no route into the driver.
+VAStatus putImage(VADriverContextP ctx, VASurfaceID id, VAImageID image_id, int sx, int sy, unsigned sw,
+    unsigned sh, int dx, int dy, unsigned dw, unsigned dh)
 {
-    return VA_STATUS_ERROR_UNIMPLEMENTED;
+    return guarded(ctx, "putImage", [&] {
+        auto& d = data(ctx);
+        std::shared_ptr<Surface> s;
+        VAImage image;
+        std::shared_ptr<Buffer> b;
+        {
+            std::lock_guard<std::recursive_mutex> lock(d.mutex);
+            s = surface(d, id);
+            auto it = d.images.find(image_id);
+            iris::require(it != d.images.end(), "invalid image", VA_STATUS_ERROR_INVALID_IMAGE);
+            image = it->second;
+            b = buffer(d, image.buf);
+        }
+        iris::require(sw == dw && sh == dh, "vaPutImage cannot scale", VA_STATUS_ERROR_UNIMPLEMENTED);
+        iris::require(!b->alias, "vaPutImage reads a client image, not a derived view",
+            VA_STATUS_ERROR_INVALID_IMAGE);
+        iris::require(sx >= 0 && sy >= 0 && dx >= 0 && dy >= 0 && sw && sh
+                && static_cast<uint64_t>(sx) + sw <= image.width
+                && static_cast<uint64_t>(sy) + sh <= image.height
+                && static_cast<uint64_t>(dx) + dw <= s->width && static_cast<uint64_t>(dy) + dh <= s->height,
+            "vaPutImage region outside the image or the surface", VA_STATUS_ERROR_INVALID_PARAMETER);
+        iris::require(!((sx | sy | dx | dy | sw | sh) & 1u),
+            "vaPutImage regions are even for 4:2:0", VA_STATUS_ERROR_INVALID_PARAMETER);
+        iris::require(image.format.fourcc == s->fourcc, "image format does not match the surface",
+            VA_STATUS_ERROR_INVALID_IMAGE_FORMAT);
+        if (s->rendering())
+            syncSurface(ctx, id);
+
+        uint8_t* destination = nullptr;
+        iris::Layout layout;
+        int fd = -1;
+        {
+            std::lock_guard<std::recursive_mutex> lock(d.mutex);
+            if (s->target.frame) {
+                destination = static_cast<uint8_t*>(s->target.frame->map());
+                layout = s->target.frame->layout();
+                fd = s->target.frame->fd();
+            } else {
+                iris::StableBuffer& stable = ensure_stable(d, *s);
+                destination = static_cast<uint8_t*>(stable.map());
+                layout = stable.layout();
+                fd = stable.fd();
+            }
+        }
+        iris::require(destination != nullptr && layout.fourcc == image.format.fourcc,
+            "surface memory does not match the image", VA_STATUS_ERROR_INVALID_IMAGE_FORMAT);
+
+        const unsigned bytes = layout.fourcc == VA_FOURCC_P010 ? 2 : 1;
+        const uint8_t* source = b->data.data();
+        iris::dma_buf_cpu_sync(fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE);
+        for (unsigned row = 0; row < sh; ++row)
+            std::memcpy(destination + layout.data_offset + static_cast<size_t>(dy + row) * layout.stride
+                    + static_cast<size_t>(dx) * bytes,
+                source + image.offsets[0] + static_cast<size_t>(sy + row) * image.pitches[0]
+                    + static_cast<size_t>(sx) * bytes,
+                static_cast<size_t>(sw) * bytes);
+        for (unsigned row = 0; row < sh / 2; ++row)
+            std::memcpy(destination + layout.chroma_offset() + static_cast<size_t>(dy / 2 + row) * layout.stride
+                    + static_cast<size_t>(dx) * bytes,
+                source + image.offsets[1] + static_cast<size_t>(sy / 2 + row) * image.pitches[1]
+                    + static_cast<size_t>(sx) * bytes,
+                static_cast<size_t>(sw) * bytes);
+        iris::dma_buf_cpu_sync(fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE);
+
+        std::lock_guard<std::recursive_mutex> lock(d.mutex);
+        s->client_pixels = true;
+        s->failed = false;
+        return VA_STATUS_SUCCESS;
+    });
 }
 
 VAStatus querySubpictureFormats(VADriverContextP, VAImageFormat*, unsigned*, unsigned* count)

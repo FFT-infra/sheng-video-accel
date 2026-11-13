@@ -45,6 +45,18 @@ if va_drm_dep.found()
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
 
+# Hardware probe, built but not registered as a meson test: the upload half of
+# the image API. vaPutImage and the derived-image write path are what put
+# client pixels into a surface; vaGetImage reads them back. No decode is
+# involved, so this runs against a render node alone.
+if va_drm_dep.found()
+  executable(
+    'iris-va-image-probe',
+    'iris-va-image-probe.cc',
+    dependencies: [va_drm_dep],
+    cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+endif
+
 # Hardware probe, built but not registered as a meson test: it needs the
 # encoder node. Answers whether the loop-filter controls exist and whether a
 # deblocking request the firmware cannot honour is refused, which is the §10

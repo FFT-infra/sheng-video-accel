@@ -68,8 +68,15 @@ struct Surface {
     // Pixels this driver produced through a VideoProc picture, not a decode
     // completion. vaGetImage reads `stable`; no session owns the surface.
     bool vpp_pixels = false;
+    // Pixels the client wrote: through a derived image it mapped, or through
+    // vaPutImage. Nothing on the hardware side has to happen before a
+    // download may read them, so this counts as "has pixels" on its own.
+    bool client_pixels = false;
     bool rendering() const { return target.pending; }
-    bool has_pixels() const { return (target.completed || vpp_pixels) && (target.frame || stable); }
+    bool has_pixels() const
+    {
+        return (target.completed || vpp_pixels || client_pixels) && (target.frame || stable);
+    }
 };
 
 struct Buffer {
