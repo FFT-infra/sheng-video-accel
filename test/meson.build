@@ -7,6 +7,14 @@ session_test = executable(
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('session', session_test)
 
+# The copy engine is built on the first copy, never by vaCreateContext.
+deferred_copy_test = executable(
+  'deferred-copy-test',
+  ['unit/deferred-copy-test.cc', 'unit/fake_device.cc'],
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+test('deferred-copy', deferred_copy_test)
+
 # Annex-B reassembly for a requested IDR (src/codec/annexb.cc).
 annexb_test = executable(
   'annexb-test',

@@ -801,15 +801,12 @@ VAStatus createContext(VADriverContextP ctx, VAConfigID config, int width, int h
             auto it = d.configs.find(config);
             iris::require(it != d.configs.end(), "invalid config", VA_STATUS_ERROR_INVALID_CONFIG);
             cfg = it->second;
-            // Defer copy-engine creation until an actual context is requested,
-            // keeping capability queries thread-free. A VideoProc context
-            // never copies: its pixels arrive from the compute kernel.
-            if (!d.copier && cfg.entrypoint != VAEntrypointVideoProc) {
-                if (d.options.copy_mode == iris::CopyMode::Gpu)
-                    d.copier = iris::make_gpu_copy(d.render_fd);
-                if (!d.copier)
-                    d.copier = iris::make_cpu_copy();
-            }
+            // The copy engine is built on the first copy, not here: GPU copy
+            // initialises EGL, worth about 0.1 s per process, and Direct and
+            // Import clients never copy. A VideoProc context never copies at
+            // all — its pixels arrive from the compute kernel.
+            if (!d.copier && cfg.entrypoint != VAEntrypointVideoProc)
+                d.copier = iris::make_deferred_copy(d.render_fd, d.options.copy_mode);
         }
         auto c = std::make_shared<Context>();
         c->profile = cfg.profile;
