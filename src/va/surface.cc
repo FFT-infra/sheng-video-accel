@@ -355,9 +355,15 @@ VAStatus querySurfaceAttributes(VADriverContextP ctx, VAConfigID config, VASurfa
     const bool encoding = it->second.entrypoint == VAEntrypointEncSlice;
     if (!encoding && d.capabilities.p010 && p010_decode_profile(profile))
         add(VASurfaceAttribPixelFormat, VA_FOURCC_P010, VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
-    add(VASurfaceAttribMinWidth, static_cast<int>(d.capabilities.min_width), VA_SURFACE_ATTRIB_GETTABLE);
+    // A VideoProc config creates the render target, not a decoded picture, so
+    // its floor is the kernel's rather than the node's; a client scaling down
+    // to a thumbnail is otherwise refused before the driver is called.
+    const bool vpp = profile == VAProfileNone && it->second.entrypoint == VAEntrypointVideoProc;
+    const unsigned min_geometry = vpp ? kVppMinGeometry : d.capabilities.min_width;
+    add(VASurfaceAttribMinWidth, static_cast<int>(min_geometry), VA_SURFACE_ATTRIB_GETTABLE);
     add(VASurfaceAttribMaxWidth, static_cast<int>(d.capabilities.max_width), VA_SURFACE_ATTRIB_GETTABLE);
-    add(VASurfaceAttribMinHeight, static_cast<int>(d.capabilities.min_height), VA_SURFACE_ATTRIB_GETTABLE);
+    add(VASurfaceAttribMinHeight,
+        static_cast<int>(vpp ? kVppMinGeometry : d.capabilities.min_height), VA_SURFACE_ATTRIB_GETTABLE);
     add(VASurfaceAttribMaxHeight, static_cast<int>(d.capabilities.max_height), VA_SURFACE_ATTRIB_GETTABLE);
     add(VASurfaceAttribMemoryType,
         VA_SURFACE_ATTRIB_MEM_TYPE_VA | VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME | VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,

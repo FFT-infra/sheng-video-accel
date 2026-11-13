@@ -9,6 +9,8 @@
 
 #include "../util/error.h"
 
+#include <algorithm>
+
 namespace va {
 
 namespace {
@@ -78,12 +80,12 @@ VAStatus queryVideoProcPipelineCaps(VADriverContextP ctx, VAContextID id, VABuff
     caps->input_pixel_format = kPixelFormats;
     caps->num_output_pixel_formats = 1;
     caps->output_pixel_format = kPixelFormats;
-    caps->min_input_width = d.capabilities.min_width;
-    caps->min_input_height = d.capabilities.min_height;
+    caps->min_input_width = std::max(kVppMinGeometry, d.capabilities.min_width);
+    caps->min_input_height = std::max(kVppMinGeometry, d.capabilities.min_height);
     caps->max_input_width = d.capabilities.max_width;
     caps->max_input_height = d.capabilities.max_height;
-    caps->min_output_width = d.capabilities.min_width;
-    caps->min_output_height = d.capabilities.min_height;
+    caps->min_output_width = kVppMinGeometry;
+    caps->min_output_height = kVppMinGeometry;
     caps->max_output_width = d.capabilities.max_width;
     caps->max_output_height = d.capabilities.max_height;
     return VA_STATUS_SUCCESS;

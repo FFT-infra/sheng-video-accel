@@ -34,7 +34,7 @@
 | --- | --- | --- | --- | --- |
 | `VAEntrypointVideoProc`（`VAProfileNone`，需显式开启） | 任意比例最近邻缩放 | NV12 | NV12 | `scale_vaapi` 输出与 swscale `flags=neighbor` 逐字节一致 |
 
-视频处理默认关闭，需设置 `V4L2_VA_VPP`。处理在 surface 的 DMA-BUF 上运行固定的 Vulkan 计算内核，只提供最近邻缩放一种操作，取点位置与 swscale 相同；裁剪、旋转、混合、滤镜与色彩转换都会被拒绝，不做近似处理。
+视频处理默认关闭，需设置 `V4L2_VA_VPP`。处理在 surface 的 DMA-BUF 上运行固定的 Vulkan 计算内核，只提供最近邻缩放一种操作，取点位置与 swscale 相同；裁剪、旋转、混合、滤镜与色彩转换都会被拒绝，不做近似处理。 缩放下限是内核自身的 16x16，不再受解码节点最小尺寸约束，因此可以缩到缩略图大小。
 
 ## 运行环境
 

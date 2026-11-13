@@ -34,7 +34,7 @@ Hardware encode verification requires an active Iris IRQ counter increase, error
 | --- | --- | --- | --- | --- |
 | `VAEntrypointVideoProc` (`VAProfileNone`, opt-in) | nearest-neighbour scale, any ratio | NV12 | NV12 | `scale_vaapi` frame byte-identical to swscale `flags=neighbor` |
 
-The processor is off unless `V4L2_VA_VPP` is set. It runs the pinned Vulkan compute kernel on the surface DMA-BUFs and offers exactly one operation, a nearest-neighbour scale at the ratio the client asks for, sampling where swscale samples; crop, rotation, blending, filters and colour conversion are refused rather than approximated.
+The processor is off unless `V4L2_VA_VPP` is set. It runs the pinned Vulkan compute kernel on the surface DMA-BUFs and offers exactly one operation, a nearest-neighbour scale at the ratio the client asks for, sampling where swscale samples; crop, rotation, blending, filters and colour conversion are refused rather than approximated. Its surface floor is the kernel's own 16x16 rather than the decoder node's minimum, so a client can scale down to a thumbnail.
 
 ## Requirements
 

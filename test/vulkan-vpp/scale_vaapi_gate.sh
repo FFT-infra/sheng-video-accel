@@ -48,10 +48,12 @@ work=${IRIS_VPP_DIR:-$(iris_artifact_dir va-vpp)}
 mkdir -p "$work"
 
 # Ratios a client can ask for: 2x (the qualified geometry), fractional up and
-# down, identity, a mismatched aspect, and a real 720p frame each way. The
-# driver samples at swscale's point positions, so `scale_vaapi=w=W:h=H` must be
-# byte-identical to `scale=WxH:flags=neighbor` in every case.
-cases="64x64:128x128 64x64:96x96 64x64:32x32 128x128:200x150 62x34:62x34 1280x720:854x480 1280x720:1920x1080"
+# down, a result below the decoder node's minimum, the advertised floor, a
+# mismatched aspect, and a real 720p frame each way. The driver samples at
+# swscale's point positions, so `scale_vaapi=w=W:h=H` must be byte-identical
+# to `scale=WxH:flags=neighbor` in every case. Equal geometry is not here:
+# FFmpeg's scale_vaapi passes such a frame through without a VPP picture.
+cases="64x64:128x128 64x64:96x96 64x64:32x32 128x128:16x16 128x128:200x150 62x34:46x26 1280x720:854x480 1280x720:1920x1080"
 
 failed=0
 for c in $cases; do

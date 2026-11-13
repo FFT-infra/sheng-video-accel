@@ -200,6 +200,13 @@ struct DriverData {
 
 inline DriverData& data(VADriverContextP ctx) { return *static_cast<DriverData*>(ctx->pDriverData); }
 
+// The smallest VideoProc geometry the kernel and surface allocation are gated
+// for. Decode and encode keep the V4L2 node's own minimum: this floor belongs
+// to the compute kernel, which has no node and no firmware limit. A client
+// asking for a thumbnail-sized result would otherwise inherit the decoder's
+// minimum and be refused before the driver is ever called.
+inline constexpr unsigned kVppMinGeometry = 16;
+
 // The VPP entrypoint may be advertised: the build has the Vulkan backend and
 // the client opted in with V4L2_VA_VPP. Never probes the GPU.
 bool vpp_available(const DriverData& d);

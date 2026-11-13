@@ -414,7 +414,7 @@ int main(int argc, char** argv)
         }
     VkDeviceMemory mdst = import_dmabuf(dev, mtype, dmr, dst_fd, dst_buf);
     VkDeviceMemory msrc = import_dmabuf(dev, mtype, smr, src_fd, src_buf);
-    printf("ok   imported src=%uB dst=%uB (NV12 2x) mtype=%u\n", g.src_size, g.dst_size, mtype);
+    printf("ok   imported src=%uB dst=%uB (NV12) mtype=%u\n", g.src_size, g.dst_size, mtype);
 
     VkDescriptorPoolSize dps = { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 2 };
     VkDescriptorPoolCreateInfo dpci = {
