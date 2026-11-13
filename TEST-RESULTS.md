@@ -7794,3 +7794,82 @@ dependency metadata and its provenance — not a Debian runtime. The `msm`
 alias, the node rule and the diagnostics are carried by the package but were
 exercised from the installed-tree copies on this boot, not from the extracted
 tree.
+
+## Bilinear interpolation in the video processor scale (`234a7f7`)
+
+The scale kernel sampled at swscale's point positions, which is what made
+`scale_vaapi` byte-identical to `scale=flags=neighbor`. It had no second
+method, so a picture naming `VA_FILTER_INTERPOLATION_BILINEAR` was refused —
+one interpolation method where VA names three, and the one FFmpeg's
+`scale_vaapi` reaches for when a client asks for anything better than nearest.
+
+Both kernels (`nv12_scale.comp`, `p010_scale.comp`) gained a second path
+behind one push-constant switch. The point map is untouched. The bilinear path
+maps the destination sample's centre back into the source, clamps it to the
+source's extent, and blends the four samples around it. VA mirrors after
+rotating, so the reflection applies to that continuous position rather than to
+a rounded index, and a 1:1 scale lands exactly on the sample the point map
+picks. On P010 the blend runs on the ten-bit code and not on the padded word:
+mixing words would leave bits in the low six, which is not a legal P010
+sample.
+
+Two defects turned up while wiring the VA layer and the gates:
+
+- `caps->filter_flags` was set to `NEAREST | BILINEAR`. That is 0x1000 | 0x2000
+  = 0x3000, exactly `VA_FILTER_INTERPOLATION_ADVANCED`: the field carries one
+  method, not a bit set. The first run of `crop_vaapi_gate.sh` reported the
+  driver advertising the one method it refuses.
+- `--expect-refusal` was matched in `argv[12]` only, so adding a second option
+  to `iris-va-vpp-probe` made the refusal case run the picture instead, and the
+  gate reported a correct refusal as a driver that ran it.
+
+The probe's own bilinear oracle had the same kind of fault: it mirrored the
+continuous position and then mirrored the rounded index again, so every
+mirrored case failed on the target while the kernel was right. The oracle now
+mirrors once, in the caller, exactly where the kernel does.
+
+### The gates
+
+Source `234a7f7`, driver `40ab046a…` (build-tree override, `LIBVA_DRIVERS_PATH`),
+boot `4b73926c…`, kernel `7.2.6-sm8550-g42f3b40-iris1`, module `b90bd823…`,
+decoder resolved by driver name to `/dev/video0`, encoder to `/dev/video1`.
+Every run below is a guarded target run with `source_dirty=0`.
+
+| gate | run | cases | verdict |
+| --- | --- | --- | --- |
+| `nv12_scale_gate.sh` | `120445Z` | 27 nearest + 12 bilinear, both DMA-BUF origins | `PASS` |
+| `p010_scale_gate.sh` | `120524Z` | 12 nearest + 9 bilinear, both origins | `PASS` |
+| `crop_vaapi_gate.sh` | `120602Z` | 3 crops, 1 bilinear picture, 2 refusals | `PASS` |
+| `scale_vaapi_gate.sh` | `120643Z` | 8 NV12 + 3 P010 ratios | `PASS` |
+| `transpose_vaapi_gate.sh` | `120721Z` | 19: all seven directions, NV12 and P010 | `PASS` |
+| `tonemap_gate.sh` | `120803Z` | 11 cases, 3 refusals | `PASS` |
+| `overlay_gate.sh` | `120842Z` | 15 cases, 2 endpoint frames, 7 refusals | `PASS` |
+| `overlay_vaapi_gate.sh` | `120922Z` | 3 through FFmpeg's `overlay_vaapi` | `PASS` |
+
+The bilinear cases are compared within one code of a double-precision model of
+the blend, and two invariants bracket them: a constant picture must come out
+that constant at any ratio, because the weights sum to one, and a 1:1 scale
+must reproduce the point map byte for byte. The 8-bit gate's constant case is
+`77` over `64x32 -> 200x100`, a ratio whose weights are all fractional; the
+10-bit gate's is `1023`, the largest code, which also proves the clamp is the
+ten-bit one rather than the eight-bit saturation carried over.
+
+The host half runs in CI: `rotation_model_check.py` compares the bilinear map
+with swscale's `flags=bilinear` on six upscales, where swscale uses the same
+four taps (maximum difference 1 code, four of the six exact). Downscales are
+excluded there and only there, because swscale widens its support with the
+ratio while the kernel always takes two neighbours per axis; the primitive
+gates measure those ratios against the kernel's own model instead.
+
+### What this does not prove
+
+The bilinear path has no byte-exact software reference at any ratio: swscale's
+`flags=bilinear` is a wider tent when it downsamples, so the comparison the
+point map gets is not available. The evidence is a model of the documented
+blend plus the two invariants, not an equivalence with a reference filter. No
+client was measured using it end to end — FFmpeg 8.1's `scale_vaapi` submits
+`filter_flags = VA_FRAME_PICTURE` (zero) on every call, so the method is
+reached today only by a client that sets it, such as Chromium's VA-API wrapper
+on the paths where it asks for EU-bilinear. The `crop_vaapi_gate.sh` bilinear
+case proves the VA layer accepts and runs the method; it does not compare
+those pixels with anything.
