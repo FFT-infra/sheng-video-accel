@@ -79,13 +79,12 @@ Debian 包请在 chroot（`sbuild`、`pbuilder`）里构建：`libgbm-dev` 绑�
 
 - **Direct**：客户端在解码后直接导出驱动分配的表面，实现零拷贝。
 - **Import**：客户端在解码前传入预分配的 DMA-BUF 缓冲区，在应用了解码顺序补丁的内核上实现零拷贝。
-- **Copy**：固件解码至驱动内部缓冲槽位，再由 GPU 复制至客户端表面。用于未打补丁的原版内核、VP9，以及同一 VA 上下文内 AV1 分辨率切换后的后半段。AV1 在应用了解码顺序补丁的内核上走 Import 零拷贝路径（2026-11-11 安装包实机验证，见 TEST-RESULTS.md）。
+- **Copy**：固件解码至驱动内部缓冲槽位，再由 GPU 复制至客户端表面。用于未打补丁的原版内核，以及同一 VA 上下文内 AV1 分辨率切换后的后半段。AV1 在应用了解码顺序补丁的内核上走 Import 零拷贝路径（2026-11-11 安装包实机验证，见 TEST-RESULTS.md）。
 
 导入的 DMA-BUF 表面必须严格符合 CAPTURE 布局规范（单线性对象，128 字节对齐跨度）。不符合规范的表面直接返回 `VA_STATUS_ERROR_INVALID_PARAMETER`。
 
 ## 已知限制
 
-- **VP9 零拷贝**：由于客户端在多帧合成包（alt-ref）完成阶段提前释放表面，当前维持走 GPU 拷贝路径。
 - **AV1 动态分辨率切换与浏览器选择**：驱动内部维护八槽 DPB，在 `vaEndPicture` 直接提交当前帧。同一 VA 上下文分辨率改变后，若客户端继续沿用旧 CAPTURE 几何导出表面，驱动检测到跨距不匹配时改用 GPU 拷贝发布，避免跨距错位。Chromium 152 播放本地文件默认走内置软件解码；Chrome 156 在线页面与 Firefox 158 已验证硬解。
 - **AV1 film grain 合成**：在 `endPicture` 直接拒绝。VA-API 画面参数区分 `current_frame`（无 grain 参考帧）与 `current_display_picture`（加 grain 显示表面）；驱动单次 CAPTURE 完成对应单个目标表面，支持合成需在用户态增加双目标表面发布路径。客户端以 side data 导出 grain 参数（`apply_grain=0`）时码流可正常硬解。
 - **原版内核降级**：在缺少显示延迟控制或强制关键帧控制的内核上，解码降级为 GPU 拷贝，关键帧请求通过临时改动 intra period 实现。

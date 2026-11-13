@@ -81,13 +81,12 @@ The driver selects buffer publishing policies dynamically:
 
 - **Direct**: Application exports an allocated surface after decode. Zero-copy.
 - **Import**: Application allocates and passes DMA-BUFs before decode. Zero-copy when running on decode-order patched kernels.
-- **Copy**: Firmware decodes to driver-owned slots; frames are blitted via GPU into application buffers. Used on stock kernels, for VP9, and for the second half of an in-context AV1 resolution change. AV1 uses the Import policy on decode-order patched kernels (qualified 2026-11-11 on the installed package, see TEST-RESULTS.md).
+- **Copy**: Firmware decodes to driver-owned slots; frames are blitted via GPU into application buffers. Used on stock kernels and for the second half of an in-context AV1 resolution change. AV1 uses the Import policy on decode-order patched kernels (qualified 2026-11-11 on the installed package, see TEST-RESULTS.md).
 
 Imported DMA-BUF surfaces must match native CAPTURE layout (single linear object, 128-byte aligned pitch). Other configurations return `VA_STATUS_ERROR_INVALID_PARAMETER`.
 
 ## Known Limits
 
-- **VP9 zero-copy**: Requires the GPU copy path due to client-side surface lifecycle constraints during multi-picture access unit completions.
 - **AV1 dynamic resolution change & browser selection**: The internal eight-slot DPB emits each picture at `vaEndPicture` without holding frames across access units. After an in-context resolution change, if a client continues exporting surfaces with the previous CAPTURE geometry, the driver falls back to GPU copy for those pictures to avoid pitch corruption. For local file playback, Chromium 152 chooses its built-in software AV1 decoder; hardware AV1 is verified on live Chrome 156 web pages and in Firefox 158.
 - **AV1 film grain synthesis**: Refused at `endPicture`. VA-API picture parameters distinguish `current_frame` (ungrained reference) from `current_display_picture` (grained display surface). Because the driver maps each CAPTURE completion to a single target surface, synthesis requires a separate dual-target publishing path in user space. Streams with film grain decode in hardware when the client exports grain parameters as side data (`apply_grain=0`).
 - **Stock kernel fallback**: On kernels without display-delay or sync-frame controls, decode degrades to GPU copy and requested IDRs are handled via intra-period repositioning.
