@@ -8498,7 +8498,21 @@ driver issues 219 failing `VIDIOC_DQBUF` calls against 143, and 111
 `VIDIOC_DQEVENT` against 74; the extra attempts cost 0.046 s of kernel time
 against 0.041 s. Its client CPU is still 16 % lower on that cell. The sync
 path carries the Import and decode-order contracts, so it was left alone
-rather than reshaped for 2.4 % in one profile.
+rather than reshaped for 2.4 % in one profile. The obvious reshape was tried:
+skipping the pre-submit `pump()` when no picture is outstanding and an output
+slot is free. That build ran 0.598-0.626 s over 300 frames (mean 0.612)
+against 0.596-0.618 s (mean 0.605) for the unchanged one, so the pump is
+load-bearing for pipeline depth and was reverted.
+
+### Two concurrent decode sessions
+
+Two FFmpeg processes decoding the HEVC 1080p clip at once, five interleaved
+rounds, 600 frames per run: 835.8 ms wall here (826-843) against 829.2 ms for
+the sibling (819-841), a 0.8 % difference inside the round-to-round spread,
+so wall time is a tie. Aggregate client utime is 0.254 s against 0.306 s,
+17 % lower, and the per-session cost matches the single-session cells above.
+A second resident decoder neither changes the throughput nor gives up the CPU
+advantage.
 
 AV1 is the opposite case: the 8-bit stream decodes 9.8 % faster and the
 10-bit stream 11.5 % faster, and the 10-bit client CPU is 4.4x lower than the

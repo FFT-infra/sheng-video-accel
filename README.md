@@ -67,7 +67,9 @@ at parity (+1.1 to +1.3 %); AV1 decode is 9.8 % faster at 8 bits and 11.5 % at
 10 bits, with 35 % and 77 % less client CPU; HEVC 10-bit is 2.4 % behind while
 using 16 % less CPU. Decoding 1080p HEVC into H.264 runs at parity with 23 %
 less client CPU. Kodi playback of 1080p and 4K is at parity in wall time, with
-6 % less CPU at 4K.
+6 % less CPU at 4K. Two simultaneous 1080p HEVC decodes finish in the same
+wall time (836 against 829 ms per 600 frames) with 17 % less aggregate client
+CPU.
 
 The VA video processor scales 1080p to 720p at 536 fps on 0.54 s of client CPU
 per 900 frames, against 287 fps and 8.4 s for
