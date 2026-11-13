@@ -8203,3 +8203,89 @@ picture and its cost was measured on the host (2.52 ms at 720p, 3.69 ms at
 from the AOM film-grain test pattern and one 10-bit clip, not the conformance
 corpus. The Direct and Copy results are manual runs; the gate exercises
 Import only.
+
+## Startup and encode throughput: two serialised costs removed (2026-11-14)
+
+Two costs sat on the client's critical path and both are gone. `vaCreateContext`
+initialised GPU copy, which starts EGL, for every context — 105 ms on this
+tablet, paid by encode contexts that never copy. The copy engine now builds its
+backend on the first copy. Separately, `vaSyncSurface` on an encode context's
+input surface claimed the access unit, so it waited for the whole picture;
+FFmpeg syncs the input surface per picture, which doubled the per-frame
+latency and made `-async_depth` useless. The firmware returns an input buffer
+as soon as it has read the picture, and the session now answers the surface
+sync from that, before the access unit exists.
+
+Target `sheng`, boot `4b73926c-a774-4ae4-8968-d0a26b20a9c3`, kernel
+`7.2.6-sm8550-g42f3b40-iris1` (`qcom_iris` module unchanged and not reloaded),
+encoder node `/dev/video1` by QUERYCAP name `iris_driver`, render node
+`/dev/dri/renderD128`. Source commit `be2c6aa`, then `bd8d268`; the deployed
+tree was this worktree before the second commit (`source_commit=be2c6aa`,
+`source_dirty=1`, tracked digest
+`36b13402878ed401acb3777c7cab114263fc78a2e5bc629685e2a82c9ef14f7f`). Release
+build tree (`LIBVA_DRIVERS_PATH=$HOME/iris-vaapi-lab/src/build-rel/src`, driver
+sha256 `f38e2fe8272e684e2346623f1369ead3962a7d2c6cd199f6ca989ee5aeafca70`), not
+an installed package. Battery 93% discharging, no firmware reset.
+
+### One frame and the copy policy
+
+The sibling is `radxa-pkg/qcom-va-driver`, built in the same tree layout, run
+interleaved on the same node with the same ffmpeg command.
+
+| case | before | after | sibling |
+| --- | --- | --- | --- |
+| 720p HEVC encode, 1 frame | 0.106-0.137 s | 0.014-0.036 s | 0.013-0.019 s |
+| 720p HEVC decode, 1 frame | 0.164 s | 0.051-0.070 s | 0.048 s |
+
+`iris-matrix.sh` passes on H.264, HEVC, VP9 and AV1 on this driver: 48/48
+frames exact, `drops=0`, under the default policy and under
+`V4L2_VA_PUBLISH=copy V4L2_VA_COPY=gpu` (12 PASS records each; the trace names
+`publish=copy-gpu`, so the deferred engine did start on the first copy).
+
+### Encode after the input-release split
+
+300 frames of `testsrc2` at 1280x720, five interleaved runs per driver, same
+command:
+
+| `-async_depth` | this driver | sibling |
+| --- | --- | --- |
+| 1 | 1.258 s | 1.84-2.01 s |
+| 2 | 0.623 s | 0.69-0.81 s |
+| 4 | 0.471-0.478 s | 0.49-0.51 s |
+| 8 | 0.471 s | 0.52-0.53 s |
+
+The `depth 4` rows of the size sweep, same interleaving:
+
+| size | this driver | sibling |
+| --- | --- | --- |
+| 720p encode | 0.474-0.563 s | 0.486-0.497 s |
+| 1080p encode | 0.530-0.538 s | 0.527-0.557 s |
+| 720p decode | 0.421-0.435 s | 0.431-0.449 s |
+| 1080p decode | 0.554-0.588 s | 0.553-0.584 s |
+
+4K encode stays inside the run-to-run spread of both drivers (1.80-2.16 s)
+with the core and frequency unpinned; the earlier 1.70-1.73 s figures for this
+driver were taken before a long run. The DVFS section of the 4K decode record
+above explains why an unpaced 4K workload moves with the clock, and the same
+caution applies here.
+
+### Correctness gates
+
+- `iris-encode-quality.sh` on the build tree: H.264 SSIM 0.9986, HEVC 0.9968,
+  both 120 frames, the platform decode byte-identical to the software decode,
+  and the HEVC run moved the Iris IRQ counter by 249 (the hardware really
+  coded it).
+- `gst-launch-1.0 ... vah265enc` produced 7,396,834 bytes from 120 NV12
+  frames and the stream decodes back to 120 frames with no errors. This is the
+  client that syncs the surface and then maps the coded buffer, which is the
+  path the split changes.
+- Unit tests on the target: `encode-session` (including the new split case)
+  and `deferred-copy`, plus the full local suite (27 tests).
+
+### What this does not prove
+
+No browser and no GStreamer `vah265dec`-based acceptance window was run for
+this change; Chrome does not encode, and the Chrome decode pass is unchanged
+by both commits. The matrix and quality gates ran from the build tree, not
+from an installed package. 4K numbers are not comparable across runs on this
+tablet without pinning CPU and GPU frequency.
