@@ -39,6 +39,7 @@
 #include <cmath>
 #include <cstring>
 #include <fcntl.h>
+#include <mutex>
 #include <unistd.h>
 
 namespace iris {
@@ -219,12 +220,52 @@ uint32_t external_memory_type(VkPhysicalDevice physical, uint32_t bits)
     return UINT32_MAX;
 }
 
-// Every Vulkan object the job creates. Destroying this in reverse order is
-// the single cleanup path; a partial setup cannot leak a device or an fd.
-struct Job {
+// Process-wide Vulkan objects. Device creation and pipeline compilation on
+// Turnip cost tens of milliseconds, and the VA video processor runs once per
+// picture, so paying them per call made a 1080p scale slower than swscale.
+// They are paid once here; the per-picture work is the DMA-BUF import, one
+// descriptor set and one dispatch.
+struct Shared {
     VkInstance instance = VK_NULL_HANDLE;
+    VkPhysicalDevice physical = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
-    VkShaderModule shader = VK_NULL_HANDLE;
+    uint32_t family = 0;
+    struct Pipe {
+        const uint32_t* code;
+        size_t code_words;
+        unsigned buffer_count;
+        VkShaderModule shader;
+        VkDescriptorSetLayout set_layout;
+        VkPipelineLayout layout;
+        VkPipeline pipeline;
+    };
+    Pipe* pipelines = nullptr;
+    size_t pipeline_count = 0;
+};
+
+std::mutex& shared_mutex()
+{
+    static std::mutex mutex;
+    return mutex;
+}
+
+// Deliberately leaked: the driver has no unload hook to hang a destructor on,
+// and a Vulkan teardown at exit can race the loader's own teardown. The
+// process reclaims the device when it exits, which is the same lifetime the
+// VA device itself has.
+Shared& shared_state()
+{
+    static Shared* state = new Shared();
+    return *state;
+}
+
+// Every Vulkan object the job owns. Destroying this in reverse order is the
+// single cleanup path; a partial setup cannot leak an fd. The device, its
+// descriptor layout and the pipeline are borrowed from Shared and outlive the
+// job.
+struct Job {
+    VkDevice device = VK_NULL_HANDLE;
+    uint32_t family = 0;
     VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
     VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
     VkPipeline pipeline = VK_NULL_HANDLE;
@@ -251,33 +292,24 @@ struct Job {
             if (buffers[i])
                 vkDestroyBuffer(device, buffers[i], nullptr);
         }
-        if (pipeline)
-            vkDestroyPipeline(device, pipeline, nullptr);
-        if (pipeline_layout)
-            vkDestroyPipelineLayout(device, pipeline_layout, nullptr);
-        if (set_layout)
-            vkDestroyDescriptorSetLayout(device, set_layout, nullptr);
-        if (shader)
-            vkDestroyShaderModule(device, shader, nullptr);
-        if (device)
-            vkDestroyDevice(device, nullptr);
-        if (instance)
-            vkDestroyInstance(instance, nullptr);
     }
 
     bool ok(VkResult result) const { return result == VK_SUCCESS; }
 };
 
-bool make_job(Job& j, const PlaneBuffers& buffers, const uint32_t* code, size_t code_words, uint32_t push_size,
-    VkPhysicalDevice* physical_out, uint32_t* family_out, uint32_t* memory_type_out)
+// One device and one compute queue for the process. Returns false when the
+// platform cannot provide them; the caller then refuses the picture.
+bool ensure_device(Shared& s)
 {
-    j.buffer_count = buffers.count;
+    if (s.device)
+        return true;
+
     VkInstanceCreateInfo instance_info = {};
     instance_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     const char* instance_ext[] = { "VK_KHR_external_memory_capabilities", "VK_KHR_get_physical_device_properties2" };
     instance_info.enabledExtensionCount = 2;
     instance_info.ppEnabledExtensionNames = instance_ext;
-    if (!j.ok(vkCreateInstance(&instance_info, nullptr, &j.instance)))
+    if (vkCreateInstance(&instance_info, nullptr, &s.instance) != VK_SUCCESS)
         return false;
 
     // The first call reports how many devices there are; the second writes
@@ -285,18 +317,18 @@ bool make_job(Job& j, const PlaneBuffers& buffers, const uint32_t* code, size_t 
     // land on the next stack word, which happened to be the job's own buffer
     // descriptor, and the picture then failed on a garbage fd.
     uint32_t device_count = 0;
-    vkEnumeratePhysicalDevices(j.instance, &device_count, nullptr);
+    vkEnumeratePhysicalDevices(s.instance, &device_count, nullptr);
     if (!device_count)
         return false;
     VkPhysicalDevice* devices = new VkPhysicalDevice[device_count];
-    const VkResult enumerated = vkEnumeratePhysicalDevices(j.instance, &device_count, devices);
-    if (j.ok(enumerated) && device_count)
-        *physical_out = devices[0];
+    const VkResult enumerated = vkEnumeratePhysicalDevices(s.instance, &device_count, devices);
+    if (enumerated == VK_SUCCESS && device_count)
+        s.physical = devices[0];
     delete[] devices;
-    if (!j.ok(enumerated) || !device_count)
+    if (enumerated != VK_SUCCESS || !device_count)
         return false;
 
-    if (!compute_family(*physical_out, family_out))
+    if (!compute_family(s.physical, &s.family))
         return false;
 
     const char* device_ext[] = { "VK_KHR_external_memory", "VK_KHR_external_memory_fd",
@@ -304,7 +336,7 @@ bool make_job(Job& j, const PlaneBuffers& buffers, const uint32_t* code, size_t 
     float priority = 1.0f;
     VkDeviceQueueCreateInfo queue_info = {};
     queue_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    queue_info.queueFamilyIndex = *family_out;
+    queue_info.queueFamilyIndex = s.family;
     queue_info.queueCount = 1;
     queue_info.pQueuePriorities = &priority;
     VkDeviceCreateInfo device_info = {};
@@ -313,18 +345,46 @@ bool make_job(Job& j, const PlaneBuffers& buffers, const uint32_t* code, size_t 
     device_info.pQueueCreateInfos = &queue_info;
     device_info.enabledExtensionCount = 3;
     device_info.ppEnabledExtensionNames = device_ext;
-    if (!j.ok(vkCreateDevice(*physical_out, &device_info, nullptr, &j.device)))
-        return false;
+    return vkCreateDevice(s.physical, &device_info, nullptr, &s.device) == VK_SUCCESS;
+}
+
+// Shader and pipeline for one kernel and descriptor count, compiled once.
+// Caller holds shared_mutex().
+Shared::Pipe* ensure_pipeline(Shared& s, const uint32_t* code, size_t code_words, unsigned buffer_count,
+    uint32_t push_size)
+{
+    for (size_t i = 0; i < s.pipeline_count; ++i)
+        if (s.pipelines[i].code == code && s.pipelines[i].buffer_count == buffer_count)
+            return &s.pipelines[i];
+
+    Shared::Pipe pipe = {};
+    pipe.code = code;
+    pipe.code_words = code_words;
+    pipe.buffer_count = buffer_count;
+
+    // A kernel that cannot be compiled must not leave a half-built pipe in the
+    // cache, so every failure destroys what this call made.
+    auto discard = [&]() {
+        if (pipe.pipeline)
+            vkDestroyPipeline(s.device, pipe.pipeline, nullptr);
+        if (pipe.layout)
+            vkDestroyPipelineLayout(s.device, pipe.layout, nullptr);
+        if (pipe.set_layout)
+            vkDestroyDescriptorSetLayout(s.device, pipe.set_layout, nullptr);
+        if (pipe.shader)
+            vkDestroyShaderModule(s.device, pipe.shader, nullptr);
+        return nullptr;
+    };
 
     VkShaderModuleCreateInfo shader_info = {};
     shader_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
     shader_info.codeSize = code_words * 4;
     shader_info.pCode = code;
-    if (!j.ok(vkCreateShaderModule(j.device, &shader_info, nullptr, &j.shader)))
-        return false;
+    if (vkCreateShaderModule(s.device, &shader_info, nullptr, &pipe.shader) != VK_SUCCESS)
+        return nullptr;
 
     VkDescriptorSetLayoutBinding bindings[PlaneBuffers::kMax] = {};
-    for (unsigned i = 0; i < buffers.count; ++i) {
+    for (unsigned i = 0; i < buffer_count; ++i) {
         bindings[i].binding = i;
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         bindings[i].descriptorCount = 1;
@@ -332,10 +392,10 @@ bool make_job(Job& j, const PlaneBuffers& buffers, const uint32_t* code, size_t 
     }
     VkDescriptorSetLayoutCreateInfo layout_info = {};
     layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layout_info.bindingCount = buffers.count;
+    layout_info.bindingCount = buffer_count;
     layout_info.pBindings = bindings;
-    if (!j.ok(vkCreateDescriptorSetLayout(j.device, &layout_info, nullptr, &j.set_layout)))
-        return false;
+    if (vkCreateDescriptorSetLayout(s.device, &layout_info, nullptr, &pipe.set_layout) != VK_SUCCESS)
+        return discard();
 
     VkPushConstantRange push_range = {};
     push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -343,47 +403,79 @@ bool make_job(Job& j, const PlaneBuffers& buffers, const uint32_t* code, size_t 
     VkPipelineLayoutCreateInfo pipeline_layout_info = {};
     pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipeline_layout_info.setLayoutCount = 1;
-    pipeline_layout_info.pSetLayouts = &j.set_layout;
+    pipeline_layout_info.pSetLayouts = &pipe.set_layout;
     pipeline_layout_info.pushConstantRangeCount = 1;
     pipeline_layout_info.pPushConstantRanges = &push_range;
-    if (!j.ok(vkCreatePipelineLayout(j.device, &pipeline_layout_info, nullptr, &j.pipeline_layout)))
-        return false;
+    if (vkCreatePipelineLayout(s.device, &pipeline_layout_info, nullptr, &pipe.layout) != VK_SUCCESS)
+        return discard();
 
     VkComputePipelineCreateInfo pipeline_info = {};
     pipeline_info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
     pipeline_info.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     pipeline_info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    pipeline_info.stage.module = j.shader;
+    pipeline_info.stage.module = pipe.shader;
     pipeline_info.stage.pName = "main";
-    pipeline_info.layout = j.pipeline_layout;
-    if (!j.ok(vkCreateComputePipelines(j.device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &j.pipeline)))
-        return false;
+    pipeline_info.layout = pipe.layout;
+    if (vkCreateComputePipelines(s.device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipe.pipeline) != VK_SUCCESS)
+        return discard();
 
-    VkExternalMemoryBufferCreateInfo external = {};
-    external.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO;
-    external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-    VkBufferCreateInfo info = {};
-    info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    info.pNext = &external;
-    info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    for (unsigned i = 0; i < buffers.count; ++i) {
-        info.size = buffers.size[i];
-        if (!j.ok(vkCreateBuffer(j.device, &info, nullptr, &j.buffers[i])))
+    // A realloc moves the array; the handles are copied by value into each
+    // Job, so a later growth can never invalidate a live dispatch.
+    Shared::Pipe* grown = new Shared::Pipe[s.pipeline_count + 1];
+    for (size_t i = 0; i < s.pipeline_count; ++i)
+        grown[i] = s.pipelines[i];
+    grown[s.pipeline_count] = pipe;
+    delete[] s.pipelines;
+    s.pipelines = grown;
+    return &s.pipelines[s.pipeline_count++];
+}
+
+bool make_job(Job& j, const PlaneBuffers& buffers, const uint32_t* code, size_t code_words, uint32_t push_size,
+    uint32_t* memory_type_out)
+{
+    j.buffer_count = buffers.count;
+
+    {
+        std::lock_guard lock(shared_mutex());
+        Shared& s = shared_state();
+        if (!ensure_device(s))
+            return false;
+        Shared::Pipe* pipe = ensure_pipeline(s, code, code_words, buffers.count, push_size);
+        if (!pipe)
+            return false;
+        j.device = s.device;
+        j.family = s.family;
+        j.set_layout = pipe->set_layout;
+        j.pipeline_layout = pipe->layout;
+        j.pipeline = pipe->pipeline;
+
+        VkExternalMemoryBufferCreateInfo external = {};
+        external.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO;
+        external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+        VkBufferCreateInfo info = {};
+        info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        info.pNext = &external;
+        info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        for (unsigned i = 0; i < buffers.count; ++i) {
+            info.size = buffers.size[i];
+            if (!j.ok(vkCreateBuffer(j.device, &info, nullptr, &j.buffers[i])))
+                return false;
+        }
+
+        // One memory type has to serve every import: the smallest requirement
+        // set is the intersection, and a job whose surfaces disagree has no
+        // such type.
+        uint32_t bits = UINT32_MAX;
+        for (unsigned i = 0; i < buffers.count; ++i) {
+            VkMemoryRequirements req = {};
+            vkGetBufferMemoryRequirements(j.device, j.buffers[i], &req);
+            bits &= req.memoryTypeBits;
+        }
+        *memory_type_out = external_memory_type(s.physical, bits);
+        if (*memory_type_out == UINT32_MAX)
             return false;
     }
-
-    // One memory type has to serve every import: the smallest requirement set
-    // is the intersection, and a job whose surfaces disagree has no such type.
-    uint32_t bits = UINT32_MAX;
-    for (unsigned i = 0; i < buffers.count; ++i) {
-        VkMemoryRequirements req = {};
-        vkGetBufferMemoryRequirements(j.device, j.buffers[i], &req);
-        bits &= req.memoryTypeBits;
-    }
-    *memory_type_out = external_memory_type(*physical_out, bits);
-    if (*memory_type_out == UINT32_MAX)
-        return false;
 
     // Imports run from the last binding back, so the destination is allocated
     // before the sources it reads, as the two-buffer path always did; a
@@ -402,10 +494,10 @@ bool make_job(Job& j, const PlaneBuffers& buffers, const uint32_t* code, size_t 
 // plain numbers here (VA_ROTATION_NONE/90/180/270 is 0/1/2/3).
 constexpr uint32_t kRotate270 = 3;
 
-bool dispatch(Job& j, const void* push_data, size_t push_size, uint32_t groups_x, uint32_t groups_y, uint32_t family)
+bool dispatch(Job& j, const void* push_data, size_t push_size, uint32_t groups_x, uint32_t groups_y)
 {
     VkQueue queue = VK_NULL_HANDLE;
-    vkGetDeviceQueue(j.device, family, 0, &queue);
+    vkGetDeviceQueue(j.device, j.family, 0, &queue);
 
     VkDescriptorPoolSize pool_size = {};
     pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -440,7 +532,7 @@ bool dispatch(Job& j, const void* push_data, size_t push_size, uint32_t groups_x
 
     VkCommandPoolCreateInfo cp_info = {};
     cp_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    cp_info.queueFamilyIndex = family;
+    cp_info.queueFamilyIndex = j.family;
     if (!j.ok(vkCreateCommandPool(j.device, &cp_info, nullptr, &j.command_pool)))
         return false;
     VkCommandBufferAllocateInfo cb_info = {};
@@ -474,6 +566,11 @@ bool dispatch(Job& j, const void* push_data, size_t push_size, uint32_t groups_x
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &command;
+    // The device and its single queue are process-wide now, and vkQueueSubmit
+    // requires external synchronization. Every caller waits for its own fence
+    // before returning, so holding the lock across submit and wait costs
+    // nothing a second queue would return.
+    std::lock_guard lock(shared_mutex());
     if (!j.ok(vkQueueSubmit(queue, 1, &submit, j.fence)))
         return false;
     return vkWaitForFences(j.device, 1, &j.fence, VK_TRUE, 5000000000ull) == VK_SUCCESS;
@@ -517,10 +614,9 @@ bool scale_nv12_or_p010(const ScaleJob& job)
     const PlaneBuffers buffers = { job.src_fd, job.dst_fd, job.src_size, job.dst_size };
 
     Job j;
-    VkPhysicalDevice physical = VK_NULL_HANDLE;
-    uint32_t family = 0, memory_type = 0;
+    uint32_t memory_type = 0;
     bool ok = make_job(j, buffers, dst_wide ? kP010ScaleSpv : kNv12ScaleSpv,
-        dst_wide ? kP010ScaleSpvWords : kNv12ScaleSpvWords, sizeof(PushParams), &physical, &family, &memory_type);
+        dst_wide ? kP010ScaleSpvWords : kNv12ScaleSpvWords, sizeof(PushParams), &memory_type);
     if (ok) {
         const PushParams push = { job.src_stride, job.src_uv, job.dst_stride, job.dst_uv, job.src_y, job.dst_y,
             job.src_x, job.src_y_offset, job.src_width, job.src_height, job.width, job.height, job.rotation,
@@ -531,7 +627,7 @@ bool scale_nv12_or_p010(const ScaleJob& job)
         // chroma plane in one dispatch.
         const uint32_t words = dst_wide ? (job.width + 1) / 2 : (job.width + 3) / 4;
         const uint32_t rows = job.height + job.height / 2;
-        ok = dispatch(j, &push, sizeof(push), (words + 7) / 8, (rows + 7) / 8, family);
+        ok = dispatch(j, &push, sizeof(push), (words + 7) / 8, (rows + 7) / 8);
     }
     return ok;
 }
@@ -558,13 +654,11 @@ bool tonemap_hdr10_to_sdr(const ToneMapJob& job)
 
     const PlaneBuffers buffers = { job.src_fd, job.dst_fd, job.src_size, job.dst_size };
     Job j;
-    VkPhysicalDevice physical = VK_NULL_HANDLE;
-    uint32_t family = 0, memory_type = 0;
-    bool ok = make_job(j, buffers, kTonemapSpv, kTonemapSpvWords, sizeof(ToneMapParams), &physical, &family,
-        &memory_type);
+    uint32_t memory_type = 0;
+    bool ok = make_job(j, buffers, kTonemapSpv, kTonemapSpvWords, sizeof(ToneMapParams), &memory_type);
     if (ok)
         // One invocation owns a 4x2 destination block on both planes.
-        ok = dispatch(j, &push, sizeof(push), ((job.width + 3) / 4 + 7) / 8, ((job.height + 1) / 2 + 7) / 8, family);
+        ok = dispatch(j, &push, sizeof(push), ((job.width + 3) / 4 + 7) / 8, ((job.height + 1) / 2 + 7) / 8);
     return ok;
 }
 
@@ -633,16 +727,14 @@ bool overlay(const OverlayJob& job)
     const PlaneBuffers buffers = { job.main_fd, job.overlay_fd, job.dst_fd, job.main_size, job.overlay_size,
         job.dst_size };
     Job j;
-    VkPhysicalDevice physical = VK_NULL_HANDLE;
-    uint32_t family = 0, memory_type = 0;
-    bool ok = make_job(j, buffers, kOverlaySpv, kOverlaySpvWords, sizeof(OverlayParams), &physical, &family,
-        &memory_type);
+    uint32_t memory_type = 0;
+    bool ok = make_job(j, buffers, kOverlaySpv, kOverlaySpvWords, sizeof(OverlayParams), &memory_type);
     if (ok) {
         // One invocation per destination word, over the luma rows and the
         // half-height chroma plane.
         const uint32_t words = (job.dst_width * job.bytes + 3) / 4;
         const uint32_t rows = job.dst_height + job.dst_height / 2;
-        ok = dispatch(j, &push, sizeof(push), (words + 7) / 8, (rows + 7) / 8, family);
+        ok = dispatch(j, &push, sizeof(push), (words + 7) / 8, (rows + 7) / 8);
     }
     return ok;
 }
@@ -707,14 +799,12 @@ bool overlay_rgb(const OverlayRgbJob& job)
     const PlaneBuffers buffers = { job.main_fd, job.overlay_fd, job.dst_fd, job.main_size, job.overlay_size,
         job.dst_size };
     Job j;
-    VkPhysicalDevice physical = VK_NULL_HANDLE;
-    uint32_t family = 0, memory_type = 0;
-    bool ok = make_job(j, buffers, kOverlayRgbSpv, kOverlayRgbSpvWords, sizeof(OverlayRgbParams), &physical, &family,
-        &memory_type);
+    uint32_t memory_type = 0;
+    bool ok = make_job(j, buffers, kOverlayRgbSpv, kOverlayRgbSpvWords, sizeof(OverlayRgbParams), &memory_type);
     if (ok) {
         const uint32_t words = (job.dst_width * job.bytes + 3) / 4;
         const uint32_t rows = job.dst_height + job.dst_height / 2;
-        ok = dispatch(j, &push, sizeof(push), (words + 7) / 8, (rows + 7) / 8, family);
+        ok = dispatch(j, &push, sizeof(push), (words + 7) / 8, (rows + 7) / 8);
     }
     return ok;
 }
