@@ -7183,3 +7183,51 @@ Identity: source commit `a575c20`, kernel `7.2.6-sm8550-g42f3b40-iris1`, module
 `iris_driver` name (`/dev/video17`, `/dev/video18`), battery 93 % → 92 %
 discharging, thermal maximum 53.2 °C on the kernel run and 48.5 °C on the VA
 run, no reset and no thermal breach.
+
+## P010 scaling in the video processor (2026-11-13)
+
+The processor handled NV12 only, so a 10-bit stream could not be scaled on
+the GPU at all. `p010_scale.comp` runs the same point map over 16-bit samples:
+two samples per 32-bit word in luma, one u,v pair per word in chroma, a pair
+being four bytes of the interleaved plane. The driver picks the kernel from
+the surface's sample width (`ScaleJob::bytes`), and the VideoProc config and
+its surfaces advertise `VA_RT_FORMAT_YUV420_10` once the decoder node reports
+10-bit capture formats.
+
+Bit depth is not converted. Both ends must be NV12 or both P010, and a mixed
+picture is refused with `VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT`. swscale's own
+10-to-8 conversion is neither a shift nor a round: measured on the host with
+32 code values, 10-bit 33 comes out as 9 and 10-bit 165 as 42, where
+`(c + 2) >> 2` gives 8 and 41 — the residue of a position-dependent dither.
+There is therefore no byte-exact oracle for a 10-to-8 conversion, while
+same-depth scaling has one, and that is what the gate uses.
+
+### The gate
+
+`test/vulkan-vpp/scale_vaapi_gate.sh` now runs its comparison in 10 bits as
+well: `format=p010,hwupload,scale_vaapi,hwdownload` against
+`scale=WxH:flags=neighbor` on the same P010 frame.
+
+| case | sha256, swscale and hardware |
+| --- | --- |
+| 64x64 -> 128x128 | `c2e36f5dc6930906595a02f965d9e6b2b785b5139efd163b7876c25035897a25` |
+| 128x128 -> 96x96 | `89107492493054db4df70abfd1d09b59ceac77eda781c92c3a869fc63c70e65f` |
+| 1280x720 -> 854x480 | `235187959c7b2df3b361577e17abbe8c48fcdadd61509226e37fd1cb4b6c44f3` |
+
+The eight NV12 cases keep their own hashes from the previous run, and both
+negatives hold: the same client is refused without `V4L2_VA_VPP`, and a P010
+source asked to produce NV12 output is refused rather than converted.
+
+Run `run-20261113T053245Z`, guard `complete`, exit 0, source commit `1febae7`,
+driver `7e5b3713` from `build/src`, `spv` `p010_scale.spv`
+`8ab4699c81013e23e1ad50af6f30fb67899d9c3f7550e71ffaa704d520ca9f24`.
+
+Two defects this work produced, both caught by the gate rather than by review:
+`beginPicture` refused a P010 target before `run_vpp` saw the picture, and the
+chroma branch packed two pairs into a word that holds one, which put the first
+mismatched byte at the start of the chroma plane and left luma exact.
+
+Identity: kernel `7.2.6-sm8550-g42f3b40-iris1`, module `b90bd823…`, boot
+`972c13d1…`, decoder and encoder nodes resolved by `iris_driver` name
+(`/dev/video17`, `/dev/video18`), battery 90 % discharging, thermal maximum
+45.3 °C, no reset and no thermal breach.
