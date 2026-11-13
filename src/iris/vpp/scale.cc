@@ -7,7 +7,9 @@
 // import path the flat read/write prereq and the per-pixel scale gate prove
 // on the target; the kernel is embedded from test/vulkan-vpp/nv12_scale.spv
 // and samples the source at swscale's point positions, so `scale_vaapi=w=W:h=H`
-// reproduces `scale=WxH:flags=neighbor` byte for byte.
+// reproduces `scale=WxH:flags=neighbor` byte for byte. Rotation is a clockwise
+// quarter turn applied before the scale, as VA specifies, and the same kernel
+// reproduces FFmpeg's `transpose` filter.
 //
 // Built only when the Vulkan headers are present (meson's optional `vulkan`
 // dependency). CI has no Vulkan, so the driver still builds and the VPP
@@ -45,6 +47,7 @@ struct PushParams {
     uint32_t src_y, dst_y;
     uint32_t src_x, src_row;
     uint32_t src_width, src_height, dst_width, dst_height;
+    uint32_t rotation;
 };
 
 // Import one DMA-BUF as dedicated Vulkan memory bound to a storage buffer.
@@ -270,6 +273,10 @@ bool make_job(Job& j, const ScaleJob& job, VkPhysicalDevice* physical_out, uint3
     return j.dst_memory && j.src_memory;
 }
 
+// The backend stays free of VA headers, so the clockwise quarter turns are
+// plain numbers here (VA_ROTATION_NONE/90/180/270 is 0/1/2/3).
+constexpr uint32_t kRotate270 = 3;
+
 bool dispatch(Job& j, const ScaleJob& job, uint32_t family, uint32_t memory_type, VkPhysicalDevice physical)
 {
     (void)memory_type;
@@ -329,7 +336,7 @@ bool dispatch(Job& j, const ScaleJob& job, uint32_t family, uint32_t memory_type
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, j.pipeline);
     vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, j.pipeline_layout, 0, 1, &set, 0, nullptr);
     PushParams push = { job.src_stride, job.src_uv, job.dst_stride, job.dst_uv, job.src_y, job.dst_y,
-        job.src_x, job.src_y_offset, job.src_width, job.src_height, job.width, job.height };
+        job.src_x, job.src_y_offset, job.src_width, job.src_height, job.width, job.height, job.rotation };
     vkCmdPushConstants(command, j.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
     // One invocation per destination 32-bit word: four luma pixels of one row
     // and two chroma pairs (8-bit), or two luma samples and one chroma pair
@@ -372,6 +379,8 @@ bool scale_nv12_or_p010(const ScaleJob& job)
     if ((job.width | job.height | job.src_width | job.src_height | job.src_x | job.src_y_offset) & 1u)
         return false;
     if (job.bytes != 1 && job.bytes != 2)
+        return false;
+    if (job.rotation > kRotate270)
         return false;
 
     Job j;

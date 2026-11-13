@@ -385,17 +385,21 @@ those formats).
 The video processor is a fourth context kind but not a fourth node:
 `VAProfileNone` / `VAEntrypointVideoProc` opens no V4L2 node and owns no
 session. `vaEndPicture` resolves the two surface DMA-BUFs and runs the pinned
-NV12 nearest kernel at the requested ratio over the surface region the client
+nearest kernel for the surface's sample width at the requested ratio over the
+surface region the client names, after the clockwise quarter turn the client
 names, sampling where swscale samples;
-every other pipeline operation (rotation, blending, filters, colour
+every other pipeline operation (mirroring, blending, filters, colour
 conversion) fails the picture instead of being dropped. The entrypoint is advertised only when the
 build found Vulkan and the client set `V4L2_VA_VPP` (§6), so an installed
 decode/encode client sees the surface it qualified against. The kernel and the
 VA surface path are gated separately in §9:
-`test/vulkan-vpp/nv12_scale_gate.sh` checks every pixel of the primitive and
+`test/vulkan-vpp/nv12_scale_gate.sh` and `test/vulkan-vpp/p010_scale_gate.sh`
+check every pixel of the primitive and
 `test/vulkan-vpp/scale_vaapi_gate.sh` checks a `scale_vaapi` + `hwdownload`
 frame against swscale; `test/vulkan-vpp/crop_vaapi_gate.sh` checks a
-`surface_region` picture against `crop,scale=...:flags=neighbor`.
+`surface_region` picture against `crop,scale=...:flags=neighbor`, and
+`test/vulkan-vpp/transpose_vaapi_gate.sh` checks every rotation direction
+against `transpose`.
 
 ## 6. Environment surface
 
@@ -602,10 +606,16 @@ them). The allocation chain behind those surfaces is gated on the target by
 below the first needs an MSM render node.
 
 The video processor is gated at two levels. `test/vulkan-vpp/nv12_scale_gate.sh`
-checks the NV12 nearest kernel byte for byte against a CPU oracle over both
-DMA-BUF origins and a matrix of ratios; `test/vulkan-vpp/scale_vaapi_gate.sh`
-checks `scale_vaapi` + `hwdownload` frames against swscale over the same
-ratios and checks that the entrypoint is refused without `V4L2_VA_VPP`. The SPIR-V the driver embeds is
+checks the 8-bit nearest kernel byte for byte against a CPU oracle over both
+DMA-BUF origins and a matrix of ratios, crops and rotations;
+`test/vulkan-vpp/p010_scale_gate.sh` does the same for the 10-bit kernel,
+including a crop away from the origin, which is the only geometry that
+separates a chroma pair at four bytes from one at two;
+`test/vulkan-vpp/scale_vaapi_gate.sh` checks `scale_vaapi` + `hwdownload`
+frames against swscale over the same ratios;
+`test/vulkan-vpp/transpose_vaapi_gate.sh` checks every advertised rotation
+direction against the software `transpose`. Both VA-level gates check that the
+entrypoint is refused without `V4L2_VA_VPP`. The SPIR-V the driver embeds is
 regenerated from the pinned module and compared by `test/run-static-checks.sh`.
 
 ## 10. Invariants (the ones tests exist for)

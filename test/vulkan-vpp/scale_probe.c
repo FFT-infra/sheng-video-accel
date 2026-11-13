@@ -1,24 +1,28 @@
 // SPDX-License-Identifier: MIT
 //
-// NV12 scale primitive gate. Before a VA video processor can advertise
+// NV12/P010 scale primitive gate. Before a VA video processor can advertise
 // VAProfileNone, the compute kernel that produces its pixels must be proven
-// byte-exact against a CPU oracle on the target. This probe dispatches
-// nv12_scale.spv over two imported DMA-BUFs and checks every destination byte
-// against a nearest-neighbour oracle that uses swscale's point positions, plus
-// that the source is unchanged.
+// byte-exact against a CPU oracle on the target. This probe dispatches the
+// scale kernel named on its command line (nv12_scale.spv or p010_scale.spv)
+// over two imported DMA-BUFs and checks every destination pixel against a
+// nearest-neighbour oracle that uses swscale's point positions and VA's
+// rotation order, plus that the source is unchanged.
 //
 // The plane geometry is the Iris CAPTURE layout (src/iris/alloc.cc:
-// stable_layout -> src/util/prime.cc:plane_layout for NV12): 128-byte stride,
-// 32-row luma, 16-row chroma, chroma immediately after luma. Stride, luma and
-// chroma offsets, and both visible geometries are push constants, so the
-// kernel is the one a VA VPP pipeline would dispatch, not a test with baked
-// sizes. Both DMA-BUF origins the driver allocates (MSM GEM PRIME fd and the
-// system DMA heap) are gated, exactly like the flat read/write prereq.
+// stable_layout -> src/util/prime.cc:plane_layout): 128-byte luma pitch for
+// NV12 and 256 for P010, 32-row luma, 16-row chroma, chroma immediately after
+// luma. Stride, luma and chroma offsets, both visible geometries, the crop
+// and the rotation are push constants, so the kernel is the one a VA VPP
+// pipeline would dispatch, not a test with baked sizes. Both DMA-BUF origins
+// the driver allocates (MSM GEM PRIME fd and the system DMA heap) are gated,
+// exactly like the flat read/write prereq.
 //
-// Usage: nv12_scale_probe <nv12_scale.spv> <heap|msm> [render-node] [WxH WxH]
+// Usage: scale_probe <scale.spv> <heap|msm> [render-node] [WxH WxH
+//                     [CROP_WxH+X+Y]] [--rot 0..3] [--p010]
 // The size pair is [source destination] and defaults to 64x32 128x64.
-// Exit 0 only when compute runs, both fds import, and all destination bytes
-// match the oracle for that origin. Build and run on the target, never in CI.
+// Exit 0 only when compute runs, both fds import, and every destination pixel
+// matches the oracle for that origin. Build and run on the target, never in
+// CI.
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -54,9 +58,15 @@ struct geometry {
     unsigned crop_x, crop_y, crop_w, crop_h;
     unsigned src_stride, src_uv, src_size;
     unsigned dst_stride, dst_uv, dst_size;
+    // Bytes per sample on both ends (1 for NV12, 2 for P010) and the
+    // clockwise quarter turns the kernel applies before scaling.
+    unsigned bytes;
+    unsigned rot;
 };
 
-static struct geometry geometry(unsigned src_w, unsigned src_h, unsigned dst_w, unsigned dst_h)
+// plane_layout in src/util/prime.cc: luma pitch aligned to 128 bytes (256 for
+// P010), luma rows to 32, chroma rows to 16, chroma after the luma plane.
+static struct geometry geometry(unsigned src_w, unsigned src_h, unsigned dst_w, unsigned dst_h, unsigned bytes)
 {
     struct geometry g;
     g.src_w = src_w;
@@ -67,12 +77,14 @@ static struct geometry geometry(unsigned src_w, unsigned src_h, unsigned dst_w, 
     g.crop_y = 0;
     g.crop_w = src_w;
     g.crop_h = src_h;
-    g.src_stride = align_up(src_w, 128);
+    g.bytes = bytes;
+    g.rot = 0;
+    g.src_stride = align_up(src_w * bytes, 128 * bytes);
     g.src_uv = g.src_stride * align_up(src_h, 32);
     // stable_layout rounds the total up to 4 KiB; the DMA-BUF the driver
     // hands a Vulkan import has that size, so gate the same object.
     g.src_size = align_up(g.src_uv + g.src_stride * align_up((src_h + 1) / 2, 16), 4096);
-    g.dst_stride = align_up(dst_w, 128);
+    g.dst_stride = align_up(dst_w * bytes, 128 * bytes);
     g.dst_uv = g.dst_stride * align_up(dst_h, 32);
     g.dst_size = align_up(g.dst_uv + g.dst_stride * align_up((dst_h + 1) / 2, 16), 4096);
     return g;
@@ -90,6 +102,75 @@ static unsigned point_step(unsigned src, unsigned dst)
 static unsigned point_pick(unsigned i, unsigned inc)
 {
     return (i * inc + (inc >> 1)) >> 16;
+}
+
+// VA rotates the source clockwise before scaling it, so the point map runs on
+// the rotated size and this undo takes a point of the rotated plane back to
+// the source. A quarter turn sends the source top-left corner to the
+// top-right, 180 degrees to the bottom-right, 270 to the bottom-left.
+static void unrotate(unsigned rot, unsigned rx, unsigned ry, unsigned w, unsigned h, unsigned* sx, unsigned* sy)
+{
+    const unsigned rw = (rot & 1u) ? h : w;
+    const unsigned rh = (rot & 1u) ? w : h;
+    switch (rot) {
+    case 1:
+        *sx = ry;
+        *sy = rh - 1 - rx;
+        break;
+    case 2:
+        *sx = rw - 1 - rx;
+        *sy = rh - 1 - ry;
+        break;
+    case 3:
+        *sx = rw - 1 - ry;
+        *sy = rx;
+        break;
+    default:
+        *sx = rx;
+        *sy = ry;
+        break;
+    }
+}
+
+// One sample at a byte offset: an 8-bit byte for NV12, a 16-bit little-endian
+// word for P010. A P010 sample carries its ten bits at the top, so comparing
+// the whole word also catches a kernel that shifts the payload.
+static unsigned sample_at(const volatile uint8_t* p, unsigned off, unsigned bytes)
+{
+    return bytes == 2 ? (unsigned)p[off] | ((unsigned)p[off + 1] << 8) : p[off];
+}
+
+static void fill_source(volatile uint8_t* src, unsigned size, unsigned bytes)
+{
+    if (bytes == 2) {
+        for (unsigned i = 0; i < size; i += 2) {
+            const unsigned sample = ((i * 37u + 11u) ^ (i >> 5)) & 0x3ffu;
+            const unsigned word = sample << 6; // legal P010: low six bits zero
+            src[i] = (uint8_t)word;
+            src[i + 1] = (uint8_t)(word >> 8);
+        }
+        return;
+    }
+    for (unsigned i = 0; i < size; i++)
+        src[i] = (uint8_t)((i * 37u + 11u) ^ (i >> 5));
+}
+
+static unsigned source_changed(const volatile uint8_t* src, unsigned size, unsigned bytes)
+{
+    unsigned changed = 0;
+    if (bytes == 2) {
+        for (unsigned i = 0; i < size; i += 2) {
+            const unsigned sample = ((i * 37u + 11u) ^ (i >> 5)) & 0x3ffu;
+            const unsigned word = sample << 6;
+            if (src[i] != (uint8_t)word || src[i + 1] != (uint8_t)(word >> 8))
+                changed++;
+        }
+        return changed;
+    }
+    for (unsigned i = 0; i < size; i++)
+        if (src[i] != (uint8_t)((i * 37u + 11u) ^ (i >> 5)))
+            changed++;
+    return changed;
 }
 
 static uint32_t* read_spv(const char* path, uint32_t* words)
@@ -209,22 +290,32 @@ struct push_params {
     uint32_t src_y, dst_y;
     uint32_t src_x, src_row;
     uint32_t src_w, src_h, dst_w, dst_h;
+    uint32_t rot;
 };
 
-// Byte-exact nearest-neighbour oracle over every destination byte. Checks
+// Byte-exact nearest-neighbour oracle over every destination pixel. Checks
 // luma and both chroma channels. `src` is the CPU view of the source DMA-BUF
-// this gate just filled, so a wrong stride/offset/subsample in the shader
-// lands on a different pattern byte and fails here.
+// this gate just filled, so a wrong stride/offset/subsample/rotation in the
+// shader lands on a different pattern sample and fails here.
 static unsigned check_pixels(const volatile uint8_t* src, const volatile uint8_t* dst, const struct geometry* g)
 {
     unsigned bad = 0;
-    const unsigned yinc = point_step(g->crop_h, g->dst_h);
-    const unsigned xinc = point_step(g->crop_w, g->dst_w);
+    const unsigned bpp = g->bytes;
+    const unsigned pair_bytes = 2 * bpp; // one interleaved (u,v) pair
+    // A quarter turn transposes the sampled rectangle, so the point map runs
+    // on that size and each point is then taken back to the source.
+    const unsigned rot_w = (g->rot & 1u) ? g->crop_h : g->crop_w;
+    const unsigned rot_h = (g->rot & 1u) ? g->crop_w : g->crop_h;
+    const unsigned xinc = point_step(rot_w, g->dst_w);
+    const unsigned yinc = point_step(rot_h, g->dst_h);
     for (unsigned dy = 0; dy < g->dst_h; dy++) {
-        unsigned so = (g->crop_y + point_pick(dy, yinc)) * g->src_stride;
+        const unsigned ry = point_pick(dy, yinc);
         for (unsigned dx = 0; dx < g->dst_w; dx++) {
-            uint8_t want = src[so + g->crop_x + point_pick(dx, xinc)];
-            uint8_t got = dst[dy * g->dst_stride + dx];
+            unsigned sx, sy;
+            unrotate(g->rot, point_pick(dx, xinc), ry, g->crop_w, g->crop_h, &sx, &sy);
+            const unsigned off = (g->crop_y + sy) * g->src_stride + (g->crop_x + sx) * bpp;
+            const unsigned want = sample_at(src, off, bpp);
+            const unsigned got = sample_at(dst, dy * g->dst_stride + dx * bpp, bpp);
             if (got != want) {
                 if (bad < 8)
                     fprintf(stderr, "  luma (%u,%u): got %u want %u\n", dx, dy, got, want);
@@ -232,15 +323,24 @@ static unsigned check_pixels(const volatile uint8_t* src, const volatile uint8_t
             }
         }
     }
-    const unsigned cyinc = point_step(g->crop_h / 2, g->dst_h / 2);
-    const unsigned cxinc = point_step(g->crop_w / 2, g->dst_w / 2);
-    for (unsigned cy = 0; cy < g->dst_h / 2; cy++) {
-        unsigned su = g->src_uv + (g->crop_y / 2 + point_pick(cy, cyinc)) * g->src_stride;
-        unsigned du = g->dst_uv + cy * g->dst_stride;
-        for (unsigned cx = 0; cx < g->dst_w / 2; cx++) {
-            unsigned pair = su + g->crop_x + point_pick(cx, cxinc) * 2;
-            uint8_t wu = src[pair], wv = src[pair + 1];
-            uint8_t gu = dst[du + cx * 2], gv = dst[du + cx * 2 + 1];
+    const unsigned cw = g->crop_w / 2, ch = g->crop_h / 2;
+    const unsigned dw = g->dst_w / 2, dh = g->dst_h / 2;
+    const unsigned crw = (g->rot & 1u) ? ch : cw;
+    const unsigned crh = (g->rot & 1u) ? cw : ch;
+    const unsigned cxinc = point_step(crw, dw);
+    const unsigned cyinc = point_step(crh, dh);
+    for (unsigned cy = 0; cy < dh; cy++) {
+        const unsigned ry = point_pick(cy, cyinc);
+        for (unsigned cx = 0; cx < dw; cx++) {
+            unsigned sx, sy;
+            unrotate(g->rot, point_pick(cx, cxinc), ry, cw, ch, &sx, &sy);
+            const unsigned off = g->src_uv + (g->crop_y / 2 + sy) * g->src_stride + g->crop_x * bpp
+                + sx * pair_bytes;
+            const unsigned wu = sample_at(src, off, bpp);
+            const unsigned wv = sample_at(src, off + bpp, bpp);
+            const unsigned d = g->dst_uv + cy * g->dst_stride + cx * pair_bytes;
+            const unsigned gu = sample_at(dst, d, bpp);
+            const unsigned gv = sample_at(dst, d + bpp, bpp);
             if (gu != wu || gv != wv) {
                 if (bad < 8)
                     fprintf(stderr, "  chroma (%u,%u): got (%u,%u) want (%u,%u)\n", cx, cy, gu, gv, wu, wv);
@@ -253,28 +353,48 @@ static unsigned check_pixels(const volatile uint8_t* src, const volatile uint8_t
 
 int main(int argc, char** argv)
 {
-    if (argc < 3) {
+    const char* positional[8] = {};
+    unsigned npos = 0;
+    unsigned bytes = 1, rot = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--p010") == 0) {
+            bytes = 2;
+        } else if (strcmp(argv[i], "--rot") == 0 && i + 1 < argc) {
+            rot = (unsigned)strtoul(argv[++i], NULL, 10);
+        } else if (npos < sizeof(positional) / sizeof(positional[0])) {
+            positional[npos++] = argv[i];
+        } else {
+            fprintf(stderr, "FAIL too many arguments\n");
+            return 2;
+        }
+    }
+    if (npos < 2) {
         fprintf(stderr,
-            "usage: %s <nv12_scale.spv> <heap|msm> [render-node] [WxH WxH [CROP_WxH+X+Y]]\n",
+            "usage: %s <scale.spv> <heap|msm> [render-node] [WxH WxH [CROP_WxH+X+Y]] [--rot 0..3] [--p010]\n",
             argv[0]);
         return 2;
     }
-    const char* origin = argv[2];
-    const char* node = argc >= 4 ? argv[3] : "/dev/dri/renderD128";
+    if (rot > 3) {
+        fprintf(stderr, "FAIL --rot must be 0..3\n");
+        return 2;
+    }
+    const char* origin = positional[1];
+    const char* node = npos >= 3 ? positional[2] : "/dev/dri/renderD128";
     unsigned src_w = 64, src_h = 32, dst_w = 128, dst_h = 64;
-    if (argc >= 6 && (sscanf(argv[4], "%ux%u", &src_w, &src_h) != 2
-                         || sscanf(argv[5], "%ux%u", &dst_w, &dst_h) != 2)) {
+    if (npos >= 5 && (sscanf(positional[3], "%ux%u", &src_w, &src_h) != 2
+                         || sscanf(positional[4], "%ux%u", &dst_w, &dst_h) != 2)) {
         fprintf(stderr, "FAIL sizes must be WxH WxH\n");
         return 2;
     }
     if (!src_w || !src_h || !dst_w || !dst_h || ((src_w | src_h | dst_w | dst_h) & 1u)) {
-        fprintf(stderr, "FAIL sizes must be even and non-zero (NV12)\n");
+        fprintf(stderr, "FAIL sizes must be even and non-zero (4:2:0)\n");
         return 2;
     }
-    struct geometry g = geometry(src_w, src_h, dst_w, dst_h);
-    if (argc >= 7) {
+    struct geometry g = geometry(src_w, src_h, dst_w, dst_h, bytes);
+    g.rot = rot;
+    if (npos >= 6) {
         unsigned crop_w = 0, crop_h = 0, crop_x = 0, crop_y = 0;
-        if (sscanf(argv[6], "%ux%u+%u+%u", &crop_w, &crop_h, &crop_x, &crop_y) != 4) {
+        if (sscanf(positional[5], "%ux%u+%u+%u", &crop_w, &crop_h, &crop_x, &crop_y) != 4) {
             fprintf(stderr, "FAIL crop must be WxH+X+Y\n");
             return 2;
         }
@@ -309,17 +429,16 @@ int main(int argc, char** argv)
     }
     sync_cpu(src_fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE);
     sync_cpu(dst_fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE);
-    // Distinct byte per address so an offset bug reads the wrong value, and a
-    // sentinel in the destination so an unwritten word cannot look correct.
-    for (unsigned i = 0; i < g.src_size; i++)
-        src[i] = (uint8_t)((i * 37u + 11u) ^ (i >> 5));
+    // Distinct sample per address so an offset bug reads the wrong value, and
+    // a sentinel in the destination so an unwritten word cannot look correct.
+    fill_source(src, g.src_size, g.bytes);
     for (unsigned i = 0; i < g.dst_size; i++)
         dst[i] = 0xcdu;
     sync_cpu(src_fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE);
     sync_cpu(dst_fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE);
 
     uint32_t words = 0;
-    uint32_t* code = read_spv(argv[1], &words);
+    uint32_t* code = read_spv(positional[0], &words);
 
     VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
     const char* iext[] = { "VK_KHR_external_memory_capabilities", "VK_KHR_get_physical_device_properties2" };
@@ -410,7 +529,7 @@ int main(int argc, char** argv)
     CHECK(vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpci, NULL, &pipe), "vkCreateComputePipelines");
 
     // Both storage buffers are external (DMA-BUF backed), with the real NV12
-    // sizes; the destination is twice the source's geometry.
+    // or P010 sizes; the destination is twice the source's geometry.
     VkExternalMemoryBufferCreateInfo embci = { .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
         .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT };
     VkBufferCreateInfo sbci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -440,7 +559,8 @@ int main(int argc, char** argv)
         }
     VkDeviceMemory mdst = import_dmabuf(dev, mtype, dmr, dst_fd, dst_buf);
     VkDeviceMemory msrc = import_dmabuf(dev, mtype, smr, src_fd, src_buf);
-    printf("ok   imported src=%uB dst=%uB (NV12) mtype=%u\n", g.src_size, g.dst_size, mtype);
+    printf("ok   imported src=%uB dst=%uB (%s) mtype=%u\n", g.src_size, g.dst_size, bytes == 2 ? "P010" : "NV12",
+        mtype);
 
     VkDescriptorPoolSize dps = { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 2 };
     VkDescriptorPoolCreateInfo dpci = {
@@ -495,11 +615,13 @@ int main(int argc, char** argv)
         .src_w = g.crop_w,
         .src_h = g.crop_h,
         .dst_w = g.dst_w,
-        .dst_h = g.dst_h };
+        .dst_h = g.dst_h,
+        .rot = g.rot };
     vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-    // One invocation per destination word (4 luma pixels, or 2 chroma pairs);
-    // the grid covers the luma rows and the half-height chroma plane.
-    const unsigned words_per_row = (g.dst_w + 3) / 4;
+    // One invocation per destination word: four luma pixels and two chroma
+    // pairs (NV12), or two luma samples and one chroma pair (P010). The grid
+    // covers the luma rows and the half-height chroma plane.
+    const unsigned words_per_row = bytes == 2 ? (g.dst_w + 1) / 2 : (g.dst_w + 3) / 4;
     const unsigned rows = g.dst_h + g.dst_h / 2;
     vkCmdDispatch(cb, (words_per_row + 7) / 8, (rows + 7) / 8, 1);
     vkEndCommandBuffer(cb);
@@ -514,18 +636,16 @@ int main(int argc, char** argv)
     sync_cpu(src_fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ);
     const unsigned bad = check_pixels(src, dst, &g);
     // The source must be unchanged: the shader reads it only.
-    unsigned changed = 0;
-    for (unsigned i = 0; i < g.src_size; i++)
-        if (src[i] != (uint8_t)((i * 37u + 11u) ^ (i >> 5)))
-            changed++;
+    const unsigned changed = source_changed(src, g.src_size, g.bytes);
     sync_cpu(dst_fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
     sync_cpu(src_fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
     if (bad || changed) {
         fprintf(stderr, "FAIL origin=%s pixels_wrong=%u src_changed=%u\n", origin, bad, changed);
         return 1;
     }
-    printf("PASS origin=%s scale=%ux%u->%ux%u crop=%ux%u+%u+%u exact bytes=%u src=unchanged\n", origin,
-        g.src_w, g.src_h, g.dst_w, g.dst_h, g.crop_w, g.crop_h, g.crop_x, g.crop_y, g.dst_size);
+    printf("PASS origin=%s %s rot=%u scale=%ux%u->%ux%u crop=%ux%u+%u+%u exact bytes=%u src=unchanged\n", origin,
+        bytes == 2 ? "p010" : "nv12", g.rot, g.src_w, g.src_h, g.dst_w, g.dst_h, g.crop_w, g.crop_h, g.crop_x,
+        g.crop_y, g.dst_size);
 
     vkDestroyFence(dev, fence, NULL);
     vkFreeCommandBuffers(dev, cmdp, 1, &cb);

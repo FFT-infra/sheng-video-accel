@@ -32,9 +32,9 @@
 
 | 接口入口 | 操作 | 输入格式 | 输出格式 | 验证基准 |
 | --- | --- | --- | --- | --- |
-| `VAEntrypointVideoProc`（`VAProfileNone`，需显式开启） | 任意比例最近邻缩放，可带裁剪 | NV12 | NV12 | `scale_vaapi` 输出与 swscale `flags=neighbor` 逐字节一致；裁剪与 `crop,scale` 逐字节一致 |
+| `VAEntrypointVideoProc`（`VAProfileNone`，需显式开启） | 任意比例最近邻缩放，可带裁剪与旋转 | NV12、P010 | NV12、P010 | `scale_vaapi` 输出与 swscale `flags=neighbor` 逐字节一致；裁剪与 `crop,scale` 逐字节一致；三个方向都与 `transpose` 逐字节一致 |
 
-视频处理默认关闭，需设置 `V4L2_VA_VPP`。处理在 surface 的 DMA-BUF 上运行固定的 Vulkan 计算内核，只提供最近邻缩放一种操作，取点位置与 swscale 相同，起点是客户端给出的 surface region。NV12 与 P010 走同一套取点，按样本宽度各有一个内核；两端位深不一致的画面、旋转、混合、滤镜与色彩转换都会被拒绝，不做近似处理。 缩放下限是内核自身的 16x16，不再受解码节点最小尺寸约束，因此可以缩到缩略图大小。
+视频处理默认关闭，需设置 `V4L2_VA_VPP`。处理在 surface 的 DMA-BUF 上运行固定的 Vulkan 计算内核，只提供最近邻缩放一种操作，取点位置与 swscale 相同，起点是客户端给出的 surface region，先按客户端要求做顺时针旋转再缩放。NV12 与 P010 走同一套取点，按样本宽度各有一个内核；两端位深不一致的画面、镜像、混合、滤镜与色彩转换都会被拒绝，不做近似处理。 缩放下限是内核自身的 16x16，不再受解码节点最小尺寸约束，因此可以缩到缩略图大小。
 
 ## 运行环境
 
@@ -95,7 +95,7 @@ cd packaging/arch && makepkg -si
 | `V4L2_VA_SYNC_TIMEOUT_MS` | 2000 | session 等待超时时间（毫秒） |
 | `V4L2_VA_COPY` | gpu | 拷贝引擎选择（`gpu` 或 `cpu`） |
 | `V4L2_VA_PUBLISH` | auto | 强制指定发布模式（`auto`、`direct`、`import`、`copy`） |
-| `V4L2_VA_VPP` | off | 启用 `VAProfileNone` / `VAEntrypointVideoProc` 入口（NV12 最近邻缩放） |
+| `V4L2_VA_VPP` | off | 启用 `VAProfileNone` / `VAEntrypointVideoProc` 入口（NV12/P010 最近邻缩放与旋转） |
 | `V4L2_VA_DUMP` | off | 提交的码流单元转储目录路径 |
 
 GStreamer 的 VA 插件（`libgstva`）在注册任何元素之前会按厂商字符串过滤 VA 驱动，本驱动的字符串不在白名单里：`gst-inspect-1.0 va` 报 `0 features`，`vaav1dec` 元素不存在。`GST_VA_ALL_DRIVERS=1` 是插件自带的绕过开关，设置后元素才会注册；libva 仍然通过 `msm_drv_video.so` 符号链接加载本驱动，不涉及任何 `LIBVA_*` 变量。`test/iris-gstreamer-gate.sh` 在平板上验证这两种状态。

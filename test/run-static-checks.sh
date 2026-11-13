@@ -45,14 +45,19 @@ echo "== VPP SPIR-V pin"
 # SPIR-V binaries are pinned by hash here. A stale or hand-edited .spv must
 # fail a host check rather than silently change what the target gate measures.
 # SHA256SUMS lists copy.spv (flat read/write prereq), nv12_scale.spv (the
-# nearest NV12 scale with crop) and p010_scale.spv (the same map for P010);
+# nearest NV12 scale with crop and rotation) and p010_scale.spv (the same map
+# for P010);
 # sha256sum -c verifies every entry.
 run vpp-spv-pin sh -c 'cd "$1" && sha256sum -c SHA256SUMS' sh "$test_dir/vulkan-vpp"
 run vpp-spv-scale-pinned grep -Fq 'nv12_scale.spv' "$test_dir/vulkan-vpp/SHA256SUMS"
 run vpp-spv-p010-pinned grep -Fq 'p010_scale.spv' "$test_dir/vulkan-vpp/SHA256SUMS"
 # The scale gate must stay a per-pixel oracle, not a spot check: a stride or
 # chroma-offset bug can otherwise hide behind a handful of sampled bytes.
-run vpp-scale-pixel-oracle grep -Fq 'check_pixels(src, dst, &g)' "$test_dir/vulkan-vpp/nv12_scale_probe.c"
+run vpp-scale-pixel-oracle grep -Fq 'check_pixels(src, dst, &g)' "$test_dir/vulkan-vpp/scale_probe.c"
+# The probe is shared by both kernels and both gates; a rename or a moved
+# helper would leave a gate compiling nothing.
+run vpp-p010-gate-uses-probe grep -Fq 'scale_probe.c' "$test_dir/vulkan-vpp/p010_scale_gate.sh"
+run vpp-rotate-gate-uses-driver grep -Fq 'transpose_vaapi' "$test_dir/vulkan-vpp/transpose_vaapi_gate.sh"
 # The driver embeds the shader, so the array in src/ is a second copy of the
 # pinned binary. Regenerate it from the .spv and require an identical file; a
 # hand edit here would ship a kernel no gate ever measured.

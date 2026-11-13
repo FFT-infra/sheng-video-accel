@@ -2,9 +2,10 @@
 //
 // The three queries on the VPP vtable. They describe what the compute
 // backend runs — one nearest-neighbour scale at the requested ratio from an
-// optional crop, in NV12 or P010, no filters, no rotation, no blending — and
-// nothing here creates a VkInstance or opens a node, so a client can query
-// them during GPU sandbox initialisation.
+// optional crop, in NV12 or P010, after an optional clockwise quarter turn,
+// with no filters, mirroring or blending — and nothing here creates a
+// VkInstance or opens a node, so a client can query them during GPU sandbox
+// initialisation.
 
 #include "driver.h"
 
@@ -74,8 +75,9 @@ VAStatus queryVideoProcPipelineCaps(VADriverContextP ctx, VAContextID id, VABuff
     caps->num_input_color_standards = static_cast<uint32_t>(sizeof(kStandards) / sizeof(kStandards[0]));
     caps->output_color_standards = kStandards;
     caps->num_output_color_standards = static_cast<uint32_t>(sizeof(kStandards) / sizeof(kStandards[0]));
-    // Only the identity rotation and mirror are implemented.
-    caps->rotation_flags = 1u << VA_ROTATION_NONE;
+    // All three clockwise quarter turns; mirroring is not implemented.
+    caps->rotation_flags = (1u << VA_ROTATION_NONE) | (1u << VA_ROTATION_90) | (1u << VA_ROTATION_180)
+        | (1u << VA_ROTATION_270);
     caps->blend_flags = 0;
     caps->mirror_flags = 0;
     caps->num_additional_outputs = 0;

@@ -136,8 +136,8 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
     iris::require(p.blend_state == nullptr, "VPP blending is not supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
     iris::require(p.output_hdr_metadata == nullptr, "VPP HDR metadata is not supported",
         VA_STATUS_ERROR_UNSUPPORTED_FILTER);
-    iris::require(p.rotation_state == VA_ROTATION_NONE, "VPP rotation is not supported",
-        VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    iris::require(p.rotation_state <= VA_ROTATION_270, "invalid VPP rotation",
+        VA_STATUS_ERROR_INVALID_PARAMETER);
     iris::require(p.mirror_state == VA_MIRROR_NONE, "VPP mirroring is not supported",
         VA_STATUS_ERROR_UNSUPPORTED_FILTER);
     iris::require((p.pipeline_flags & ~VA_PROC_PIPELINE_FAST) == 0, "unsupported VPP pipeline flag",
@@ -166,6 +166,7 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
 
     Context::VppJob job;
     job.source = p.surface;
+    job.rotation = p.rotation_state;
     if (p.surface_region) {
         job.region = *p.surface_region;
         job.region_set = true;
@@ -252,6 +253,9 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
     sj.width = target->width;
     sj.height = target->height;
     sj.bytes = source->fourcc == VA_FOURCC_P010 ? 2 : 1;
+    // The rotation happens before the scale, so a quarter turn swaps the
+    // sampled rectangle's dimensions and the point map runs on that.
+    sj.rotation = job.rotation;
     if (!iris::vpp::scale_nv12_or_p010(sj)) {
         target->failed = true;
         throw iris::Error(VA_STATUS_ERROR_OPERATION_FAILED, "Vulkan VPP scale failed");

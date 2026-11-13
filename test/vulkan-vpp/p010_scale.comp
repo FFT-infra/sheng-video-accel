@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 //
-// P010 nearest-neighbour scale (optionally from a crop) for the VA video
-// processor: the 10-bit sibling of nv12_scale.comp. Same sample map, same
-// crop semantics, same rule that one invocation owns one 32-bit destination
-// word so no two invocations race.
+// P010 nearest-neighbour scale (optionally from a crop, optionally rotated)
+// for the VA video processor: the 10-bit sibling of nv12_scale.comp. Same
+// sample map, same crop semantics, same rotation, same rule that one
+// invocation owns one 32-bit destination word so no two invocations race.
 //
 // A P010 sample is a 16-bit little-endian word with the ten bits at the top
 // (the low six are zero), so a 32-bit word holds two samples instead of four
@@ -17,6 +17,11 @@
 // source and output formats differ, because swscale's own 10-to-8 conversion
 // dithers by a count that depends on the sample position and this kernel has
 // no business reproducing that.
+//
+// The crop origin is in luma pixels and even. A chroma pair spans two luma
+// columns and four bytes here (one 16-bit u, one 16-bit v), so the origin
+// lands at byte 2 * src_x of the chroma row — not src_x, which is what a
+// pair-at-2-bytes format like NV12 needs.
 
 #version 450
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -27,6 +32,8 @@ layout(push_constant) uniform Params {
     uint src_y, dst_y;
     uint src_x, src_row;
     uint src_w, src_h, dst_w, dst_h;
+    // Clockwise quarter turns: VA_ROTATION_NONE/90/180/270 as 0/1/2/3.
+    uint rot;
 } p;
 
 // `off` is a byte offset and is always even: P010 samples are 16-bit and the
@@ -46,6 +53,27 @@ uint pick(uint i, uint inc)
     return (i * inc + (inc >> 1)) >> 16;
 }
 
+// Size of a w x h plane after the rotation. A quarter turn transposes it.
+uvec2 rotated(uint w, uint h)
+{
+    return (p.rot & 1u) != 0u ? uvec2(h, w) : uvec2(w, h);
+}
+
+// Same inverse rotation as nv12_scale.comp: the source is rotated clockwise
+// first and scaled second, so each destination point is mapped into the
+// rotated plane and then taken back to the source.
+uvec2 unrotate(uint rx, uint ry, uint w, uint h)
+{
+    uvec2 r = rotated(w, h);
+    if (p.rot == 1u)
+        return uvec2(ry, r.y - 1u - rx);
+    if (p.rot == 2u)
+        return uvec2(r.x - 1u - rx, r.y - 1u - ry);
+    if (p.rot == 3u)
+        return uvec2(r.x - 1u - ry, rx);
+    return uvec2(rx, ry);
+}
+
 void main()
 {
     uint word = gl_GlobalInvocationID.x;
@@ -57,13 +85,16 @@ void main()
         // Two luma samples per word.
         if (word >= ((p.dst_w + 1u) >> 1))
             return;
-        uint inc = step(p.src_w, p.dst_w);
-        uint base = p.src_y + (p.src_row + pick(row, step(p.src_h, p.dst_h))) * p.src_stride;
+        uvec2 r = rotated(p.src_w, p.src_h);
+        uint hx = step(r.x, p.dst_w);
+        uint hy = step(r.y, p.dst_h);
+        uint ry = pick(row, hy);
         uint packed = 0u;
         for (uint k = 0u; k < 2u; ++k) {
             uint dx = word * 2u + k;
-            uint sx = p.src_x + pick(min(dx, p.dst_w - 1u), inc);
-            packed |= sample16(base + sx * 2u) << (k * 16u);
+            uvec2 at = unrotate(pick(min(dx, p.dst_w - 1u), hx), ry, p.src_w, p.src_h);
+            packed |= sample16(p.src_y + (p.src_row + at.y) * p.src_stride + (p.src_x + at.x) * 2u)
+                << (k * 16u);
         }
         d[(p.dst_y + row * p.dst_stride + word * 4u) >> 2] = packed;
     } else {
@@ -76,11 +107,15 @@ void main()
         uint pairs = p.dst_w >> 1;
         if (word >= pairs)
             return;
-        uint inc = step(p.src_w >> 1, pairs);
-        uint srow = (p.src_row >> 1) + pick(cy, step(p.src_h >> 1, p.dst_h >> 1));
-        uint base = p.src_uv + srow * p.src_stride;
-        uint sx = p.src_x + pick(min(word, pairs - 1u), inc) * 4u;
+        uint cw = p.src_w >> 1;
+        uint ch = p.src_h >> 1;
+        uvec2 r = rotated(cw, ch);
+        uint hx = step(r.x, pairs);
+        uint hy = step(r.y, p.dst_h >> 1);
+        uint ry = pick(cy, hy);
+        uvec2 at = unrotate(pick(min(word, pairs - 1u), hx), ry, cw, ch);
+        uint off = p.src_uv + ((p.src_row >> 1) + at.y) * p.src_stride + p.src_x * 2u + at.x * 4u;
         d[(p.dst_uv + cy * p.dst_stride + word * 4u) >> 2]
-            = sample16(base + sx) | (sample16(base + sx + 2u) << 16u);
+            = sample16(off) | (sample16(off + 2u) << 16u);
     }
 }

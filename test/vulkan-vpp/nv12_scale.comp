@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 //
-// NV12 nearest-neighbour scale (optionally from a crop) for the VA video
-// processor. The two DMA-BUFs
+// NV12 nearest-neighbour scale (optionally from a crop, optionally rotated)
+// for the VA video processor. The two DMA-BUFs
 // are bound as flat uint[] storage buffers and every address (stride, luma and
-// chroma offsets, source and destination geometry) comes from push constants,
-// so this is the same kernel the driver dispatches, not a shader with one test
-// size baked in.
+// chroma offsets, source and destination geometry, rotation) comes from push
+// constants, so this is the same kernel the driver dispatches, not a shader
+// with one test size baked in.
 //
 // The sample position is swscale's point map, so a client that swaps
 // `scale=WxH:flags=neighbor` for `scale_vaapi=w=W:h=H` gets the same pixels at
@@ -17,6 +17,13 @@
 // (libswscale/utils.c initFilter, SWS_POINT with filterSize 1, and the
 // lumXInc/chrXInc rounding in sws_init_context; verified byte-exact against
 // the host `scale` filter over the ratio matrix in nv12_scale_gate.sh.)
+//
+// Rotation follows the VA pipeline order: the source is rotated clockwise
+// first, then scaled to fill the output. So the point map runs on the rotated
+// size and `unrotate` walks each destination point back to the source. A
+// quarter turn makes the two planes transpose too, which is why the map is
+// applied to the chroma plane with its own half-size geometry rather than
+// derived from the luma coordinate.
 //
 // Each invocation owns one 32-bit destination word, so no two invocations
 // write the same word and a per-pixel oracle is meaningful instead of a race
@@ -37,6 +44,8 @@ layout(push_constant) uniform Params {
     // are even because a 4:2:0 chroma sample covers two luma columns.
     uint src_x, src_row;
     uint src_w, src_h, dst_w, dst_h;
+    // Clockwise quarter turns: VA_ROTATION_NONE/90/180/270 as 0/1/2/3.
+    uint rot;
 } p;
 
 uint src_byte(uint off)
@@ -56,6 +65,28 @@ uint pick(uint i, uint inc)
     return (i * inc + (inc >> 1)) >> 16;
 }
 
+// Size of a w x h plane after the rotation. A quarter turn transposes it.
+uvec2 rotated(uint w, uint h)
+{
+    return (p.rot & 1u) != 0u ? uvec2(h, w) : uvec2(w, h);
+}
+
+// The source point behind (rx, ry) of the rotated plane. A clockwise quarter
+// turn sends the source top-left corner to the top-right, 180 degrees to the
+// bottom-right and 270 to the bottom-left, so undoing it means reading the
+// rotated coordinates in that corner's order.
+uvec2 unrotate(uint rx, uint ry, uint w, uint h)
+{
+    uvec2 r = rotated(w, h);
+    if (p.rot == 1u)
+        return uvec2(ry, r.y - 1u - rx);
+    if (p.rot == 2u)
+        return uvec2(r.x - 1u - rx, r.y - 1u - ry);
+    if (p.rot == 3u)
+        return uvec2(r.x - 1u - ry, rx);
+    return uvec2(rx, ry);
+}
+
 void main()
 {
     uint word = gl_GlobalInvocationID.x;
@@ -69,31 +100,38 @@ void main()
         return;
 
     if (row < p.dst_h) {
-        uint inc = step(p.src_w, p.dst_w);
-        uint base = p.src_y + (p.src_row + pick(row, step(p.src_h, p.dst_h))) * p.src_stride;
+        uvec2 r = rotated(p.src_w, p.src_h);
+        uint hx = step(r.x, p.dst_w);
+        uint hy = step(r.y, p.dst_h);
+        uint ry = pick(row, hy);
         uint packed = 0u;
         for (uint k = 0u; k < 4u; ++k) {
             uint dx = word * 4u + k;
             // Columns past the visible width land in the row padding; clamp so
             // the read stays inside the source plane.
-            uint sx = p.src_x + pick(min(dx, p.dst_w - 1u), inc);
-            packed |= src_byte(base + sx) << (k * 8u);
+            uvec2 at = unrotate(pick(min(dx, p.dst_w - 1u), hx), ry, p.src_w, p.src_h);
+            packed |= src_byte(p.src_y + (p.src_row + at.y) * p.src_stride + p.src_x + at.x) << (k * 8u);
         }
         d[(p.dst_y + row * p.dst_stride + word * 4u) >> 2] = packed;
     } else {
         uint cy = row - p.dst_h;
-        uint cw = p.dst_w >> 1;
-        uint inc = step(p.src_w >> 1, cw);
+        uint cw = p.src_w >> 1;
+        uint ch = p.src_h >> 1;
+        uint dw = p.dst_w >> 1;
+        uvec2 r = rotated(cw, ch);
+        uint hx = step(r.x, dw);
+        uint hy = step(r.y, p.dst_h >> 1);
+        uint ry = pick(cy, hy);
         // The crop origin is even, so the chroma origin is exactly src_x/2
         // pairs — that is, src_x bytes into the interleaved row.
-        uint srow = (p.src_row >> 1) + pick(cy, step(p.src_h >> 1, p.dst_h >> 1));
-        uint base = p.src_uv + srow * p.src_stride;
+        uint base = p.src_uv + (p.src_row >> 1) * p.src_stride + p.src_x;
         uint packed = 0u;
         for (uint k = 0u; k < 2u; ++k) {
             uint cx = word * 2u + k;
-            uint sx = p.src_x + pick(min(cx, cw - 1u), inc) * 2u;
-            packed |= src_byte(base + sx) << (k * 16u);
-            packed |= src_byte(base + sx + 1u) << (k * 16u + 8u);
+            uvec2 at = unrotate(pick(min(cx, dw - 1u), hx), ry, cw, ch);
+            uint off = base + at.y * p.src_stride + at.x * 2u;
+            packed |= src_byte(off) << (k * 16u);
+            packed |= src_byte(off + 1u) << (k * 16u + 8u);
         }
         d[(p.dst_uv + cy * p.dst_stride + word * 4u) >> 2] = packed;
     }

@@ -157,13 +157,16 @@ struct Context {
     // VideoProc state: one picture, one VAProcPipelineParameterBuffer. The
     // client's pointers are only valid until vaEndPicture, so the regions it
     // names are resolved to values in renderPicture and the buffer is not
-    // kept. The backend only scales 2x NV12; anything else fails the picture.
+    // kept. The backend scales NV12 or P010 at any ratio, from an optional
+    // crop, with an optional clockwise quarter turn; anything else fails the
+    // picture.
     struct VppJob {
         VASurfaceID source = VA_INVALID_ID;
         VARectangle region = {};
         bool region_set = false;
         VARectangle output_region = {};
         bool output_region_set = false;
+        uint32_t rotation = VA_ROTATION_NONE;
     };
     std::optional<VppJob> vpp;
 
