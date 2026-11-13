@@ -93,6 +93,7 @@ struct PlaneBuffers {
 // Must mirror the push-constant block in test/vulkan-vpp/overlay.comp.
 struct OverlayParams {
     uint32_t main_stride, main_uv, main_y;
+    uint32_t main_x, main_row;
     uint32_t overlay_stride, overlay_uv, overlay_y;
     uint32_t dst_stride, dst_uv, dst_y;
     uint32_t overlay_width, overlay_height;
@@ -532,12 +533,16 @@ bool overlay(const OverlayJob& job)
         return false;
     if (!job.dst_width || !job.dst_height || !job.overlay_width || !job.overlay_height || !job.width || !job.height)
         return false;
+    // The main pass is an offset copy, not a scale: its rectangle is the
+    // destination's size.
+    if (job.main_width != job.dst_width || job.main_height != job.dst_height)
+        return false;
     if (job.bytes != 1 && job.bytes != 2)
         return false;
     // Word writes assume the 4:2:0 geometry, and an even rectangle keeps every
     // chroma cell wholly inside it or wholly outside it.
     if ((job.dst_width | job.dst_height | job.overlay_width | job.overlay_height | job.x | job.y | job.width
-            | job.height)
+            | job.height | job.main_x | job.main_row)
         & 1u)
         return false;
     if (job.x + job.width > job.dst_width || job.y + job.height > job.dst_height)
@@ -549,6 +554,8 @@ bool overlay(const OverlayJob& job)
     push.main_stride = job.main_stride;
     push.main_uv = job.main_uv;
     push.main_y = job.main_y;
+    push.main_x = job.main_x;
+    push.main_row = job.main_row;
     push.overlay_stride = job.overlay_stride;
     push.overlay_uv = job.overlay_uv;
     push.overlay_y = job.overlay_y;

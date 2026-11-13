@@ -78,13 +78,18 @@ run_probe() {
 #   p010   the 10-bit path, overlay and output both P010
 #   ragged 318x178: a row whose last destination word carries two columns the
 #          output does not cover
+#   padded the main surface 16 columns wider than the picture, as a decoder
+#          allocates it, so the main pass copies a rectangle rather than the
+#          whole surface
 cases="half:128x72:128x72:0:0:128:72:0.50 \
 opaque:160x96:64x48:16:16:64:48:1.00 \
 scale:128x72:64x48:34:12:32:24:0.60 \
 p010:128x72:32x24:64:48:32:24:0.50:--p010 \
-ragged:318x178:64x48:100:50:64:48:0.25"
+ragged:318x178:64x48:100:50:64:48:0.25 \
+padded:128x72:64x48:16:16:64:48:0.35:--pad 16"
 
 failed=0
+count=0
 for entry in $cases; do
     tag=${entry%%:*}
     spec=${entry#*:}
@@ -93,6 +98,7 @@ for entry in $cases; do
     ow=${2%x*} oh=${2#*x}
     rx=$3 ry=$4 rw=$5 rh=$6 alpha=$7
     flags=${8:-}
+    count=$((count + 1))
     echo "== $tag ${w}x${h} overlay ${ow}x${oh} rect ${rw}x${rh}+$rx,$ry alpha=$alpha $flags"
     rc=0
     run_probe "$tag" "$w" "$h" "$ow" "$oh" "$rx" "$ry" "$rw" "$rh" "$alpha" "$work/$tag.raw" $flags || rc=$?
@@ -184,6 +190,6 @@ printf 'driver_path=%s\n' "$driver_path"
 printf 'driver_source=%s\n' "$([ -n "$driver_env" ] && echo build-tree || echo installed-package)"
 printf 'driver_sha256=%s\n' "$driver_hash"
 printf 'decoder=%s\n' "$device"
-printf 'cases=%s\n' "$(echo "$cases" | wc -w)"
+printf 'cases=%s\n' "$count"
 printf 'oracle=the documented mix in double precision, plus both endpoint frames byte for byte\n'
-echo "PASS va-vpp-overlay cases=5 endpoints=2 refused=8 driver=$driver_hash"
+echo "PASS va-vpp-overlay cases=$count endpoints=2 refused=8 driver=$driver_hash"

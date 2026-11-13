@@ -28,7 +28,8 @@
 //   iris-va-vpp-probe overlay <render-node> <W> <H> <ovW> <ovH> <x> <y>
 //                     <rw> <rh> <alpha> <out.raw>
 //                     [--p010] [--premultiplied] [--luma-key] [--third]
-//                     [--blend-first] [--main-crop] [--expect-refusal]
+//                     [--blend-first] [--main-crop] [--pad <columns>]
+//                     [--expect-refusal]
 //
 // The third mode submits two pipeline buffers in one picture, the way
 // overlay_vaapi does: the main surface over the whole output, then the
@@ -606,6 +607,22 @@ void make_pattern(unsigned width, unsigned height, unsigned bytes, unsigned seed
         }
 }
 
+// The left `width` columns of a `full_width`-wide frame, as packed rows: what
+// a client's picture looks like inside a decode surface wider than it is.
+void crop_left(const std::vector<uint8_t>& full, unsigned full_width, unsigned width, unsigned height,
+    unsigned bytes, std::vector<uint8_t>& out)
+{
+    out.assign(static_cast<size_t>(width) * height * bytes * 3 / 2, 0);
+    for (unsigned y = 0; y < height; ++y)
+        std::memcpy(&out[static_cast<size_t>(y) * width * bytes],
+            &full[static_cast<size_t>(y) * full_width * bytes], static_cast<size_t>(width) * bytes);
+    const size_t luma = static_cast<size_t>(width) * height * bytes;
+    const size_t full_luma = static_cast<size_t>(full_width) * height * bytes;
+    for (unsigned y = 0; y < height / 2; ++y)
+        std::memcpy(&out[luma + static_cast<size_t>(y) * width * bytes],
+            &full[full_luma + static_cast<size_t>(y) * full_width * bytes], static_cast<size_t>(width) * bytes);
+}
+
 unsigned code_at(const std::vector<uint8_t>& frame, size_t sample, unsigned bytes)
 {
     if (bytes == 1)
@@ -671,7 +688,7 @@ void overlay_usage(const char* argv0)
     std::fprintf(stderr,
         "usage: %s overlay <render-node> <W> <H> <ovW> <ovH> <x> <y> <rw> <rh> <alpha> <out.raw>\n"
         "                 [--p010] [--premultiplied] [--luma-key] [--third] [--blend-first]\n"
-        "                 [--main-crop]\n"
+        "                 [--main-crop] [--pad <columns>]\n"
         "                 [--expect-refusal]\n",
         argv0);
 }
@@ -695,6 +712,7 @@ int run_overlay(int argc, char** argv)
     const char* out_path = argv[10];
     bool p010 = false, premultiplied = false, luma_key = false, third = false, blend_first = false;
     bool main_crop = false, expect_refusal = false;
+    unsigned pad = 0;
     for (int i = 11; i < argc; ++i) {
         if (std::strcmp(argv[i], "--p010") == 0)
             p010 = true;
@@ -708,6 +726,8 @@ int run_overlay(int argc, char** argv)
             blend_first = true;
         else if (std::strcmp(argv[i], "--main-crop") == 0)
             main_crop = true;
+        else if (std::strcmp(argv[i], "--pad") == 0 && i + 1 < argc)
+            pad = static_cast<unsigned>(std::atoi(argv[++i]));
         else if (std::strcmp(argv[i], "--expect-refusal") == 0)
             expect_refusal = true;
         else {
@@ -735,7 +755,14 @@ int run_overlay(int argc, char** argv)
     mix.rect_height = rh;
     mix.bytes = bytes;
     mix.alpha = alpha;
-    make_pattern(width, height, bytes, 1, mix.main);
+    // The main surface is `pad` columns wider than the picture, as a decoder
+    // allocates it; the picture is the left `width` columns.
+    std::vector<uint8_t> main_surface_frame;
+    make_pattern(width + pad, height, bytes, 1, main_surface_frame);
+    if (pad)
+        crop_left(main_surface_frame, width + pad, width, height, bytes, mix.main);
+    else
+        mix.main = main_surface_frame;
     make_pattern(ov_w, ov_h, bytes, 2, mix.overlay);
 
     const int fd = open(argv[0], O_RDWR | O_CLOEXEC);
@@ -762,7 +789,7 @@ int run_overlay(int argc, char** argv)
 
     VASurfaceID main_surface = VA_INVALID_ID, overlay_surface = VA_INVALID_ID, dst_surface = VA_INVALID_ID;
     VASurfaceID created[3] = { VA_INVALID_ID, VA_INVALID_ID, VA_INVALID_ID };
-    check(vaCreateSurfaces(display, rt_format, width, height, &main_surface, 1, nullptr, 0)
+    check(vaCreateSurfaces(display, rt_format, width + pad, height, &main_surface, 1, nullptr, 0)
             == VA_STATUS_SUCCESS,
         "create the main surface");
     check(vaCreateSurfaces(display, rt_format, ov_w, ov_h, &overlay_surface, 1, nullptr, 0)
@@ -789,7 +816,8 @@ int run_overlay(int argc, char** argv)
     }
 
     if (main_surface != VA_INVALID_ID)
-        check(upload(display, main_surface, mix.main, width, height, bytes), "upload the main frame");
+        check(upload(display, main_surface, main_surface_frame, width + pad, height, bytes),
+            "upload the main frame");
     if (overlay_surface != VA_INVALID_ID)
         check(upload(display, overlay_surface, mix.overlay, ov_w, ov_h, bytes), "upload the overlay frame");
 

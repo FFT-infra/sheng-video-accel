@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: MIT
 //
-// Global-alpha compositing for the VA video processor: the whole main surface
-// stays in place, the overlay surface is scaled into one rectangle of the
-// output, and every pixel inside that rectangle becomes
+// Global-alpha compositing for the VA video processor: the main surface is
+// copied into the output at its own scale, the overlay surface is scaled into
+// one rectangle of the output, and every pixel inside that rectangle becomes
 //
 //     out = alpha * overlay + (1 - alpha) * main
+//
+// The main pass is an offset copy rather than a plain one because a decoded
+// frame's surface is wider than its picture — 3048 columns in a 3056-column
+// stride, say — so the rectangle the client names is the picture, and the
+// output is its size. It has to cover the output exactly: a smaller rectangle
+// would be a scale, which is the other kernel's job.
 //
 // This is what `overlay_vaapi` asks for: FFmpeg submits two
 // VAProcPipelineParameterBuffers in one picture, the first naming the main
@@ -41,6 +47,8 @@ layout(set = 0, binding = 1, std430) readonly buffer Overlay { uint o[]; };
 layout(set = 0, binding = 2, std430) writeonly buffer Dst { uint d[]; };
 layout(push_constant) uniform Params {
     uint m_stride, m_uv, m_y;
+    // Where the main pass's rectangle starts inside its surface.
+    uint m_x, m_row;
     uint o_stride, o_uv, o_y;
     uint d_stride, d_uv, d_y;
     // Overlay surface size, and the rectangle it is drawn into.
@@ -117,7 +125,7 @@ void main()
         uint packed = 0u;
         for (uint k = 0u; k < per_word; ++k) {
             uint dx = min(word * per_word + k, p.dst_width - 1u);
-            float m = code(p.m_y + row * p.m_stride + dx * p.bytes);
+            float m = code(p.m_y + (row + p.m_row) * p.m_stride + (dx + p.m_x) * p.bytes);
             if (inside(dx, row)) {
                 uint ox = pick(dx - p.r_x, hx);
                 uint oy = pick(row - p.r_y, hy);
@@ -140,7 +148,7 @@ void main()
         uint packed = 0u;
         for (uint k = 0u; k < cells; ++k) {
             uint cx = min(word * cells + k, cw - 1u);
-            uint m_off = p.m_uv + cy * p.m_stride + cx * 2u * p.bytes;
+            uint m_off = p.m_uv + (cy + (p.m_row >> 1)) * p.m_stride + (cx + (p.m_x >> 1)) * 2u * p.bytes;
             float u = code(m_off);
             float v = code(m_off + p.bytes);
             if (cx >= rx && cx < rx + rw && cy >= ry && cy < ry + rh) {

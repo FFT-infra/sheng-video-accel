@@ -54,17 +54,22 @@ struct ToneMapJob {
     float source_peak_nits = 1000.0f;
 };
 
-// Global-alpha compositing: the main surface stays in place and the overlay
-// surface is scaled into x/y/width/height of the output, where every pixel
-// becomes alpha * overlay + (1 - alpha) * main. All three surfaces share one
-// sample width (bytes) and the destination is the main surface's size; the
-// rectangle is even on both axes, so no chroma cell is half covered.
+// Global-alpha compositing: the main surface's rectangle is copied into the
+// output at its own scale and the overlay surface is scaled into
+// x/y/width/height of the output, where every pixel becomes
+// alpha * overlay + (1 - alpha) * main. All three surfaces share one sample
+// width (bytes); main_width/main_height is the copied rectangle and equals the
+// destination, main_x/main_row is where it starts inside the main surface, and
+// the overlay rectangle is even on both axes so no chroma cell is half
+// covered.
 struct OverlayJob {
     int main_fd = -1, overlay_fd = -1, dst_fd = -1;
     uint32_t main_size = 0, overlay_size = 0, dst_size = 0;
     uint32_t main_stride = 0, overlay_stride = 0, dst_stride = 0;
     uint32_t main_uv = 0, overlay_uv = 0, dst_uv = 0;
     uint32_t main_y = 0, overlay_y = 0, dst_y = 0;
+    uint32_t main_x = 0, main_row = 0;
+    uint32_t main_width = 0, main_height = 0;
     uint32_t overlay_width = 0, overlay_height = 0;
     uint32_t x = 0, y = 0, width = 0, height = 0;
     uint32_t dst_width = 0, dst_height = 0;

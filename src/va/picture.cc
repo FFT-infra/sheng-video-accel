@@ -351,17 +351,15 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
                 VA_STATUS_ERROR_UNSUPPORTED_FILTER);
         }
         if (blend) {
-            // The compositing kernel keeps the main surface in place, so its
-            // size is the output's, and draws the overlay into one rectangle.
-            iris::require(source->width == target->width && source->height == target->height,
-                "a blended picture keeps the main surface's size", VA_STATUS_ERROR_INVALID_PARAMETER);
-            // FFmpeg names the main frame's whole region on every pass, crop or
-            // not, so that region is accepted; a smaller one would mean a crop
-            // the kernel does not do.
-            iris::require(!job.region_set
-                    || (job.region.x == 0 && job.region.y == 0 && job.region.width == source->width
-                        && job.region.height == source->height),
-                "a blended picture reads the whole main surface", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+            // The main pass is copied at its own scale, so the rectangle the
+            // client names is the output's size. FFmpeg names it on every
+            // pass: the picture inside a decode surface that is wider than it.
+            // A smaller rectangle would be a scale, which the composite does
+            // not do, and an odd origin cannot land on a chroma cell.
+            iris::require(static_cast<uint32_t>(crop.width) == target->width
+                    && static_cast<uint32_t>(crop.height) == target->height,
+                "a blended picture copies its main rectangle at its own scale",
+                VA_STATUS_ERROR_UNSUPPORTED_FILTER);
             iris::require(!blend->region_set, "the overlay samples its whole surface",
                 VA_STATUS_ERROR_UNSUPPORTED_FILTER);
             iris::require(blend->output_region_set, "the blending pass needs an output region",
@@ -412,6 +410,10 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         oj.overlay_uv = ov.layout.chroma_offset();
         oj.dst_uv = dst.layout.chroma_offset();
         oj.main_y = src.layout.data_offset;
+        oj.main_x = static_cast<uint32_t>(crop.x);
+        oj.main_row = static_cast<uint32_t>(crop.y);
+        oj.main_width = static_cast<uint32_t>(crop.width);
+        oj.main_height = static_cast<uint32_t>(crop.height);
         oj.overlay_y = ov.layout.data_offset;
         oj.dst_y = dst.layout.data_offset;
         oj.overlay_width = overlay_surface->width;
