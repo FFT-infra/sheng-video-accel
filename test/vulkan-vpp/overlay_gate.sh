@@ -112,6 +112,12 @@ run_probe() {
 #   cubic   the same pick over a 1.56:1 growth, where it selects the cubic
 #   full, rgbfull  a full-range destination, where the encoded output and a
 #           premultiplied sample's neutral code both move
+#   layers16, layers16rgb  the driver's sixteen-pass bound, reached rather than
+#           named. Every layer steps two pixels down and right, so the
+#           sixteenth rectangle starts at 46,46 and a 32x24 rectangle still
+#           ends at 78,70 inside the 128x72 output; the 64x48 rectangle the
+#           shorter stacks use would leave the frame and be refused for its
+#           geometry instead of for the layer count.
 cat > "$work/cases" <<'EOF'
 half:128x72:128x72:0:0:128:72:0.50
 opaque:160x96:64x48:16:16:64:48:1.00
@@ -143,6 +149,8 @@ layers2:128x72:64x48:16:16:64:48:0.50:--layers=2
 layers3:128x72:64x48:16:16:64:48:0.50:--layers=3
 layers2rgb:128x72:64x48:16:16:64:48:0.50:--rgb --layers=2
 layers2premult:128x72:64x48:16:16:64:48:0.50:--premultiplied --layers=2
+layers16:128x72:64x48:16:16:32:24:0.50:--layers=16
+layers16rgb:128x72:64x48:16:16:32:24:0.50:--rgb --layers=16
 EOF
 
 failed=0
@@ -293,7 +301,9 @@ refuse() {
     printf 'refused=%s\n' "$what"
 }
 refuse luma-key 128 72 64 48 16 16 64 48 0.50 --luma-key
-refuse too-many-layers 128 72 64 48 16 16 64 48 0.50 --layers=18
+# Seventeen, one past the bound, on geometry that fits: the sixteenth
+# rectangle ends at 72,68, so the only reason to refuse is the layer count.
+refuse too-many-layers 128 72 64 48 16 16 24 20 0.50 --layers=17
 refuse blend-first 128 72 64 48 16 16 64 48 0.50 --blend-first
 refuse outside 128 72 64 48 112 16 32 48 0.50
 refuse odd-region 128 72 64 48 17 16 32 48 0.50
