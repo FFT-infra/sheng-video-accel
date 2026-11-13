@@ -7280,9 +7280,9 @@ starting at x begins its chroma at byte `2 * x` of the row; the kernel used
 `x`. Every 10-bit crop case until now started at the origin, where the two
 agree. The gate's crop cases now start at `+16+16`, and both origins pass.
 
-Two claims are not yet made: the pre-fix kernel has not been re-run against
-the new crop case as a negative control (the tablet went offline first), and
-none of this has been repeated from the installed package. `scale_vaapi_gate.sh`
-in its previous form still passes from `build/src`; its 8-bit and 10-bit
-hashes are unchanged by the rotation work, which is what the byte comparison
-against swscale is for.
+Three claims are not yet made. The pre-fix kernel has not been re-run against
+the new crop case as a negative control. None of this has been repeated from
+the installed package. And `scale_vaapi_gate.sh` has not been re-run since the
+rotation change: its unrotated ratios are covered by the kernel gate above,
+but the VA-level scale path last ran on the previous commit, so the next
+session owes that run.
