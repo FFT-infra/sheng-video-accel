@@ -26,7 +26,8 @@
 # weight or a transposed plane would produce. Two cases bracket it from the
 # other side: a constant picture must come out that constant at every ratio
 # (the weights sum to one), and a 1:1 scale must reproduce the nearest map
-# byte for byte (at a sample centre both methods pick the same sample).
+# byte for byte: at a sample centre there is nothing to blend, so the probe
+# drops its one-code tolerance for exactly that geometry.
 #
 # This is evidence for the VPP slice's load-bearing kernel only. It does not
 # advertise VAProfileNone/VAEntrypointVideoProc, wire a VPP context, or touch

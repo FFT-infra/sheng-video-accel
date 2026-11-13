@@ -422,11 +422,17 @@ static unsigned check_pixels(const volatile uint8_t* src, const volatile uint8_t
     const unsigned bpp = g->bytes;
     const unsigned pair_bytes = 2 * bpp;
     const unsigned full = bpp == 2 ? 1023u : 255u;
-    const unsigned tol = g->interp ? 1u : 0u;
     // A quarter turn transposes the sampled rectangle, so the point map runs
     // on that size and each point is then taken back to the source.
     const unsigned rot_w = (g->rot & 1u) ? g->crop_h : g->crop_w;
     const unsigned rot_h = (g->rot & 1u) ? g->crop_w : g->crop_h;
+    // The point map is byte-exact. The blend allows one code, because GLSL may
+    // contract the four-tap sum into fused multiply-adds while the model sums
+    // in double. At 1:1 there is nothing to blend — the centre lands on the
+    // sample and the weights are 1 and 0 — so the two methods must agree
+    // exactly there, and that case is compared byte for byte.
+    const unsigned one_to_one = g->dst_w == rot_w && g->dst_h == rot_h;
+    const unsigned tol = (g->interp && !one_to_one) ? 1u : 0u;
     const unsigned xinc = point_step(rot_w, g->dst_w);
     const unsigned yinc = point_step(rot_h, g->dst_h);
     for (unsigned dy = 0; dy < g->dst_h; dy++) {
