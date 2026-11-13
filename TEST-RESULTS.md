@@ -7605,3 +7605,96 @@ through libva with no `LIBVA_DRIVERS_PATH`.
 | `iris-encode-quality.sh` | `run-20261113T103047Z` | 120 frames each, SSIM 0.9986 / 0.9968, HEVC IRQ +241 |
 | `iris-browser-acceptance.sh` | `run-20261113T103134Z` | Chrome 156 `VaapiVideoDecoder`, `platform=True`, 478 frames, 0 dropped, `driver=installed:cc0d022b` |
 | `iris-av1-browser-matrix.sh local-only` | `run-20261113T103213Z` | Firefox 485 decoded / 8 dropped `hw_log=True`; Chrome 477 / 0 |
+
+## A packed overlay, stored alpha, and the image list the client sizes (`569fd19`)
+
+`overlay_vaapi` had never run against this driver. FFmpeg uploads its overlay
+input into a `VA_RT_FORMAT_RGB32` surface, and for any input carrying an alpha
+channel it sets `VA_BLEND_PREMULTIPLIED_ALPHA` (`vf_overlay_vaapi.c`:
+`have_alpha_planar`). This backend had neither a packed surface nor the second
+blend flag, so the graph failed before the processor was reached.
+
+The packed surface is one plane of 32-bit words end to end: `BGRA` maps to
+`DRM_FORMAT_ARGB8888` and `RGBA` to `DRM_FORMAT_ABGR8888`, the image layer
+fills, views and copies a single plane at four bytes a sample, and the surface
+layer takes `RGB32` on its own and picks the byte order from the pixel-format
+attribute. `overlay_rgb.comp` converts each sampled pixel with the picture's
+own matrix (BT.601, BT.709, BT.2020) to normalised Y'/Cb'/Cr', scales the
+stored main codes by `1 - alpha`, adds, and encodes once. Mixing in codes is
+equivalent for a straight source because limited-range Y'CbCr is affine in RGB;
+it is not equivalent for a stored one, where the neutral offset is part of the
+pixel. `overlay.comp` gained the same stored-alpha form around each plane's
+neutral code for its Y'CbCr overlay.
+
+Found on the way: `queryImageFormats` wrote one entry per format it knew with no
+regard for the caller's capacity. FFmpeg sizes its array from
+`vaMaxNumImageFormats()`, and the two new formats pushed the write past it — a
+`malloc(): invalid next size` in every FFmpeg run, including a plain NV12
+upload and download, before any trace line beyond `va init`. Valgrind on the
+target named `va::queryImageFormats` at `image.cc:172`, "Invalid write of size 8
+… 0 bytes after a block of size 96". The driver now answers the full count,
+writes at most `*count` entries, and `kMaxImageFormats` is the single value
+both sides read.
+
+### The gates
+
+`overlay_gate.sh` grew from seven cases to fifteen: both byte orders, both bit
+depths, the stored-alpha form, BT.601, and a packed overlay over a tone-mapped
+main surface. It also grew the first check whose expectation does not come
+from the probe's own model of the kernel: the same overlay at straight and at
+stored alpha, compared byte for byte after the straight frame is premultiplied
+in the gate. Seven shapes are refused (luma keying, a third pass, a blend
+before its pass, a rectangle outside the output, an odd rectangle, a crop of
+the main surface, an alpha of 1.5).
+
+`overlay_vaapi_gate.sh` drives the client itself. Both frames are one colour,
+so the expected result is one BT.709 triple computed in awk, or one
+stored-alpha mix, and all three cases are exact: alpha 0 with a black overlay
+is the main frame byte for byte; alpha 1 is the overlay colour's own codes
+(62, 102, 240 for the `rgb(254,0,0)` lavfi produces, after asserting the band
+is uniform); alpha 0.25 is `overlay + 0.75·main` in normalised codes,
+`max_diff=0`. The trace must say `source=bgra premultiplied`, and the same
+graph must be refused without `V4L2_VA_VPP`.
+
+Build tree first, `LIBVA_DRIVERS_PATH=$PWD/build/src`, source commit `569fd19`,
+tracked source `15d42f03…`, `source_dirty=0`, driver `acec075a…`, run
+`run-20261113T105641Z`:
+
+| gate | cases | result |
+| --- | ---: | --- |
+| `nv12_scale_gate.sh` | 27 x 2 origins | byte-exact, `spv=5425102c…` |
+| `p010_scale_gate.sh` | 12 x 2 origins | byte-exact, `spv=957a0e4f…` |
+| `tonemap_gate.sh` | 11 + 3 refusals | within 1 code |
+| `overlay_gate.sh` | 15 + 2 endpoints + 7 refusals | within 1 code, the stored-alpha cross-check exact |
+| `overlay_vaapi_gate.sh` | 3 | exact, `client=ffmpeg` |
+| `scale_vaapi_gate.sh` | 8 ratios, 3 P010 | exact |
+| `crop_vaapi_gate.sh` | 3 | exact |
+| `transpose_vaapi_gate.sh` | 19, 7 directions, 2 formats | exact |
+
+### The installed package, re-qualified
+
+`scripts/install-system.sh build` installed `acec075a…` as
+`/usr/lib64/dri/v4l2_drv_video.so` at source commit `569fd19`, tracked source
+`15d42f03…`, `IRIS_SOURCE_DIRTY=0`. The manifest records the rollback as the
+former `cc0d022b…` at
+`/usr/local/share/iris-vaapi/backup/v4l2_drv_video.so`. Every run below is
+`source_dirty=0`, guard `complete`, exit 0, and resolved the driver through
+libva with no `LIBVA_DRIVERS_PATH`. The image-format list and the config's RT
+format changed, so the decode, encode and browser paths were re-run, not just
+the processor.
+
+| gate | run | result |
+| --- | --- | --- |
+| eight VPP gates, `IRIS_VPP_INSTALLED=1` | `run-20261113T105817Z` | all cases above, `driver_source=installed-package` |
+| `iris-matrix.sh` | `run-20261113T110108Z` | H.264, VP9, HEVC, AV1 48/48 exact, `drops=0`, AV1 `noshow=23` |
+| `iris-real-clip-gate.sh` | `run-20261113T105948Z` | AV1 120/120 `import=120 copy=0`; DRC 80 frames `import=42 copy=42` |
+| `iris-encode-quality.sh` | `run-20261113T105948Z` | 120 frames each, SSIM 0.998596 / 0.996808, HEVC IRQ +243 |
+| `iris-browser-acceptance.sh` | `run-20261113T110108Z` | Chrome 156.0.8078.79 `VaapiVideoDecoder`, `platform=True`, 478 frames, 0 dropped, `driver=installed:acec075a` |
+| `iris-av1-browser-matrix.sh local-only` | `run-20261113T110108Z` | Firefox 484 decoded / 11 dropped `hw_log=True`; Chrome 477 / 0 |
+
+Identity for all four runs: kernel `7.2.6-sm8550-g42f3b40-iris1`, module
+`b90bd823…`, boot `4b73926c…` before and after, decoder
+`Iris Decoder` at `/dev/video0` and encoder
+`Iris Encoder` at `/dev/video1`, both resolved by
+`iris_driver` QUERYCAP. Battery 40 % discharging at ~1.0 A, thermal peak
+50.5 °C over the VPP suite and 53.2 °C over the matrix and browsers.
