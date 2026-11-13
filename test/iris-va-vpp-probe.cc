@@ -37,6 +37,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 extern "C" {
@@ -293,12 +294,19 @@ double sample10(const std::vector<uint8_t>& frame, size_t off)
     return static_cast<double>(frame[off] | (frame[off + 1] << 8U)) / 64.0;
 }
 
-// The pipeline's own output for this frame, in packed NV12 rows.
+// The pipeline's own output for this frame, in packed NV12 rows. Chroma is
+// averaged over the pixels of each 2x2 block, the way the kernel averages it:
+// one pair covers two columns of two rows, and on a steep ramp the four pixels
+// do not agree.
 void expected_sdr(const std::vector<uint8_t>& hdr, unsigned width, unsigned height, double peak_nits,
     std::vector<uint8_t>& out)
 {
     const ToneParams p = tone_params(peak_nits);
     out.assign(static_cast<size_t>(width) * height * 3U / 2U, 0);
+    const unsigned cw = width / 2, ch = height / 2;
+    std::vector<double> cb_sum(static_cast<size_t>(cw) * ch, 0.0);
+    std::vector<double> cr_sum(static_cast<size_t>(cw) * ch, 0.0);
+    std::vector<unsigned> samples(static_cast<size_t>(cw) * ch, 0);
     for (unsigned y = 0; y < height; ++y) {
         for (unsigned x = 0; x < width; ++x) {
             const double u = sample10(hdr, chroma_offset(width, height, x / 2, y / 2));
@@ -307,11 +315,19 @@ void expected_sdr(const std::vector<uint8_t>& hdr, unsigned width, unsigned heig
             tone_pixel(sample10(hdr, luma_offset(width, x, y)), u, v, p, rgb);
             const double luma = rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
             out[static_cast<size_t>(y) * width + x] = limited(luma, 16.0, 219.0);
-            if (!(y & 1U) && !(x & 1U)) {
-                const size_t uv = static_cast<size_t>(width) * height + static_cast<size_t>(y / 2) * width + x;
-                out[uv] = limited((rgb[2] - luma) / 1.8556, 128.0, 224.0);
-                out[uv + 1] = limited((rgb[0] - luma) / 1.5748, 128.0, 224.0);
-            }
+            const size_t cell = static_cast<size_t>(y / 2) * cw + x / 2;
+            cb_sum[cell] += (rgb[2] - luma) / 1.8556;
+            cr_sum[cell] += (rgb[0] - luma) / 1.5748;
+            ++samples[cell];
+        }
+    }
+    for (unsigned by = 0; by < ch; ++by) {
+        for (unsigned bx = 0; bx < cw; ++bx) {
+            const size_t cell = static_cast<size_t>(by) * cw + bx;
+            const double n = samples[cell] ? static_cast<double>(samples[cell]) : 0.0;
+            const size_t uv = static_cast<size_t>(width) * height + static_cast<size_t>(by) * width + bx * 2;
+            out[uv] = limited(n > 0.0 ? cb_sum[cell] / n : 0.0, 128.0, 224.0);
+            out[uv + 1] = limited(n > 0.0 ? cr_sum[cell] / n : 0.0, 128.0, 224.0);
         }
     }
 }
@@ -482,11 +498,22 @@ int run_tonemap(int argc, char** argv)
             expected_sdr(hdr, width, height, peak, expected);
             unsigned max_diff = 0;
             double sum = 0;
+            size_t worst = 0;
             for (size_t i = 0; i < expected.size(); ++i) {
                 const unsigned d = static_cast<unsigned>(std::abs(int(expected[i]) - int(output[i])));
-                max_diff = std::max(max_diff, d);
+                if (d > max_diff) {
+                    max_diff = d;
+                    worst = i;
+                }
                 sum += d;
             }
+            // The model's frame beside the kernel's, so a disagreement names
+            // the plane and the column instead of only a count.
+            const std::string side = std::string(out_path) + ".expected";
+            write_file(side.c_str(), expected.data(), expected.size());
+            if (max_diff > 2)
+                std::printf("worst offset=%zu plane=%s expected=%u got=%u\n", worst,
+                    worst < static_cast<size_t>(width) * height ? "Y" : "chroma", expected[worst], output[worst]);
             check(max_diff <= 2, "every byte within 2 codes of the documented pipeline");
             // A monotone ramp in, a monotone ramp out: a knee applied to the
             // wrong variable or a sign error in the matrix breaks this even
