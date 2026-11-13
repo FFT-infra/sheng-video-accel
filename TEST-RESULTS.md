@@ -7298,3 +7298,83 @@ The same two VA-level gates then ran from the installed package: artifacts
 8+3/11 byte-identical (`run-20261113T082519Z`, `run-20261113T082604Z`), both
 reporting `driver_source=installed-package` and the same `driver_sha256`.
 Battery 59 % discharging at the last run.
+
+## HDR10 to SDR tone mapping through the video processor (2026-11-13)
+
+`VAProcFilterHighDynamicRangeToneMapping` with HDR10 metadata now runs
+`tonemap.spv` over a P010 surface and writes SDR NV12: PQ EOTF, the BT.2390
+EETF toward 100 cd/m² as one gain on the largest channel, the linear BT.2020 to
+BT.709 matrix, the BT.709 OETF. The picture is one whole surface at its own
+size. A crop, a scale, a rotation, an NV12 source, HDR to HDR and a second
+filter are refused with a VA status; the client's colour standards may differ
+only as BT.2020 in and BT.709 out, and may be left unnamed.
+
+### The gate
+
+`tonemap_gate.sh` runs `iris-va-vpp-probe tonemap`, which builds the
+`VAProcFilterParameterBufferType` buffer itself. FFmpeg cannot be the client:
+`tonemap_vaapi` refuses a raw P010 frame because it demands mastering-display
+side data a rawvideo input cannot carry. There is no byte-exact reference for
+a tone curve, so the probe compares every output byte with its own
+implementation of the pipeline `tonemap.comp` documents, within 2 codes, and
+checks three properties separately so a model and a kernel that share a
+mistake still fail: PQ black on 16/128/128, the mastering peak on 235, and a
+monotone ramp. One frame runs at 1000 and at 4000 cd/m² and the two outputs
+must differ.
+
+| case | geometry | peak | result |
+| --- | --- | --- | --- |
+| `sdrwhite` | 128x72 | 1000 | `max_diff=1` |
+| `mastering4000` | 128x72 | 4000 | `max_diff=1` |
+| `ragged` | 318x178 (width not a multiple of four) | 1000 | `max_diff=1` |
+
+Refused in the same run: a tone map with an NV12 source, one with the filter
+named and no parameter buffer, and one with `rotation_state = 90`. Without
+`V4L2_VA_VPP` the entrypoint does not exist and the client fails at
+`vaCreateConfig`; the gate requires that.
+
+Runs `run-20261113T085605Z` (build tree) and `run-20261113T085313Z` (installed
+package), guard `complete`, exit 0, `source_dirty=0` at commit `ccc94b1`,
+driver `dbd0630e` both ways. Identity: kernel `7.2.6-sm8550-g42f3b40-iris1`,
+module `b90bd823…`, boot `4b73926c…`, decoder `Iris Decoder` on `/dev/video0`,
+encoder `Iris Encoder` on `/dev/video1`, battery 57 % discharging, thermal
+maximum 37.8 °C for the build-tree run and 42.2 °C for the installed one.
+The installed artifact keeps `7dc6f386` as the rollback copy at
+`/usr/local/share/iris-vaapi/backup/v4l2_drv_video.so`.
+
+The three existing VA-level gates ran again against the same driver, both
+from `build/src` and from `/usr/lib64/dri`, because the defect below was in
+the shared Vulkan backend: `transpose_vaapi_gate.sh` 9/9 and
+`scale_vaapi_gate.sh` 8+3/11 byte-identical (`run-20261113T085032Z`,
+`run-20261113T085152Z`, and `run-20261113T085358Z`,
+`run-20261113T085514Z` installed), `crop_vaapi_gate.sh` 3/3 exact
+(`run-20261113T085114Z`, `run-20261113T085437Z`).
+
+### The first run failed, and it was the driver
+
+The gate's first run stopped every case at
+`VK_ERROR_INVALID_EXTERNAL_HANDLE`. The driver turned out to ask
+`vkEnumeratePhysicalDevices` how many devices there are and then hand it the
+address of a single `VkPhysicalDevice`; the target reports two, so the second
+handle landed on the next word of the caller's frame, which in this path is
+the job's own buffer descriptor. The fds arrived at `vkAllocateMemory` as 0
+and as a pointer, which is what the error says.
+
+The scale path had the same overflow and never showed it: the word after its
+physical-device slot was rewritten before it was read, so the corruption only
+became visible when the tone mapper put its own locals there. Fixed in
+`a119930`, which sizes the array by the count the way `compute_family` already
+did; the selected device is the same one. The evidence is the debugging cycle
+itself: the same job printed `dst_fd=5` at entry and `dst_fd=0` after the
+enumeration in the same frame.
+
+### The second failure was the oracle
+
+With the kernel running, the gate failed on `max_diff=11` at one chroma column
+of each row. The oracle took the top-left pixel of each 2x2 block and called it
+the pair; the kernel averages the four. On a smooth picture those agree to a
+code, which is why the luma plane passed. Fixed in `ccc94b1`; every byte of
+all three cases is then within one code, which is the float32 kernel against a
+double-precision model. The oracle now writes its frame beside the kernel's
+(`<out>.expected`), so a disagreement names a plane and a column instead of a
+count.
