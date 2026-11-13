@@ -105,7 +105,7 @@ Imported DMA-BUF surfaces must match native CAPTURE layout (single linear object
 | `V4L2_VA_SYNC_TIMEOUT_MS` | 2000 | Bounded session wait timeout in milliseconds |
 | `V4L2_VA_COPY` | gpu | Copy engine selection (`gpu` or `cpu`) |
 | `V4L2_VA_PUBLISH` | auto | Force publication mode (`auto`, `direct`, `import`, `copy`) |
-| `V4L2_VA_VPP` | off | Opt in to the `VAProfileNone` / `VAEntrypointVideoProc` entrypoint (NV12/P010 scale, nearest or bilinear, rotation, mirroring, HDR10 to SDR tone mapping and global-alpha compositing, including a packed BGRA/RGBA overlay) |
+| `V4L2_VA_VPP` | off | Opt in to the `VAProfileNone` / `VAEntrypointVideoProc` entrypoint (NV12/P010 scale at any ratio with any of the three interpolation methods, bit-depth conversion, rotation, mirroring, HDR10 to SDR tone mapping, and global-alpha compositing of up to sixteen layers, including packed BGRA/RGBA overlays) |
 | `V4L2_VA_DUMP` | off | Directory path to dump submitted access units |
 
 GStreamer's VA plugin (`libgstva`) filters VA drivers by vendor string before
