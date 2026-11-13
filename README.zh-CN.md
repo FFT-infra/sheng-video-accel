@@ -28,6 +28,14 @@
 
 硬件编码的判定标准：测试执行后 Iris 硬件中断计数产生有效增量，输出码流可正常解码，且 SPS 参数与请求的 profile 及分辨率完全匹配。
 
+### 视频处理
+
+| 接口入口 | 操作 | 输入格式 | 输出格式 | 验证基准 |
+| --- | --- | --- | --- | --- |
+| `VAEntrypointVideoProc`（`VAProfileNone`，需显式开启） | 2 倍最近邻缩放 | NV12 | NV12 | `scale_vaapi` 输出与 swscale `flags=neighbor` 逐字节一致 |
+
+视频处理默认关闭，需设置 `V4L2_VA_VPP`。处理在 surface 的 DMA-BUF 上运行固定的 Vulkan 计算内核，只提供 2 倍缩放一种操作；其他比例、裁剪、旋转、混合与滤镜都会被拒绝，不做近似处理。
+
 ## 运行环境
 
 - 目标平台：高通 SM8550（HFI gen2 Iris VPU），aarch64 架构。

@@ -28,6 +28,14 @@ Hardware decode verification requires a media surface that reports the selected 
 
 Hardware encode verification requires an active Iris IRQ counter increase, error-free bitstream decoding, and valid sequence parameters matching requested profile and geometry.
 
+### Video processing
+
+| Entrypoint | Operation | Input | Output | Verification |
+| --- | --- | --- | --- | --- |
+| `VAEntrypointVideoProc` (`VAProfileNone`, opt-in) | 2x nearest-neighbour scale | NV12 | NV12 | `scale_vaapi` frame byte-identical to swscale `flags=neighbor` |
+
+The processor is off unless `V4L2_VA_VPP` is set. It runs the pinned Vulkan compute kernel on the surface DMA-BUFs and offers exactly one operation, a 2x scale; other ratios, crop, rotation, blending and filters are refused rather than approximated.
+
 ## Requirements
 
 - Target SoC: Qualcomm SM8550 (HFI gen2 Iris VPU), aarch64.
