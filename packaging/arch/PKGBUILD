@@ -31,7 +31,11 @@ license=('MIT' 'LGPL-2.1-or-later')
 # name because the node number moves between boots on this device, and it
 # refuses to fall back to a fixed /dev/video number that may be a camera.
 depends=('libva' 'libdrm' 'mesa' 'v4l-utils')
-makedepends=('meson' 'ninja' 'pkgconf' 'python')
+# vulkan-headers and vulkan-icd-loader are build dependencies only: the VA
+# video processor is Vulkan compute behind a runtime opt-in, but a package
+# built without them would not contain it. The Fedora spec and the Debian
+# packaging declare the same dependency.
+makedepends=('meson' 'ninja' 'pkgconf' 'python' 'vulkan-headers' 'vulkan-icd-loader')
 optdepends=('google-chrome: Google Chrome, the qualified VA-API decode client')
 source=("$pkgname-$pkgver.tar.gz")
 sha256sums=('SKIP')

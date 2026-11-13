@@ -1,0 +1,76 @@
+#!/usr/bin/make -f
+
+# Debian packaging for the Iris VA-API backend.
+#
+# Like the Fedora spec and the Arch PKGBUILD, the install stage is
+# scripts/install-system.sh rather than `meson install`. The helper is the one
+# path that resolves libva's canonical driverdir, installs the msm_drv_video.so
+# alias libva resolves by DRM name, and writes the provenance manifest the
+# runtime checks read. Three package formats, one layout: if the file list here
+# and the installer disagree, test/iris-packaging-check.sh fails.
+
+export DH_VERBOSE = 1
+
+DEB_HOST_MULTIARCH := $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
+DEB_HOST_GNU_TYPE := $(shell dpkg-architecture -qDEB_HOST_GNU_TYPE)
+DEB_BUILD_DIR := obj-$(DEB_HOST_GNU_TYPE)
+PKGDIR := $(CURDIR)/debian/libva-v4l2-iris
+
+# A tarball build has no .git, and install-system.sh refuses to guess the
+# source identity. The builder may state it, exactly as `rpmbuild --define
+# source_commit=...` and the PKGBUILD's IRIS_SOURCE_COMMIT do for the other two
+# formats; that is how a release tarball still records a verified commit. With
+# nothing supplied and no .git, the install is recorded dirty rather than
+# claiming an identity nothing checked. $(shell ...) with := runs once, at
+# parse time, before these rules create anything in the tree.
+ifneq ($(IRIS_SOURCE_COMMIT),)
+SOURCE_COMMIT := $(IRIS_SOURCE_COMMIT)
+TRACKED_SOURCE_SHA256 := $(IRIS_TRACKED_SOURCE_SHA256)
+SOURCE_DIRTY := $(if $(IRIS_SOURCE_DIRTY),$(IRIS_SOURCE_DIRTY),1)
+else ifeq ($(shell git rev-parse --git-dir 2>/dev/null),)
+SOURCE_COMMIT := 0000000000000000000000000000000000000000
+TRACKED_SOURCE_SHA256 := 0000000000000000000000000000000000000000000000000000000000000000
+SOURCE_DIRTY := 1
+else
+SOURCE_COMMIT := $(shell git rev-parse HEAD)
+TRACKED_SOURCE_SHA256 := $(shell git ls-files -z | xargs -0 sha256sum | sha256sum | awk '{print $$1}')
+SOURCE_DIRTY := $(shell test -z "$$(git status --porcelain --untracked-files=all)" && echo 0 || echo 1)
+endif
+
+%:
+	dh $@
+
+# dh_strip_nondeterminism is a separate package on Debian hosts and does not
+# exist on this project's Fedora target, which is where the package build is
+# verified. Run it when it is there and say nothing when it is not, rather than
+# letting an absent optional tool stop the build sequence. Nothing in the
+# payload carries a build timestamp: the driver is compiled deterministically
+# and the manifest records the source commit, not the clock.
+override_dh_strip_nondeterminism:
+	@if command -v dh_strip_nondeterminism >/dev/null 2>&1; then \
+		dh_strip_nondeterminism; \
+	fi
+
+override_dh_auto_test:
+	IRIS_TEST_SCRATCH_ROOT=$(CURDIR)/$(DEB_BUILD_DIR)/scratch dh_auto_test
+
+override_dh_auto_install:
+	DESTDIR=$(PKGDIR) \
+	IRIS_INSTALL_PREFIX=/usr \
+	IRIS_VA_DRIVER_DIR=/usr/lib/$(DEB_HOST_MULTIARCH)/dri \
+	IRIS_SOURCE_COMMIT=$(SOURCE_COMMIT) \
+	IRIS_TRACKED_SOURCE_SHA256=$(TRACKED_SOURCE_SHA256) \
+	IRIS_SOURCE_DIRTY=$(SOURCE_DIRTY) \
+		sh scripts/install-system.sh $(DEB_BUILD_DIR)
+
+# dh_strip runs after the install stage, so a manifest written there would
+# describe the unstripped build-tree file rather than the payload in the .deb.
+# Strip first, then refresh the recorded artifact hash and size, exactly as the
+# Fedora spec's brp hooks and the PKGBUILD's explicit strip do. No automatic
+# dbgsym package: the shipped runtime ELF is deliberately post-processed, and
+# an empty debug package would describe a file the package does not carry.
+override_dh_strip:
+	dh_strip --no-automatic-dbgsym
+	sh scripts/refresh-install-manifest.sh \
+		$(PKGDIR)/usr/share/iris-vaapi/install-manifest.txt \
+		$(PKGDIR)/usr/lib/$(DEB_HOST_MULTIARCH)/dri/v4l2_drv_video.so

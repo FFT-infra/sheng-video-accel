@@ -49,6 +49,11 @@ BuildRequires:  pkgconfig(libdrm) >= 2.4.52
 BuildRequires:  pkgconfig(egl)
 BuildRequires:  pkgconfig(glesv2)
 BuildRequires:  pkgconfig(gbm)
+# The VA video processor (scale, crop, rotation, mirroring, tone mapping,
+# compositing) is Vulkan compute and stays behind V4L2_VA_VPP at runtime, but
+# a package built without the loader and headers would not carry it at all.
+# All three package formats depend on it for the same reason.
+BuildRequires:  pkgconfig(vulkan)
 
 # The diagnostic commands resolve the decoder node by driver name with
 # v4l2-ctl, because the node number is not stable across boots on this device.

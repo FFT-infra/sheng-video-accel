@@ -226,14 +226,15 @@ stopped the run exits 3, and its state says why.
 
 `scripts/install-system.sh` is enough for a lab target, but it needs a build
 tree, a checkout and root. For an image that should work on first boot, build
-a package instead. Both manifests live under `packaging/` and both install
-through that same script, so the packaged layout cannot drift from the one the
-lab uses:
+a package instead. All three manifests live under `packaging/` (and `debian/`)
+and all three install through that same script, so the packaged layout cannot
+drift from the one the lab uses:
 
 | Target | Manifest | libva driver directory |
 | --- | --- | --- |
 | Fedora aarch64 | `packaging/fedora/libva-v4l2-iris.spec` | `%{_libdir}/dri` |
 | Arch aarch64 | `packaging/arch/PKGBUILD` | `/usr/lib/dri` |
+| Debian/Ubuntu arm64 | `debian/rules` | `/usr/lib/$(DEB_HOST_MULTIARCH)/dri` |
 
 ```sh
 # Fedora
@@ -242,9 +243,25 @@ git archive --format=tar.gz --prefix=libva-v4l2-iris-0.1.0/ \
 rpmbuild -ba packaging/fedora/libva-v4l2-iris.spec \
     --define "source_commit $(git rev-parse HEAD)" \
     --define "tracked_sha256 $(git ls-files -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
+
+# Debian/Ubuntu, from a checkout
+dpkg-buildpackage -b -us -uc
+
+# Debian/Ubuntu, from a tarball that has no .git
+IRIS_SOURCE_COMMIT=$(git rev-parse HEAD) \
+IRIS_TRACKED_SOURCE_SHA256=$(git ls-files -z | xargs -0 sha256sum | sha256sum | awk '{print $1}') \
+IRIS_SOURCE_DIRTY=0 \
+    dpkg-buildpackage -b -us -uc
 ```
 
-Both declare `v4l-utils` as a hard runtime dependency. The diagnostic commands
+The Debian build reads the source identity from the checkout, or from
+`IRIS_SOURCE_COMMIT`, `IRIS_TRACKED_SOURCE_SHA256` and `IRIS_SOURCE_DIRTY` in
+the environment when it builds from a tarball with no `.git` — the same
+contract `rpmbuild --define` and the PKGBUILD's variables follow. With neither,
+the install is recorded dirty rather than claiming an identity nothing
+verified.
+
+All three declare `v4l-utils` as a hard runtime dependency. The diagnostic commands
 resolve the decoder node by driver name because the number moves between boots
 on this device, and without `v4l2-ctl` they exit instead of falling back to a
 fixed `/dev/videoN` that may be a camera.
@@ -258,21 +275,28 @@ stack and reports `V4L2VideoDecoder` without loading this driver at all.
 Google Chrome has no such path and is the client this driver exists for; it is
 the one that moves from `FFmpegVideoDecoder` to `VaapiVideoDecoder`.
 
-`test/iris-packaging-check.sh` runs in CI and fails when a shipped desktop
-entry is missing from the spec's `%files`, when a manifest stops delegating to
-`install-system.sh`, when `TryExec` disagrees with the browser the entry
-launches, when `v4l-utils` is dropped, or when one of the three diagnostics
-stops being installed beside the launcher.
+`test/iris-packaging-check.sh` runs in CI and fails when an installed path is
+missing from the spec's `%files`, when any of the three manifests stops
+delegating to `install-system.sh`, when a manifest stops refreshing the
+provenance file after its own strip step, when `v4l-utils` is dropped, when a
+format forgets the Vulkan build dependency that the video processor needs, or
+when one of the three diagnostics stops being installed beside the driver.
 
-There is no Debian or Ubuntu package. Building on those distributions wants
-`libgbm-dev`, which is a Mesa package pinned to an exact `libgbm1`; installing
-it can downgrade a vendor-patched graphics stack on a device whose Mesa came
-from the vendor. The build needs only the headers, `gbm.pc` and the
-`libgbm.so` link-time symlink, and Meson treats GBM as optional
-(`meson.build:47-48`): without it the driver builds with the CPU copy engine
-and the GPU blit path in `iris/gpu_copy.cc` is not compiled in. That is a
-slower Copy policy, not a broken build, and it is not the configuration any
-record in `TEST-RESULTS.md` measured.
+Debian and Ubuntu packaging exists for one aarch64 target and is built in a
+clean chroot, not on the device. The reason it took until now is the build
+dependency, not the package: `libgbm-dev` is a Mesa package pinned to an exact
+`libgbm1`, and installing it into a vendor-Mesa system can downgrade the
+graphics stack the vendor shipped. A build chroot (`sbuild`, `pbuilder`) never
+touches the running system, which is what the Debian toolchain assumes anyway;
+installing build dependencies directly on the tablet is still the wrong move.
+Because Meson treats GBM as optional (`meson.build`), a machine without the
+development package still builds — the CPU copy engine stays and the GPU blit
+path in `iris/gpu_copy.cc` is not compiled in. That is a slower Copy policy,
+not a broken build, and it is not the configuration any record in
+`TEST-RESULTS.md` measured. The Debian package therefore build-depends on
+`libgbm-dev` and lets `${shlibs:Depends}` carry the runtime library, so a
+package built in a chroot installs on a device whose own Mesa already
+provides it.
 
 For the Arch image projects, drop `packaging/arch/PKGBUILD` into the image
 repository's `pkgs/libva-v4l2-iris/` directory and add it to the package list.

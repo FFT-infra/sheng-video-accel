@@ -40,7 +40,7 @@ The processor is off unless `V4L2_VA_VPP` is set. It runs the pinned Vulkan comp
 
 - Target SoC: Qualcomm SM8550 (HFI gen2 Iris VPU), aarch64.
 - Core dependencies: `libva` >= 1.1, `libdrm` >= 2.4.52. GPU copy engine requires EGL, GLES, and GBM.
-- Distribution: Fedora 44 is the qualified baseline. Packages for Fedora and Arch are provided in `packaging/`.
+- Distribution: Fedora 44 is the qualified baseline. Packages for Fedora, Arch and Debian/Ubuntu arm64 are provided in `packaging/` and `debian/`.
 - Supporting kernel patches: Located in `packaging/kernel/` with module rebuild instructions. On stock kernels without these patches, the driver falls back to display-order decoding (GPU copy) and intra-period repositioning for IDR requests.
 
 ## Installation
@@ -57,6 +57,16 @@ Arch:
 ```sh
 cd packaging/arch && makepkg -si
 ```
+
+Debian / Ubuntu (arm64):
+```sh
+dpkg-buildpackage -b -us -uc
+sudo apt install ../libva-v4l2-iris_0.1.0_arm64.deb
+```
+
+Build the Debian package in a chroot (`sbuild`, `pbuilder`) rather than on a
+device: `libgbm-dev` is pinned to the distribution's Mesa and can downgrade a
+vendor-patched graphics stack.
 
 The package installs the driver binary along with the `msm_drv_video.so` symlink, allowing libva to resolve the driver automatically for clients such as mpv, VLC, and GStreamer without requiring `LIBVA_DRIVER_NAME`.
 

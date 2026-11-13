@@ -40,7 +40,7 @@
 
 - 目标平台：高通 SM8550（HFI gen2 Iris VPU），aarch64 架构。
 - 核心依赖：`libva` >= 1.1，`libdrm` >= 2.4.52。GPU 拷贝引擎需要 EGL、GLES 和 GBM 支持。
-- 发行版基准：以 Fedora 44 作为基准验证环境；`packaging/` 目录下提供 Fedora 与 Arch 的打包规则。
+- 发行版基准：以 Fedora 44 作为基准验证环境；`packaging/` 与 `debian/` 下提供 Fedora、Arch 与 Debian/Ubuntu arm64 的打包规则。
 - 配套内核补丁：位于 `packaging/kernel/`，附带模块独立编译指南。在未应用补丁的原版内核上，驱动会自动降级至显示顺序解码（GPU 拷贝模式），并将 IDR 请求回退至修改 intra period 方案。
 
 ## 安装与配置
@@ -57,6 +57,14 @@ Arch Linux：
 ```sh
 cd packaging/arch && makepkg -si
 ```
+
+Debian / Ubuntu（arm64）：
+```sh
+dpkg-buildpackage -b -us -uc
+sudo apt install ../libva-v4l2-iris_0.1.0_arm64.deb
+```
+
+Debian 包请在 chroot（`sbuild`、`pbuilder`）里构建：`libgbm-dev` 绑定发行版的 Mesa，直接在设备上安装构建依赖可能降级厂商魔改的图形栈。
 
 安装包会自动放置驱动本体与 `msm_drv_video.so` 符号链接，mpv、VLC 与 GStreamer 等客户端可在未指定 `LIBVA_DRIVER_NAME` 的情况下直接加载该驱动。
 

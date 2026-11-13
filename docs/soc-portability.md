@@ -48,10 +48,12 @@ SoC until its own hardware gate passes and `TEST-RESULTS.md` records the run.
    critical trip; the firmware throttles passively at 90000/95000). These were chosen for this
    tablet's firmware; a slower device needs its own guarded measurement, not a
    global knob change.
-6. **Packaging.** `packaging/fedora/libva-v4l2-iris.spec` and
-   `packaging/arch/PKGBUILD` assume the Fedora 44 / Arch aarch64 layouts and
-   install through `scripts/install-system.sh`. The Arch PKGBUILD comment
-   names an `arch-xiaomi-sheng` image. There is no Debian package; see
+6. **Packaging.** `packaging/fedora/libva-v4l2-iris.spec`,
+   `packaging/arch/PKGBUILD` and `debian/` assume the Fedora 44 / Arch /
+   Debian arm64 layouts and install through `scripts/install-system.sh`. The
+   Arch PKGBUILD comment names an `arch-xiaomi-sheng` image. The Debian
+   package is built in a clean chroot: `libgbm-dev` is pinned to the distro's
+   Mesa and is not safe to install over a vendor-patched stack. See
    `docs/build-and-deploy.md` and WP6 in `docs/POST-MERGE-BACKLOG.md` §16.
 7. **Validation records.** Every hardware result in `TEST-RESULTS.md` came
    from this target's installed package, driver hash, boot ID, resolved node,

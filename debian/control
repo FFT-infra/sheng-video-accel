@@ -1,0 +1,41 @@
+Source: libva-v4l2-iris
+Section: libs
+Priority: optional
+Maintainer: phxinyang <112766158+phxinyang@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13),
+               meson (>= 0.56.0),
+               ninja-build,
+               pkg-config,
+               python3,
+               libva-dev (>= 1.1.0),
+               libdrm-dev (>= 2.4.52),
+               libegl-dev,
+               libgles-dev,
+               libgbm-dev,
+               libvulkan-dev
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+Homepage: https://github.com/phxinyang/qualcomm-iris-vaapi
+Vcs-Git: https://github.com/phxinyang/qualcomm-iris-vaapi.git
+Vcs-Browser: https://github.com/phxinyang/qualcomm-iris-vaapi
+
+Package: libva-v4l2-iris
+Architecture: arm64
+Depends: ${misc:Depends}, ${shlibs:Depends}, v4l-utils
+Description: VA-API backend for the Qualcomm Iris V4L2 stateful decoder and encoder
+ A libVA driver that drives the Qualcomm Iris V4L2 stateful decoder and
+ encoder, so VA-API clients such as Chromium, Google Chrome and FFmpeg decode
+ and encode H.264, HEVC, VP9 and AV1 in hardware instead of falling back to a
+ CPU codec.
+ .
+ The package installs the driver into libva's driver directory together with
+ a read-only device report and a one-command hardware check. Clients need no
+ wrapper and no environment variable: libva resolves the driver through the
+ msm_drv_video.so alias. Diagnostic commands refuse to guess a /dev/video
+ number, because the decoder node moves between boots on this device; they
+ resolve it by its iris_driver QUERYCAP name, which is why v4l-utils is a
+ hard dependency.
+ .
+ The VA video processor (scale, crop, rotation, mirroring, HDR tone mapping,
+ compositing) is compiled in when the Vulkan loader and headers are present
+ and stays behind the V4L2_VA_VPP opt-in at runtime.
