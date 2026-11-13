@@ -7830,15 +7830,17 @@ mirrors once, in the caller, exactly where the kernel does.
 
 ### The gates
 
-Source `234a7f7`, driver `40ab046a…` (build-tree override, `LIBVA_DRIVERS_PATH`),
-boot `4b73926c…`, kernel `7.2.6-sm8550-g42f3b40-iris1`, module `b90bd823…`,
+Source `cef4349` for the two primitive gates — their 1:1 bilinear cases are
+compared byte for byte from that commit on — and `234a7f7` for the VA-level
+ones. Driver `40ab046a…` (build-tree override, `LIBVA_DRIVERS_PATH`), boot
+`4b73926c…`, kernel `7.2.6-sm8550-g42f3b40-iris1`, module `b90bd823…`,
 decoder resolved by driver name to `/dev/video0`, encoder to `/dev/video1`.
 Every run below is a guarded target run with `source_dirty=0`.
 
 | gate | run | cases | verdict |
 | --- | --- | --- | --- |
-| `nv12_scale_gate.sh` | `120445Z` | 27 nearest + 12 bilinear, both DMA-BUF origins | `PASS` |
-| `p010_scale_gate.sh` | `120524Z` | 12 nearest + 9 bilinear, both origins | `PASS` |
+| `nv12_scale_gate.sh` | `121526Z` | 27 nearest + 12 bilinear, both DMA-BUF origins | `PASS` |
+| `p010_scale_gate.sh` | `121607Z` | 12 nearest + 9 bilinear, both origins | `PASS` |
 | `crop_vaapi_gate.sh` | `120602Z` | 3 crops, 1 bilinear picture, 2 refusals | `PASS` |
 | `scale_vaapi_gate.sh` | `120643Z` | 8 NV12 + 3 P010 ratios | `PASS` |
 | `transpose_vaapi_gate.sh` | `120721Z` | 19: all seven directions, NV12 and P010 | `PASS` |
@@ -7849,10 +7851,12 @@ Every run below is a guarded target run with `source_dirty=0`.
 The bilinear cases are compared within one code of a double-precision model of
 the blend, and two invariants bracket them: a constant picture must come out
 that constant at any ratio, because the weights sum to one, and a 1:1 scale
-must reproduce the point map byte for byte. The 8-bit gate's constant case is
-`77` over `64x32 -> 200x100`, a ratio whose weights are all fractional; the
-10-bit gate's is `1023`, the largest code, which also proves the clamp is the
-ten-bit one rather than the eight-bit saturation carried over.
+must reproduce the point map byte for byte — the probe drops its one-code
+tolerance for exactly that geometry, because at a sample centre there is
+nothing to blend. The 8-bit gate's constant case is `77` over
+`64x32 -> 200x100`, a ratio whose weights are all fractional; the 10-bit gate's
+is `1023`, the largest code, which also proves the clamp is the ten-bit one
+rather than the eight-bit saturation carried over.
 
 The host half runs in CI: `rotation_model_check.py` compares the bilinear map
 with swscale's `flags=bilinear` on six upscales, where swscale uses the same
