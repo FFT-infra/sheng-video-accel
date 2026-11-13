@@ -55,8 +55,9 @@ cc -std=c11 -O2 -Wall -Wextra -x c "$here/scale_probe.c" \
     $(pkg-config --cflags libdrm) -lvulkan $(pkg-config --libs libdrm) \
     -o "$work/probe"
 
-# `src:dst:crop:rot`, crop `-` when the whole source is sampled. Same matrix
-# as the 8-bit gate, shortened where the map is already covered there.
+# `src:dst:crop:rot[:mirror]`, crop `-` when the whole source is sampled and
+# the mirror field optional. Same matrix as the 8-bit gate, shortened where the
+# map is already covered there.
 cases="
 64x32:128x64:-:0
 64x32:96x48:-:0
@@ -67,6 +68,9 @@ cases="
 64x32:64x64:-:2
 128x72:96x48:-:3
 128x72:96x48:96x40+16+16:1
+64x32:128x64:-:0:1
+128x72:96x48:-:1:2
+64x32:96x48:48x24+8+4:0:3
 "
 
 failed=0
@@ -79,12 +83,13 @@ for origin in heap msm; do
         IFS=:
         set -- $c
         IFS=$old_ifs
-        src=$1 dst=$2 crop=$3 rot=$4
+        src=$1 dst=$2 crop=$3 rot=$4 mirror=${5:-0}
         set -- "$here/p010_scale.spv" "$origin" "$render" "$src" "$dst"
         [ "$crop" = - ] || set -- "$@" "$crop"
         rc=0
-        "$work/probe" "$@" --rot "$rot" --p010 || rc=$?
-        printf 'case=%s %s->%s crop=%s rot=%s exit=%s\n' "$origin" "$src" "$dst" "$crop" "$rot" "$rc"
+        "$work/probe" "$@" --rot "$rot" --mirror "$mirror" --p010 || rc=$?
+        printf 'case=%s %s->%s crop=%s rot=%s mirror=%s exit=%s\n' "$origin" "$src" "$dst" "$crop" "$rot" \
+            "$mirror" "$rc"
         [ "$rc" -eq 0 ] || failed=1
     done
 done

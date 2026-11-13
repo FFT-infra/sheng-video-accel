@@ -34,6 +34,10 @@ struct ScaleJob {
     // for a quarter turn and width/height may be its transpose or any other
     // even size.
     uint32_t rotation = 0;
+    // VA mirroring: VA_MIRROR_HORIZONTAL as bit 0, VA_MIRROR_VERTICAL as bit 1,
+    // applied to the rotated rectangle and before the scale, which is the order
+    // the VA pipeline buffer documents.
+    uint32_t mirror = 0;
     // Bytes per sample on both ends: 1 for NV12, 2 for P010. Source and
     // destination must agree; the kernels do not convert bit depth.
     uint32_t bytes = 1;

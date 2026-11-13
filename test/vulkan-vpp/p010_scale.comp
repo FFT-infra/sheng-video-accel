@@ -34,6 +34,9 @@ layout(push_constant) uniform Params {
     uint src_w, src_h, dst_w, dst_h;
     // Clockwise quarter turns: VA_ROTATION_NONE/90/180/270 as 0/1/2/3.
     uint rot;
+    // VA_MIRROR_HORIZONTAL as bit 0 and VA_MIRROR_VERTICAL as bit 1, applied
+    // after the rotation.
+    uint mirror;
 } p;
 
 // `off` is a byte offset and is always even: P010 samples are 16-bit and the
@@ -59,9 +62,19 @@ uvec2 rotated(uint w, uint h)
     return (p.rot & 1u) != 0u ? uvec2(h, w) : uvec2(w, h);
 }
 
-// Same inverse rotation as nv12_scale.comp: the source is rotated clockwise
-// first and scaled second, so each destination point is mapped into the
-// rotated plane and then taken back to the source.
+// Same mirroring and inverse rotation as nv12_scale.comp, in the same order:
+// VA rotates first, mirrors second, and scales last.
+uvec2 mirror_at(uvec2 at, uvec2 size)
+{
+    if ((p.mirror & 1u) != 0u)
+        at.x = size.x - 1u - at.x;
+    if ((p.mirror & 2u) != 0u)
+        at.y = size.y - 1u - at.y;
+    return at;
+}
+
+// The source is rotated clockwise first and scaled second, so each destination
+// point is mapped into the rotated plane and then taken back to the source.
 uvec2 unrotate(uint rx, uint ry, uint w, uint h)
 {
     if (p.rot == 1u)
@@ -91,7 +104,8 @@ void main()
         uint packed = 0u;
         for (uint k = 0u; k < 2u; ++k) {
             uint dx = word * 2u + k;
-            uvec2 at = unrotate(pick(min(dx, p.dst_w - 1u), hx), ry, p.src_w, p.src_h);
+            uvec2 rp = mirror_at(uvec2(pick(min(dx, p.dst_w - 1u), hx), ry), r);
+            uvec2 at = unrotate(rp.x, rp.y, p.src_w, p.src_h);
             packed |= sample16(p.src_y + (p.src_row + at.y) * p.src_stride + (p.src_x + at.x) * 2u)
                 << (k * 16u);
         }
@@ -112,7 +126,8 @@ void main()
         uint hx = step(r.x, pairs);
         uint hy = step(r.y, p.dst_h >> 1);
         uint ry = pick(cy, hy);
-        uvec2 at = unrotate(pick(min(word, pairs - 1u), hx), ry, cw, ch);
+        uvec2 rp = mirror_at(uvec2(pick(min(word, pairs - 1u), hx), ry), r);
+        uvec2 at = unrotate(rp.x, rp.y, cw, ch);
         uint off = p.src_uv + ((p.src_row >> 1) + at.y) * p.src_stride + p.src_x * 2u + at.x * 4u;
         d[(p.dst_uv + cy * p.dst_stride + word * 4u) >> 2]
             = sample16(off) | (sample16(off + 2u) << 16u);

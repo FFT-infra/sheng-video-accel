@@ -14,10 +14,11 @@
 # output, so the comparison is byte-exact for all three directions the driver
 # advertises.
 #
-# Mirroring is not implemented and the verdict is visible two ways: the
-# pipeline caps advertise no mirror flag, and a client that sends one anyway
-# is refused rather than getting unmirrored pixels. dir=clock_flip (rotation
-# plus a vertical mirror) is the case that proves the refusal.
+# Mirroring is implemented for both axes and their combination, applied after
+# the rotation as the pipeline buffer documents it, so all seven transpose_vaapi
+# directions run: the three quarter turns, hflip, vflip and the two rotated
+# flips. transpose_vaapi itself refuses a direction whose bit is missing from
+# pipeline_caps.mirror_flags, so running them is also the caps check.
 #
 # The entrypoint is opt-in. The same client must be refused without
 # V4L2_VA_VPP, which is what keeps a VPP-capable build from changing the
@@ -59,6 +60,10 @@ software_chain() {
         clock) echo 'transpose=clock' ;;
         cclock) echo 'transpose=cclock' ;;
         reversal) echo 'hflip,vflip' ;;
+        hflip) echo 'hflip' ;;
+        vflip) echo 'vflip' ;;
+        clock_flip) echo 'transpose=clock_flip' ;;
+        cclock_flip) echo 'transpose=cclock_flip' ;;
     esac
 }
 
@@ -94,9 +99,19 @@ nv12:64x64:reversal
 nv12:128x72:clock
 nv12:128x72:cclock
 nv12:128x72:reversal
+nv12:64x64:hflip
+nv12:64x64:vflip
+nv12:64x64:clock_flip
+nv12:64x64:cclock_flip
+nv12:128x72:hflip
+nv12:128x72:clock_flip
 p010le:128x72:clock
 p010le:128x72:cclock
 p010le:128x72:reversal
+p010le:128x72:hflip
+p010le:128x72:vflip
+p010le:128x72:clock_flip
+p010le:128x72:cclock_flip
 "
 
 failed=0
@@ -145,15 +160,14 @@ for c in $cases; do
 done
 [ "$failed" -eq 0 ] || fail "VPP transpose differs from the software transpose for at least one direction"
 
-echo "== mirroring is refused, not ignored"
-if env LIBVA_DRIVER_NAME=v4l2 $driver_env \
-        LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_VPP=1 V4L2_VA_TRACE=1 \
-        timeout 120 ffmpeg -y -xerror -hide_banner -loglevel error \
-        -vaapi_device "$render" -f rawvideo -pix_fmt nv12 -s 64x64 -i "$work/src-nv12-64x64.raw" \
-        -vf 'format=nv12,hwupload,transpose_vaapi=dir=clock_flip,hwdownload,format=nv12' \
-        -f rawvideo "$work/mirror.nv12" 2>"$work/mirror.trace"; then
-    fail "transpose_vaapi dir=clock_flip ran; the driver does not mirror and must say so"
-fi
+echo "== the mirrored directions ran through the caps, not around them"
+# transpose_vaapi refuses every direction the pipeline caps do not advertise,
+# so a green clock_flip or hflip above is also the proof that mirror_flags
+# carries both axes and their combination.
+for case in nv12-64x64-hflip nv12-64x64-clock_flip p010le-128x72-vflip; do
+    grep -q 'entrypoint=videoproc' "$work/$case.trace" \
+        || fail "$case produced no videoproc records"
+done
 
 echo "== opt-in is required: the same client is refused without V4L2_VA_VPP"
 if env LIBVA_DRIVER_NAME=v4l2 $driver_env \

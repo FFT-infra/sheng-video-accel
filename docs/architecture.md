@@ -388,16 +388,18 @@ The video processor is a fourth context kind but not a fourth node:
 `VAProfileNone` / `VAEntrypointVideoProc` opens no V4L2 node and owns no
 session. `vaEndPicture` resolves the two surface DMA-BUFs and runs the pinned
 nearest kernel for the surface's sample width at the requested ratio over the
-surface region the client names, after the clockwise quarter turn the client
-names, sampling where swscale samples; a picture that names the HDR10 tone
+surface region the client names, after the clockwise quarter turn and the
+mirroring the client names — VA orders rotation, then mirroring, then the
+scale — sampling where swscale samples; a picture that names the HDR10 tone
 mapper instead runs `iris::vpp::tonemap_hdr10_to_sdr` over the two DMA-BUFs and
 converts P010 BT.2020/PQ to NV12 BT.709 at the surface's own size; a picture
 whose second pipeline buffer names a `VABlendState` runs
 `iris::vpp::overlay` over three DMA-BUFs, keeping the main surface in place and
 mixing the overlay into an even rectangle of it on the coded values of both
-planes; every other pipeline operation (mirroring, per-pixel alpha, luma
-keying, a third pass, any second filter, any colour conversion outside that one
-filter) fails the picture instead of being dropped. The decode lives on the
+planes; every other pipeline operation (per-pixel alpha, luma keying, a third
+pass, any second filter, any colour conversion outside that one filter, and a
+mirror or a rotation in a tone-mapped or blended picture) fails the picture
+instead of being dropped. The decode lives on the
 V4L2 node and the kernel on Vulkan, so `vaEndPicture` waits for each source
 surface's pending decode before it reads that surface — a client that issues
 the processor's picture straight behind the decode (FFmpeg's `overlay_vaapi`
@@ -411,8 +413,9 @@ check every pixel of the primitive and
 `test/vulkan-vpp/scale_vaapi_gate.sh` checks a `scale_vaapi` + `hwdownload`
 frame against swscale; `test/vulkan-vpp/crop_vaapi_gate.sh` checks a
 `surface_region` picture against `crop,scale=...:flags=neighbor`, and
-`test/vulkan-vpp/transpose_vaapi_gate.sh` checks every rotation direction
-against `transpose`, `test/vulkan-vpp/tonemap_gate.sh` checks the tone
+`test/vulkan-vpp/transpose_vaapi_gate.sh` checks all seven `transpose_vaapi`
+directions — the three quarter turns and the four mirrored ones — against the
+software filters, `test/vulkan-vpp/tonemap_gate.sh` checks the tone
 mapper against the pipeline `tonemap.comp` documents, and
 `test/vulkan-vpp/overlay_gate.sh` checks the composite against the mix
 `overlay.comp` documents plus both of its endpoint frames byte for byte.
@@ -640,9 +643,10 @@ including a crop away from the origin, which is the only geometry that
 separates a chroma pair at four bytes from one at two;
 `test/vulkan-vpp/scale_vaapi_gate.sh` checks `scale_vaapi` + `hwdownload`
 frames against swscale over the same ratios;
-`test/vulkan-vpp/transpose_vaapi_gate.sh` checks every advertised rotation
-direction against the software `transpose`. Both VA-level gates check that the
-entrypoint is refused without `V4L2_VA_VPP`.
+`test/vulkan-vpp/transpose_vaapi_gate.sh` checks every direction the pipeline
+caps advertise — three quarter turns, a horizontal and a vertical mirror, and a
+quarter turn with each — against the software filters, in NV12 and P010. Both
+VA-level gates check that the entrypoint is refused without `V4L2_VA_VPP`.
 `test/vulkan-vpp/tonemap_gate.sh` drives the one filter through
 `iris-va-vpp-probe tonemap`: no FFmpeg in 8.1 can feed `tonemap_vaapi` a raw
 P010 frame, so the probe builds the HDR10 metadata buffer itself and compares

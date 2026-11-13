@@ -174,8 +174,8 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
     }
     iris::require(p.rotation_state <= VA_ROTATION_270, "invalid VPP rotation",
         VA_STATUS_ERROR_INVALID_PARAMETER);
-    iris::require(p.mirror_state == VA_MIRROR_NONE, "VPP mirroring is not supported",
-        VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    iris::require((p.mirror_state & ~(VA_MIRROR_HORIZONTAL | VA_MIRROR_VERTICAL)) == 0,
+        "unsupported VPP mirror", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
     iris::require((p.pipeline_flags & ~VA_PROC_PIPELINE_FAST) == 0, "unsupported VPP pipeline flag",
         VA_STATUS_ERROR_UNSUPPORTED_FILTER);
     // Scaling mode is only a hint, so every VA_FILTER_SCALING_* value is
@@ -202,6 +202,7 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
     Context::VppJob job;
     job.source = p.surface;
     job.rotation = p.rotation_state;
+    job.mirror = p.mirror_state;
     job.filters = p.num_filters;
     job.input_standard = input_standard;
     job.output_standard = output_standard;
@@ -278,6 +279,8 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         iris::require(blend->filters == 0, "the blending pass carries no filter",
             VA_STATUS_ERROR_UNSUPPORTED_FILTER);
         iris::require(job.rotation == VA_ROTATION_NONE, "a blended picture does not rotate",
+            VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+        iris::require(job.mirror == VA_MIRROR_NONE, "a blended picture does not mirror",
             VA_STATUS_ERROR_UNSUPPORTED_FILTER);
         // The overlay is mixed in the main pass's coded values, so naming a
         // different standard (or different explicit properties) would claim a
@@ -370,6 +373,8 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
                 "tone mapping keeps the surface size", VA_STATUS_ERROR_INVALID_PARAMETER);
             iris::require(job.rotation == VA_ROTATION_NONE, "tone mapping does not rotate",
                 VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+            iris::require(job.mirror == VA_MIRROR_NONE, "tone mapping does not mirror",
+                VA_STATUS_ERROR_UNSUPPORTED_FILTER);
         }
         if (blend) {
             // The main pass is copied at its own scale, so the rectangle the
@@ -386,6 +391,8 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
             iris::require(blend->output_region_set, "the blending pass needs an output region",
                 VA_STATUS_ERROR_INVALID_PARAMETER);
             iris::require(blend->rotation == VA_ROTATION_NONE, "the overlay does not rotate",
+                VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+            iris::require(blend->mirror == VA_MIRROR_NONE, "the overlay does not mirror",
                 VA_STATUS_ERROR_UNSUPPORTED_FILTER);
             overlay_surface = surface(d, blend->source);
             iris::require(overlay_surface.get() != target.get() && overlay_surface.get() != source.get(),
@@ -502,6 +509,8 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         // The rotation happens before the scale, so a quarter turn swaps the
         // sampled rectangle's dimensions and the point map runs on that.
         sj.rotation = job.rotation;
+        // Mirroring is the step after the rotation and before the scale.
+        sj.mirror = job.mirror;
         ran = iris::vpp::scale_nv12_or_p010(sj);
     }
     if (!ran) {

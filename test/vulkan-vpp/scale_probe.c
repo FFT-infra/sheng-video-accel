@@ -62,6 +62,9 @@ struct geometry {
     // clockwise quarter turns the kernel applies before scaling.
     unsigned bytes;
     unsigned rot;
+    // VA_MIRROR_HORIZONTAL as bit 0 and VA_MIRROR_VERTICAL as bit 1, applied to
+    // the rotated rectangle and before the scale.
+    unsigned mirror;
 };
 
 // plane_layout in src/util/prime.cc: luma pitch aligned to 128 bytes (256 for
@@ -79,6 +82,7 @@ static struct geometry geometry(unsigned src_w, unsigned src_h, unsigned dst_w, 
     g.crop_h = src_h;
     g.bytes = bytes;
     g.rot = 0;
+    g.mirror = 0;
     g.src_stride = align_up(src_w * bytes, 128 * bytes);
     g.src_uv = g.src_stride * align_up(src_h, 32);
     // stable_layout rounds the total up to 4 KiB; the DMA-BUF the driver
@@ -102,6 +106,16 @@ static unsigned point_step(unsigned src, unsigned dst)
 static unsigned point_pick(unsigned i, unsigned inc)
 {
     return (i * inc + (inc >> 1)) >> 16;
+}
+
+// VA mirrors after rotating and before scaling, so a point of the rotated
+// plane is flipped inside that plane's own size on the way back.
+static void mirror_at(unsigned mirror, unsigned size_x, unsigned size_y, unsigned* rx, unsigned* ry)
+{
+    if (mirror & 1u)
+        *rx = size_x - 1 - *rx;
+    if (mirror & 2u)
+        *ry = size_y - 1 - *ry;
 }
 
 // VA rotates the source clockwise before scaling it, so the point map runs on
@@ -289,6 +303,7 @@ struct push_params {
     uint32_t src_x, src_row;
     uint32_t src_w, src_h, dst_w, dst_h;
     uint32_t rot;
+    uint32_t mirror;
 };
 
 // Byte-exact nearest-neighbour oracle over every destination pixel. Checks
@@ -310,7 +325,9 @@ static unsigned check_pixels(const volatile uint8_t* src, const volatile uint8_t
         const unsigned ry = point_pick(dy, yinc);
         for (unsigned dx = 0; dx < g->dst_w; dx++) {
             unsigned sx, sy;
-            unrotate(g->rot, point_pick(dx, xinc), ry, g->crop_w, g->crop_h, &sx, &sy);
+            unsigned rx = point_pick(dx, xinc), my = ry;
+            mirror_at(g->mirror, rot_w, rot_h, &rx, &my);
+            unrotate(g->rot, rx, my, g->crop_w, g->crop_h, &sx, &sy);
             const unsigned off = (g->crop_y + sy) * g->src_stride + (g->crop_x + sx) * bpp;
             const unsigned want = sample_at(src, off, bpp);
             const unsigned got = sample_at(dst, dy * g->dst_stride + dx * bpp, bpp);
@@ -331,7 +348,9 @@ static unsigned check_pixels(const volatile uint8_t* src, const volatile uint8_t
         const unsigned ry = point_pick(cy, cyinc);
         for (unsigned cx = 0; cx < dw; cx++) {
             unsigned sx, sy;
-            unrotate(g->rot, point_pick(cx, cxinc), ry, cw, ch, &sx, &sy);
+            unsigned rx = point_pick(cx, cxinc), my = ry;
+            mirror_at(g->mirror, crw, crh, &rx, &my);
+            unrotate(g->rot, rx, my, cw, ch, &sx, &sy);
             const unsigned off = g->src_uv + (g->crop_y / 2 + sy) * g->src_stride + g->crop_x * bpp
                 + sx * pair_bytes;
             const unsigned wu = sample_at(src, off, bpp);
@@ -353,12 +372,14 @@ int main(int argc, char** argv)
 {
     const char* positional[8] = {};
     unsigned npos = 0;
-    unsigned bytes = 1, rot = 0;
+    unsigned bytes = 1, rot = 0, mirror = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--p010") == 0) {
             bytes = 2;
         } else if (strcmp(argv[i], "--rot") == 0 && i + 1 < argc) {
             rot = (unsigned)strtoul(argv[++i], NULL, 10);
+        } else if (strcmp(argv[i], "--mirror") == 0 && i + 1 < argc) {
+            mirror = (unsigned)strtoul(argv[++i], NULL, 10);
         } else if (npos < sizeof(positional) / sizeof(positional[0])) {
             positional[npos++] = argv[i];
         } else {
@@ -368,12 +389,16 @@ int main(int argc, char** argv)
     }
     if (npos < 2) {
         fprintf(stderr,
-            "usage: %s <scale.spv> <heap|msm> [render-node] [WxH WxH [CROP_WxH+X+Y]] [--rot 0..3] [--p010]\n",
+            "usage: %s <scale.spv> <heap|msm> [render-node] [WxH WxH [CROP_WxH+X+Y]] [--rot 0..3] [--mirror 0..3] [--p010]\n",
             argv[0]);
         return 2;
     }
     if (rot > 3) {
         fprintf(stderr, "FAIL --rot must be 0..3\n");
+        return 2;
+    }
+    if (mirror > 3) {
+        fprintf(stderr, "FAIL --mirror must be 0..3\n");
         return 2;
     }
     const char* origin = positional[1];
@@ -390,6 +415,7 @@ int main(int argc, char** argv)
     }
     struct geometry g = geometry(src_w, src_h, dst_w, dst_h, bytes);
     g.rot = rot;
+    g.mirror = mirror;
     if (npos >= 6) {
         unsigned crop_w = 0, crop_h = 0, crop_x = 0, crop_y = 0;
         if (sscanf(positional[5], "%ux%u+%u+%u", &crop_w, &crop_h, &crop_x, &crop_y) != 4) {
@@ -614,7 +640,8 @@ int main(int argc, char** argv)
         .src_h = g.crop_h,
         .dst_w = g.dst_w,
         .dst_h = g.dst_h,
-        .rot = g.rot };
+        .rot = g.rot,
+        .mirror = g.mirror };
     vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
     // One invocation per destination word: four luma pixels and two chroma
     // pairs (NV12), or two luma samples and one chroma pair (P010). The grid
@@ -641,9 +668,9 @@ int main(int argc, char** argv)
         fprintf(stderr, "FAIL origin=%s pixels_wrong=%u src_changed=%u\n", origin, bad, changed);
         return 1;
     }
-    printf("PASS origin=%s %s rot=%u scale=%ux%u->%ux%u crop=%ux%u+%u+%u exact bytes=%u src=unchanged\n", origin,
-        bytes == 2 ? "p010" : "nv12", g.rot, g.src_w, g.src_h, g.dst_w, g.dst_h, g.crop_w, g.crop_h, g.crop_x,
-        g.crop_y, g.dst_size);
+    printf("PASS origin=%s %s rot=%u mirror=%u scale=%ux%u->%ux%u crop=%ux%u+%u+%u exact bytes=%u src=unchanged\n",
+        origin, bytes == 2 ? "p010" : "nv12", g.rot, g.mirror, g.src_w, g.src_h, g.dst_w, g.dst_h, g.crop_w,
+        g.crop_h, g.crop_x, g.crop_y, g.dst_size);
 
     vkDestroyFence(dev, fence, NULL);
     vkFreeCommandBuffers(dev, cmdp, 1, &cb);

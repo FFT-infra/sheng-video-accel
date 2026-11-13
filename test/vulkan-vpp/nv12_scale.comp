@@ -23,7 +23,9 @@
 // size and `unrotate` walks each destination point back to the source. A
 // quarter turn makes the two planes transpose too, which is why the map is
 // applied to the chroma plane with its own half-size geometry rather than
-// derived from the luma coordinate.
+// derived from the luma coordinate. VA puts mirroring after the rotation, so
+// the flip is applied to the rotated coordinates before they are taken back,
+// with the rotated size rather than the source size.
 //
 // Each invocation owns one 32-bit destination word, so no two invocations
 // write the same word and a per-pixel oracle is meaningful instead of a race
@@ -46,6 +48,9 @@ layout(push_constant) uniform Params {
     uint src_w, src_h, dst_w, dst_h;
     // Clockwise quarter turns: VA_ROTATION_NONE/90/180/270 as 0/1/2/3.
     uint rot;
+    // VA_MIRROR_HORIZONTAL as bit 0 and VA_MIRROR_VERTICAL as bit 1, applied
+    // after the rotation.
+    uint mirror;
 } p;
 
 uint src_byte(uint off)
@@ -69,6 +74,17 @@ uint pick(uint i, uint inc)
 uvec2 rotated(uint w, uint h)
 {
     return (p.rot & 1u) != 0u ? uvec2(h, w) : uvec2(w, h);
+}
+
+// The point (rx, ry) of the rotated plane as the mirroring leaves it. `size`
+// is the rotated plane's size, because VA mirrors after rotating.
+uvec2 mirror_at(uvec2 at, uvec2 size)
+{
+    if ((p.mirror & 1u) != 0u)
+        at.x = size.x - 1u - at.x;
+    if ((p.mirror & 2u) != 0u)
+        at.y = size.y - 1u - at.y;
+    return at;
 }
 
 // The source point behind (rx, ry) of the rotated plane. A clockwise quarter
@@ -108,7 +124,8 @@ void main()
             uint dx = word * 4u + k;
             // Columns past the visible width land in the row padding; clamp so
             // the read stays inside the source plane.
-            uvec2 at = unrotate(pick(min(dx, p.dst_w - 1u), hx), ry, p.src_w, p.src_h);
+            uvec2 rp = mirror_at(uvec2(pick(min(dx, p.dst_w - 1u), hx), ry), r);
+            uvec2 at = unrotate(rp.x, rp.y, p.src_w, p.src_h);
             packed |= src_byte(p.src_y + (p.src_row + at.y) * p.src_stride + p.src_x + at.x) << (k * 8u);
         }
         d[(p.dst_y + row * p.dst_stride + word * 4u) >> 2] = packed;
@@ -127,7 +144,8 @@ void main()
         uint packed = 0u;
         for (uint k = 0u; k < 2u; ++k) {
             uint cx = word * 2u + k;
-            uvec2 at = unrotate(pick(min(cx, dw - 1u), hx), ry, cw, ch);
+            uvec2 rp = mirror_at(uvec2(pick(min(cx, dw - 1u), hx), ry), r);
+            uvec2 at = unrotate(rp.x, rp.y, cw, ch);
             uint off = base + at.y * p.src_stride + at.x * 2u;
             packed |= src_byte(off) << (k * 16u);
             packed |= src_byte(off + 1u) << (k * 16u + 8u);

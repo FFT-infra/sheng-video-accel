@@ -110,14 +110,18 @@ VAStatus queryVideoProcPipelineCaps(VADriverContextP ctx, VAContextID id, VABuff
     caps->num_input_color_standards = static_cast<uint32_t>(sizeof(kStandards) / sizeof(kStandards[0]));
     caps->output_color_standards = kStandards;
     caps->num_output_color_standards = static_cast<uint32_t>(sizeof(kStandards) / sizeof(kStandards[0]));
-    // All three clockwise quarter turns; mirroring is not implemented.
+    // All three clockwise quarter turns.
     caps->rotation_flags = (1u << VA_ROTATION_NONE) | (1u << VA_ROTATION_90) | (1u << VA_ROTATION_180)
         | (1u << VA_ROTATION_270);
     // What `overlay_vaapi` refuses to run without. Per-pixel (premultiplied)
     // alpha and luma keying are separate kernels that do not exist here, so
     // only the global alpha is advertised.
     caps->blend_flags = VA_BLEND_GLOBAL_ALPHA;
-    caps->mirror_flags = 0;
+    // Both axes, together with their combination: the flag word is the value a
+    // client puts in mirror_state, and FFmpeg tests `mirror_flags &
+    // mirror_state`, so the `|` of the two bits has to be set for a client that
+    // asks for both at once.
+    caps->mirror_flags = VA_MIRROR_HORIZONTAL | VA_MIRROR_VERTICAL;
     caps->num_additional_outputs = 0;
     const bool p010 = d.capabilities.p010;
     caps->num_input_pixel_formats = p010 ? 2 : 1;

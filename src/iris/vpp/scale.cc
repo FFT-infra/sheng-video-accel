@@ -57,6 +57,7 @@ struct PushParams {
     uint32_t src_x, src_row;
     uint32_t src_width, src_height, dst_width, dst_height;
     uint32_t rotation;
+    uint32_t mirror;
 };
 
 // Must mirror the push-constant block in test/vulkan-vpp/tonemap.comp.
@@ -470,6 +471,9 @@ bool scale_nv12_or_p010(const ScaleJob& job)
         return false;
     if (job.rotation > kRotate270)
         return false;
+    // Horizontal and vertical, each in the rotated plane.
+    if (job.mirror > 3u)
+        return false;
 
     // One kernel per sample width. Both read the same push-constant block;
     // only the word packing differs.
@@ -483,7 +487,8 @@ bool scale_nv12_or_p010(const ScaleJob& job)
         wide ? kP010ScaleSpvWords : kNv12ScaleSpvWords, sizeof(PushParams), &physical, &family, &memory_type);
     if (ok) {
         const PushParams push = { job.src_stride, job.src_uv, job.dst_stride, job.dst_uv, job.src_y, job.dst_y,
-            job.src_x, job.src_y_offset, job.src_width, job.src_height, job.width, job.height, job.rotation };
+            job.src_x, job.src_y_offset, job.src_width, job.src_height, job.width, job.height, job.rotation,
+            job.mirror };
         // One invocation per destination 32-bit word: four luma pixels of one
         // row and two chroma pairs (8-bit), or two luma samples and one chroma
         // pair (P010). The grid covers the luma rows and the half-height

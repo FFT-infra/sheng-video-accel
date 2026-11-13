@@ -69,8 +69,10 @@ cc -std=c11 -O2 -Wall -Wextra -x c "$here/scale_probe.c" \
 # and fractional steps. Crops are what a VA surface region means: the sampled
 # rectangle starts at X,Y inside the source. Rotation is VA's clockwise
 # quarter turn, applied before the scale, so a quarter turn transposes the
-# sampled rectangle. The oracle is the same integer map swscale uses, so a
-# green case is a byte-level equivalence with the software filters.
+# sampled rectangle, and mirroring flips that rectangle on its own rotated
+# axes. Every case is `src:dst:crop:rot[:mirror]` with the mirror field
+# optional. The oracle is the same integer map swscale uses, so a green case is
+# a byte-level equivalence with the software filters.
 cases="
 64x32:128x64:-:0
 64x32:96x48:-:0
@@ -90,6 +92,12 @@ cases="
 128x72:56x96:-:3
 128x72:96x48:96x40+16+16:1
 64x32:32x16:32x16+16+8:3
+64x32:128x64:-:0:1
+64x32:64x32:-:0:2
+128x72:96x48:-:1:1
+128x72:56x96:-:3:2
+64x32:96x48:48x24+8+4:0:3
+62x34:62x34:-:0:1
 "
 
 failed=0
@@ -102,12 +110,13 @@ for origin in heap msm; do
         IFS=:
         set -- $c
         IFS=$old_ifs
-        src=$1 dst=$2 crop=$3 rot=$4
+        src=$1 dst=$2 crop=$3 rot=$4 mirror=${5:-0}
         set -- "$here/nv12_scale.spv" "$origin" "$render" "$src" "$dst"
         [ "$crop" = - ] || set -- "$@" "$crop"
         rc=0
-        "$work/probe" "$@" --rot "$rot" || rc=$?
-        printf 'case=%s %s->%s crop=%s rot=%s exit=%s\n' "$origin" "$src" "$dst" "$crop" "$rot" "$rc"
+        "$work/probe" "$@" --rot "$rot" --mirror "$mirror" || rc=$?
+        printf 'case=%s %s->%s crop=%s rot=%s mirror=%s exit=%s\n' "$origin" "$src" "$dst" "$crop" "$rot" \
+            "$mirror" "$rc"
         [ "$rc" -eq 0 ] || failed=1
     done
 done

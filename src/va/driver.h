@@ -169,6 +169,7 @@ struct Context {
         VARectangle output_region = {};
         bool output_region_set = false;
         uint32_t rotation = VA_ROTATION_NONE;
+        uint32_t mirror = VA_MIRROR_NONE;
         // How many filter buffers the pipeline names. One is supported, and
         // only the HDR10 tone mapper; the parameters arrive as their own
         // buffer, which is why the peak lives beside the job and not in it.
