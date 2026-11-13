@@ -171,13 +171,6 @@ struct Context {
     struct EncSubmitted {
         iris::EncodeTicket ticket;
         std::shared_ptr<iris::EncoderSession> session;
-        // The coded buffer the client named for this picture. vaSyncSurface
-        // on the input surface and vaSyncBuffer / vaMapBuffer on the coded
-        // buffer are two ways to claim one completion, and GStreamer's
-        // encoder calls both. Whichever arrives first stores the access unit
-        // in that buffer, so the second finds the bytes instead of a second,
-        // empty answer.
-        VABufferID coded = VA_INVALID_ID;
     };
     std::map<VASurfaceID, EncSubmitted> enc_submitted;
 

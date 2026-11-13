@@ -285,7 +285,7 @@ Ordering facts learned on this firmware and kept verbatim:
 
 The encoder operates as a secondary V4L2 M2M node with a dedicated execution model. Picture encoding is separated across two stages:
 1. `vaEndPicture` translates sequence and picture parameters into V4L2 controls, commits the raw input surface, and returns a tracking ticket.
-2. The coded access unit is claimed downstream by `vaSyncBuffer` on the coded buffer, `vaSyncSurface` on the input surface, or `vaMapBuffer` on the coded buffer.
+2. The firmware releases the input buffer as soon as it has read the picture (`OUTPUT` `DQBUF`), and that is what `vaSyncSurface` on the input surface waits for. The coded access unit comes later and is claimed by `vaSyncBuffer` on the coded buffer or by `vaMapBuffer` on it. Keeping the two apart is what lets a client with `-async_depth` pipeline: with one wait, every input sync paid for a whole picture.
 
 This decoupling enables asynchronous submission in clients such as FFmpeg.
 
@@ -777,10 +777,14 @@ regenerated from the pinned modules and compared by `test/run-static-checks.sh`.
    `misplaced`.
 10. An encoded picture lands only in the coded buffer the client named in
     `VAEncPictureParameterBuffer{H264,HEVC}::coded_buf`, and only once its
-    ticket is claimed (`vaSyncBuffer`, `vaSyncSurface`, or the `vaMapBuffer`
-    fallback). A payload larger than the buffer's capacity is
-    `ENCODING_ERROR`, never a truncation. A submitted picture is never
-    dropped: the drain resolves whatever is still outstanding.
+    ticket is claimed (`vaSyncBuffer` on that buffer, or the `vaMapBuffer`
+    fallback). `vaSyncSurface` on the input surface is *not* a claim: it
+    returns when the firmware has released the input buffer, which happens
+    before the access unit exists, so a client that submits ahead is not
+    serialised behind its own output wait. A payload larger than the
+    buffer's capacity is `ENCODING_ERROR`, never a truncation. A submitted
+    picture is never dropped: the drain resolves whatever is still
+    outstanding.
 11. An encode surface is input only. It never carries a decode target, and
     the session queues exactly one raw buffer per picture, so a picture
     cannot be encoded into a buffer that still holds the next one. The

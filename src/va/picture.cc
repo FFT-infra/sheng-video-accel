@@ -1194,7 +1194,7 @@ VAStatus endPicture(VADriverContextP ctx, VAContextID id)
                 coded->segment.next = nullptr;
                 coded->ticket = ticket;
                 coded->coded_session = c->encode_session;
-                c->enc_submitted[current] = Context::EncSubmitted { ticket, c->encode_session, coded_id };
+                c->enc_submitted[current] = Context::EncSubmitted { ticket, c->encode_session };
             }
             d.trace("va end_picture ctx=%u surface=%u entrypoint=encslice submitted token=%llu", id, current,
                 static_cast<unsigned long long>(ticket.timestamp_us));

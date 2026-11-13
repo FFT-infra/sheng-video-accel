@@ -228,7 +228,7 @@ public:
             gop_at_queue_.push_back(written_.count(V4L2_CID_MPEG_VIDEO_GOP_SIZE)
                     ? written_.at(V4L2_CID_MPEG_VIDEO_GOP_SIZE)
                     : INT32_MIN);
-            returned_.push_back(index);
+            returned_.push_back(iris::Dequeued { index, 0, timestamp_us, 0, 0 });
             // Withhold completions to model firmware latency: a real node
             // answers a few pictures late, which is what makes the session's
             // pipelining visible.
@@ -269,9 +269,9 @@ public:
         }
         if (returned_.empty())
             return std::nullopt;
-        const unsigned index = returned_.front();
+        const iris::Dequeued input = returned_.front();
         returned_.erase(returned_.begin());
-        return iris::Dequeued { index, 0, 0, 0, 0 };
+        return input;
     }
 
     void stream(iris::Queue, bool) override { }
@@ -318,7 +318,8 @@ private:
     std::map<uint32_t, unsigned> writes_;
     std::vector<std::vector<uint8_t>> capture_;
     std::vector<iris::Dequeued> staged_;
-    std::vector<unsigned> returned_;
+    // Returned input buffers, carrying the timestamp the firmware echoes.
+    std::vector<iris::Dequeued> returned_;
     std::vector<uint64_t> timestamps_;
     std::vector<int32_t> gop_at_queue_;
     uint32_t codec_ = V4L2_PIX_FMT_H264;
@@ -687,6 +688,40 @@ void test_pipelined_pictures()
     session.finish();
 }
 
+// An input surface is free again when the firmware has read it, not when the
+// access unit exists. A client that syncs the surface and lets the coded
+// buffer's own sync claim the unit was serialised behind the whole encode
+// when the two were one wait.
+void test_input_release_is_not_the_access_unit()
+{
+    auto node = std::make_unique<FakeEncoderNode>(true);
+    FakeEncoderNode* raw = node.get();
+    iris::EncodeConfig config;
+    config.codec = V4L2_PIX_FMT_HEVC;
+    config.width = 1920;
+    config.height = 1080;
+    iris::EncoderSession session(std::move(node), config, iris::Options {}, iris::Trace(false));
+
+    check(status_of([&] { session.configure(params(0, 0, 0), 1920, 1080); }) == -1, "configure");
+    raw->hold_completions();
+    const int fd = dmabuf();
+    check(fd >= 0, "memfd for the raw frame");
+
+    const iris::EncodeTicket ticket = session.submit(fd, kCaptureSlot, params(0, 0, 0));
+    check(status_of([&] { session.wait_timeout(ticket, 0); }) == VA_STATUS_ERROR_TIMEDOUT,
+        "the access unit has not arrived");
+
+    check(status_of([&] { session.wait_input(ticket); }) == -1, "the input is released before the unit");
+    check(status_of([&] { session.wait_input(ticket); }) == -1, "a second sync of the same surface succeeds");
+    check(status_of([&] { session.wait_timeout(ticket, 0); }) == VA_STATUS_ERROR_TIMEDOUT,
+        "syncing the input did not consume the access unit");
+
+    raw->release(1);
+    check(session.wait(ticket).bytes.size() == kPayload, "the access unit is still claimable");
+    check(status_of([&] { session.wait_input(ticket); }) == -1, "a sync after the claim still succeeds");
+    session.finish();
+}
+
 // A picture still with the firmware when the context goes away is resolved
 // by the drain rather than dropped: the client that submitted it and never
 // waited still gets its bytes.
@@ -825,6 +860,7 @@ int main()
     test_on_demand_idr();
     test_on_demand_idr_by_sync_frame();
     test_pipelined_pictures();
+    test_input_release_is_not_the_access_unit();
     test_drain_resolves_outstanding_pictures();
     test_coded_buffer_claim_contract();
     if (failures) {

@@ -409,8 +409,8 @@ VAStatus syncSurface(VADriverContextP ctx, VASurfaceID id)
             session = session_of(d, *s);
             owner = owner_of(d, *s);
             // An encode context has no decode session: vaSyncSurface means
-            // "the picture this surface was input to is done", which is the
-            // access unit's completion.
+            // "this surface is free to reuse", which the firmware answers
+            // when it has read the picture, before the access unit exists.
             if (owner && owner->encoding()) {
                 auto it = owner->enc_submitted.find(id);
                 if (it != owner->enc_submitted.end())
@@ -418,23 +418,12 @@ VAStatus syncSurface(VADriverContextP ctx, VASurfaceID id)
             }
         }
         if (encoded) {
-            // Claim it into the coded buffer the client named, not into a
-            // local. The access unit is the client's, and GStreamer's encoder
-            // syncs the surface and then maps the coded buffer; throwing the
-            // bytes away here left that map with nothing to return.
-            if (encoded->session && encoded->coded != VA_INVALID_ID) {
-                std::shared_ptr<Buffer> coded;
-                {
-                    std::lock_guard<std::recursive_mutex> lock(d.mutex);
-                    auto it = d.buffers.find(encoded->coded);
-                    if (it != d.buffers.end())
-                        coded = it->second;
-                }
-                if (coded)
-                    return claim_coded(d, coded, VA_TIMEOUT_INFINITE);
-            }
+            // Waiting for the unit here made every client that submits ahead
+            // serialise: FFmpeg syncs the input surface per picture. The
+            // unit is claimed by the coded buffer's own vaSyncBuffer or
+            // vaMapBuffer, which is where the bytes are wanted.
             if (encoded->session)
-                encoded->session->wait(encoded->ticket);
+                encoded->session->wait_input(encoded->ticket);
             return VA_STATUS_SUCCESS;
         }
         return wait_for(d, std::move(session), s);

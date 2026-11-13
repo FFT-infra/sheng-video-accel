@@ -26,6 +26,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <vector>
 
 namespace iris {
@@ -85,6 +86,12 @@ public:
     // zero returns at once when the picture is not ready; the ticket stays
     // valid, so the client can ask again.
     EncodeResult wait_timeout(EncodeTicket ticket, uint64_t timeout_ns);
+    // Return once the firmware has released this picture's input buffer. It
+    // does that as soon as it has read the picture, before the access unit
+    // exists; this is what vaSyncSurface on the input surface waits for. The
+    // unit itself is still taken by wait()/wait_timeout() through the coded
+    // buffer.
+    void wait_input(EncodeTicket ticket);
     // submit() then wait(): the synchronous shape, kept for the unit tests
     // and for a client that wants one picture at a time.
     EncodeResult encode(int dmabuf_fd, unsigned dmabuf_length, const EncodeParams& params);
@@ -113,6 +120,9 @@ private:
     void set_frame_qp(int qp);
     void configure_deblocking(const EncodeParams& params);
     void take_output_slot(Clock::time_point limit);
+    // DQBUF every OUTPUT completion that is ready, freeing its input slot and
+    // recording that the firmware has released that picture's buffer.
+    void pump_output();
     std::optional<Dequeued> wait_capture(Clock::time_point limit);
     // Move the oldest queued completion into `completed_`. Returns false when
     // the firmware produced nothing.
@@ -150,6 +160,9 @@ private:
     std::deque<unsigned> free_output_;
     // Submitted pictures whose access unit has not arrived, oldest first.
     std::deque<Pending> pending_;
+    // Tickets whose input buffer the firmware has returned. Pruned at each
+    // claim: everything at or below the newest claimed ticket is dead.
+    std::set<uint64_t> input_released_;
     // Pictures the firmware has finished, waiting for their ticket holder.
     std::map<uint64_t, EncodeResult> completed_;
     // The newest ticket issued, and the newest one already claimed. A ticket
