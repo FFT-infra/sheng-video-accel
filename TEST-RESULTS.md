@@ -7058,6 +7058,7 @@ because `src/` changed:
 | `iris-real-clip-gate.sh` | `run-20261113T044426Z` | AV1 120/120 exact, `import=120 copy=0`; DRC 80 frames, `import=42 copy=42` |
 | `iris-encode-quality.sh` | `run-20261113T044513Z` | H.264 and HEVC 1080p 120 frames; IRQ +237 / +249; SSIM mean 0.9986 / 0.9968 |
 | `iris-browser-acceptance.sh` | `run-20261113T044626Z` | Chrome 156 `VaapiVideoDecoder`, `platform=True`, 478 frames, 0 dropped, driver `installed` |
+| `iris-av1-browser-matrix.sh local-only` | `run-20261113T045207Z` | Firefox 484 decoded / 7 dropped with `hw_log=True`; Chrome 476 decoded / 0 dropped, `VaapiVideoDecoder`, `platform=True` |
 
 Identity for the whole set: kernel `7.2.6-sm8550-g42f3b40-iris1`, module
 `b90bd823`, boot `972c13d1-1848-4bb3-8c9b-ce60c74376cb` (the tablet rebooted
