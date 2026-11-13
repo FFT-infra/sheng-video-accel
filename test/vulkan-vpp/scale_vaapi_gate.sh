@@ -19,7 +19,11 @@
 #
 # Target prerequisites: ffmpeg built with --enable-vaapi (scale_vaapi,
 # hwupload, hwdownload), libvulkan, and a driver .so built with the Vulkan
-# backend. CI has no GPU, so this runs only here.
+# backend. By default the driver under test is `build/src` (LIBVA_DRIVERS_PATH
+# is exported to it); IRIS_VPP_INSTALLED=1 runs the same cases against the
+# installed package, letting libva resolve its own driver directory so the
+# evidence record can name which artifact produced it. CI has no GPU, so this
+# runs only here.
 
 set -eu
 
@@ -40,7 +44,19 @@ done
 device=$(iris_resolve_device) || exit 2
 render=${IRIS_RENDER_DEVICE:-/dev/dri/renderD128}
 [ -c "$render" ] || fail "no render node $render"
-driver_path=${LIBVA_DRIVERS_PATH:-$(pwd)/build/src}
+# Two ways to name the driver under test: a build tree (the default, selected
+# through LIBVA_DRIVERS_PATH) or the installed package (IRIS_VPP_INSTALLED=1,
+# where libva resolves its own driver directory and no LIBVA_DRIVERS_PATH is
+# exported, so the record can say which one produced the evidence).
+driver_env=''
+if [ "${IRIS_VPP_INSTALLED:-0}" = 1 ]; then
+    [ -z "${LIBVA_DRIVERS_PATH:-}" ] || fail "IRIS_VPP_INSTALLED=1 with LIBVA_DRIVERS_PATH set; unset it"
+    driver_path=$(pkg-config --variable=driverdir libva 2>/dev/null || true)
+    [ -n "$driver_path" ] || fail "libva.pc does not report a driverdir"
+else
+    driver_path=${LIBVA_DRIVERS_PATH:-$(pwd)/build/src}
+    driver_env="LIBVA_DRIVERS_PATH=$driver_path"
+fi
 [ -f "$driver_path/v4l2_drv_video.so" ] || fail "no v4l2_drv_video.so in $driver_path; set LIBVA_DRIVERS_PATH"
 driver_hash=$(sha256sum "$driver_path/v4l2_drv_video.so" | cut -d' ' -f1)
 
@@ -69,7 +85,7 @@ for c in $cases; do
     ffmpeg -y -hide_banner -loglevel error -f rawvideo -pix_fmt nv12 -s "$src" \
         -i "$work/src-$src.nv12" -vf "scale=$dst:flags=neighbor" -f rawvideo "$work/ref-$src-$dst.nv12"
     ref_hash=$(sha256sum "$work/ref-$src-$dst.nv12" | cut -d' ' -f1)
-    if ! env LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH="$driver_path" \
+    if ! env LIBVA_DRIVER_NAME=v4l2 $driver_env \
             LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_VPP=1 V4L2_VA_TRACE=1 \
             timeout 120 ffmpeg -y -xerror -hide_banner -loglevel error \
             -vaapi_device "$render" -f rawvideo -pix_fmt nv12 -s "$src" -i "$work/src-$src.nv12" \
@@ -98,7 +114,7 @@ done
 [ "$failed" -eq 0 ] || fail "VPP output differs from swscale neighbor for at least one ratio"
 
 echo "== opt-in is required: the same client is refused without V4L2_VA_VPP"
-if env LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH="$driver_path" \
+if env LIBVA_DRIVER_NAME=v4l2 $driver_env \
         LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_TRACE=1 \
         timeout 120 ffmpeg -y -xerror -hide_banner -loglevel error \
         -vaapi_device "$render" -f rawvideo -pix_fmt nv12 -s 64x64 -i "$work/src-64x64.nv12" \
@@ -110,6 +126,8 @@ if grep -q 'entrypoint=videoproc' "$work/default.trace"; then
     fail "videoproc appeared without the opt-in"
 fi
 
+printf 'driver_path=%s\n' "$driver_path"
+printf 'driver_source=%s\n' "$([ -n "$driver_env" ] && echo build-tree || echo installed-package)"
 printf 'driver_sha256=%s\n' "$driver_hash"
 printf 'decoder=%s\n' "$device"
 printf 'cases=%s\n' "$(echo "$cases" | wc -w)"
