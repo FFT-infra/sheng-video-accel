@@ -9,7 +9,9 @@
 // and samples the source at swscale's point positions, so `scale_vaapi=w=W:h=H`
 // reproduces `scale=WxH:flags=neighbor` byte for byte. Rotation is a clockwise
 // quarter turn applied before the scale, as VA specifies, and the same kernel
-// reproduces FFmpeg's `transpose` filter.
+// reproduces FFmpeg's `transpose` filter. A third kernel, tonemap.spv, converts
+// a P010 HDR10 surface to SDR NV12; it does not scale, crop or rotate, and its
+// pipeline is written down in test/vulkan-vpp/tonemap.comp.
 //
 // Built only when the Vulkan headers are present (meson's optional `vulkan`
 // dependency). CI has no Vulkan, so the driver still builds and the VPP
@@ -21,9 +23,12 @@
 
 #include "nv12_scale_spv.h"
 #include "p010_scale_spv.h"
+#include "tonemap_spv.h"
 
 #include <vulkan/vulkan.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <fcntl.h>
 #include <unistd.h>
@@ -49,6 +54,43 @@ struct PushParams {
     uint32_t src_width, src_height, dst_width, dst_height;
     uint32_t rotation;
 };
+
+// Must mirror the push-constant block in test/vulkan-vpp/tonemap.comp.
+struct ToneMapParams {
+    uint32_t src_stride, src_uv, dst_stride, dst_uv;
+    uint32_t src_y, dst_y;
+    uint32_t width, height;
+    float src_pq, knee, max_lum;
+};
+
+// The two surface buffers a job reads and writes, independent of what the
+// kernel does with them.
+struct PlaneBuffers {
+    int src_fd = -1, dst_fd = -1;
+    uint32_t src_size = 0, dst_size = 0;
+};
+
+// PQ (SMPTE ST 2084) code for a luminance in cd/m², and the BT.2390
+// parameters derived from a source peak and the 100 cd/m² SDR target.
+double pq_encode(double nits)
+{
+    const double m1 = 0.1593017578125, m2 = 78.84375;
+    const double c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
+    const double t = std::pow(std::max(nits, 0.0) / 10000.0, m1);
+    return std::pow((c1 + c2 * t) / (1.0 + c3 * t), m2);
+}
+
+// A peak below 100 cd/m² needs no compression; the knee is clamped so the
+// shader never divides by zero.
+void bt2390_params(float peak_nits, float* src_pq, float* knee, float* max_lum)
+{
+    const double source = pq_encode(std::min(std::max(static_cast<double>(peak_nits), 100.0), 10000.0));
+    const double target = pq_encode(100.0);
+    const double lum = std::min(target / source, 1.0);
+    *src_pq = static_cast<float>(source);
+    *max_lum = static_cast<float>(lum);
+    *knee = static_cast<float>(std::min(std::max(1.5 * lum - 0.5, 0.0), 0.999));
+}
 
 // Import one DMA-BUF as dedicated Vulkan memory bound to a storage buffer.
 VkDeviceMemory import_dmabuf(VkDevice device, uint32_t memory_type, VkDeviceSize size, int fd, VkBuffer buffer)
@@ -163,8 +205,8 @@ struct Job {
     bool ok(VkResult result) const { return result == VK_SUCCESS; }
 };
 
-bool make_job(Job& j, const ScaleJob& job, VkPhysicalDevice* physical_out, uint32_t* family_out,
-    uint32_t* memory_type_out)
+bool make_job(Job& j, const PlaneBuffers& buffers, const uint32_t* code, size_t code_words, uint32_t push_size,
+    VkPhysicalDevice* physical_out, uint32_t* family_out, uint32_t* memory_type_out)
 {
     VkInstanceCreateInfo instance_info = {};
     instance_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -199,10 +241,6 @@ bool make_job(Job& j, const ScaleJob& job, VkPhysicalDevice* physical_out, uint3
     if (!j.ok(vkCreateDevice(*physical_out, &device_info, nullptr, &j.device)))
         return false;
 
-    // One kernel per sample width. Both read the same push-constant block;
-    // only the word packing differs.
-    const uint32_t* code = job.bytes == 2 ? kP010ScaleSpv : kNv12ScaleSpv;
-    const size_t code_words = job.bytes == 2 ? kP010ScaleSpvWords : kNv12ScaleSpvWords;
     VkShaderModuleCreateInfo shader_info = {};
     shader_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
     shader_info.codeSize = code_words * 4;
@@ -226,7 +264,7 @@ bool make_job(Job& j, const ScaleJob& job, VkPhysicalDevice* physical_out, uint3
 
     VkPushConstantRange push_range = {};
     push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    push_range.size = sizeof(PushParams);
+    push_range.size = push_size;
     VkPipelineLayoutCreateInfo pipeline_layout_info = {};
     pipeline_layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipeline_layout_info.setLayoutCount = 1;
@@ -252,11 +290,11 @@ bool make_job(Job& j, const ScaleJob& job, VkPhysicalDevice* physical_out, uint3
     VkBufferCreateInfo src_info = {};
     src_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     src_info.pNext = &external;
-    src_info.size = job.src_size;
+    src_info.size = buffers.src_size;
     src_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     src_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     VkBufferCreateInfo dst_info = src_info;
-    dst_info.size = job.dst_size;
+    dst_info.size = buffers.dst_size;
     if (!j.ok(vkCreateBuffer(j.device, &src_info, nullptr, &j.src_buffer))
         || !j.ok(vkCreateBuffer(j.device, &dst_info, nullptr, &j.dst_buffer)))
         return false;
@@ -268,8 +306,8 @@ bool make_job(Job& j, const ScaleJob& job, VkPhysicalDevice* physical_out, uint3
     if (*memory_type_out == UINT32_MAX)
         return false;
 
-    j.dst_memory = import_dmabuf(j.device, *memory_type_out, dst_req.size, job.dst_fd, j.dst_buffer);
-    j.src_memory = import_dmabuf(j.device, *memory_type_out, src_req.size, job.src_fd, j.src_buffer);
+    j.dst_memory = import_dmabuf(j.device, *memory_type_out, dst_req.size, buffers.dst_fd, j.dst_buffer);
+    j.src_memory = import_dmabuf(j.device, *memory_type_out, src_req.size, buffers.src_fd, j.src_buffer);
     return j.dst_memory && j.src_memory;
 }
 
@@ -277,10 +315,8 @@ bool make_job(Job& j, const ScaleJob& job, VkPhysicalDevice* physical_out, uint3
 // plain numbers here (VA_ROTATION_NONE/90/180/270 is 0/1/2/3).
 constexpr uint32_t kRotate270 = 3;
 
-bool dispatch(Job& j, const ScaleJob& job, uint32_t family, uint32_t memory_type, VkPhysicalDevice physical)
+bool dispatch(Job& j, const void* push_data, size_t push_size, uint32_t groups_x, uint32_t groups_y, uint32_t family)
 {
-    (void)memory_type;
-    (void)physical;
     VkQueue queue = VK_NULL_HANDLE;
     vkGetDeviceQueue(j.device, family, 0, &queue);
 
@@ -335,18 +371,12 @@ bool dispatch(Job& j, const ScaleJob& job, uint32_t family, uint32_t memory_type
     vkBeginCommandBuffer(command, &begin);
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, j.pipeline);
     vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, j.pipeline_layout, 0, 1, &set, 0, nullptr);
-    PushParams push = { job.src_stride, job.src_uv, job.dst_stride, job.dst_uv, job.src_y, job.dst_y,
-        job.src_x, job.src_y_offset, job.src_width, job.src_height, job.width, job.height, job.rotation };
-    vkCmdPushConstants(command, j.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-    // One invocation per destination 32-bit word: four luma pixels of one row
-    // and two chroma pairs (8-bit), or two luma samples and one chroma pair
-    // (P010). The grid covers the luma rows and the half-height chroma plane
-    // in one dispatch, rounded up so a geometry that is not a multiple of the
-    // 8x8 workgroup is still complete; the kernel's own bounds test drops the
+    vkCmdPushConstants(command, j.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, static_cast<uint32_t>(push_size),
+        push_data);
+    // The grid is rounded up so a geometry that is not a multiple of the 8x8
+    // workgroup is still complete; the kernel's own bounds test drops the
     // extra invocations.
-    const uint32_t words = job.bytes == 2 ? (job.width + 1) / 2 : (job.width + 3) / 4;
-    const uint32_t rows = job.height + job.height / 2;
-    vkCmdDispatch(command, (words + 7) / 8, (rows + 7) / 8, 1);
+    vkCmdDispatch(command, groups_x, groups_y, 1);
     vkEndCommandBuffer(command);
 
     VkFenceCreateInfo fence_info = {};
@@ -383,12 +413,59 @@ bool scale_nv12_or_p010(const ScaleJob& job)
     if (job.rotation > kRotate270)
         return false;
 
+    // One kernel per sample width. Both read the same push-constant block;
+    // only the word packing differs.
+    const bool wide = job.bytes == 2;
+    const PlaneBuffers buffers = { job.src_fd, job.dst_fd, job.src_size, job.dst_size };
+
     Job j;
     VkPhysicalDevice physical = VK_NULL_HANDLE;
     uint32_t family = 0, memory_type = 0;
-    bool ok = make_job(j, job, &physical, &family, &memory_type);
+    bool ok = make_job(j, buffers, wide ? kP010ScaleSpv : kNv12ScaleSpv,
+        wide ? kP010ScaleSpvWords : kNv12ScaleSpvWords, sizeof(PushParams), &physical, &family, &memory_type);
+    if (ok) {
+        const PushParams push = { job.src_stride, job.src_uv, job.dst_stride, job.dst_uv, job.src_y, job.dst_y,
+            job.src_x, job.src_y_offset, job.src_width, job.src_height, job.width, job.height, job.rotation };
+        // One invocation per destination 32-bit word: four luma pixels of one
+        // row and two chroma pairs (8-bit), or two luma samples and one chroma
+        // pair (P010). The grid covers the luma rows and the half-height
+        // chroma plane in one dispatch.
+        const uint32_t words = wide ? (job.width + 1) / 2 : (job.width + 3) / 4;
+        const uint32_t rows = job.height + job.height / 2;
+        ok = dispatch(j, &push, sizeof(push), (words + 7) / 8, (rows + 7) / 8, family);
+    }
+    return ok;
+}
+
+bool tonemap_hdr10_to_sdr(const ToneMapJob& job)
+{
+    if (job.src_fd < 0 || job.dst_fd < 0 || !job.width || !job.height)
+        return false;
+    // The kernel writes whole 32-bit words on both planes, which assumes the
+    // 4:2:0 geometry the VA layer already enforces.
+    if ((job.width | job.height) & 1u)
+        return false;
+
+    ToneMapParams push = {};
+    push.src_stride = job.src_stride;
+    push.src_uv = job.src_uv;
+    push.dst_stride = job.dst_stride;
+    push.dst_uv = job.dst_uv;
+    push.src_y = job.src_y;
+    push.dst_y = job.dst_y;
+    push.width = job.width;
+    push.height = job.height;
+    bt2390_params(job.source_peak_nits, &push.src_pq, &push.knee, &push.max_lum);
+
+    const PlaneBuffers buffers = { job.src_fd, job.dst_fd, job.src_size, job.dst_size };
+    Job j;
+    VkPhysicalDevice physical = VK_NULL_HANDLE;
+    uint32_t family = 0, memory_type = 0;
+    bool ok = make_job(j, buffers, kTonemapSpv, kTonemapSpvWords, sizeof(ToneMapParams), &physical, &family,
+        &memory_type);
     if (ok)
-        ok = dispatch(j, job, family, memory_type, physical);
+        // One invocation owns a 4x2 destination block on both planes.
+        ok = dispatch(j, &push, sizeof(push), ((job.width + 3) / 4 + 7) / 8, ((job.height + 1) / 2 + 7) / 8, family);
     return ok;
 }
 
@@ -406,6 +483,11 @@ bool compiled_in()
 }
 
 bool scale_nv12_or_p010(const ScaleJob&)
+{
+    return false;
+}
+
+bool tonemap_hdr10_to_sdr(const ToneMapJob&)
 {
     return false;
 }

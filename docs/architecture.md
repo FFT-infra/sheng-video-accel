@@ -318,6 +318,7 @@ src/
     picture.cc        begin/render/end -> codec translator -> Session::submit,
                       or for an EncSlice context -> EncoderSession::encode,
                       or for a VideoProc context -> iris::vpp::scale_nv12_or_p010
+                      or iris::vpp::tonemap_hdr10_to_sdr
     vpp.cc            the three vtable_vpp queries; no GPU probe
     image.cc          images and subpictures (minimal); derive aliases a surface
   iris/               the only code that touches /dev/videoN
@@ -387,9 +388,12 @@ The video processor is a fourth context kind but not a fourth node:
 session. `vaEndPicture` resolves the two surface DMA-BUFs and runs the pinned
 nearest kernel for the surface's sample width at the requested ratio over the
 surface region the client names, after the clockwise quarter turn the client
-names, sampling where swscale samples;
-every other pipeline operation (mirroring, blending, filters, colour
-conversion) fails the picture instead of being dropped. The entrypoint is advertised only when the
+names, sampling where swscale samples; a picture that names the HDR10 tone
+mapper instead runs `iris::vpp::tonemap_hdr10_to_sdr` over the two DMA-BUFs and
+converts P010 BT.2020/PQ to NV12 BT.709 at the surface's own size;
+every other pipeline operation (mirroring, blending, any second filter, any
+colour conversion outside that one filter) fails the picture instead of being
+dropped. The entrypoint is advertised only when the
 build found Vulkan and the client set `V4L2_VA_VPP` (§6), so an installed
 decode/encode client sees the surface it qualified against. The kernel and the
 VA surface path are gated separately in §9:
@@ -399,7 +403,8 @@ check every pixel of the primitive and
 frame against swscale; `test/vulkan-vpp/crop_vaapi_gate.sh` checks a
 `surface_region` picture against `crop,scale=...:flags=neighbor`, and
 `test/vulkan-vpp/transpose_vaapi_gate.sh` checks every rotation direction
-against `transpose`.
+against `transpose`, and `test/vulkan-vpp/tonemap_gate.sh` checks the tone
+mapper against the pipeline `tonemap.comp` documents.
 
 ## 6. Environment surface
 
@@ -530,7 +535,7 @@ va begin_picture ctx=<n> surface=<n> entrypoint=encslice
 va begin_picture ctx=<n> surface=<n> entrypoint=videoproc
 va end_picture ctx=<n> surface=<n> bytes=<n> seq_start=0|1
 va end_picture ctx=<n> surface=<n> entrypoint=encslice submitted token=<n>
-va end_picture ctx=<n> surface=<n> entrypoint=videoproc src=<n> <w>x<h>-><w>x<h>
+va end_picture ctx=<n> surface=<n> entrypoint=videoproc src=<n> <w>x<h>-><w>x<h>[ tonemap=hdr10]
 encode open node=<path> codec=<fourcc> raw=<w>x<h> crop=<w>x<h> mode=cbr|vbr|cqp
             gop=<n> rate=<num>/<den>
 encode frame index=<n> bytes=<n> idr=0|1 promoted=0|1    (idr=1 covers both the
@@ -615,7 +620,16 @@ separates a chroma pair at four bytes from one at two;
 frames against swscale over the same ratios;
 `test/vulkan-vpp/transpose_vaapi_gate.sh` checks every advertised rotation
 direction against the software `transpose`. Both VA-level gates check that the
-entrypoint is refused without `V4L2_VA_VPP`. The SPIR-V the driver embeds is
+entrypoint is refused without `V4L2_VA_VPP`.
+`test/vulkan-vpp/tonemap_gate.sh` drives the one filter through
+`iris-va-vpp-probe tonemap`: no FFmpeg in 8.1 can feed `tonemap_vaapi` a raw
+P010 frame, so the probe builds the HDR10 metadata buffer itself and compares
+every output byte with its own implementation of the documented pipeline,
+within 2 codes, plus three properties of the curve that a shared model mistake
+would not satisfy (PQ black on 16/128/128, the mastering peak on 235, a
+monotone ramp). It also proves the curve follows the metadata by running two
+mastering peaks over one frame, and requires an NV12 source, a filter without
+its parameters and a rotation in a tone-mapped picture to be refused. The SPIR-V the driver embeds is
 regenerated from the pinned module and compared by `test/run-static-checks.sh`.
 
 ## 10. Invariants (the ones tests exist for)

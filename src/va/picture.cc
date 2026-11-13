@@ -126,7 +126,12 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
     VAProcPipelineParameterBuffer p = {};
     std::memcpy(&p, b.data.data(), sizeof(p));
 
-    iris::require(p.num_filters == 0, "VPP filters are not supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    // One filter is supported, the HDR10 tone mapper. Its parameters travel in
+    // their own buffer, so nothing about them is read here.
+    iris::require(p.num_filters <= 1, "one VideoProc filter per picture is supported",
+        VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    iris::require(p.num_filters == 0 || p.filters != nullptr, "VPP filter list is null",
+        VA_STATUS_ERROR_INVALID_PARAMETER);
     iris::require(p.forward_references == nullptr && p.num_forward_references == 0,
         "VPP forward references are not supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
     iris::require(p.backward_references == nullptr && p.num_backward_references == 0,
@@ -157,16 +162,19 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
         "invalid input colour standard", VA_STATUS_ERROR_INVALID_PARAMETER);
     iris::require(output_standard >= 0 && output_standard < VAProcColorStandardCount,
         "invalid output colour standard", VA_STATUS_ERROR_INVALID_PARAMETER);
-    iris::require(p.surface_color_standard == p.output_color_standard,
-        "VPP colour conversion is not supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
-    if (p.surface_color_standard == VAProcColorStandardExplicit)
-        iris::require(std::memcmp(&p.input_color_properties, &p.output_color_properties,
-                          sizeof(VAProcColorProperties)) == 0,
-            "VPP colour conversion is not supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    // Whether the two ends may name different standards depends on whether a
+    // tone-mapping filter is in the picture, and that buffer is not required to
+    // arrive before this one; run_vpp judges it once both are in.
+    const bool colour_properties_equal
+        = std::memcmp(&p.input_color_properties, &p.output_color_properties, sizeof(VAProcColorProperties)) == 0;
 
     Context::VppJob job;
     job.source = p.surface;
     job.rotation = p.rotation_state;
+    job.filters = p.num_filters;
+    job.input_standard = input_standard;
+    job.output_standard = output_standard;
+    job.explicit_colour_properties_equal = colour_properties_equal;
     if (p.surface_region) {
         job.region = *p.surface_region;
         job.region_set = true;
@@ -178,6 +186,36 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
     c.vpp = job;
 }
 
+// One HDR10 tone-mapping filter buffer. The kernel's curve needs one number
+// from it — the mastering display peak — and the rest of the metadata describes
+// primaries this driver assumes (BT.2020/PQ) rather than reads, so a picture
+// that names different primaries would be tone mapped with the wrong matrix.
+// Refuse that instead of producing plausible colours.
+void accept_vpp_filter(Context& c, const Buffer& b)
+{
+    iris::require(!c.vpp_peak_nits.has_value(), "one VideoProc filter per picture is supported",
+        VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    iris::require(b.size >= sizeof(VAProcFilterParameterBufferHDRToneMapping),
+        "filter parameters too small", VA_STATUS_ERROR_INVALID_PARAMETER);
+    VAProcFilterParameterBufferHDRToneMapping f = {};
+    std::memcpy(&f, b.data.data(), sizeof(f));
+    iris::require(f.type == VAProcFilterHighDynamicRangeToneMapping, "unsupported VPP filter type",
+        VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    iris::require(f.data.metadata_type == VAProcHighDynamicRangeMetadataHDR10,
+        "only HDR10 tone mapping is supported", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+
+    float peak = 1000.0f;
+    if (f.data.metadata != nullptr && f.data.metadata_size >= sizeof(VAHdrMetaDataHDR10)) {
+        VAHdrMetaDataHDR10 m = {};
+        std::memcpy(&m, f.data.metadata, sizeof(m));
+        if (m.max_display_mastering_luminance)
+            peak = static_cast<float>(m.max_display_mastering_luminance) / 10000.0f;
+    }
+    iris::require(peak >= 100.0f && peak <= 10000.0f,
+        "HDR mastering peak is outside the 100..10000 cd/m2 range", VA_STATUS_ERROR_INVALID_PARAMETER);
+    c.vpp_peak_nits = peak;
+}
+
 // Run one VideoProc picture: the source comes from the pipeline buffer, the
 // target is the surface vaBeginPicture named. Synchronous — scale_nv12_or_p010 waits
 // for its fence, so a successful vaEndPicture means the pixels are there.
@@ -187,6 +225,34 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
     iris::require(c.vpp.has_value(), "VideoProc picture has no pipeline parameters",
         VA_STATUS_ERROR_INVALID_PARAMETER);
     const Context::VppJob job = *c.vpp;
+
+    // One filter is supported, the HDR10 tone mapper, and its parameters
+    // arrive as their own buffer in whichever order the client renders them.
+    // The picture is judged only once both are in.
+    const bool tone_map = job.filters == 1;
+    iris::require(tone_map == c.vpp_peak_nits.has_value(),
+        tone_map ? "the HDR10 tone mapper needs its parameter buffer"
+                 : "VideoProc filter parameters without a filter",
+        VA_STATUS_ERROR_INVALID_PARAMETER);
+    if (!tone_map) {
+        iris::require(job.input_standard == job.output_standard, "VPP colour conversion is not supported",
+            VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+        if (job.input_standard == VAProcColorStandardExplicit)
+            iris::require(job.explicit_colour_properties_equal, "VPP colour conversion is not supported",
+                VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    } else {
+        // The kernel's matrices are fixed: BT.2020 primaries and the PQ
+        // transfer in, BT.709 primaries and the BT.709 OETF out. A client
+        // naming something else would get plausible colours from the wrong
+        // conversion, so refuse it; naming nothing is fine, the metadata that
+        // selected this filter already says HDR10.
+        iris::require(job.input_standard == VAProcColorStandardNone
+                || job.input_standard == VAProcColorStandardBT2020,
+            "a tone-mapped source must be BT.2020 or unnamed", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+        iris::require(job.output_standard == VAProcColorStandardNone
+                || job.output_standard == VAProcColorStandardBT709,
+            "a tone-mapped output must be BT.709 or unnamed", VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+    }
 
     Pixels src, dst;
     VARectangle crop = {};
@@ -200,12 +266,17 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         source = surface(d, job.source);
         iris::require(source.get() != target.get(), "VPP source and output are the same surface",
             VA_STATUS_ERROR_INVALID_PARAMETER);
-        // Both ends carry the same sample width: the kernels scale, they do
-        // not convert bit depth.
-        iris::require(source->fourcc == target->fourcc
-                && (source->fourcc == VA_FOURCC_NV12 || source->fourcc == VA_FOURCC_P010),
-            "VPP input and output must share one NV12 or P010 format",
-            VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+        // A scale carries the same sample width on both ends: those kernels
+        // do not convert bit depth. The tone mapper is the one converter,
+        // P010 in and NV12 out.
+        if (tone_map)
+            iris::require(source->fourcc == VA_FOURCC_P010 && target->fourcc == VA_FOURCC_NV12,
+                "tone mapping needs a P010 source and an NV12 output", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+        else
+            iris::require(source->fourcc == target->fourcc
+                    && (source->fourcc == VA_FOURCC_NV12 || source->fourcc == VA_FOURCC_P010),
+                "VPP input and output must share one NV12 or P010 format",
+                VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
         iris::require(source->target.frame || source->stable, "VPP source holds no pixels",
             VA_STATUS_ERROR_OPERATION_FAILED);
 
@@ -230,40 +301,75 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         iris::require(source->width && source->height && target->width && target->height
                 && !((source->width | source->height | target->width | target->height) & 1u),
             "VPP needs an even, non-empty geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
+        // The tone mapper converts per pixel and does not move pixels: it
+        // reads the whole source and fills a same-size output. Crop, scale and
+        // rotation are the scale kernel's job, and asking for both in one
+        // picture is a pipeline this driver does not run.
+        if (tone_map) {
+            iris::require(crop.x == 0 && crop.y == 0 && crop.width == source->width
+                    && crop.height == source->height,
+                "tone mapping reads the whole source surface", VA_STATUS_ERROR_INVALID_PARAMETER);
+            iris::require(target->width == source->width && target->height == source->height,
+                "tone mapping keeps the surface size", VA_STATUS_ERROR_INVALID_PARAMETER);
+            iris::require(job.rotation == VA_ROTATION_NONE, "tone mapping does not rotate",
+                VA_STATUS_ERROR_UNSUPPORTED_FILTER);
+        }
 
         src = pixels_of(d, *source);
         dst = pixels_of(d, *target);
     }
 
-    iris::vpp::ScaleJob sj;
-    sj.src_fd = src.fd;
-    sj.dst_fd = dst.fd;
-    sj.src_size = src.size;
-    sj.dst_size = dst.size;
-    sj.src_stride = src.layout.stride;
-    sj.dst_stride = dst.layout.stride;
-    sj.src_uv = src.layout.chroma_offset();
-    sj.dst_uv = dst.layout.chroma_offset();
-    sj.src_y = src.layout.data_offset;
-    sj.dst_y = dst.layout.data_offset;
-    sj.src_x = static_cast<uint32_t>(crop.x);
-    sj.src_y_offset = static_cast<uint32_t>(crop.y);
-    sj.src_width = static_cast<uint32_t>(crop.width);
-    sj.src_height = static_cast<uint32_t>(crop.height);
-    sj.width = target->width;
-    sj.height = target->height;
-    sj.bytes = source->fourcc == VA_FOURCC_P010 ? 2 : 1;
-    // The rotation happens before the scale, so a quarter turn swaps the
-    // sampled rectangle's dimensions and the point map runs on that.
-    sj.rotation = job.rotation;
-    if (!iris::vpp::scale_nv12_or_p010(sj)) {
+    bool ran = false;
+    if (tone_map) {
+        iris::vpp::ToneMapJob tj;
+        tj.src_fd = src.fd;
+        tj.dst_fd = dst.fd;
+        tj.src_size = src.size;
+        tj.dst_size = dst.size;
+        tj.src_stride = src.layout.stride;
+        tj.dst_stride = dst.layout.stride;
+        tj.src_uv = src.layout.chroma_offset();
+        tj.dst_uv = dst.layout.chroma_offset();
+        tj.src_y = src.layout.data_offset;
+        tj.dst_y = dst.layout.data_offset;
+        tj.width = target->width;
+        tj.height = target->height;
+        tj.source_peak_nits = *c.vpp_peak_nits;
+        ran = iris::vpp::tonemap_hdr10_to_sdr(tj);
+    } else {
+        iris::vpp::ScaleJob sj;
+        sj.src_fd = src.fd;
+        sj.dst_fd = dst.fd;
+        sj.src_size = src.size;
+        sj.dst_size = dst.size;
+        sj.src_stride = src.layout.stride;
+        sj.dst_stride = dst.layout.stride;
+        sj.src_uv = src.layout.chroma_offset();
+        sj.dst_uv = dst.layout.chroma_offset();
+        sj.src_y = src.layout.data_offset;
+        sj.dst_y = dst.layout.data_offset;
+        sj.src_x = static_cast<uint32_t>(crop.x);
+        sj.src_y_offset = static_cast<uint32_t>(crop.y);
+        sj.src_width = static_cast<uint32_t>(crop.width);
+        sj.src_height = static_cast<uint32_t>(crop.height);
+        sj.width = target->width;
+        sj.height = target->height;
+        sj.bytes = source->fourcc == VA_FOURCC_P010 ? 2 : 1;
+        // The rotation happens before the scale, so a quarter turn swaps the
+        // sampled rectangle's dimensions and the point map runs on that.
+        sj.rotation = job.rotation;
+        ran = iris::vpp::scale_nv12_or_p010(sj);
+    }
+    if (!ran) {
         target->failed = true;
-        throw iris::Error(VA_STATUS_ERROR_OPERATION_FAILED, "Vulkan VPP scale failed");
+        throw iris::Error(VA_STATUS_ERROR_OPERATION_FAILED, tone_map ? "Vulkan VPP tone mapping failed"
+                                                                     : "Vulkan VPP scale failed");
     }
     target->vpp_pixels = true;
     target->failed = false;
-    d.trace("va end_picture ctx=%u surface=%u entrypoint=videoproc src=%u %ux%u->%ux%u", ctx_id, dst_id,
-        job.source, src.layout.width, src.layout.height, target->width, target->height);
+    d.trace("va end_picture ctx=%u surface=%u entrypoint=videoproc src=%u %ux%u->%ux%u%s", ctx_id, dst_id,
+        job.source, src.layout.width, src.layout.height, target->width, target->height,
+        tone_map ? " tonemap=hdr10" : "");
     return VA_STATUS_SUCCESS;
 }
 
@@ -492,6 +598,7 @@ VAStatus beginPicture(VADriverContextP ctx, VAContextID id, VASurfaceID surface_
             } else if (c->video_proc()) {
                 // A new picture replaces whatever this surface held.
                 c->vpp.reset();
+                c->vpp_peak_nits.reset();
                 s->failed = false;
             } else {
                 c->picture = {};
@@ -567,6 +674,11 @@ VAStatus renderPicture(VADriverContextP ctx, VAContextID id, VABufferID* buffers
                 switch (b->type) {
                 case VAProcPipelineParameterBufferType:
                     accept_vpp_pipeline(*c, *b);
+                    break;
+                case VAProcFilterParameterBufferType:
+                    // Arrives before or after the pipeline buffer; both are
+                    // judged together in run_vpp.
+                    accept_vpp_filter(*c, *b);
                     break;
                 default:
                     throw iris::Error(VA_STATUS_ERROR_UNSUPPORTED_BUFFERTYPE,

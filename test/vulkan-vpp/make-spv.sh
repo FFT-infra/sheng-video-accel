@@ -11,6 +11,7 @@
 #                     transpose_vaapi_gate.sh through the driver)
 #   p010_scale.spv    the same kernel for P010 surfaces
 #                     (p010_scale_gate.sh / scale_probe.c)
+#   tonemap.spv       HDR10 P010 to SDR NV12 (tonemap_gate.sh / tonemap_probe.c)
 #
 # Usage: test/vulkan-vpp/make-spv.sh [-c]
 #   -c  check that both current .spv files match a fresh compile and
@@ -35,7 +36,7 @@ scratch=${TMPDIR:-$HOME/Lab/Bridge/tmp}
 work=$(mktemp -d "$scratch/vpp-spv.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
-names="copy nv12_scale p010_scale"
+names="copy nv12_scale p010_scale tonemap"
 for name in $names; do
     "$glslang" -V --target-env vulkan1.1 -o "$work/$name.spv" "$here/$name.comp" >/dev/null
 done

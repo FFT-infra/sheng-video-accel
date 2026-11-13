@@ -555,10 +555,12 @@ context opens no node and owns no session. It samples inside the surface region 
 first-class picture rather than a post-step, applies the clockwise quarter turn
 the client asks for before scaling, and it runs the same map on
 P010 with a second kernel (same-depth only: a mixed-depth picture is
-refused, because swscale's own 10-to-8 conversion dithers). Everything the
-kernel does not do (mirroring, blending, filters, colour conversion, a second
-pipeline buffer in one picture) fails the picture with a VA status instead of
-being approximated. Vulkan stays an optional meson dependency, so CI builds the stub
+refused, because swscale's own 10-to-8 conversion dithers). One filter is
+implemented, `VAProcFilterHighDynamicRangeToneMapping`, which converts P010
+BT.2020/PQ to SDR NV12 through `tonemap.spv`. Everything else (mirroring,
+blending, a second filter, any other colour conversion, a second pipeline
+buffer in one picture) fails the picture with a VA status instead of being
+approximated. Vulkan stays an optional meson dependency, so CI builds the stub
 and advertises nothing.
 
 The backend samples where swscale's `SWS_POINT` map samples - the rounded

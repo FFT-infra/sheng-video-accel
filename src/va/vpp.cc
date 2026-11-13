@@ -3,15 +3,16 @@
 // The three queries on the VPP vtable. They describe what the compute
 // backend runs — one nearest-neighbour scale at the requested ratio from an
 // optional crop, in NV12 or P010, after an optional clockwise quarter turn,
-// with no filters, mirroring or blending — and nothing here creates a
-// VkInstance or opens a node, so a client can query them during GPU sandbox
-// initialisation.
+// and the HDR10 tone mapper as its only filter, with no mirroring or blending
+// — and nothing here creates a VkInstance or opens a node, so a client can
+// query them during GPU sandbox initialisation.
 
 #include "driver.h"
 
 #include "../util/error.h"
 
 #include <algorithm>
+#include <cstring>
 
 namespace va {
 
@@ -29,27 +30,61 @@ VAProcColorStandardType kStandards[] = { VAProcColorStandardNone, VAProcColorSta
 uint32_t kPixelFormatsNv12[] = { VA_FOURCC_NV12 };
 uint32_t kPixelFormatsNv12P010[] = { VA_FOURCC_NV12, VA_FOURCC_P010 };
 
+// The tone mapper reads a 10-bit HDR10 surface, so it is offered only when
+// the node reported a 10-bit capture format.
+constexpr unsigned kHdrFilters = 1;
+
 } // namespace
 
 VAStatus queryVideoProcFilters(VADriverContextP ctx, VAContextID id, VAProcFilterType* filters, unsigned* count)
 {
-    (void)filters;
     auto& d = data(ctx);
     std::lock_guard<std::recursive_mutex> lock(d.mutex);
     (void)context(d, id); // invalid contexts are an error even for an empty answer
-    // No filter is implemented, so the chain is always empty.
-    *count = 0;
+    iris::require(count != nullptr, "null filter count", VA_STATUS_ERROR_INVALID_PARAMETER);
+    // One filter: the HDR10 tone mapper.
+    const unsigned n = d.capabilities.p010 ? kHdrFilters : 0;
+    if (filters == nullptr) {
+        *count = n;
+        return VA_STATUS_SUCCESS;
+    }
+    if (*count < n) {
+        *count = n;
+        return VA_STATUS_ERROR_MAX_NUM_EXCEEDED;
+    }
+    if (n)
+        filters[0] = VAProcFilterHighDynamicRangeToneMapping;
+    *count = n;
     return VA_STATUS_SUCCESS;
 }
 
-VAStatus queryVideoProcFilterCaps(VADriverContextP ctx, VAContextID id, VAProcFilterType, void* caps, unsigned* count)
+VAStatus queryVideoProcFilterCaps(VADriverContextP ctx, VAContextID id, VAProcFilterType type, void* caps,
+    unsigned* count)
 {
-    (void)caps;
     auto& d = data(ctx);
     std::lock_guard<std::recursive_mutex> lock(d.mutex);
     (void)context(d, id);
-    *count = 0;
-    return VA_STATUS_ERROR_UNSUPPORTED_FILTER;
+    iris::require(count != nullptr, "null filter caps count", VA_STATUS_ERROR_INVALID_PARAMETER);
+    // Only HDR10 to SDR: the kernel's curve is the BT.2390 EETF toward a
+    // 100 cd/m2 display, and it has no way to produce HDR output metadata.
+    if (type != VAProcFilterHighDynamicRangeToneMapping || !d.capabilities.p010) {
+        *count = 0;
+        return VA_STATUS_ERROR_UNSUPPORTED_FILTER;
+    }
+    if (caps == nullptr) {
+        *count = 1;
+        return VA_STATUS_SUCCESS;
+    }
+    if (*count < 1) {
+        *count = 1;
+        return VA_STATUS_ERROR_MAX_NUM_EXCEEDED;
+    }
+    VAProcFilterCapHighDynamicRange hdr = {};
+    hdr.metadata_type = VAProcHighDynamicRangeMetadataHDR10;
+    hdr.caps_flag = VA_TONE_MAPPING_HDR_TO_SDR;
+    std::memcpy(caps, &hdr, sizeof(hdr));
+    *count = 1;
+    return VA_STATUS_SUCCESS;
 }
 
 VAStatus queryVideoProcPipelineCaps(VADriverContextP ctx, VAContextID id, VABufferID* filters, unsigned count,

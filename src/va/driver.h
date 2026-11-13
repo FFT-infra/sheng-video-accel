@@ -158,8 +158,8 @@ struct Context {
     // client's pointers are only valid until vaEndPicture, so the regions it
     // names are resolved to values in renderPicture and the buffer is not
     // kept. The backend scales NV12 or P010 at any ratio, from an optional
-    // crop, with an optional clockwise quarter turn; anything else fails the
-    // picture.
+    // crop, with an optional clockwise quarter turn; or it tone maps HDR10
+    // P010 to SDR NV12 at one-to-one size. Anything else fails the picture.
     struct VppJob {
         VASurfaceID source = VA_INVALID_ID;
         VARectangle region = {};
@@ -167,8 +167,21 @@ struct Context {
         VARectangle output_region = {};
         bool output_region_set = false;
         uint32_t rotation = VA_ROTATION_NONE;
+        // How many filter buffers the pipeline names. One is supported, and
+        // only the HDR10 tone mapper; the parameters arrive as their own
+        // buffer, which is why the peak lives beside the job and not in it.
+        uint32_t filters = 0;
+        // The client's colour standards, kept so the picture can be judged
+        // once both buffers have arrived: a tone-mapped picture is the one
+        // case where the two ends may name different standards.
+        int input_standard = VAProcColorStandardNone;
+        int output_standard = VAProcColorStandardNone;
+        bool explicit_colour_properties_equal = true;
     };
     std::optional<VppJob> vpp;
+    // Set by a VAProcFilterParameterBufferType buffer: the mastering display
+    // peak of the HDR10 source, in cd/m². Absent means no filter.
+    std::optional<float> vpp_peak_nits;
 
     bool encoding() const { return entrypoint == VAEntrypointEncSlice; }
     bool video_proc() const { return entrypoint == VAEntrypointVideoProc; }

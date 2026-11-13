@@ -39,6 +39,21 @@ struct ScaleJob {
     uint32_t bytes = 1;
 };
 
+// One HDR10 P010 picture to SDR NV12: the source is BT.2020 primaries with the
+// PQ transfer, limited range; the destination is BT.709 with the BT.709 OETF,
+// limited range. The kernel applies the PQ EOTF, the ITU-R BT.2390 EETF toward
+// a 100 cd/m² peak as one gain on the largest channel, the linear BT.2020 to
+// BT.709 matrix, and the BT.709 OETF. source_peak_nits is the HDR10 mastering
+// display peak; width and height are visible and even.
+struct ToneMapJob {
+    int src_fd = -1, dst_fd = -1;
+    uint32_t src_size = 0, dst_size = 0;
+    uint32_t src_stride = 0, src_uv = 0, dst_stride = 0, dst_uv = 0;
+    uint32_t src_y = 0, dst_y = 0;
+    uint32_t width = 0, height = 0;
+    float source_peak_nits = 1000.0f;
+};
+
 // True when this driver was built with the Vulkan VPP backend. Capability
 // queries use this instead of touching Vulkan: creating a VkInstance during
 // Chromium's GPU-sandbox init is not allowed (docs/architecture.md §7).
@@ -49,6 +64,11 @@ bool compiled_in();
 // the device rejected the job; the VA layer must then fail the picture and
 // never publish partial pixels.
 bool scale_nv12_or_p010(const ScaleJob& job);
+
+// Dispatch the tone-mapping kernel (tonemap.spv) over the two imported
+// DMA-BUFs. Same failure contract as the scale: false means the VA layer must
+// fail the picture rather than publish partial pixels.
+bool tonemap_hdr10_to_sdr(const ToneMapJob& job);
 
 } // namespace vpp
 } // namespace iris

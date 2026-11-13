@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 //
 // Standalone probe (hardware only): one VideoProc picture, driven the way a
-// client drives it, with a surface region on the input.
+// client drives it.
 //
-//   iris-va-vpp-probe <render-node> <src.raw> <srcW> <srcH> \
-//                     <cropW> <cropH> <cropX> <cropY> <dstW> <dstH> <out.raw> \
+//   iris-va-vpp-probe <render-node> <src.raw> <srcW> <srcH>
+//                     <cropW> <cropH> <cropX> <cropY> <dstW> <dstH> <out.raw>
 //                     [--expect-refusal]
 //
 // It uploads the NV12 frame through a derived image, creates a
@@ -13,12 +13,27 @@
 // picture and downloads the result with vaGetImage. FFmpeg 8.1 has no
 // crop_vaapi filter, so this is the only client that can ask for a region.
 //
+//   iris-va-vpp-probe tonemap <render-node> <W> <H> <peak-nits> <out.raw>
+//                     [--source-nv12] [--no-filter] [--rotate]
+//                     [--expect-refusal]
+//
+// The second mode submits VAProcFilterHighDynamicRangeToneMapping with HDR10
+// metadata naming `peak-nits` as the mastering display peak, converts a
+// synthetic HDR10 P010 surface to SDR NV12, and compares every output byte
+// with the probe's own implementation of the pipeline documented in
+// test/vulkan-vpp/tonemap.comp. FFmpeg's tonemap_vaapi refuses a raw P010
+// frame (it demands mastering-display side data), so this is the only client
+// that can drive the filter at all.
+//
 // `--expect-refusal` inverts the verdict: the picture must fail (an odd or
-// out-of-bounds region is the driver's to refuse, not to round).
+// out-of-bounds region, an NV12 source, a filter without its parameters, a
+// rotation, all are the driver's to refuse rather than to round).
 //
 // Needs V4L2_VA_VPP=1, LIBVA_DRIVER_NAME=v4l2 and either the installed driver
 // or LIBVA_DRIVERS_PATH pointing at a build tree.
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -65,9 +80,10 @@ bool write_file(const char* path, const uint8_t* bytes, size_t size)
     return ok;
 }
 
-// Packed NV12 rows into the surface's own layout, through a derived image.
+// Packed NV12 (or P010, `bytes` = 2) rows into the surface's own layout,
+// through a derived image.
 bool upload(VADisplay display, VASurfaceID surface, const std::vector<uint8_t>& frame, unsigned width,
-    unsigned height)
+    unsigned height, unsigned bytes)
 {
     VAImage image = {};
     if (vaDeriveImage(display, surface, &image) != VA_STATUS_SUCCESS)
@@ -80,23 +96,25 @@ bool upload(VADisplay display, VASurfaceID surface, const std::vector<uint8_t>& 
     auto* base = static_cast<uint8_t*>(mapped);
     for (unsigned y = 0; y < height; ++y)
         std::memcpy(base + image.offsets[0] + static_cast<size_t>(y) * image.pitches[0],
-            frame.data() + static_cast<size_t>(y) * width, width);
+            frame.data() + static_cast<size_t>(y) * width * bytes, width * bytes);
     for (unsigned y = 0; y < (height + 1) / 2; ++y)
         std::memcpy(base + image.offsets[1] + static_cast<size_t>(y) * image.pitches[1],
-            frame.data() + static_cast<size_t>(width) * height + static_cast<size_t>(y) * width, width);
+            frame.data() + static_cast<size_t>(width) * height * bytes + static_cast<size_t>(y) * width * bytes,
+            width * bytes);
     vaUnmapBuffer(display, image.buf);
     vaDestroyImage(display, image.image_id);
     return true;
 }
 
-// The surface's visible pixels as packed NV12 rows.
+// The surface's visible pixels as packed rows, NV12 or P010.
 bool download(VADisplay display, VASurfaceID surface, std::vector<uint8_t>& frame, unsigned width,
-    unsigned height)
+    unsigned height, uint32_t fourcc)
 {
+    const unsigned bytes = fourcc == VA_FOURCC_P010 ? 2 : 1;
     VAImageFormat format = {};
-    format.fourcc = VA_FOURCC_NV12;
+    format.fourcc = fourcc;
     format.byte_order = VA_LSB_FIRST;
-    format.bits_per_pixel = 12;
+    format.bits_per_pixel = bytes == 2 ? 24 : 12;
     VAImage image = {};
     if (vaCreateImage(display, &format, width, height, &image) != VA_STATUS_SUCCESS)
         return false;
@@ -111,22 +129,404 @@ bool download(VADisplay display, VASurfaceID surface, std::vector<uint8_t>& fram
         return false;
     }
     const auto* base = static_cast<const uint8_t*>(mapped);
-    frame.resize(static_cast<size_t>(width) * height * 3 / 2);
+    frame.resize(static_cast<size_t>(width) * height * bytes * 3 / 2);
     for (unsigned y = 0; y < height; ++y)
-        std::memcpy(frame.data() + static_cast<size_t>(y) * width,
-            base + image.offsets[0] + static_cast<size_t>(y) * image.pitches[0], width);
+        std::memcpy(frame.data() + static_cast<size_t>(y) * width * bytes,
+            base + image.offsets[0] + static_cast<size_t>(y) * image.pitches[0], width * bytes);
     for (unsigned y = 0; y < (height + 1) / 2; ++y)
-        std::memcpy(frame.data() + static_cast<size_t>(width) * height + static_cast<size_t>(y) * width,
-            base + image.offsets[1] + static_cast<size_t>(y) * image.pitches[1], width);
+        std::memcpy(frame.data() + static_cast<size_t>(width) * height * bytes
+                + static_cast<size_t>(y) * width * bytes,
+            base + image.offsets[1] + static_cast<size_t>(y) * image.pitches[1], width * bytes);
     vaUnmapBuffer(display, image.buf);
     vaDestroyImage(display, image.image_id);
     return true;
+}
+
+// ---- HDR10 to SDR tone mapping ---------------------------------------------
+//
+// The pipeline test/vulkan-vpp/tonemap.comp documents, in double precision.
+// The kernel runs it in float32, so agreement is a tolerance, not a hash:
+// byte-exactness is not defined for a tone curve, but the curve is.
+
+double pq_encode(double nits)
+{
+    const double m1 = 0.1593017578125, m2 = 78.84375;
+    const double c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
+    const double t = std::pow(std::max(nits, 0.0) / 10000.0, m1);
+    return std::pow((c1 + c2 * t) / (1.0 + c3 * t), m2);
+}
+
+double pq_decode(double code)
+{
+    const double m1 = 0.1593017578125, m2 = 78.84375;
+    const double c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
+    const double t = std::pow(std::min(std::max(code, 0.0), 1.0), 1.0 / m2);
+    return 10000.0 * std::pow(std::max(t - c1, 0.0) / (c2 - c3 * t), 1.0 / m1);
+}
+
+double bt709_oetf(double x)
+{
+    return x < 0.018 ? 4.5 * x : 1.099 * std::pow(x, 0.45) - 0.099;
+}
+
+struct ToneParams {
+    double src_pq = 0.0, knee = 0.0, max_lum = 0.0;
+};
+
+// ITU-R BT.2390 Annex 2's Hermite shoulder, on PQ codes normalised by the
+// source peak.
+double eetf(double e, const ToneParams& p)
+{
+    e = std::min(std::max(e, 0.0), 1.0);
+    if (e <= p.knee)
+        return e;
+    const double t = (e - p.knee) / (1.0 - p.knee);
+    const double t2 = t * t;
+    const double t3 = t2 * t;
+    return (2.0 * t3 - 3.0 * t2 + 1.0) * p.knee + (t3 - 2.0 * t2 + t) * (1.0 - p.knee)
+        + (-2.0 * t3 + 3.0 * t2) * p.max_lum;
+}
+
+ToneParams tone_params(double peak_nits)
+{
+    ToneParams p;
+    p.src_pq = pq_encode(std::min(std::max(peak_nits, 100.0), 10000.0));
+    p.max_lum = std::min(pq_encode(100.0) / p.src_pq, 1.0);
+    p.knee = std::min(std::max(1.5 * p.max_lum - 0.5, 0.0), 0.999);
+    return p;
+}
+
+// One pixel: PQ codes in, tone-mapped BT.709 OETF values out.
+void tone_pixel(double y10, double u10, double v10, const ToneParams& p, double rgb[3])
+{
+    const double y = (y10 - 64.0) / 876.0;
+    const double cb = (u10 - 512.0) / 896.0;
+    const double cr = (v10 - 512.0) / 896.0;
+    const double r = y + 1.4746 * cr;
+    const double b = y + 1.8814 * cb;
+    const double g = (y - 0.2627 * r - 0.0593 * b) / 0.6780;
+
+    double nits[3] = { pq_decode(r), pq_decode(g), pq_decode(b) };
+    const double peak = std::max(std::max(nits[0], nits[1]), nits[2]);
+    if (peak <= 0.0) {
+        rgb[0] = rgb[1] = rgb[2] = 0.0;
+        return;
+    }
+    const double mapped = pq_decode(eetf(pq_encode(peak) / p.src_pq, p) * p.src_pq);
+    double lin[3];
+    for (int i = 0; i < 3; ++i)
+        lin[i] = nits[i] * (mapped / peak / 100.0);
+
+    // Linear BT.2020 to BT.709.
+    double o[3] = {
+        lin[0] * 1.660491 + lin[1] * -0.587641 + lin[2] * -0.072850,
+        lin[0] * -0.124550 + lin[1] * 1.132900 + lin[2] * -0.008349,
+        lin[0] * -0.018151 + lin[1] * -0.100579 + lin[2] * 1.118730,
+    };
+    const double luma = std::max(o[0] * 0.2126 + o[1] * 0.7152 + o[2] * 0.0722, 0.0);
+    const double negative = std::max(-std::min(std::min(o[0], o[1]), o[2]), 0.0);
+    const double scale = luma / std::max(luma + negative, 1e-20);
+    for (int i = 0; i < 3; ++i)
+        rgb[i] = bt709_oetf(std::min(std::max((o[i] + negative) * scale, 0.0), 1.0));
+}
+
+uint8_t limited(double normalized, double level, double amplitude)
+{
+    return static_cast<uint8_t>(std::min(std::max(std::round(level + amplitude * normalized), 0.0), 255.0));
+}
+
+size_t luma_offset(unsigned width, unsigned x, unsigned y) { return (static_cast<size_t>(y) * width + x) * 2U; }
+
+size_t chroma_offset(unsigned width, unsigned height, unsigned bx, unsigned by)
+{
+    return static_cast<size_t>(width) * height * 2U + (static_cast<size_t>(by) * (width / 2) + bx) * 4U;
+}
+
+// A synthetic HDR10 surface: the first two columns are PQ black, the last two
+// carry exactly the mastering peak, and the rest a geometric ramp from 0.05 to
+// 10000 cd/m². Chroma sweeps both ways down the rows and is neutral at both
+// ends, so a wrong matrix or a swapped chroma plane shows up as a diff rather
+// than as a grey picture, and the two endpoints stay two exact codes.
+void make_hdr10_frame(unsigned width, unsigned height, double peak_nits, std::vector<uint8_t>& frame)
+{
+    frame.assign(static_cast<size_t>(width) * height * 3U, 0);
+    for (unsigned y = 0; y < height; ++y) {
+        for (unsigned x = 0; x < width; ++x) {
+            double nits;
+            if (x < 2)
+                nits = 0.0;
+            else if (x + 2 >= width)
+                nits = peak_nits;
+            else
+                nits = 0.05 * std::pow(10000.0 / 0.05, static_cast<double>(x - 2) / (width - 5));
+            const unsigned code = static_cast<unsigned>(std::lround(64.0 + pq_encode(nits) * 876.0));
+            const size_t off = luma_offset(width, x, y);
+            frame[off] = static_cast<uint8_t>(code << 6U & 0xffU);
+            frame[off + 1] = static_cast<uint8_t>(code << 6U >> 8U);
+        }
+        for (unsigned bx = 0; bx < width / 2; ++bx) {
+            const bool neutral = bx == 0 || bx + 1 >= width / 2;
+            const double sweep = neutral ? 0.0 : 2.0 * static_cast<double>(y) / height - 1.0;
+            const unsigned u = static_cast<unsigned>(std::lround(512.0 + 96.0 * sweep));
+            const unsigned v = static_cast<unsigned>(std::lround(512.0 - 64.0 * sweep));
+            const size_t off = chroma_offset(width, height, bx, y / 2);
+            frame[off] = static_cast<uint8_t>((u << 6U) & 0xffU);
+            frame[off + 1] = static_cast<uint8_t>((u << 6U) >> 8U);
+            frame[off + 2] = static_cast<uint8_t>((v << 6U) & 0xffU);
+            frame[off + 3] = static_cast<uint8_t>((v << 6U) >> 8U);
+        }
+    }
+}
+
+// The same ramp in 8-bit NV12, for the refusal that proves a tone map needs a
+// 10-bit source.
+void make_nv12_frame(unsigned width, unsigned height, std::vector<uint8_t>& frame)
+{
+    frame.assign(static_cast<size_t>(width) * height * 3U / 2U, 128);
+    for (unsigned y = 0; y < height; ++y)
+        for (unsigned x = 0; x < width; ++x)
+            frame[static_cast<size_t>(y) * width + x] = static_cast<uint8_t>(16 + (x * 200) / width);
+}
+
+double sample10(const std::vector<uint8_t>& frame, size_t off)
+{
+    return static_cast<double>(frame[off] | (frame[off + 1] << 8U)) / 64.0;
+}
+
+// The pipeline's own output for this frame, in packed NV12 rows.
+void expected_sdr(const std::vector<uint8_t>& hdr, unsigned width, unsigned height, double peak_nits,
+    std::vector<uint8_t>& out)
+{
+    const ToneParams p = tone_params(peak_nits);
+    out.assign(static_cast<size_t>(width) * height * 3U / 2U, 0);
+    for (unsigned y = 0; y < height; ++y) {
+        for (unsigned x = 0; x < width; ++x) {
+            const double u = sample10(hdr, chroma_offset(width, height, x / 2, y / 2));
+            const double v = sample10(hdr, chroma_offset(width, height, x / 2, y / 2) + 2);
+            double rgb[3];
+            tone_pixel(sample10(hdr, luma_offset(width, x, y)), u, v, p, rgb);
+            const double luma = rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+            out[static_cast<size_t>(y) * width + x] = limited(luma, 16.0, 219.0);
+            if (!(y & 1U) && !(x & 1U)) {
+                const size_t uv = static_cast<size_t>(width) * height + static_cast<size_t>(y / 2) * width + x;
+                out[uv] = limited((rgb[2] - luma) / 1.8556, 128.0, 224.0);
+                out[uv + 1] = limited((rgb[0] - luma) / 1.5748, 128.0, 224.0);
+            }
+        }
+    }
+}
+
+void tonemap_usage(const char* argv0)
+{
+    std::fprintf(stderr, "usage: %s tonemap <render-node> <W> <H> <peak-nits> <out.raw> [--source-nv12] "
+                         "[--no-filter] [--rotate] [--expect-refusal]\n",
+        argv0);
+}
+
+// The tone-mapping mode. `argv[0]` is the render node.
+int run_tonemap(int argc, char** argv)
+{
+    if (argc < 5) {
+        tonemap_usage("iris-va-vpp-probe");
+        return 2;
+    }
+    const unsigned width = static_cast<unsigned>(std::atoi(argv[1]));
+    const unsigned height = static_cast<unsigned>(std::atoi(argv[2]));
+    const double peak = std::atof(argv[3]);
+    const char* out_path = argv[4];
+    bool source_nv12 = false, no_filter = false, rotate = false, expect_refusal = false;
+    for (int i = 5; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--source-nv12") == 0)
+            source_nv12 = true;
+        else if (std::strcmp(argv[i], "--no-filter") == 0)
+            no_filter = true;
+        else if (std::strcmp(argv[i], "--rotate") == 0)
+            rotate = true;
+        else if (std::strcmp(argv[i], "--expect-refusal") == 0)
+            expect_refusal = true;
+        else {
+            tonemap_usage("iris-va-vpp-probe");
+            return 2;
+        }
+    }
+    if (width < 4 || height < 4 || (width & 1U) || (height & 1U)) {
+        std::fprintf(stderr, "tone-mapping geometry must be even and at least 4x4\n");
+        return 2;
+    }
+
+    std::vector<uint8_t> hdr;
+    make_hdr10_frame(width, height, peak, hdr);
+    std::vector<uint8_t> nv12;
+    make_nv12_frame(width, height, nv12);
+
+    const int fd = open(argv[0], O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        std::perror("open render node");
+        return 2;
+    }
+    VADisplay display = vaGetDisplayDRM(fd);
+    int major = 0, minor = 0;
+    if (vaInitialize(display, &major, &minor) != VA_STATUS_SUCCESS) {
+        std::fprintf(stderr, "vaInitialize failed (is V4L2_VA_VPP=1 set?)\n");
+        return 2;
+    }
+
+    VAConfigAttrib attrib = {};
+    attrib.type = VAConfigAttribRTFormat;
+    attrib.value = VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10;
+    VAConfigID config = VA_INVALID_ID;
+    VAStatus status = vaCreateConfig(display, VAProfileNone, VAEntrypointVideoProc, &attrib, 1, &config);
+    if (status != VA_STATUS_SUCCESS) {
+        std::fprintf(stderr, "vaCreateConfig(VAProfileNone, VideoProc) failed: %s\n", vaErrorStr(status));
+        return 2;
+    }
+
+    VASurfaceID src_surface = VA_INVALID_ID, dst_surface = VA_INVALID_ID;
+    if (vaCreateSurfaces(display, source_nv12 ? VA_RT_FORMAT_YUV420 : VA_RT_FORMAT_YUV420_10, width, height,
+            &src_surface, 1, nullptr, 0)
+            != VA_STATUS_SUCCESS
+        || vaCreateSurfaces(display, VA_RT_FORMAT_YUV420, width, height, &dst_surface, 1, nullptr, 0)
+            != VA_STATUS_SUCCESS) {
+        std::fprintf(stderr, "vaCreateSurfaces failed\n");
+        return 2;
+    }
+    check(upload(display, src_surface, source_nv12 ? nv12 : hdr, width, height, source_nv12 ? 1 : 2),
+        "upload the source frame");
+
+    VAContextID context = VA_INVALID_ID;
+    status = vaCreateContext(display, config, static_cast<int>(width), static_cast<int>(height), VA_PROGRESSIVE,
+        &dst_surface, 1, &context);
+    check(status == VA_STATUS_SUCCESS, "create a VideoProc context");
+
+    // The filter has to be advertised before a client can ask for it, and the
+    // caps have to name HDR10 in and SDR out rather than a generic conversion.
+    VAProcFilterType filters[4] = {};
+    unsigned filter_count = 4;
+    check(vaQueryVideoProcFilters(display, context, filters, &filter_count) == VA_STATUS_SUCCESS
+            && filter_count == 1 && filters[0] == VAProcFilterHighDynamicRangeToneMapping,
+        "the HDR10 tone mapper is the one advertised filter");
+    VAProcFilterCapHighDynamicRange filter_caps = {};
+    unsigned cap_count = 1;
+    const VAStatus caps_status = vaQueryVideoProcFilterCaps(display, context,
+        VAProcFilterHighDynamicRangeToneMapping, &filter_caps, &cap_count);
+    check(caps_status == VA_STATUS_SUCCESS && cap_count == 1
+            && filter_caps.metadata_type == VAProcHighDynamicRangeMetadataHDR10
+            && (filter_caps.caps_flag & VA_TONE_MAPPING_HDR_TO_SDR) != 0
+            && (filter_caps.caps_flag & VA_TONE_MAPPING_HDR_TO_HDR) == 0,
+        "the caps offer HDR10 to SDR and no HDR to HDR");
+
+    VAHdrMetaDataHDR10 metadata = {};
+    metadata.display_primaries_x[0] = 13250;
+    metadata.display_primaries_y[0] = 34500;
+    metadata.display_primaries_x[1] = 7500;
+    metadata.display_primaries_y[1] = 3000;
+    metadata.display_primaries_x[2] = 34000;
+    metadata.display_primaries_y[2] = 16000;
+    metadata.white_point_x = 15635;
+    metadata.white_point_y = 16450;
+    metadata.max_display_mastering_luminance = static_cast<uint32_t>(std::lround(peak * 10000.0));
+    metadata.min_display_mastering_luminance = 50; // 0.005 cd/m2
+    VAProcFilterParameterBufferHDRToneMapping params = {};
+    params.type = VAProcFilterHighDynamicRangeToneMapping;
+    params.data.metadata_type = VAProcHighDynamicRangeMetadataHDR10;
+    params.data.metadata = &metadata;
+    params.data.metadata_size = sizeof(metadata);
+
+    VABufferID filter_buffer = VA_INVALID_ID;
+    if (!no_filter) {
+        status = vaCreateBuffer(display, context, VAProcFilterParameterBufferType, sizeof(params), 1, &params,
+            &filter_buffer);
+        check(status == VA_STATUS_SUCCESS, "create the HDR10 filter buffer");
+    }
+
+    VAProcPipelineParameterBuffer pipeline = {};
+    pipeline.surface = src_surface;
+    pipeline.surface_color_standard = VAProcColorStandardBT2020;
+    pipeline.output_color_standard = VAProcColorStandardBT709;
+    pipeline.num_filters = 1;
+    pipeline.filters = &filter_buffer;
+    pipeline.rotation_state = rotate ? VA_ROTATION_90 : VA_ROTATION_NONE;
+    VABufferID pipeline_buffer = VA_INVALID_ID;
+    status = vaCreateBuffer(display, context, VAProcPipelineParameterBufferType, sizeof(pipeline), 1, &pipeline,
+        &pipeline_buffer);
+    check(status == VA_STATUS_SUCCESS, "create the pipeline buffer");
+
+    check(vaBeginPicture(display, context, dst_surface) == VA_STATUS_SUCCESS, "vaBeginPicture");
+    VABufferID render[2] = { pipeline_buffer, filter_buffer };
+    check(vaRenderPicture(display, context, render, no_filter ? 1 : 2) == VA_STATUS_SUCCESS, "vaRenderPicture");
+    status = vaEndPicture(display, context);
+
+    if (expect_refusal) {
+        const bool refused = status != VA_STATUS_SUCCESS;
+        std::printf("%s vaEndPicture refused the tone map (status 0x%x)\n", refused ? "PASS" : "FAIL",
+            static_cast<unsigned>(status));
+        if (!refused)
+            ++failures;
+    } else {
+        check(status == VA_STATUS_SUCCESS, "vaEndPicture");
+        std::vector<uint8_t> output;
+        if (status == VA_STATUS_SUCCESS)
+            check(download(display, dst_surface, output, width, height, VA_FOURCC_NV12),
+                "download the tone-mapped frame");
+        if (status == VA_STATUS_SUCCESS && output.size() == static_cast<size_t>(width) * height * 3U / 2U) {
+            // Black in, limited-range black out, with neutral chroma.
+            check(output[0] == 16 && output[static_cast<size_t>(width) * height] == 128
+                    && output[static_cast<size_t>(width) * height + 1] == 128,
+                "PQ black maps to 16/128/128");
+            // The EETF's endpoint is the SDR reference white, so the source
+            // peak lands at 235 whatever the peak was.
+            const uint8_t white = output[static_cast<size_t>(height / 2) * width + width - 1];
+            check(white >= 234 && white <= 236, "the mastering peak maps to limited-range white");
+
+            std::vector<uint8_t> expected;
+            expected_sdr(hdr, width, height, peak, expected);
+            unsigned max_diff = 0;
+            double sum = 0;
+            for (size_t i = 0; i < expected.size(); ++i) {
+                const unsigned d = static_cast<unsigned>(std::abs(int(expected[i]) - int(output[i])));
+                max_diff = std::max(max_diff, d);
+                sum += d;
+            }
+            check(max_diff <= 2, "every byte within 2 codes of the documented pipeline");
+            // A monotone ramp in, a monotone ramp out: a knee applied to the
+            // wrong variable or a sign error in the matrix breaks this even
+            // when the tolerance above is generous.
+            bool monotone = true;
+            const unsigned row = height / 2;
+            for (unsigned x = 3; x + 2 < width; ++x)
+                monotone = monotone
+                    && output[static_cast<size_t>(row) * width + x]
+                    >= output[static_cast<size_t>(row) * width + x - 1];
+            check(monotone, "the luminance ramp stays monotone");
+            check(write_file(out_path, output.data(), output.size()), "write the output frame");
+            std::printf("tonemap %ux%u peak=%.0f max_diff=%u mean=%.3f\n", width, height, peak, max_diff,
+                sum / static_cast<double>(expected.size()));
+        }
+    }
+
+    vaDestroySurfaces(display, &src_surface, 1);
+    vaDestroySurfaces(display, &dst_surface, 1);
+    if (context != VA_INVALID_ID)
+        vaDestroyContext(display, context);
+    vaDestroyConfig(display, config);
+    vaTerminate(display);
+    close(fd);
+
+    if (failures) {
+        std::printf("FAIL iris-va-vpp-probe tonemap %d check(s)\n", failures);
+        return 1;
+    }
+    std::printf("PASS iris-va-vpp-probe tonemap %ux%u peak=%.0f\n", width, height, peak);
+    return 0;
 }
 
 } // namespace
 
 int main(int argc, char** argv)
 {
+    if (argc >= 2 && std::strcmp(argv[1], "tonemap") == 0)
+        return run_tonemap(argc - 2, argv + 2);
+
     const bool expect_refusal = argc == 13 && std::strcmp(argv[12], "--expect-refusal") == 0;
     if (argc != 12 && !expect_refusal) {
         std::fprintf(stderr, "usage: %s <render-node> <src.raw> <srcW> <srcH> <cropW> <cropH> <cropX> "
@@ -180,7 +580,7 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "vaCreateSurfaces failed\n");
         return 2;
     }
-    check(upload(display, src_surface, source, src_w, src_h), "upload the source frame");
+    check(upload(display, src_surface, source, src_w, src_h, 1), "upload the source frame");
 
     VAContextID context = VA_INVALID_ID;
     status = vaCreateContext(display, config, static_cast<int>(dst_w), static_cast<int>(dst_h), VA_PROGRESSIVE,
@@ -209,7 +609,8 @@ int main(int argc, char** argv)
         check(status == VA_STATUS_SUCCESS, "vaEndPicture");
         std::vector<uint8_t> output;
         if (status == VA_STATUS_SUCCESS)
-            check(download(display, dst_surface, output, dst_w, dst_h), "download the processed frame");
+            check(download(display, dst_surface, output, dst_w, dst_h, VA_FOURCC_NV12),
+                "download the processed frame");
         if (!output.empty())
             check(output.size() == static_cast<size_t>(dst_w) * dst_h * 3 / 2
                     && write_file(argv[11], output.data(), output.size()),
