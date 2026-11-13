@@ -134,9 +134,23 @@ refuse() {
     what=$1
     shift
     echo "-- $what"
+    # The probe takes nine positional fields and then its flags, with the
+    # output path between them; the call sites name the flags last, so split
+    # the two here instead of relying on their order.
+    fields=''
+    flags=''
+    n=0
+    for argument in "$@"; do
+        n=$((n + 1))
+        if [ "$n" -le 9 ]; then
+            fields="$fields $argument"
+        else
+            flags="$flags $argument"
+        fi
+    done
     rc=0
     env LIBVA_DRIVER_NAME=v4l2 $driver_env LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_VPP=1 V4L2_VA_TRACE=1 \
-        timeout 120 "$probe" overlay "$render" "$@" "$work/refused.raw" --expect-refusal \
+        timeout 120 "$probe" overlay "$render" $fields "$work/refused.raw" $flags --expect-refusal \
         >"$work/refused-$what.log" 2>"$work/refused-$what.trace" || rc=$?
     if [ "$rc" -ne 0 ]; then
         sed -n '1,20p' "$work/refused-$what.log" >&2 || true
