@@ -8071,3 +8071,41 @@ full output read-back between them, so a sixteen-layer picture is sixteen
 passes over the output rather than one — correct, but not free, and nothing
 here measured what it costs. The sibling driver's figure was copied as a bound
 on a single `vaEndPicture`, not as a performance target.
+
+## The CDSP FastRPC path, measured instead of assumed (2026-11-13)
+
+Three claims about the DSP backend were recorded without a measurement and
+all three were wrong. They are corrected here from probes run on `sheng`,
+boot `4b73926c…`, kernel `7.2.6-sm8550-g42f3b40-iris1`. The probes are
+throwaway C programs under `~/Lab/Bridge/tmp/fastrpc-probe/`; none of them is
+in the repository, because none of them gates a capability.
+
+| claim | measurement | verdict |
+| --- | --- | --- |
+| `sheng` cannot open a FastRPC session | `DSPRPC_GET_DSP_INFO` answers for the CDSP domain: `DOMAIN_SUPPORT=1`, `UNSIGNED_PD_SUPPORT=1`, `HVX_SUPPORT_128B=4`, `ARCH_VER=0x1008c73` (v73), `VTCM_PAGE=8 MiB`, `VTCM_COUNT=1` | wrong: the session opens and the domain is fully described |
+| no Hexagon compiler exists | Fedora clang 22 compiles `--target=hexagon -mv73` to an object `file` reports as `ELF 32-bit LSB relocatable, QUALCOMM DSP6`; `hexagon_types.h`, `hexagon_protos.h` and `hexagon_circ_brev_intrinsics.h` ship with clang | wrong: the compiler exists; the **linker** does not (`ld.lld` has no `elf32hexagon`, no `hexagon-ld`) |
+| the shell binary is what blocks the PD | a v73 `fastrpc_shell_unsigned_3` from `hexagon-dsp-binaries-qualcomm-hamoa-iot-evk`, placed at `/usr/share/qcom/sm8550/Xiaomi/sheng/cdsp/`, still fails `FASTRPC_IOCTL_INIT_CREATE` with `0x80000416`; an empty file of that name fails identically | wrong: the failure is upstream of the shell's contents |
+
+The first claim survived because the only probe used was `remote_handle_open`
+on a module that cannot exist. With no shell installed, that path returns
+`AEE_EBADFD` (`0x8000044f`) — a "bad file descriptor", which reads as a
+session failure and is not one. `DSPRPC_GET_DSP_INFO` goes through
+`remote_handle_control` with a null handle and answers regardless.
+
+The device node matters. The library opens `/dev/fastrpc-cdsp-secure`, not
+`/dev/fastrpc-cdsp`, and the device-tree node is `qcom,non-secure-domain`
+with no `qcom,nsessions` and no `memory-region` property. With an empty file
+failing exactly as a real shell does, the create is refused by the firmware
+after the kernel forwards it, so no userspace change reaches it.
+
+### What this does not prove
+
+Nothing here measures a DSP computation, because no skeleton can be loaded and
+none can be built: the compiler emits objects but no Hexagon linker exists to
+produce a `.so`, and the pinned Open Access archive that would supply one
+answers 403 to an unauthenticated download from this host. The v73 shell came
+from a different board's package (`hamoa-iot-evk`), so "the shell is not the
+problem" is proven for that shell on this firmware and not for a vendor-matched
+one. A DSP VPP backend remains blocked on a device-tree change, a firmware
+that accepts the unsigned PD, and a Hexagon linker — three things outside this
+repository, against a Vulkan backend that already passes every gate.

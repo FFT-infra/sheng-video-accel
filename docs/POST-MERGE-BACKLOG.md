@@ -520,21 +520,53 @@ and both READMEs. Re-run the four-codec matrix, 120-frame AV1 clip, DRC,
 The 2026-11-12 read-only survey concluded "no proven viable backend" because
 `vulkaninfo` and `glslangValidator` are absent on the tablet and no CDSP
 session was opened. Those two tools are diagnostics and a host shader
-compiler, not the runtime contract. The CDSP path is settled without a session:
-`/dev/fastrpc-cdsp` and `libcdsprpc.so.1` exist on the target, no Hexagon
-compiler (`hexagon-clang`, `q6-clang`) does, and the installed Fedora packages
-compile FastCV out — `sheng` cannot open a FastRPC session at all
-(`TEST-RESULTS.md` §"Against libva-v4l2 (Radxa), on the same tablet"). A DSP backend would therefore need a
-toolchain, a working FastRPC session and a new kernel contract before it could
-be measured, against a Vulkan backend that already passes every gate. A userspace probe now settles the
+compiler, not the runtime contract.
+
+The earlier record that "`sheng` cannot open a FastRPC session at all" was
+wrong, and measuring it replaced three guesses with three facts
+(2026-11-13). The session opens: `remote_handle_open` reaches the
+kernel, and `DSPRPC_GET_DSP_INFO` reports `DOMAIN_SUPPORT=1`,
+`UNSIGNED_PD_SUPPORT=1`, `HVX_SUPPORT_128B=4`, `ARCH_VER=0x1008c73` (v73) and
+`VTCM_PAGE=8 MiB` for the CDSP domain, with no shell binary present at all.
+The session was previously thought to be blocked because the only probe had
+been `remote_handle_open` on a nonexistent module, whose `EBADFD` reads as a
+session failure and is not one.
+
+What does block it is the PD create, and the shell binary is not the reason
+either. A v73 `fastrpc_shell_unsigned_3` taken from Fedora's
+`hexagon-dsp-binaries-qualcomm-hamoa-iot-evk` package, placed at the path the
+library resolves (`/usr/share/qcom/sm8550/Xiaomi/sheng/cdsp/`, from
+`/usr/share/qcom/conf.d/sheng.yaml`), still fails `FASTRPC_IOCTL_INIT_CREATE`
+with `0x80000416`. An empty file of the same name fails identically, so the
+failure is upstream of the shell's contents: the kernel hands the create to
+the CDSP and the firmware refuses it. The device node the library opens is
+`/dev/fastrpc-cdsp-secure` — the DT node is `qcom,non-secure-domain` with no
+`qcom,nsessions` and no `memory-region`, and the library selects the secure
+node. Nothing in this repository can change that; it needs a device-tree
+change and a firmware that accepts the unsigned PD.
+
+The toolchain half of the old claim is also wrong. Fedora's clang 22 compiles
+`--target=hexagon -mv73` to a `QUALCOMM DSP6` object with no Qualcomm
+toolchain installed, and clang ships `hexagon_types.h`, `hexagon_protos.h` and
+`hexagon_circ_brev_intrinsics.h`. What is missing is the linker: `ld.lld`
+has no `elf32hexagon` emulation and clang looks for a `hexagon-ld` that is not
+installed, so a shared object cannot be produced. The pinned Open Access
+archive would supply both, and it answers 403 to an unauthenticated download
+from this host.
+
+A DSP backend would therefore need a device-tree change, a firmware that
+accepts the PD, and a working Hexagon linker before it could be measured,
+against a Vulkan backend that already passes every gate. The CDSP/FastRPC
+path is not needed for this backend and was not probed further.
+
+A userspace probe settles the
 question on `sheng`: `test/vulkan-vpp/prereq.sh` builds a SPIR-V compute
 pipeline, imports two DMA-BUF fds as Vulkan external memory (one read, one
 written with coherent CPU read-back), and checks exact output for both
 DMA-BUF origins the driver allocates (MSM GEM PRIME fd and system DMA heap).
 Both pass on Turnip Adreno 740; the run record
 is `run-20261112T205511Z` (guard `complete`, exit 0), recorded in
-`TEST-RESULTS.md` §"Vulkan VPP prerequisites on the target". The CDSP/FastRPC
-path is not needed for this backend and was not probed.
+`TEST-RESULTS.md` §"Vulkan VPP prerequisites on the target".
 
 This reverses the "no viable backend" verdict, for the backend alone: a
 Vulkan compute pipeline can import both DMA-BUF origins and write them back
