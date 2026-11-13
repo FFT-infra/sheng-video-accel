@@ -112,6 +112,24 @@ Pixels pixels_of(DriverData& d, Surface& s)
     return p;
 }
 
+// Wait for a surface's decode to land before the kernel reads it. A client is
+// supposed to sync first, and the gates do; FFmpeg's vaapi hwaccel does not —
+// it issues the filter picture straight after the decode and relies on one
+// command stream ordering the two. Here the decode belongs to the V4L2 node
+// and the kernel to Vulkan, so the order is enforced at this boundary. The
+// caller must not hold the driver mutex: this waits on a session.
+void wait_for_pixels(const std::shared_ptr<Surface>& s, const std::shared_ptr<iris::Session>& session)
+{
+    if (!session || !s->target.pending)
+        return;
+    try {
+        session->wait(s->target);
+    } catch (const iris::Error&) {
+        s->failed = true;
+        throw;
+    }
+}
+
 // Copy the client's pipeline parameters and refuse every operation the
 // compute kernel does not run. The struct's pointers are valid only until
 // vaEndPicture, so the regions are dereferenced here rather than kept.
@@ -297,6 +315,7 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
     // while this picture is running must not pull the buffer out from under
     // the import.
     std::shared_ptr<Surface> source, overlay_surface;
+    std::shared_ptr<iris::Session> source_session, overlay_session;
     {
         std::lock_guard<std::recursive_mutex> lock(d.mutex);
         source = surface(d, job.source);
@@ -388,6 +407,21 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
                 "the overlay needs an even, non-empty geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
         }
 
+        // Captured under the lock; the waits themselves happen below, outside
+        // it (architecture §7: never hold the mutex across a session wait).
+        const auto source_owner = owner_of(d, *source);
+        source_session = source_owner ? source_owner->session : nullptr;
+        if (blend) {
+            const auto overlay_owner = owner_of(d, *overlay_surface);
+            overlay_session = overlay_owner ? overlay_owner->session : nullptr;
+        }
+    }
+
+    wait_for_pixels(source, source_session);
+    if (blend)
+        wait_for_pixels(overlay_surface, overlay_session);
+    {
+        std::lock_guard<std::recursive_mutex> lock(d.mutex);
         src = pixels_of(d, *source);
         dst = pixels_of(d, *target);
         if (blend)
