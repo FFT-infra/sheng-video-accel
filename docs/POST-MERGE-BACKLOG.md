@@ -552,24 +552,31 @@ query hooks, `VAProfileNone` + `VAEntrypointVideoProc` config and context
 behind `V4L2_VA_VPP`, buffer types 41 and 42, and `endPicture` dispatching the
 pinned SPIR-V over the source and output surface DMA-BUFs. A VideoProc
 context opens no node and owns no session. Everything the kernel does not do
-(crop, rotation, blending, filters, colour conversion, a ratio other than
-exactly 2x, a second pipeline buffer in one picture) fails the picture with a
-VA status instead of being approximated. Vulkan stays an optional meson
-dependency, so CI builds the stub and advertises nothing.
+(crop, rotation, blending, filters, colour conversion, a second pipeline
+buffer in one picture) fails the picture with a VA status instead of being
+approximated. Vulkan stays an optional meson dependency, so CI builds the stub
+and advertises nothing.
 
-End-to-end evidence is `test/vulkan-vpp/scale_vaapi_gate.sh`: FFmpeg
-`hwupload,scale_vaapi=256:256,hwdownload` of a 128x128 NV12 frame is
-byte-identical to swscale `flags=neighbor`, and the same client is refused
-without the switch (`TEST-RESULTS.md` §"VA video processor wired end to end").
-That run used `LIBVA_DRIVERS_PATH=build/src`, and the installed driver does
-not carry the entrypoint, so no capability row, README decode table or VA
-profile changed.
+The backend samples where swscale's `SWS_POINT` map samples - the rounded
+16.16 step `xInc` and `(i * xInc + (xInc >> 1)) >> 16` - so it scales at any
+ratio and not only 2x, and the VideoProc config advertises its own 16x16
+surface floor instead of the decoder node's minimum. `scale_vaapi=w=W:h=H` is
+then byte-identical to `scale=WxH:flags=neighbor` at every geometry the gate
+runs (`TEST-RESULTS.md` §"Any ratio, and the gate run from the installed
+package"), eight of eight from both `build/src` and the installed package, and
+the same client is refused without `V4L2_VA_VPP`.
 
-Two gaps stay open by decision. The backend performs one operation, a 2x
-nearest NV12 scale; a general ratio needs a new kernel and a new oracle, not a
-config knob, because swscale's nearest map only coincides with the kernel's
-`src = dst/2` at exactly 2x. And the gate has only run against a build-tree
-override, so an installed-package run is owed before any support wording.
+The installed-package run is part of that: `scripts/install-system.sh` put
+artifact `f6095e79` in `/usr/lib64/dri` with the previous `323c07cb` build kept
+as the rollback copy, and the four-codec matrix, the real AV1 clips, the
+encode gate and one Chrome acceptance run were repeated on it. Equal in/out
+geometry is not a gap: FFmpeg passes such a frame through without calling the
+driver. The one behaviour this work surfaced and did not change is that a
+surface written through a derived image (an upload with no filter) still fails
+`vaGetImage`, because `has_pixels()` only counts decoded and VideoProc
+completions; the previous installed driver fails the same command, and
+`vaPutImage` is unimplemented. Relaxing that for client-written surfaces is the
+candidate fix and needs its own gate.
 
 ### WP5 RGB import — done, verdict "no RGB import code"
 

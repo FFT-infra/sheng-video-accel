@@ -6973,3 +6973,111 @@ peak 41 °C. The embedded shader header is regenerated from the pinned
 `nv12_scale.spv` and compared by `test/run-static-checks.sh`, and Vulkan is an
 optional meson dependency, so a build without it compiles and does not
 advertise the entrypoint.
+
+## Any ratio, and the gate run from the installed package (2026-11-13)
+
+The processor described above ran one ratio, 2x. This changes the kernel's
+sample position to the one libswscale uses for `flags=neighbor`, so
+`scale_vaapi=w=W:h=H` and `scale=WxH:flags=neighbor` produce the same bytes at
+any geometry:
+
+```
+xInc          = ((src << 16) + (dst >> 1)) / dst
+src_index(i)  = (i * xInc + (xInc >> 1)) >> 16
+```
+
+The chroma plane uses the same integers on its own half-size grid. That is
+`initFilter`'s `SWS_POINT` branch (filterSize 1) combined with the rounded
+`lumXInc`/`chrXInc` of `sws_init_context`, not an approximation of them. The
+model was checked against the host `scale` filter on fifteen sizes before any
+shader was written, luma and both chroma channels: exact for 1:1, 0.5x, 1.5x,
+3.125x, an odd 62x34 source and 1280x720, including the sizes where the fixed
+point lands on an integer boundary.
+
+The kernel takes both geometries as push constants and writes one 32-bit
+destination word per invocation (four luma samples of one row, or two chroma
+pairs), so a per-pixel oracle still means something at a 3:1 ratio. The
+VideoProc config also advertises its own 16x16 surface floor instead of the
+decoder node's 96x96; before that change FFmpeg refused `scale_vaapi=w=32:h=32`
+with `constraints: width 96-8192`.
+
+### Kernel gate, both DMA-BUF origins
+
+`test/vulkan-vpp/nv12_scale_gate.sh`, run `run-20261113T044033Z` (guard
+`complete`, exit 0), dispatches the pinned `nv12_scale.spv`
+(`6a0169c1d007da20fdbf75e45c9b9e2c826dc325798b7dfa9c26f3360d87a691`) over one
+MSM GEM PRIME fd and one system DMA-heap buffer for each ratio. Every case
+reports `pixels_exact` with the source unchanged:
+
+| source -> destination | ratio |
+| --- | --- |
+| 64x32 -> 128x64 | 2x |
+| 64x32 -> 96x48 | 1.5x |
+| 64x32 -> 32x16 | 0.5x |
+| 64x32 -> 42x22 | 1.375x |
+| 64x32 -> 200x100 | 3.125x |
+| 62x34 -> 62x34 | 1:1 |
+| 128x72 -> 86x48 | 0.67x |
+
+### VA gate, build tree and installed package
+
+`test/vulkan-vpp/scale_vaapi_gate.sh` runs eight geometries through
+`hwupload,scale_vaapi,hwdownload` and compares each frame with swscale. The
+same script run twice, once against `build/src` (`run-20261113T043948Z`) and
+once with `IRIS_VPP_INSTALLED=1`, where libva resolves `/usr/lib64/dri` and no
+`LIBVA_DRIVERS_PATH` is exported (`run-20261113T044224Z`). Both are guard
+`complete`, exit 0, eight of eight:
+
+| geometry | sha256, swscale and hardware |
+| --- | --- |
+| 64x64 -> 128x128 | `1076510ee62f55127e53ec796263d7a525eb5c3244b310aa0de71e9bb69f9a20` |
+| 64x64 -> 96x96 | `980d1df6363ae8058ee4e2a7a71baed9c2e27fe5d7a609c89d2f0b686eabd761` |
+| 64x64 -> 32x32 | `fad2794ecfcb3bb8a734ac19dc99b3257010ccebbba5ae27ffb3a836369687b5` |
+| 128x128 -> 16x16 | `359d6a9ee42b7d64f7caf51bae4bced7923beeeeb889f40e3a1a9a7f9a72c6a7` |
+| 128x128 -> 200x150 | `c4cd41c4fbddbb34aa54d8798fd7d3dbe54c6a5775bee02977f481032e2c26ac` |
+| 62x34 -> 46x26 | `6f24f58a9b8184bc57af13d4e17d8124c8c02427a1b8fc2b64427ba24bff1210` |
+| 1280x720 -> 854x480 | `7bf14757595b2da36ea95576232e73fd2e749299c7ae9faf725cab6f638647c7` |
+| 1280x720 -> 1920x1080 | `b75a0b8ca08de7bb908adb88bc25e7ef77dae7d458fd4d00b0aefa314347b298` |
+
+The installed-package run records `driver_source=installed-package`,
+`driver_path=/usr/lib64/dri`, `driver_sha256=f6095e7950b89097040dc77d7f6337499f973fca8eb2387c3dd84de26a232f8b`,
+and the same eight hashes as the build-tree run. Both runs also check that the
+same client is refused without `V4L2_VA_VPP`.
+
+### The installed package, re-qualified
+
+`scripts/install-system.sh build` installed that artifact on 2026-11-13 and
+recorded `source_commit=33fafdb6b8df902b3b21a95a83036f65fa737e1a`,
+`previous_driver_backup=/usr/local/share/iris-vaapi/backup/v4l2_drv_video.so`
+(the former `323c07cb` build). The decode and encode paths were re-run on it,
+because `src/` changed:
+
+| gate | run | result |
+| --- | --- | --- |
+| `iris-matrix.sh` | `run-20261113T044321Z` | 48/48 exact for H.264, HEVC, VP9, AV1; `drops=0`, AV1 `noshow=23` |
+| `iris-real-clip-gate.sh` | `run-20261113T044426Z` | AV1 120/120 exact, `import=120 copy=0`; DRC 80 frames, `import=42 copy=42` |
+| `iris-encode-quality.sh` | `run-20261113T044513Z` | H.264 and HEVC 1080p 120 frames; IRQ +237 / +249; SSIM mean 0.9986 / 0.9968 |
+| `iris-browser-acceptance.sh` | `run-20261113T044626Z` | Chrome 156 `VaapiVideoDecoder`, `platform=True`, 478 frames, 0 dropped, driver `installed` |
+
+Identity for the whole set: kernel `7.2.6-sm8550-g42f3b40-iris1`, module
+`b90bd823`, boot `972c13d1-1848-4bb3-8c9b-ce60c74376cb` (the tablet rebooted
+before this sequence; every guard recorded the new boot ID), decoder and
+encoder nodes resolved by `iris_driver` QUERYCAP name (`/dev/video17` /
+`/dev/video18`), render node `/dev/dri/renderD128`. Guard battery 99%
+discharging, peak 37.4 °C, no reset and no thermal breach.
+
+### Two findings this gate produced
+
+Equal input and output geometry never reaches the driver: FFmpeg's
+`scale_vaapi` sets `vpp_ctx->passthrough` when the size, format and colour
+properties are unchanged, so the frame is forwarded untouched. The VA gate
+therefore does not carry a 1:1 case; the kernel gate does.
+
+A client that uploads and downloads without any filter fails:
+`format=nv12,hwupload,hwdownload` exits at `vaGetImage` with `surface has no
+decoded pixels`, because a surface written through a derived image never sets
+`has_pixels()`. It is not new: the previous installed driver (`323c07cb`) fails
+the same command the same way, and `vaPutImage` is `VA_STATUS_ERROR_UNIMPLEMENTED`.
+No client in this project's gates reads back an uploaded surface, so the
+behaviour is recorded rather than changed here; relaxing `has_pixels()` for
+client-written surfaces is the candidate fix and needs its own gate.
