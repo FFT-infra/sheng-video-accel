@@ -261,6 +261,12 @@ contract `rpmbuild --define` and the PKGBUILD's variables follow. With neither,
 the install is recorded dirty rather than claiming an identity nothing
 verified.
 
+All three build-depend on FFmpeg, because their test stage runs the host checks
+and three of those compare against it — the rotation model against software
+transpose, and two AV1 oracles against `libdav1d`. A machine that happens to
+have FFmpeg installed hides the missing build dependency until a clean build
+root runs the test stage and fails there.
+
 All three declare `v4l-utils` as a hard runtime dependency. The diagnostic commands
 resolve the decoder node by driver name because the number moves between boots
 on this device, and without `v4l2-ctl` they exit instead of falling back to a
