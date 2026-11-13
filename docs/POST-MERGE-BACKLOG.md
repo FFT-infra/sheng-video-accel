@@ -520,7 +520,13 @@ and both READMEs. Re-run the four-codec matrix, 120-frame AV1 clip, DRC,
 The 2026-11-12 read-only survey concluded "no proven viable backend" because
 `vulkaninfo` and `glslangValidator` are absent on the tablet and no CDSP
 session was opened. Those two tools are diagnostics and a host shader
-compiler, not the runtime contract. A userspace probe now settles the
+compiler, not the runtime contract. The CDSP path is settled without a session:
+`/dev/fastrpc-cdsp` and `libcdsprpc.so.1` exist on the target, no Hexagon
+compiler (`hexagon-clang`, `q6-clang`) does, and the installed Fedora packages
+compile FastCV out — `sheng` cannot open a FastRPC session at all
+(`TEST-RESULTS.md` §"Against libva-v4l2 (Radxa), on the same tablet"). A DSP backend would therefore need a
+toolchain, a working FastRPC session and a new kernel contract before it could
+be measured, against a Vulkan backend that already passes every gate. A userspace probe now settles the
 question on `sheng`: `test/vulkan-vpp/prereq.sh` builds a SPIR-V compute
 pipeline, imports two DMA-BUF fds as Vulkan external memory (one read, one
 written with coherent CPU read-back), and checks exact output for both
@@ -560,10 +566,21 @@ implemented, `VAProcFilterHighDynamicRangeToneMapping`, which converts P010
 BT.2020/PQ to SDR NV12 through `tonemap.spv`. A picture may also carry a second
 pipeline buffer that composites a surface into one even rectangle of the output
 with a global alpha — the shape `overlay_vaapi` submits — through
-`overlay.spv`, importing three DMA-BUFs. Everything else (mirroring, per-pixel
-alpha, luma keying, a third pass, a second filter, any other colour conversion)
-fails the picture with a VA status instead of being approximated. Vulkan stays an optional meson dependency, so CI builds the stub
-and advertises nothing.
+`overlay.spv`, importing three DMA-BUFs. Mirroring on either axis, and on
+both, runs after the rotation and before the scale, so all seven
+`transpose_vaapi` directions a client can name are implemented. Everything else
+(per-pixel alpha, luma keying, a third pass, a second filter, any other colour
+conversion) fails the picture with a VA status instead of being approximated.
+Vulkan stays an optional meson dependency, so CI builds the stub and
+advertises nothing.
+
+Interpolation follows the picture's `filter_flags`: the default and
+nearest-neighbour are the point map above, bilinear is a four-tap blend around
+the destination sample's centre, and the "advanced" method is refused rather
+than approximated. The caps name bilinear, because that field holds one method
+and `NEAREST | BILINEAR` is the advanced value. On P010 the blend runs on the
+ten-bit code, not on the padded word. `TEST-RESULTS.md` §"Bilinear interpolation
+in the video processor scale" records the batch and its eight gates.
 
 The backend samples where swscale's `SWS_POINT` map samples - the rounded
 16.16 step `xInc` and `(i * xInc + (xInc >> 1)) >> 16` - so it scales at any
