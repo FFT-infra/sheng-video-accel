@@ -4319,17 +4319,18 @@ one family changed:
   change that keeps the context, so it is the in-context resize path, and the
   native decoder hangs on it too. That makes it a firmware/kernel-path limit
   rather than this driver's session logic.
-- **`vp90-2-16-intra-only` is the one family where this driver fails and the
-  native decoder does not.** FFmpeg's own parse of the vector yields a
-  117 963-byte key frame followed by frames of 25 801, 1, 1, 1, 21 400 and
-  10 293 bytes, and the first frame's header bytes are
-  `84 c9 30 68 40 20 2b …`. Through the driver the first picture is
-  submitted with `bytes=30306 seq_start=0`, the kernel raises no
-  SOURCE_CHANGE, and `endPicture` returns `no SOURCE_CHANGE after the first
-  access unit`; it then retries the same 5 s wait for each following frame.
-  The native decoder returns 7 frames in 207 ms. One family, one vector, not
-  yet root-caused; the trace is `~/Lab/Bridge/tmp/dec-perf/p16i.trace` on the
-  target.
+- **`vp90-2-16-intra-only` fails on the native V4L2 client too; corrected
+  2026-11-14.** The earlier entry here said the native decoder returned 7
+  frames in 207 ms. That is the software decoder: `vp9_v4l2m2m` exits 0 with
+  `frame=0`, and a raw V4L2 client that queues all seven demuxed packets with
+  CAPTURE streaming sees no SOURCE_CHANGE and dequeues no CAPTURE buffer. The
+  first packet is a 117 963-byte superframe of four frames (30 299 / 35 391 /
+  40 875 / 11 384 bytes plus a 14-byte index); the first three carry
+  `84 c9 …` (inter, `show_frame=0`, intra-only) and the fourth `86 02 …`
+  (inter, `show_frame=1`). There is no key frame in the stream, the decoder
+  node never signals a format change for it, and both VA drivers retry the
+  same 5 s wait per access unit. Details and the probe: the intra-only
+  section at the end of this file.
 - **64 × `vp90-2-02` and `vp91-2-04-yuv444` are the advertised-capability
   boundary**: every 2-02 vector is 8x8 through 66x66, below the node's
   96x96 minimum, and FFmpeg refuses them before any VA call. The 130x132 and
@@ -9036,3 +9037,96 @@ re-run on the installed copy — it is the same sha256, so it would measure the
 same bytes. `iris-matrix.sh` skips MPEG-2 and VP8 because the device does not
 advertise those formats. The AV1 browser run recorded one drop; a drop count
 is a renderer statistic, as the 4K cell above explains.
+
+## The VP9 intra-only vector is a decoder-node boundary (2026-11-14)
+
+Target `sheng`, boot `4b73926c-a774-4ae4-8968-d0a26b20a9c3`, kernel
+`7.2.6-sm8550-g42f3b40-iris1` (`qcom_iris` `b90bd823fdab9895`, patches
+0001-0004), decoder node `/dev/video0` by QUERYCAP name `iris_driver`.
+Vector `vp90-2-16-intra-only.webm` from the fluster VP9 corpus, FFmpeg 8.1.3.
+Four clients, same file:
+
+| client | result |
+| --- | --- |
+| `libvpx-vp9` (software) | 7 frames, 1 064 448 bytes of NV12 |
+| `vp9_v4l2m2m` (kernel via FFmpeg) | `frame=0`, exit 0 |
+| this driver `a1b3ef16` | `no SOURCE_CHANGE after the first access unit`, 5 s per access unit |
+| sibling `f7dd9710` rebuilt from `radxa-v111` | same `endPicture` failure, VA status 38 |
+| raw V4L2 probe, no VA driver | all 7 packets queued, CAPTURE streaming, 8 CAPTURE buffers queued: no event, 0 captures in 2 s |
+
+The probe is a 120-line scratch program that opens the node, sets the
+bitstream and capture formats, streams both queues, queues the demuxed
+packets, subscribes to `V4L2_EVENT_SOURCE_CHANGE`, and polls. The same probe
+on a one-second keyframed VP9 clip raises the event (`changes=1`) and the
+three clients decode 30/30, so the negative result is not the probe failing
+to subscribe. The control also rules out a missing capture queue: queueing
+capture buffers does not change the result.
+
+Why the stream is outside the node's contract: its first packet is a
+117 963-byte superframe of four frames (30 299 / 35 391 / 40 875 / 11 384
+bytes plus a 14-byte index). The first three sub-frames have header
+`84 c9 …` — inter, `show_frame=0`, intra-only — and the fourth `86 02 …` —
+inter, `show_frame=1`. There is no key frame in the stream. The firmware
+therefore never sends `HFI_CMD_SETTINGS_CHANGE` on the bitstream port, and
+`iris_hfi_gen2_handle_src_change` has nothing to forward. Submitting the
+sub-frames raw, without this driver's invisible-frame wrapper, changes
+nothing; so does configuring CAPTURE without waiting for the event.
+
+The earlier entry in the VP9 corpus section measured this same silent
+failure, not a decode: `vp9_v4l2m2m` exits in about 0.2 s with `frame=0`.
+No userspace change is proposed. Rebuilding a key-frame header around an
+intra-only frame would be compensating complexity around a firmware parser,
+for a stream shape that carries no key frame at all.
+
+What this does not prove: one vector, one kernel build, one sibling build
+(`radxa-v111` with `cdsp_vpp` and `vulkan_vpp` disabled; the decode path is
+unaffected). A different firmware or a kernel change could move the
+boundary. The probe hardcodes `/dev/video0` and lives in scratch space, not
+in the repository.
+
+## 4K HEVC encode at pinned clocks (2026-11-14)
+
+The earlier 4K encode cell (1.80-2.16 s) was unpinned and mixed both drivers.
+This one pins the cores in `performance` at max frequency and the GPU in
+`userspace` at 680 MHz, renders 30 NV12 frames of `testsrc2` at 3840x2160
+once to a raw file, loops that file to 300 frames, uploads with `hwupload`,
+and encodes HEVC with `-async_depth 4` to the null muxer. Five ABBA rounds,
+wall clock around ffmpeg.
+
+| round | this driver (ms) | sibling (ms) |
+| --- | ---: | ---: |
+| 1 | 1636 | 1662 |
+| 2 | 1634 | 1684 |
+| 3 | 1635 | 1684 |
+| 4 | 1644 | 1630 |
+| 5 | 1658 | 1635 |
+
+This driver 1634-1658 ms (mean 1641), sibling 1630-1684 ms (mean 1659);
+paired mean difference −18 ms, this driver faster in three of five rounds.
+The verdict is parity: the spread is larger than the difference, and the
+source is already NV12 so no conversion sits on either side.
+
+What this does not prove: one source, HEVC only, wall time includes the
+null muxer and the raw-file loop; no bitrate or quality cell here.
+
+## One-frame encode, ten interleaved rounds (2026-11-14)
+
+The earlier first-frame cell was two samples per driver (0.014-0.036 s
+against 0.013-0.019 s). This one is ten ABBA rounds of a one-frame 720p HEVC
+encode, `-benchmark` rtime from ffmpeg (process and filter setup included):
+
+| | this driver | sibling |
+| --- | ---: | ---: |
+| rtime samples (ms) | 26, 25, 21, 16, 16, 24, 23, 21, 24, 21 | 21, 19, 24, 15, 17, 15, 23, 22, 21, 20 |
+| mean | 21.7 | 19.7 |
+| range | 16-26 | 15-24 |
+
+Paired mean +2.0 ms for this driver; it is slower in six rounds, faster in
+three and tied in one. The two-sample range overstated the tail: with ten
+rounds the distributions overlap and the residual is about 2 ms of a
+measurement that includes roughly 15 ms of process and filter setup that is
+not driver work.
+
+What this does not prove: no per-phase counters were added, so this does not
+locate the 2 ms; `rtime` also includes the software `format=nv12`
+conversion feeding `hwupload`.
