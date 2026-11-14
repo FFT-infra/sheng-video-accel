@@ -8645,6 +8645,11 @@ the release build.
   md5 `ab446a44aa5ebe2ef76ff75d49bfd1f2`.
 - Decode is unchanged: the same clip through this build reproduces the
   software framemd5 for 300/300 frames.
+- All three publish policies agree. The same 60-frame decode-to-encode pass
+  under `V4L2_VA_PUBLISH=direct`, `copy` and `import` produces 1920x1080 in
+  both codecs and byte-identical output within each codec
+  (`25cb0b4d7a9a2021...` H.264, `1855cf9fe078d895...` HEVC), so the fix reads
+  the right buffer whichever policy published the surface.
 
 ### Pinned-clock throughput
 
