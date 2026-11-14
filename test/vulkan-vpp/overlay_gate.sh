@@ -2,7 +2,7 @@
 
 # Global-alpha compositing through the VA video processor, on the target:
 #
-#   IRIS_REMOTE_HOST=sheng test/remote/gate.sh -- sh test/vulkan-vpp/overlay_gate.sh
+#   IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh -- sh test/vulkan-vpp/overlay_gate.sh
 #
 # The client is `iris-va-vpp-probe overlay`, which submits what FFmpeg's
 # overlay_vaapi submits: a main pass over the whole output, then the overlay

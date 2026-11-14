@@ -2,7 +2,7 @@
 
 # P010 scale primitive gate, run on the target under test/remote/gate.sh:
 #
-#   IRIS_REMOTE_HOST=sheng test/remote/gate.sh -- sh test/vulkan-vpp/p010_scale_gate.sh
+#   IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh -- sh test/vulkan-vpp/p010_scale_gate.sh
 #
 # nv12_scale_gate.sh proves the 8-bit kernel. This one proves the 10-bit
 # sibling: p010_scale.spv over two imported DMA-BUFs laid out like the Iris

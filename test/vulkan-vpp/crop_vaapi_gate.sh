@@ -2,7 +2,7 @@
 
 # Crop through the VA video processor, on the target:
 #
-#   IRIS_REMOTE_HOST=sheng test/remote/gate.sh -- sh test/vulkan-vpp/crop_vaapi_gate.sh
+#   IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh -- sh test/vulkan-vpp/crop_vaapi_gate.sh
 #
 # A VA client crops by putting a surface_region in the pipeline buffer. No
 # FFmpeg filter in 8.1 submits one (there is no crop_vaapi), so

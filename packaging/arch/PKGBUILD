@@ -11,7 +11,8 @@
 #
 # Building from a checkout:
 #
-#   makepkg -si \
+#   sh scripts/make-dist.sh
+#   cd packaging/arch && makepkg -si \
 #       IRIS_SOURCE_COMMIT=$(git -C ../.. rev-parse HEAD) \
 #       IRIS_TRACKED_SOURCE_SHA256=$(git -C ../.. ls-files -z \
 #           | xargs -0 sha256sum | sha256sum | awk '{print $1}')
@@ -27,6 +28,12 @@ arch=('aarch64')
 url="https://github.com/phxinyang/qualcomm-iris-vaapi"
 # Driver source is MIT; COPYING.LGPL retains upstream provenance. See COPYING.
 license=('MIT' 'LGPL-2.1-or-later')
+# The upstream project and the sibling distribution package were named
+# libva-v4l2 before the qcom rename; keep old client recipes resolving.
+provides=('libva-v4l2')
+# Both packages install libva's msm alias, so they cannot coexist.
+conflicts=('libva-v4l2' 'qcom-va-driver')
+replaces=('libva-v4l2')
 # v4l-utils is not optional: the launcher resolves the decoder node by driver
 # name because the node number moves between boots on this device, and it
 # refuses to fall back to a fixed /dev/video number that may be a camera.

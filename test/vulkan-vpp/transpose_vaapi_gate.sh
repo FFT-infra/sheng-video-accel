@@ -3,7 +3,7 @@
 # Rotation through the VA video processor, run on the target under
 # test/remote/gate.sh:
 #
-#   IRIS_REMOTE_HOST=sheng test/remote/gate.sh -- sh test/vulkan-vpp/transpose_vaapi_gate.sh
+#   IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh -- sh test/vulkan-vpp/transpose_vaapi_gate.sh
 #
 # nv12_scale_gate.sh and p010_scale_gate.sh prove the kernels' rotation map
 # over imported DMA-BUFs. This gate proves the VA surface path around it: a

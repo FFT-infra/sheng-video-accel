@@ -16,7 +16,7 @@
 # says which driver and module hashes that was.
 #
 # Usage:
-#   IRIS_REMOTE_HOST=sheng test/remote/gate.sh [--out DIR] -- command [args ...]
+#   IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh [--out DIR] -- command [args ...]
 #
 # The command runs on the target inside the remote checkout. It is landed in a
 # per-run script under the run directory and read by the guard's child from

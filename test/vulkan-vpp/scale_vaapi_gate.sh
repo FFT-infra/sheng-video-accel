@@ -3,7 +3,7 @@
 # End-to-end VA video processor gate, run on the target under
 # test/remote/gate.sh:
 #
-#   IRIS_REMOTE_HOST=sheng test/remote/gate.sh -- sh test/vulkan-vpp/scale_vaapi_gate.sh
+#   IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh -- sh test/vulkan-vpp/scale_vaapi_gate.sh
 #
 # nv12_scale_gate.sh proved the compute kernel over two imported DMA-BUFs.
 # This gate proves the VA surface path around it: a client opens VAProfileNone
