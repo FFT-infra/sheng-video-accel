@@ -8730,7 +8730,7 @@ rows are a local build rather than its distribution package.
 ## AV1 correctness: the frames the sibling replaces with neutral gray (2026-11-14)
 
 This driver decodes AV1 byte-exactly against libdav1d on every clip measured.
-The sibling does not: on all five AV1 clips here it substitutes flat neutral
+The sibling does not: on all six AV1 clips here it substitutes flat neutral
 gray for a fixed set of frames and reports success, so a client sees a correct
 frame count, no dropped frames and a picture that is wrong.
 
@@ -8756,6 +8756,7 @@ the path; a driver that mangles output cannot bless its own result.
 | `av1-720.webm` | 120 | 0 mismatched | 42 mismatched |
 | `resize-av1.mkv` (dynamic resolution) | 80 | 0 mismatched | 62 mismatched |
 | `test-av1.webm` (matrix clip) | 48 | 0 mismatched | 40 mismatched |
+| `av1-4k.mkv` (3840x2160) | 30 | 0 mismatched | 1 mismatched |
 
 The 1080p result repeats exactly: six interleaved rounds of the 8-bit clip
 gave this driver 0 mismatched and 0 replacement records in every round, the
@@ -8827,12 +8828,14 @@ patch buys nothing the qualified module does not do.
 The browser does not detect this. Chrome reported 448 frames and 0 dropped
 for the sibling on the same clip, as it did for this driver, because the
 acceptance gate counts media-pipeline frames and drops, not pixels. A user
-watching AV1 sees 13 gray flashes per GOP and the browser reports a clean
-playback.
+watching AV1 sees 13 gray frames in every 60-frame GOP and the browser
+reports a clean playback.
 
 ### What this does not prove
 
-One encoder (SVT-AV1), five clips, 8- and 10-bit. The sibling is a local build
+Six clips, 8- and 10-bit, 720p to 4K, all AV1. The 4K clip shows one
+replacement in 30 frames, so the rate per frame is not the same as at 1080p
+and this record does not characterise it. The sibling is a local build
 of commit `0980a1d`; a later revision may have changed `recover_picture()`, so
 this is a statement about the measured artifact, not about the project's
 present state. No AV1 clip with a real bitstream error was in the set, so
