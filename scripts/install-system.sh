@@ -67,10 +67,9 @@ if command -v git >/dev/null 2>&1 && git -C "$root" rev-parse --git-dir >/dev/nu
 else
     source_commit=${IRIS_SOURCE_COMMIT:-}
     source_digest=${IRIS_TRACKED_SOURCE_SHA256:-}
-    # Without .git this used to record every install as dirty, including a
-    # clean packaged build, which made the field carry no information. The
-    # caller may state the source state it verified; anything but an explicit
-    # 0 stays dirty, so a missing or malformed value never upgrades a claim.
+    # A tarball build has no .git. The caller may state the source state it
+    # verified; only an explicit 0 records a clean source, so a missing or
+    # malformed value never upgrades the claim.
     case "${IRIS_SOURCE_DIRTY:-}" in
         0) source_dirty=0 ;;
         ''|1) source_dirty=1 ;;

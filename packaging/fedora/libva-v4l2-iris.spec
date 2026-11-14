@@ -1,14 +1,13 @@
 # Fedora package for the Qualcomm Iris VA-API backend.
 #
-# The spec installs through scripts/install-system.sh rather than plain
-# `meson install`. Both paths exist in this tree and they disagree: meson uses
-# the configured prefix, while the helper additionally resolves libva's
-# canonical driverdir. One install path is the point.
+# The spec installs through scripts/install-system.sh, not `meson install`:
+# that helper resolves libva's canonical driverdir and writes the provenance
+# manifest. test/iris-packaging-check.sh holds all three package formats to
+# that one layout.
 #
 # Building from a git checkout:
 #
-#   git archive --format=tar.gz --prefix=libva-v4l2-iris-0.1.0/ \
-#       -o ~/rpmbuild/SOURCES/libva-v4l2-iris-0.1.0.tar.gz HEAD
+#   sh scripts/make-dist.sh --out ~/rpmbuild/SOURCES
 #   rpmbuild -ba packaging/fedora/libva-v4l2-iris.spec \
 #       --define "source_commit $(git rev-parse HEAD)" \
 #       --define "tracked_sha256 $(git ls-files -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
@@ -65,6 +64,20 @@ BuildRequires:  ffmpeg
 # Without v4l-utils they refuse to guess /dev/video0, which may be a camera.
 # No browser is required: the driver is useful to any VA-API client.
 Requires:       v4l-utils
+
+# The upstream project and the sibling distribution package were named
+# libva-v4l2 before the qcom rename; keep old client recipes resolving. The
+# sibling package last used version 1.1.1, which is why the bound sits above it
+# rather than at this package's 0.x version.
+Provides:       libva-v4l2 = %{version}-%{release}
+Obsoletes:      libva-v4l2 < 1.2
+# Both packages install libva's msm alias, so they cannot coexist.
+Conflicts:      qcom-va-driver
+
+# The VA video processor is Vulkan compute behind the V4L2_VA_VPP opt-in.
+# Without an ICD the rest of the driver still works, so this is a
+# recommendation rather than a requirement.
+Recommends:     mesa-vulkan-drivers
 
 %description
 A libVA backend that drives the Qualcomm Iris V4L2 stateful decoder and

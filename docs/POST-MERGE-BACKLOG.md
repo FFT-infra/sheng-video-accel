@@ -515,7 +515,7 @@ vocabulary and its consumers, invariant 17, the capability table `sync_note`
 and both READMEs. Re-run the four-codec matrix, 120-frame AV1 clip, DRC,
 10-bit probe and the Chrome/Firefox browser matrix.
 
-### WP4 VPP — implemented on a branch behind an opt-in switch, not merged
+### WP4 CDSP VPP — not merged; the Vulkan VPP shipped behind `V4L2_VA_VPP`
 
 The 2026-11-12 read-only survey concluded "no proven viable backend" because
 `vulkaninfo` and `glslangValidator` are absent on the tablet and no CDSP

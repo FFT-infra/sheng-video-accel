@@ -6,8 +6,10 @@ experimental ones (0005-0007), targeting the `qcom-iris` driver on
 
 Only 0001-0004 make up the module the driver's decode results in
 TEST-RESULTS.md are qualified on, including the 2026-11-10 AV1 zero-copy
-Import run. The driver detects missing kernel controls at runtime and degrades
-gracefully on stock kernels. None of the experimental patches is part of
+Import run. The lab module `b90bd823` also carries 0006; its guarded WP1 run
+found no frame effect, so no capability claim rests on that extra patch. The
+driver detects missing kernel controls at runtime and degrades gracefully on
+stock kernels. None of the experimental patches is part of
 that qualified baseline; 0006 has one guarded WP1 run on `sheng` recorded in
 TEST-RESULTS.md, with a "no regression" verdict and no capability change, and
 0007 was built, installed and run on 2026-11-12 with a "no reason to ship"
@@ -95,7 +97,7 @@ The `[5] optional kernel controls` section resolves both nodes by the
 `iris_driver` name and reports `display_delay`, `min_number_of_capture_buffers`,
 `force_key_frame` and the loop-filter controls.
 
-The six patch files are kernel fragments targeting GPL-2.0-only sources under
+The seven patch files are kernel fragments targeting GPL-2.0-only sources under
 `drivers/media/platform/qcom/iris/`. They are not compiled into the MIT driver
 package, so they have no SPDX header of their own; the patched files keep the
 kernel's own identifier. `SHA256SUMS` pins each patch for the downstream

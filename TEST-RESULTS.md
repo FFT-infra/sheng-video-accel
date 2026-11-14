@@ -1,7 +1,7 @@
 # Qualcomm Iris VA-API Test Results
 
 Primary latest documented target: Fedora 44 ARM64 Snapdragon SM8550 tablet,
-kernel `7.2.0-sm8550`. Device numbers are historical and must be resolved
+kernel `7.2.6-sm8550-g42f3b40-iris1`. Device numbers are historical and must be resolved
 through `iris_resolve_device`; target labels below distinguish separate boots
 and replacement endpoints without exposing private network addresses.
 
@@ -5414,7 +5414,7 @@ undefined symbols and 25/25 target meson tests. This is an installed package
 (`LIBVA_DRIVERS_PATH=/usr/lib64/dri`), not a build-tree override and not a
 `DESTDIR` staging run. Rollback: the previous installed drivers
 `8f87efde…` and `e97a861f…` are preserved at
-`/home/xinyang/Lab/Bridge/tmp/rollback-final-20261111/v4l2_drv_video.so`
+`<scratch>/rollback-final-20261111/v4l2_drv_video.so`
 (`e97a861f…`), `/usr/local/share/iris-vaapi/backup/v4l2_drv_video.so`
 (`8f87efde…`), and the `final-install/src/build` tree. No kernel module was
 changed or reloaded; boot ID stayed

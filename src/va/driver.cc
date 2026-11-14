@@ -154,21 +154,12 @@ Capabilities probe_capabilities(const iris::Options& options)
     if (caps.output_formats.count(V4L2_PIX_FMT_AV1) && caps.nv12)
         caps.import_formats.insert(V4L2_PIX_FMT_AV1);
     // import-qualified-end
-    // VP9 qualified on 2026-11-12 once a released surface stopped costing its
-    // picture: Chrome destroys a VP9 surface as soon as it has composited the
-    // frame, and the session used to drop the still-in-flight completion.
-    // The target now keeps the target and completes it (`target detached`),
-    // and the 2026-11-12 runs in TEST-RESULTS.md record 48/48 four-codec
-    // matrix, FFmpeg 515/515 with framemd5 equal to the software decode, and
-    // two guarded Chrome windows at 1705/1705 and 1588/1588 with drops=0,
-    // against a Copy baseline that dropped 3 of 1705. AV1's internal-DPB
-    // translator submits at vaEndPicture; Import lends one client buffer per
-    // completion, including the invisible half of a hidden install unit. The
-    // 2026-11-11 installed-package runs qualified that default path: 48/48
-    // four-codec matrix, 120/120 AV1 and 80/80 DRC exact framemd5 under
-    // Import; the DRC clip switches to copy-gpu for its second half. Firefox
-    // 158 and Chrome 156 both decode live AV1 pages with the selected
-    // hardware decoder.
+    // VP9 and AV1 qualify through Import only on the decode-order kernel: a
+    // surface Chrome releases after compositing must still be completed
+    // (`target detached`), and AV1's internal-DPB translator lends one client
+    // buffer per completion, including the invisible half of a hidden install
+    // unit. Runs, counters and refusals: TEST-RESULTS.md, "VP9 Import
+    // qualified" and "AV1 Import qualification".
 
     // The encoder is a second iris_driver node. Its absence is not fatal:
     // the display still decodes, and no encode entrypoint is advertised.

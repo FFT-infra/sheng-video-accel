@@ -64,12 +64,16 @@ SM8550 平板上的 HEVC Main 8-bit 吞吐，FFmpeg 8.1.3。每个格五轮交�
 
 Fedora：
 ```sh
-rpmbuild -ba packaging/fedora/libva-v4l2-iris.spec
+sh scripts/make-dist.sh --out ~/rpmbuild/SOURCES
+rpmbuild -ba packaging/fedora/libva-v4l2-iris.spec \
+    --define "source_commit $(git rev-parse HEAD)" \
+    --define "tracked_sha256 $(git ls-files -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
 sudo dnf install ~/rpmbuild/RPMS/aarch64/libva-v4l2-iris-*.rpm
 ```
 
 Arch Linux：
 ```sh
+sh scripts/make-dist.sh
 cd packaging/arch && makepkg -si
 ```
 

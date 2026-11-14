@@ -64,12 +64,16 @@ Decode throughput sits at parity (within 0.4%), while client CPU time is 16–19
 
 Fedora:
 ```sh
-rpmbuild -ba packaging/fedora/libva-v4l2-iris.spec
+sh scripts/make-dist.sh --out ~/rpmbuild/SOURCES
+rpmbuild -ba packaging/fedora/libva-v4l2-iris.spec \
+    --define "source_commit $(git rev-parse HEAD)" \
+    --define "tracked_sha256 $(git ls-files -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
 sudo dnf install ~/rpmbuild/RPMS/aarch64/libva-v4l2-iris-*.rpm
 ```
 
 Arch:
 ```sh
+sh scripts/make-dist.sh
 cd packaging/arch && makepkg -si
 ```
 

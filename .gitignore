@@ -54,6 +54,9 @@ TAGS
 /meson-uninstalled/
 /compile_commands.json
 
+# Source archives are produced by scripts/make-dist.sh beside the PKGBUILD.
+/packaging/arch/*.tar.gz
+
 # Locally downloaded browser packages and generated acceptance artifacts.
 # Chromium binaries, media samples, screenshots and Playwright traces are
 # machine-specific and are not project inputs.

@@ -23,6 +23,10 @@ Vcs-Browser: https://github.com/phxinyang/qualcomm-iris-vaapi
 Package: libva-v4l2-iris
 Architecture: arm64
 Depends: ${misc:Depends}, ${shlibs:Depends}, v4l-utils
+Recommends: mesa-vulkan-drivers
+Provides: libva-v4l2
+Conflicts: libva-v4l2, qcom-va-driver
+Replaces: libva-v4l2
 Description: VA-API backend for the Qualcomm Iris V4L2 stateful decoder and encoder
  A libVA driver that drives the Qualcomm Iris V4L2 stateful decoder and
  encoder, so VA-API clients such as Chromium, Google Chrome and FFmpeg decode
