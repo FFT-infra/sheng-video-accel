@@ -8581,3 +8581,73 @@ complexity are sampled once; the AV1 sweep is 1080p only; the sibling VPP
 artifact is a local build with its documented option, not its distribution
 package; Kodi CPU includes startup and rendering; streaming is loopback with
 no power or long-window claim; and no client was driven through its GUI.
+
+## Decode-to-encode without a round trip: two defects the extended gate found (2026-11-14)
+
+`iris-encode-quality.sh` now also decodes its stream on the platform and hands
+each decoded surface to the encoder in the same FFmpeg process, the shape
+`ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -i in -c:v h264_vaapi out`
+uses. That pass found two defects in the default Direct publish path. The
+first: FFmpeg issues the encoder's `vaBeginPicture` before the decode
+completes and never calls `vaSyncSurface` between the two, and `vaBeginPicture`
+released the surface's pending decode when the surface moved to the encode
+context. The picture was dropped, the encoder ran on an unpainted allocation,
+and the gate scored the result 0.000 (black). The surface now carries the
+decode session that still holds its pixels, and `vaEndPicture` waits on that
+session before submitting.
+
+The second defect was geometry. The encoder took the surface's size, and
+FFmpeg allocates its decode surfaces at the coded size: a 1920x1080 stream
+produced a 1920x1088 H.264 or HEVC stream. The pixels were correct — the
+top 1080 rows scored 0.9977 against the source — but a client that reads the
+geometry back gets a picture it never decoded. The encoder now codes the
+picture the client declared at `vaCreateContext`, narrowed for H.264 by the
+sequence's frame crop (FFmpeg's H.264 context is 1920x1088 with a bottom crop
+of four chroma samples; its HEVC context is already 1920x1080). The surface
+may be larger than the picture; it is still queued without a copy, and the
+narrowing only stands while the encoder's raw layout matches the decoded
+buffer's, so the chroma plane never moves under it.
+
+Target `sheng`, boot `4b73926c-a774-4ae4-8968-d0a26b20a9c3`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, encoder node `/dev/video1` resolved by
+QUERYCAP name `iris_driver`, render node `/dev/dri/renderD128`. Source commit
+`bba3ef2` plus the change recorded here; build tree
+(`LIBVA_DRIVERS_PATH=$HOME/iris-vaapi-lab/src/build/src`, driver sha256
+`ad990dfc800e64a6...`), not an installed package.
+
+### Gates
+
+- `iris-encode-quality.sh`, 120 frames, build tree: H.264 encode SSIM 0.9986,
+  decode-to-encode SSIM 0.9977, HEVC encode 0.9968, decode-to-encode 0.9951,
+  both transcoded streams 1920x1080 and 120 frames, platform decode
+  byte-identical to the software decode in every case, and the Iris IRQ
+  counter moved by 227 (H.264) and 224 (HEVC).
+- CQP H.264 transcode of the 24 Mbps 1080p HEVC clip, `-qp 26 -g 60`: this
+  driver and the sibling both 1920x1080 and byte-identical,
+  md5 `ab446a44aa5ebe2ef76ff75d49bfd1f2`.
+- Decode is unchanged: the same clip through this build reproduces the
+  software framemd5 for 300/300 frames.
+
+### Pinned-clock throughput
+
+1080p HEVC in, H.264 out, 600 frames, `-async_depth 4`, four interleaved
+rounds with CPU policies at `performance` and the GPU at its maximum
+userspace frequency:
+
+| rate control | this driver | sibling |
+| --- | ---: | ---: |
+| `-qp 26` | 1.323 s (1.316-1.332) | 1.338 s (1.330-1.350) |
+| `-b:v 5M` | 1.107 s (1.099-1.113) | 1.037 s (1.023-1.056) |
+
+At `-b:v 5M` the two drivers do not deliver the same stream: this one emits
+5,007,842 bps and the sibling 1,636,836 bps from the same request, so the
+sibling encodes roughly a third of the bits and the wall times are not a
+like-for-like measure. Under CQP, where both produce the same bytes, this
+driver is 1.1 % faster.
+
+### What this does not prove
+
+The gate and the measurements ran from the build tree, not from an installed
+package. One clip and one size; 4K transcode was not run. No GUI client was
+driven through a transcode window, and the VBR comparison measures two
+different delivered rates rather than two implementations of one rate.

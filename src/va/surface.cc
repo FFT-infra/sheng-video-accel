@@ -136,12 +136,6 @@ VAStatus wait_for(DriverData& d, std::shared_ptr<iris::Session> session, const s
     return VA_STATUS_SUCCESS;
 }
 
-std::shared_ptr<iris::Session> session_of(DriverData& d, const Surface& s)
-{
-    auto owner = owner_of(d, s);
-    return owner ? owner->session : nullptr;
-}
-
 // The buffer's real length. DMA-BUF llseek reports it on the Iris kernel, so
 // a descriptor cannot claim more memory than the object holds; 0 means the
 // kernel did not say and the import cannot cross-check.
@@ -173,6 +167,12 @@ std::unique_ptr<iris::StableBuffer> import_stable(int fd, uint64_t allocation, c
 }
 
 } // namespace
+
+std::shared_ptr<iris::Session> session_of(DriverData& d, const Surface& s)
+{
+    auto owner = owner_of(d, s);
+    return owner ? owner->session : nullptr;
+}
 
 std::shared_ptr<Surface::GrainJob> queue_grain(DriverData& d, Context& c,
     const std::shared_ptr<Surface>& decoded)

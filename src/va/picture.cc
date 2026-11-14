@@ -976,11 +976,12 @@ VAStatus beginPicture(VADriverContextP ctx, VAContextID id, VASurfaceID surface_
             if (c->encoding()) {
                 iris::require(s->fourcc == VA_FOURCC_NV12, "encode input must be NV12",
                     VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
-                // Equal is the common case, but FFmpeg declares an aligned
-                // context (1920x1088) and feeds 1920x1080 frames. A larger
-                // surface is a different picture size, which has no path.
-                iris::require(s->width <= c->width && s->height <= c->height,
-                    "encode surface exceeds the context", VA_STATUS_ERROR_INVALID_SURFACE);
+                // The picture the client asked for is checked against the
+                // surface in vaEndPicture, where the sequence parameters that
+                // narrow a macroblock-aligned context have arrived. Either
+                // side may be the larger one: FFmpeg creates an aligned
+                // context and uploads exact surfaces, and its transcode
+                // creates an exact context over aligned decode surfaces.
             }
             // The processor scales either sample width; run_vpp checks that the
             // source and this target agree on it.
@@ -988,8 +989,19 @@ VAStatus beginPicture(VADriverContextP ctx, VAContextID id, VASurfaceID surface_
             // becomes the new context's target. A pending picture on another
             // context is released there first.
             if (s->owner != VA_INVALID_ID && s->owner != id) {
-                if (auto previous = owner_of(d, *s); previous && previous->session)
-                    previous->session->release(s->target);
+                if (auto previous = owner_of(d, *s); previous && previous->session) {
+                    if (c->encoding()) {
+                        // A decoded surface handed straight to the encoder is
+                        // a dependency, not a reuse: FFmpeg's transcode does
+                        // not call vaSyncSurface between the two. Keep the
+                        // picture and let endPicture wait for it; releasing
+                        // here dropped the completion and encoded an unpainted
+                        // buffer.
+                        s->pixels_session = previous->session;
+                    } else {
+                        previous->session->release(s->target);
+                    }
+                }
             }
             s->owner = id;
             c->current = surface_id;
@@ -1033,6 +1045,7 @@ VAStatus beginPicture(VADriverContextP ctx, VAContextID id, VASurfaceID surface_
         }
         // Reusing the surface: whatever it held is released (the slot goes
         // back to the firmware; a still-pending token is invalidated).
+        s->pixels_session.reset();
         c->session->release(s->target);
         s->failed = false;
         if (s->target.frame && d.copier)
@@ -1150,7 +1163,6 @@ VAStatus endPicture(VADriverContextP ctx, VAContextID id)
                 VA_STATUS_ERROR_INVALID_PARAMETER);
             const VABufferID coded_id = c->encoder->coded_buf(c->enc_picture);
             std::shared_ptr<Buffer> coded;
-            iris::StableBuffer* stable = nullptr;
             {
                 std::lock_guard<std::recursive_mutex> lock(d.mutex);
                 iris::require(coded_id != VA_INVALID_ID, "encode picture names no coded buffer",
@@ -1158,8 +1170,52 @@ VAStatus endPicture(VADriverContextP ctx, VAContextID id)
                 coded = buffer(d, coded_id);
                 iris::require(coded->type == VAEncCodedBufferType, "coded_buf is not a coded buffer",
                     VA_STATUS_ERROR_INVALID_PARAMETER);
-                stable = &ensure_stable(d, *s);
             }
+            // The input is whichever DMA-BUF holds this surface's pixels: the
+            // decoded CAPTURE frame when the surface was published Direct, or
+            // the stable buffer otherwise. Taking the stable buffer
+            // unconditionally encoded an unpainted allocation for a surface
+            // that had just been decoded Direct. The decode may still be in
+            // flight, and a Direct frame carries no fence the encoder can
+            // wait on, so wait here as the VideoProc path does.
+            auto source_session = s->pixels_session ? s->pixels_session : session_of(d, *s);
+            wait_for_pixels(s, source_session);
+            Pixels pixels;
+            {
+                std::lock_guard<std::recursive_mutex> lock(d.mutex);
+                pixels = pixels_of(d, *s);
+                s->pixels_session.reset();
+            }
+            // Code the picture the client asked for, not the surface's
+            // aligned allocation. The encode context's geometry is the
+            // picture size the client declared, and H.264's context may be
+            // macroblock-aligned (FFmpeg creates a 1920x1088 H.264 context for
+            // a 1920x1080 picture), where the sequence's frame crop names the
+            // picture instead. Coding the allocation hands the client a
+            // stream whose geometry no longer matches the one it decoded. The
+            // buffer's own layout still has to be the one the encoder will
+            // read; when narrowing would move the chroma plane, the surface
+            // geometry stays.
+            unsigned coded_width = c->width;
+            unsigned coded_height = c->height;
+            unsigned sequence_width = 0;
+            unsigned sequence_height = 0;
+            if (c->encoder->coded_size(c->enc_picture, sequence_width, sequence_height)
+                && sequence_width && sequence_height && sequence_width <= coded_width
+                && sequence_height <= coded_height) {
+                coded_width = sequence_width;
+                coded_height = sequence_height;
+            }
+            iris::require(coded_width <= s->width && coded_height <= s->height,
+                "encode surface is smaller than the picture", VA_STATUS_ERROR_INVALID_SURFACE);
+            const iris::Layout expected = iris::stable_layout(s->fourcc, coded_width, coded_height);
+            if (expected.fourcc != pixels.layout.fourcc || expected.stride != pixels.layout.stride
+                || expected.storage_height != pixels.layout.storage_height) {
+                coded_width = s->width;
+                coded_height = s->height;
+            }
+            c->enc_picture.surface_width = coded_width;
+            c->enc_picture.surface_height = coded_height;
             // Translation and the V4L2 queue run outside the table lock: the
             // submit blocks only when every input slot is still with the
             // firmware, and the access unit itself is waited for later.
@@ -1168,22 +1224,22 @@ VAStatus endPicture(VADriverContextP ctx, VAContextID id)
                 // The codec knows which units travel with its keyframes; the
                 // session decides when one needs them.
                 iris::codec::Encoder* encoder = c->encoder.get();
-                c->encode_session->configure(params, s->width, s->height,
+                c->encode_session->configure(params, coded_width, coded_height,
                     [encoder](const std::vector<uint8_t>& unit, std::vector<iris::codec::NalUnit>& last) {
                         return encoder->prepend_parameter_sets(unit, last);
                     });
             } else {
                 // The encoder has no SOURCE_CHANGE: one geometry per context.
-                iris::require(c->encode_session->config().width == s->width
-                        && c->encode_session->config().height == s->height,
+                iris::require(c->encode_session->config().width == coded_width
+                        && c->encode_session->config().height == coded_height,
                     "encode surface changed size", VA_STATUS_ERROR_INVALID_SURFACE);
             }
             c->enc_frames++;
             // The surface's DMA-BUF has to outlive the submit: the firmware
-            // reads it until it completes the picture. `stable` is the
-            // surface's own buffer, which lives until the surface does.
+            // reads it until it completes the picture. `s` holds it until the
+            // surface does.
             const iris::EncodeTicket ticket
-                = c->encode_session->submit(stable->fd(), stable->size(), params);
+                = c->encode_session->submit(pixels.fd, pixels.size, params);
             {
                 std::lock_guard<std::recursive_mutex> lock(d.mutex);
                 coded->payload.clear();

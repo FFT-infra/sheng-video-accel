@@ -190,6 +190,41 @@ void test_h264_translation()
     check(cqp_params.peak_bitrate == 0, "CQP sends no peak bitrate");
 }
 
+void test_h264_coded_size()
+{
+    auto encoder = iris::codec::make_h264_encoder(VAProfileH264High, RateMode::Vbr);
+    VAEncSequenceParameterBufferH264 sequence = h264_sequence();
+    const VAEncPictureParameterBufferH264 picture = h264_picture();
+    unsigned width = 0;
+    unsigned height = 0;
+
+    // FFmpeg's transcode declares a macroblock-aligned context (1920x1088)
+    // for a 1920x1080 picture and names the picture through the frame crop.
+    // Each chroma-sample offset removes two luma rows.
+    sequence.frame_cropping_flag = 1;
+    sequence.frame_crop_bottom_offset = 4;
+    check(encoder->coded_size(h264_input(sequence, picture), width, height), "H.264 names the picture");
+    check(width == 1920 && height == 1080, "the frame crop removes the aligned rows");
+    sequence.frame_crop_right_offset = 2;
+    check(encoder->coded_size(h264_input(sequence, picture), width, height), "H.264 names a cropped width");
+    check(width == 1916 && height == 1080, "the right crop removes four luma columns");
+
+    // Without cropping the macroblock grid is the picture.
+    sequence = h264_sequence();
+    check(encoder->coded_size(h264_input(sequence, picture), width, height), "H.264 names an uncropped picture");
+    check(width == 1920 && height == 1088, "an uncropped picture keeps the macroblock size");
+
+    // A crop that would erase the picture is not a geometry.
+    sequence.frame_cropping_flag = 1;
+    sequence.frame_crop_bottom_offset = 600;
+    check(!encoder->coded_size(h264_input(sequence, picture), width, height), "an oversized crop is refused");
+
+    // HEVC carries no such field: its picture is the context's geometry.
+    auto hevc = iris::codec::make_hevc_encoder(VAProfileHEVCMain, RateMode::Vbr);
+    EncodePicture hevc_input;
+    check(!hevc->coded_size(hevc_input, width, height), "HEVC takes the picture from the context");
+}
+
 void test_h264_rounding_and_rejections()
 {
     auto encoder = iris::codec::make_h264_encoder(VAProfileH264ConstrainedBaseline, RateMode::Vbr);
@@ -673,6 +708,7 @@ void test_unimplemented_features()
 int main()
 {
     test_h264_translation();
+    test_h264_coded_size();
     test_h264_rounding_and_rejections();
     test_hevc_translation();
     test_keyframe_request();

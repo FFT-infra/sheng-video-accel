@@ -107,6 +107,33 @@ public:
 
     uint32_t v4l2_pixelformat() const override { return V4L2_PIX_FMT_H264; }
 
+    // An H.264 context may be macroblock-aligned (FFmpeg creates a 1920x1088
+    // context for a 1920x1080 picture), and the sequence parameters are where
+    // the client says how much of it is the picture: the coded size minus the
+    // frame crop. Chroma-format cropping offsets count chroma samples, so
+    // each removes two luma pixels.
+    bool coded_size(const EncodePicture& picture, unsigned& width, unsigned& height) const override
+    {
+        const auto* sequence = static_cast<const VAEncSequenceParameterBufferH264*>(picture.sequence);
+        if (sequence == nullptr || sequence->picture_width_in_mbs == 0 || sequence->picture_height_in_mbs == 0)
+            return false;
+        unsigned coded_width = unsigned(sequence->picture_width_in_mbs) * 16;
+        unsigned coded_height = unsigned(sequence->picture_height_in_mbs) * 16;
+        if (sequence->frame_cropping_flag) {
+            const uint64_t crop_x = uint64_t(sequence->frame_crop_left_offset)
+                + sequence->frame_crop_right_offset;
+            const uint64_t crop_y = uint64_t(sequence->frame_crop_top_offset)
+                + sequence->frame_crop_bottom_offset;
+            if (crop_x * 2 >= coded_width || crop_y * 2 >= coded_height)
+                return false;
+            coded_width -= unsigned(crop_x * 2);
+            coded_height -= unsigned(crop_y * 2);
+        }
+        width = coded_width;
+        height = coded_height;
+        return true;
+    }
+
     VABufferID coded_buf(const EncodePicture& picture) const override
     {
         const auto* params = static_cast<const VAEncPictureParameterBufferH264*>(picture.picture);

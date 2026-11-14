@@ -65,6 +65,11 @@ struct Surface {
     // policy is forced. Never replaced once handed out. Shared because a
     // film grain job may outlive the surface it writes into.
     std::shared_ptr<iris::StableBuffer> stable;
+    // Session whose completion holds this surface's pixels after a decode
+    // handed it to an encode context. FFmpeg's transcode does not sync the
+    // decoded surface before the encoder reads it; the encode path waits on
+    // this session instead of dropping the picture.
+    std::shared_ptr<iris::Session> pixels_session;
     bool persistent_export = false;
     unsigned derived_images = 0;
     unsigned acquired_handles = 0;
@@ -296,6 +301,10 @@ std::shared_ptr<Buffer> buffer(DriverData& d, VABufferID id);
 
 // Owning context of a surface, if any (for sync/export/derive).
 std::shared_ptr<Context> owner_of(DriverData& d, const Surface& surface);
+
+// Session that owns the surface's pixels, if any. A decode surface keeps its
+// session through its owning context; a client-created surface has none.
+std::shared_ptr<iris::Session> session_of(DriverData& d, const Surface& surface);
 
 // Whether this profile decodes into 10-bit P010 as well as 8-bit NV12. AV1
 // carries both depths under Profile 0; H.264 is 8-bit only here. The three

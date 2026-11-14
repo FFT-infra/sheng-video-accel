@@ -16,7 +16,9 @@
 #   * every decoded frame matches a software decode of the same stream;
 #   * SSIM against the source is above the floor, per frame;
 #   * the floor would catch a broken encode: a deliberately blank stream
-#     scores below it, so a pass cannot come from trusting the encoder.
+#     scores below it, so a pass cannot come from trusting the encoder;
+#   * a decode handed straight to the encoder, as FFmpeg's transcode does,
+#     keeps the source's geometry and still matches the source's pixels.
 #
 # Usage: iris-encode-quality.sh [encoder-node] [render-node]
 #
@@ -105,6 +107,9 @@ ffmpeg -hide_banner -loglevel error -f lavfi \
 source_nv12=$work/source.nv12
 ffmpeg -hide_banner -loglevel error -i "$source_mp4" -pix_fmt yuv420p -f rawvideo -y "$source_nv12" \
     || fail 'could not extract the source frames'
+source_geometry=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height \
+    -of csv=p=0 "$source_mp4")
+[ -n "$source_geometry" ] || fail 'could not read the source geometry'
 
 check_codec() {
     codec=$1
@@ -177,6 +182,42 @@ check_codec() {
     awk -v s="$blank_ssim" -v m="$ssim_min" 'BEGIN { exit !(s < m) }' \
         || fail "$codec: a blank stream scores $blank_ssim, so the $ssim_min floor proves nothing"
     echo "PASS $codec: a blank stream scores $blank_ssim, below the floor"
+
+    # Decode the stream on the platform and hand the decoded surface to the
+    # encoder without a round trip through system memory. FFmpeg does this
+    # before the decode completes and does not sync the surface first; a
+    # driver that drops the pending picture encodes an unpainted buffer, and
+    # the SSIM against the source below is what catches that.
+    transcoded=$work/$codec.transcoded.$codec
+    LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH=$driver_path \
+        ffmpeg -hide_banner -loglevel error \
+        -hwaccel vaapi -hwaccel_output_format vaapi -i "$stream" \
+        -c:v "$ff_codec" -g 60 -y "$transcoded" \
+        || fail "$codec: the decode-to-encode pass failed"
+    ffmpeg -hide_banner -loglevel error -i "$transcoded" -f rawvideo -pix_fmt yuv420p \
+        -y "$work/$codec.transcoded.nv12" \
+        || fail "$codec: the transcoded stream does not decode"
+    # The decoded surface carries the padding FFmpeg's decode context was
+    # allocated with (1920x1088 for 1920x1080), but the stream must keep the
+    # source's visible geometry, as a client that reads the dimensions back
+    # would otherwise get a picture it never decoded.
+    trans_geometry=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height \
+        -of csv=p=0 "$transcoded")
+    trans_width=${trans_geometry%,*}
+    trans_height=${trans_geometry#*,}
+    [ "$trans_geometry" = "$source_geometry" ] \
+        || fail "$codec: the decode-to-encode stream is ${trans_width}x${trans_height}, the source is $size"
+    trans_frames=$(( $(wc -c <"$work/$codec.transcoded.nv12") / (trans_width * trans_height * 3 / 2) ))
+    [ "$trans_frames" -eq "$frames" ] \
+        || fail "$codec: the transcoded stream has $trans_frames frames, expected $frames"
+    trans_ssim=$(ffmpeg -hide_banner -nostats -f rawvideo -pix_fmt yuv420p -s "$size" -r 30 \
+        -i "$work/$codec.transcoded.nv12" -f rawvideo -pix_fmt yuv420p -s "$size" -r 30 -i "$source_nv12" \
+        -lavfi "[0:v][1:v]ssim" -f null - 2>&1 \
+        | sed -n 's/.*All:\([0-9.]*\).*/\1/p' | tail -1)
+    [ -n "$trans_ssim" ] || fail "$codec: could not compute the transcoded SSIM"
+    awk -v s="$trans_ssim" -v m="$ssim_min" 'BEGIN { exit !(s >= m) }' \
+        || fail "$codec: the decode-to-encode output scores $trans_ssim, below the $ssim_min floor"
+    echo "PASS $codec: decode-to-encode frames=$trans_frames ssim=$trans_ssim"
 }
 
 for codec in $codecs; do

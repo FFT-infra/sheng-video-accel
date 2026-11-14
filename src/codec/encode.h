@@ -53,6 +53,16 @@ public:
     virtual ~Encoder() = default;
     // V4L2_PIX_FMT_H264 or V4L2_PIX_FMT_HEVC.
     virtual uint32_t v4l2_pixelformat() const = 0;
+    // The visible picture size the client's sequence parameters ask for, when
+    // the codec carries one there. Returns false when it does not; the caller
+    // then codes the context geometry.
+    virtual bool coded_size(const EncodePicture& picture, unsigned& width, unsigned& height) const
+    {
+        (void)picture;
+        (void)width;
+        (void)height;
+        return false;
+    }
     // The coded buffer the client associated with this picture, named in its
     // picture parameter buffer. VA_INVALID_ID when the client sent none.
     virtual VABufferID coded_buf(const EncodePicture& picture) const = 0;
