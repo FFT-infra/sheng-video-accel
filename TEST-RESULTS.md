@@ -8611,10 +8611,13 @@ buffer's, so the chroma plane never moves under it.
 Target `sheng`, boot `4b73926c-a774-4ae4-8968-d0a26b20a9c3`, kernel
 `7.2.6-sm8550-g42f3b40-iris1`, encoder node `/dev/video1` resolved by
 QUERYCAP name `iris_driver`, render node `/dev/dri/renderD128`. Source commit
-`fa048e2`; build tree (`LIBVA_DRIVERS_PATH=$HOME/iris-vaapi-lab/src/build/src`,
-driver sha256 `ad990dfc800e64a6...`), not an installed package. The sibling is
+`fa048e2`; release build tree
+(`LIBVA_DRIVERS_PATH=$HOME/iris-vaapi-lab/src/build-rel/src`, driver sha256
+`a1b3ef16ba3a82c4...`), not an installed package. The sibling is
 `radxa-pkg/qcom-va-driver` built in the same tree layout, driver
-`f7dd97109f3a9965`.
+`f7dd97109f3a9965`. The gates below also ran on the `debugoptimized` tree
+(`ad990dfc800e64a6...`) with the same results; the throughput table is from
+the release build.
 
 ### Gates
 
@@ -8637,14 +8640,14 @@ userspace frequency:
 
 | rate control | this driver | sibling |
 | --- | ---: | ---: |
-| `-qp 26` | 1.323 s (1.316-1.332) | 1.338 s (1.330-1.350) |
-| `-b:v 5M` | 1.107 s (1.099-1.113) | 1.037 s (1.023-1.056) |
+| `-qp 26` | 1.328 s (1.320-1.343) | 1.338 s (1.328-1.350) |
+| `-b:v 5M` | 1.111 s (1.107-1.118) | 1.048 s (1.029-1.068) |
 
 At `-b:v 5M` the two drivers do not deliver the same stream: this one emits
 5,007,842 bps and the sibling 1,636,836 bps from the same request, so the
 sibling encodes roughly a third of the bits and the wall times are not a
-like-for-like measure. Under CQP, where both produce the same bytes, this
-driver is 1.1 % faster.
+like-for-like measure. Under CQP, where both produce the same bytes, the two
+are a tie: 0.7 % apart, inside the round-to-round spread.
 
 The rate gap is a rate-control difference, not a speed one. Asked for
 1,600 kbps the sibling delivers 1,631,217 bps and this driver 1,673,128 bps,
@@ -8661,3 +8664,41 @@ package. One clip and one size; 4K transcode was not run. No GUI client was
 driven through a transcode window. The rate-control comparison uses one clip
 and one target, so it shows the sibling does not follow a raised target
 rather than mapping its rate-control curve.
+
+## Browser playback, five codecs, both drivers, Chrome 156 (2026-11-14)
+
+Chrome 156.0.8078.79 on the target, one `iris-browser-acceptance.sh` run per
+codec and driver, 15 s measured windows after a 5 s warmup. Each run launches
+Chrome directly with no LIBVA variable; the driver reaches it through
+`LIBVA_DRIVERS_PATH` and the `msm_drv_video.so` alias, which is how libva
+resolves it from the render node. Target `sheng`, boot
+`4b73926c-a774-4ae4-8968-d0a26b20a9c3`, kernel `7.2.6-sm8550-g42f3b40-iris1`.
+This driver `a1b3ef16ba3a82c4` (release build tree, source `fa048e2`), sibling
+`f7dd97109f3a9965`. Battery 99 %, on external power, no firmware reset.
+
+| clip | this driver | sibling |
+| --- | --- | --- |
+| H.264 1080p30 | `VaapiVideoDecoder`, platform, 450 frames, 0 dropped | same, 449, 0 |
+| HEVC Main 1080p30 | same, 450, 0 | same, 449, 0 |
+| HEVC Main10 1080p30 | same, 450, 0 | same, 448, 0 |
+| VP9 Profile 0 1080p30 | same, 448, 0 | same, 448, 0 |
+| AV1 Main 1080p30 | same, 448, 0 | same, 447, 0 |
+
+Every run had a `--type=gpu-process` holding the resolved Iris decoder node.
+One H.264 run on this driver recorded 2 dropped frames out of 452; three
+further runs of the same cell recorded 451, 450 and 449 with 0 dropped, so
+that was a first-run artifact rather than a repeatable loss.
+
+Chrome 156's VA-API path on this build reports no `VADisplayStateSingleton`
+render node when started with `--headless=new`, which is why the gate runs a
+real Wayland session; that is a property of the browser's headless GPU
+initialisation, not of either driver.
+
+The acceptance gate's build-tree branch also gained the alias it needs: it
+pointed `LIBVA_DRIVERS_PATH` at the build directory, which ships only
+`v4l2_drv_video.so`, so every build-tree run failed at `vaInitialize` before
+a picture. The gate now links `msm_drv_video.so` into a per-run directory
+when the tree lacks it. Installed-package runs are unaffected.
+
+What this does not prove: one clip per codec, 15 s windows, and the sibling
+rows are a local build rather than its distribution package.
