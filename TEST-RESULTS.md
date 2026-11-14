@@ -8657,6 +8657,11 @@ userspace frequency:
 | `-qp 26` | 1.328 s (1.320-1.343) | 1.338 s (1.328-1.350) |
 | `-b:v 5M` | 1.111 s (1.107-1.118) | 1.048 s (1.029-1.068) |
 
+4K HEVC in, H.264 out, 300 frames, same pinning and interleaving, six rounds:
+3.119 s here (3.070-3.152) against 3.161 s there (3.128-3.188), and the CQP
+streams are byte-identical at 3840x2160 (36,439,584 bytes,
+md5 `d74eb1767929f9473e1128f94c48622a`).
+
 At `-b:v 5M` the two drivers do not deliver the same stream: this one emits
 5,007,842 bps and the sibling 1,636,836 bps from the same request, so the
 sibling encodes roughly a third of the bits and the wall times are not a
@@ -8674,10 +8679,10 @@ on both, so the sibling's lower `-b:v 5M` wall time is spent on fewer bits.
 ### What this does not prove
 
 The gate and the measurements ran from the build tree, not from an installed
-package. One clip and one size; 4K transcode was not run. No GUI client was
-driven through a transcode window. The rate-control comparison uses one clip
-and one target, so it shows the sibling does not follow a raised target
-rather than mapping its rate-control curve.
+package. One clip per size. No GUI client was driven through a transcode
+window. The rate-control comparison uses one clip and one target, so it shows
+the sibling does not follow a raised target rather than mapping its
+rate-control curve.
 
 ## Browser playback, five codecs, both drivers, Chrome 156 (2026-11-14)
 
