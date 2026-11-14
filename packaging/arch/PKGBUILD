@@ -25,12 +25,19 @@ pkgrel=1
 pkgdesc="VA-API backend for the Qualcomm Iris V4L2 stateful decoder"
 arch=('aarch64')
 url="https://github.com/phxinyang/qualcomm-iris-vaapi"
+# Driver source is MIT; COPYING.LGPL retains upstream provenance. See COPYING.
 license=('MIT' 'LGPL-2.1-or-later')
 # v4l-utils is not optional: the launcher resolves the decoder node by driver
 # name because the node number moves between boots on this device, and it
 # refuses to fall back to a fixed /dev/video number that may be a camera.
 depends=('libva' 'libdrm' 'mesa' 'v4l-utils')
-makedepends=('meson' 'ninja' 'pkgconf' 'python')
+# vulkan-headers and vulkan-icd-loader are build dependencies only: the VA
+# video processor is Vulkan compute behind a runtime opt-in, but a package
+# built without them would not contain it. The Fedora spec and the Debian
+# packaging declare the same dependency.
+makedepends=('meson' 'ninja' 'pkgconf' 'python' 'vulkan-headers' 'vulkan-icd-loader')
+# check() runs the host checks, three of which compare against FFmpeg.
+checkdepends=('ffmpeg')
 optdepends=('google-chrome: Google Chrome, the qualified VA-API decode client')
 source=("$pkgname-$pkgver.tar.gz")
 sha256sums=('SKIP')

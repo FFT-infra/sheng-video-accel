@@ -100,7 +100,12 @@ fi
 if [ "$clip_set" = 4k ]; then
     # A 4K AV1 clip is a capability probe, not part of the default three-clip
     # gate: run it only when the operator asks for that lane.
-    run_clip av1-4k av1-4k.mkv 30 30 0 0 || failures=$((failures + 1))
+    # The clip carries one two-completion access unit, so the token
+    # attribution in session.cc reports its install half as one invisible
+    # record; the client's 30 visible publications are all Import. Three
+    # runs of the same clip on the same driver agree on 1 and 14 NOSHOW
+    # halves, and the framemd5 is 30/30 exact in each.
+    run_clip av1-4k av1-4k.mkv 30 30 0 1 || failures=$((failures + 1))
 fi
 
 [ "$failures" -eq 0 ] || exit 1

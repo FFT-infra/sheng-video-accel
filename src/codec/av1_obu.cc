@@ -639,24 +639,11 @@ bool av1_build_frame_obu(std::vector<uint8_t>& payload,
         *reject_reason = "only AV1 profile 0 is supported";
         return false;
     }
-    // VA-API film grain synthesis names two surfaces in the picture
-    // parameters: current_frame holds the ungrained picture for reference,
-    // current_display_picture holds the grained picture for display (FFmpeg
-    // vaapi_av1.c points vaBeginPicture at the former when apply_grain is
-    // set). This driver publishes one target per CAPTURE completion, the one
-    // named by vaBeginPicture, and does not map the completion to
-    // current_display_picture, so the client's display surface stays empty.
-    // Rebuilding the film_grain_params() syntax alone was tried on the
-    // target: libdav1d decoded the rebuilt OBU cleanly and the firmware has
-    // HFI_PROP_AV1_FILM_GRAIN_PRESENT, but the hardware run still ended in
-    // "getImage: surface has no decoded pixels". Supporting this needs a
-    // second-target publish path, not just OBU syntax. Clients that export
-    // film grain as side data (apply_grain=0) decode these streams in
-    // hardware without this restriction.
-    if (picture.film_grain_info.film_grain_info_fields.bits.apply_grain) {
-        *reject_reason = "AV1 film grain synthesis needs a separate display surface";
-        return false;
-    }
+    // Film grain: the access unit rebuilt here asks the firmware for no grain
+    // (film_grain_params() writes apply_grain=0 below), so the CAPTURE slot
+    // holds the ungrained picture the spec uses for reference. The grained
+    // picture the client named in current_display_picture is blended in
+    // software from that slot at the first wait (src/va/grain.cc).
     if (picture.pic_info_fields.bits.large_scale_tile) {
         *reject_reason = "large scale tile streams are not supported";
         return false;
@@ -897,10 +884,11 @@ bool av1_build_frame_obu(std::vector<uint8_t>& payload,
     if (!write_global_motion_params(writer, picture, references, frame_is_intra, reject_reason))
         return false;
 
-    // film_grain_params(): apply_grain was rejected above, so the only legal
-    // value is zero. When the sequence does not allow grain, or the frame is
-    // neither shown nor showable, the spec resets the parameters and no
-    // syntax is written.
+    // film_grain_params(): the firmware never applies grain, whatever the
+    // client's parameters said; the software blend in src/va/grain.cc produces
+    // the grained display picture. When the sequence does not allow grain, or
+    // the frame is neither shown nor showable, the spec resets the parameters
+    // and no syntax is written.
     if (seq.film_grain_params_present && (pic.show_frame || pic.showable_frame))
         writer.bit(0);
 

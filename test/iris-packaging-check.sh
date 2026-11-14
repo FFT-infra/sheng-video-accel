@@ -51,6 +51,11 @@ grep -Fq 'destdir$prefix/lib/iris-vaapi/iris-node.sh' "$installer" \
 # shellcheck disable=SC2016
 grep -Fq 'msm_drv_video.so' "$installer" \
     || fail 'install-system.sh no longer installs the msm alias libva resolves by DRM name'
+# The qcom name is what the sibling distribution and its recipes use, so a
+# client that sets LIBVA_DRIVER_NAME=qcom must reach this driver too.
+# shellcheck disable=SC2016
+grep -Fq 'qcom_drv_video.so' "$installer" \
+    || fail 'install-system.sh no longer installs the qcom compatibility alias'
 
 expect_in_spec() {
     grep -Fq "$1" "$spec" || fail "spec %files does not list $1"
@@ -58,6 +63,7 @@ expect_in_spec() {
 
 expect_in_spec '%{_libdir}/dri/v4l2_drv_video.so'
 expect_in_spec '%{_libdir}/dri/msm_drv_video.so'
+expect_in_spec '%{_libdir}/dri/qcom_drv_video.so'
 expect_in_spec '%{_prefix}/lib/iris-vaapi/iris-node.sh'
 expect_in_spec '%{_datadir}/iris-vaapi/install-manifest.txt'
 
@@ -109,6 +115,43 @@ grep -Fq 'IRIS_VA_DRIVER_DIR' "$spec" \
     || fail 'spec does not pin the libva driver directory'
 grep -Fq 'IRIS_VA_DRIVER_DIR' "$pkgbuild" \
     || fail 'PKGBUILD does not pin the libva driver directory'
+
+# The Debian packaging is the third format and follows the same rule: one
+# install path, the driver directory pinned, the manifest refreshed on the
+# stripped payload. It is checked here rather than by reading debian/rules by
+# eye, because the failure mode is drift between three copies of one list.
+debian_control=$root/debian/control
+debian_rules=$root/debian/rules
+for path in "$debian_control" "$debian_rules" "$root/debian/copyright" \
+        "$root/debian/changelog" "$root/debian/source/format"; do
+    [ -f "$path" ] || fail "missing ${path#"$root"/}"
+done
+grep -Fq 'scripts/install-system.sh' "$debian_rules" \
+    || fail 'debian/rules does not install through scripts/install-system.sh'
+grep -Fq 'scripts/refresh-install-manifest.sh' "$debian_rules" \
+    || fail 'debian/rules does not refresh the manifest after dh_strip'
+grep -Fq 'IRIS_VA_DRIVER_DIR' "$debian_rules" \
+    || fail 'debian/rules does not pin the libva driver directory'
+grep -Fq 'dh_strip' "$debian_rules" \
+    || fail 'debian/rules does not strip before the manifest refresh'
+grep -Eq '^Depends:.*v4l-utils' "$debian_control" \
+    || fail 'debian/control does not depend on v4l-utils'
+grep -Fq 'Architecture: arm64' "$debian_control" \
+    || fail 'debian binary package is not limited to arm64'
+
+# The video processor is compiled only when Vulkan is found, so a package
+# format that forgets the build dependency ships a driver without it. All
+# three formats must ask for it, or the same source produces three different
+# drivers.
+for manifest in "$spec" "$pkgbuild" "$debian_control"; do
+    grep -Fq 'vulkan' "$manifest" \
+        || fail "${manifest#"$root"/} does not build against Vulkan; the video processor would be missing"
+    # The test stage compares against FFmpeg (rotation model, two AV1 oracles),
+    # so a format that does not declare it builds only on a machine that
+    # happens to have it installed.
+    grep -Fq 'ffmpeg' "$manifest" \
+        || fail "${manifest#"$root"/} does not require ffmpeg for its test stage"
+done
 
 # The node rule exits rather than guessing a node number when v4l2-ctl is
 # missing, so a package without v4l-utils installs diagnostics that cannot

@@ -5,6 +5,8 @@
 #include "../util/error.h"
 
 #include <cstring>
+#include <mutex>
+#include <utility>
 
 extern "C" {
 #include <linux/dma-buf.h>
@@ -58,9 +60,66 @@ public:
     }
 };
 
+class DeferredCopy final : public CopyEngine {
+public:
+    explicit DeferredCopy(std::function<std::unique_ptr<CopyEngine>()> factory)
+        : factory_(std::move(factory))
+    {
+    }
+
+    // Before the first copy this reports "deferred": the session traces the
+    // name after a copy, so a started session never sees this value.
+    const char* name() const override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return engine_ ? engine_->name() : "deferred";
+    }
+
+    void copy(StableBuffer& destination, Frame& source) override { engine().copy(destination, source); }
+
+    // A forget with no backend has nothing to release. Building one here
+    // would undo the deferral for a client that only ever publishes Direct.
+    void forget(uint64_t id) override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (engine_)
+            engine_->forget(id);
+    }
+
+private:
+    CopyEngine& engine()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!engine_)
+            engine_ = factory_();
+        return *engine_;
+    }
+
+    std::function<std::unique_ptr<CopyEngine>()> factory_;
+    mutable std::mutex mutex_;
+    std::unique_ptr<CopyEngine> engine_;
+};
+
 } // namespace
 
 std::unique_ptr<CopyEngine> make_cpu_copy() { return std::make_unique<CpuCopy>(); }
+
+std::unique_ptr<CopyEngine> make_deferred_copy(int render_fd, CopyMode mode)
+{
+    return make_deferred_copy([render_fd, mode] {
+        std::unique_ptr<CopyEngine> engine;
+        if (mode == CopyMode::Gpu)
+            engine = make_gpu_copy(render_fd);
+        if (!engine)
+            engine = make_cpu_copy();
+        return engine;
+    });
+}
+
+std::unique_ptr<CopyEngine> make_deferred_copy(std::function<std::unique_ptr<CopyEngine>()> factory)
+{
+    return std::make_unique<DeferredCopy>(std::move(factory));
+}
 
 } // namespace iris
 

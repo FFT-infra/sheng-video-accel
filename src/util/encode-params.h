@@ -22,7 +22,11 @@ struct EncodeParams {
     int level = -1;
     RateMode rate_mode = RateMode::Vbr;
     uint32_t bitrate = 0; // bits per second
-    uint32_t peak_bitrate = 0; // CBR only; 0 means the target bitrate
+    // The rate controller's maximum. CBR without one names its target (0 is
+    // filled in at the control write); VBR carries it only when the client's
+    // maximum is above its target, because VA names the target as a
+    // percentage of that maximum.
+    uint32_t peak_bitrate = 0;
     uint32_t gop_size = 0; // 0 asks the firmware for intra only
     unsigned frame_rate_num = 30;
     unsigned frame_rate_den = 1;

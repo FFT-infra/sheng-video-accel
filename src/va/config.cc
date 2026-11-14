@@ -28,6 +28,11 @@ VAStatus queryConfigProfiles(VADriverContextP ctx, VAProfile* profiles, int* cou
     std::lock_guard<std::recursive_mutex> lock(d.mutex);
     std::set<VAProfile> all = d.capabilities.profiles;
     all.insert(d.capabilities.encode_profiles.begin(), d.capabilities.encode_profiles.end());
+    // VAProfileNone carries no bitstream; it exists only so a client can open
+    // a VideoProc config. Advertised only when the backend is built in and
+    // the client opted in.
+    if (vpp_available(d))
+        all.insert(VAProfileNone);
     int n = 0;
     for (VAProfile profile : all)
         if (n < static_cast<int>(kMaxProfiles))
@@ -43,6 +48,12 @@ VAStatus queryConfigEntrypoints(VADriverContextP ctx, VAProfile profile, VAEntry
     // Decode first: FFmpeg's encode path walks the list and skips VLD, so
     // the order is only about what a human reads in vainfo.
     int n = 0;
+    if (profile == VAProfileNone) {
+        if (vpp_available(d))
+            entrypoints[n++] = VAEntrypointVideoProc;
+        *count = n;
+        return VA_STATUS_SUCCESS;
+    }
     if (d.capabilities.profiles.count(profile))
         entrypoints[n++] = VAEntrypointVLD;
     if (d.capabilities.encode_profiles.count(profile) && n < static_cast<int>(kMaxEntrypoints))
@@ -57,6 +68,11 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
     auto& d = data(ctx);
     const bool decode = d.capabilities.profiles.count(profile) && entrypoint == VAEntrypointVLD;
     const bool encode = d.capabilities.encode_profiles.count(profile) && entrypoint == VAEntrypointEncSlice;
+    // The HEVC feature and block-size attributes describe the parameter sets
+    // the firmware writes, so they answer only for a profile that HEVC encodes.
+    const bool hevc_encode = encode
+        && (profile == VAProfileHEVCMain || profile == VAProfileHEVCMain10);
+    const bool vpp = profile == VAProfileNone && entrypoint == VAEntrypointVideoProc && vpp_available(d);
     for (int i = 0; i < count; ++i) {
         switch (attributes[i].type) {
         case VAConfigAttribRTFormat:
@@ -65,8 +81,15 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
                 if (p010_decode_profile(profile) && d.capabilities.p010)
                     attributes[i].value |= VA_RT_FORMAT_YUV420_10;
             } else if (encode) {
-                // The encoder's raw port is NV12; P010 is not an option.
+                // The encoder's raw port is NV12 only.
                 attributes[i].value = VA_RT_FORMAT_YUV420;
+            } else if (vpp) {
+                // The processor scales either width; a picture whose two ends
+                // disagree on bit depth is refused at endPicture. RGB32 is the
+                // blended overlay source, which is a surface of its own config.
+                attributes[i].value = VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_RGB32;
+                if (d.capabilities.p010)
+                    attributes[i].value |= VA_RT_FORMAT_YUV420_10;
             } else {
                 attributes[i].value = VA_ATTRIB_NOT_SUPPORTED;
             }
@@ -75,10 +98,10 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
             attributes[i].value = decode ? VA_DEC_SLICE_MODE_NORMAL : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribMaxPictureWidth:
-            attributes[i].value = (decode || encode) ? d.capabilities.max_width : VA_ATTRIB_NOT_SUPPORTED;
+            attributes[i].value = (decode || encode || vpp) ? d.capabilities.max_width : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribMaxPictureHeight:
-            attributes[i].value = (decode || encode) ? d.capabilities.max_height : VA_ATTRIB_NOT_SUPPORTED;
+            attributes[i].value = (decode || encode || vpp) ? d.capabilities.max_height : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribRateControl:
             // CQP is what FFmpeg picks when the client gives no bitrate;
@@ -109,6 +132,50 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
             // NOT_SUPPORTED answer makes it compute -1.
             attributes[i].value = encode ? 1 : VA_ATTRIB_NOT_SUPPORTED;
             break;
+#if VA_CHECK_VERSION(1, 13, 0)
+        case VAConfigAttribEncHEVCFeatures: {
+            // The firmware writes the parameter sets, so the answer is what a
+            // trace_headers dump of its own SPS/PPS says rather than what a
+            // client asked for (TEST-RESULTS.md, "HEVC encode attributes").
+            // SAO, temporal MVP and cu_qp_delta are on in every stream and no
+            // picture parameter turns them off, which is REQUIRED; the slice's
+            // deblocking-disable flag is the one the encoder acts on, which is
+            // SUPPORTED. AMP, PCM, transform skip, scaling lists, sign data
+            // hiding and the rest are zero in that SPS and stay unsupported.
+            if (!hevc_encode) {
+                attributes[i].value = VA_ATTRIB_NOT_SUPPORTED;
+                break;
+            }
+            VAConfigAttribValEncHEVCFeatures features = {};
+            features.bits.sao = VA_FEATURE_REQUIRED;
+            features.bits.temporal_mvp = VA_FEATURE_REQUIRED;
+            features.bits.cu_qp_delta = VA_FEATURE_REQUIRED;
+            features.bits.deblocking_filter_disable = VA_FEATURE_SUPPORTED;
+            attributes[i].value = features.value;
+            break;
+        }
+        case VAConfigAttribEncHEVCBlockSizes: {
+            // log2_min_luma_coding_block_size_minus3 = 0, log2_diff_max_min =
+            // 2, log2_min_luma_transform_block_size_minus2 = 0 and
+            // log2_diff_max_min = 3: one 32x32 CTB size, 8x8 smallest coding
+            // block, 4x4 to 32x32 transforms, no transform hierarchy. FFmpeg
+            // otherwise guesses 32/16 and logs that it guessed.
+            if (!hevc_encode) {
+                attributes[i].value = VA_ATTRIB_NOT_SUPPORTED;
+                break;
+            }
+            VAConfigAttribValEncHEVCBlockSizes sizes = {};
+            sizes.bits.log2_max_coding_tree_block_size_minus3 = 2;
+            sizes.bits.log2_min_coding_tree_block_size_minus3 = 2;
+            sizes.bits.log2_min_luma_coding_block_size_minus3 = 0;
+            sizes.bits.log2_max_luma_transform_block_size_minus2 = 3;
+            sizes.bits.log2_min_luma_transform_block_size_minus2 = 0;
+            sizes.bits.max_max_transform_hierarchy_depth_inter = 0;
+            sizes.bits.max_max_transform_hierarchy_depth_intra = 0;
+            attributes[i].value = sizes.value;
+            break;
+        }
+#endif
         default:
             // Slice structure, ROI, quality range and tiles stay unsupported:
             // the firmware decides the layout.
@@ -125,9 +192,13 @@ VAStatus createConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entr
     return guarded(ctx, "createConfig", [&] {
         auto& d = data(ctx);
         std::lock_guard<std::recursive_mutex> lock(d.mutex);
-        iris::require(entrypoint == VAEntrypointVLD || entrypoint == VAEntrypointEncSlice, "unsupported entrypoint",
-            VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT);
-        if (entrypoint == VAEntrypointVLD) {
+        iris::require(entrypoint == VAEntrypointVLD || entrypoint == VAEntrypointEncSlice
+                || entrypoint == VAEntrypointVideoProc,
+            "unsupported entrypoint", VA_STATUS_ERROR_UNSUPPORTED_ENTRYPOINT);
+        if (entrypoint == VAEntrypointVideoProc) {
+            iris::require(profile == VAProfileNone && vpp_available(d), "VPP not advertised",
+                VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
+        } else if (entrypoint == VAEntrypointVLD) {
             iris::require(d.capabilities.profiles.count(profile) > 0, "profile not advertised",
                 VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
         } else {
@@ -137,6 +208,8 @@ VAStatus createConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entr
         uint32_t rt_format = VA_RT_FORMAT_YUV420;
         if (entrypoint == VAEntrypointVLD && d.capabilities.p010 && p010_decode_profile(profile))
             rt_format |= VA_RT_FORMAT_YUV420_10;
+        if (entrypoint == VAEntrypointVideoProc && d.capabilities.p010)
+            rt_format |= VA_RT_FORMAT_YUV420_10;
         uint32_t rate_control = VA_RC_VBR;
         for (int i = 0; i < count; ++i) {
             if (attributes[i].type == VAConfigAttribRTFormat && attributes[i].value != VA_ATTRIB_NOT_SUPPORTED)
@@ -144,7 +217,13 @@ VAStatus createConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entr
             if (attributes[i].type == VAConfigAttribRateControl && attributes[i].value != VA_ATTRIB_NOT_SUPPORTED)
                 rate_control = attributes[i].value;
         }
-        if (entrypoint == VAEntrypointEncSlice) {
+        if (entrypoint == VAEntrypointVideoProc) {
+            // One bit per config: the client names the depth of the surfaces it
+            // will create, and the picture refuses a mismatch.
+            iris::require((rt_format & (VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10)) != 0
+                    && !(rt_format & ~(VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10 | VA_RT_FORMAT_RGB32)),
+                "VPP needs YUV420 or YUV420_10", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+        } else if (entrypoint == VAEntrypointEncSlice) {
             // One bit, chosen by the client from what getConfigAttributes
             // advertised.
             iris::require((rate_control & (VA_RC_CBR | VA_RC_VBR | VA_RC_CQP)) != 0,

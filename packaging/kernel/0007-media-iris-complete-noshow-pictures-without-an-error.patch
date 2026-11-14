@@ -1,0 +1,83 @@
+media: iris: complete non-display pictures without an error
+
+HFI gen2 marks non-display pictures with HFI_GEN2_PICTURE_NOSHOW. The driver
+maps them to V4L2_BUF_FLAG_ERROR and returns an empty CAPTURE buffer, so every
+hidden AV1 reference picture looks like a decode error to userspace.
+
+Keep the completion instead: no payload, no picture-type flag and no error,
+with the timestamp 0004 preserves. This is the completion-preserving form of
+0005-*; 0005 recycles the buffer inside the kernel, which removes the only
+event that clears a hidden pending target in this VA driver.
+
+Measured on sheng on 2026-11-12 (TEST-RESULTS.md, "The completion-preserving
+0005 form on the target"): the installed driver fails all three AV1 clips on
+this module, while the same driver with the unflagged-NOSHOW tolerance in the
+session decodes byte-identical output. The patch buys nothing the qualified
+module does not already do, so it is recorded as an experiment.
+
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c b/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c
+index 25162ae71..381a89a7b 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c
+@@ -100,18 +100,24 @@ static int iris_hfi_gen2_get_driver_buffer_flags(struct iris_inst *inst, u32 hfi
+ 	u32 keyframe = HFI_GEN2_PICTURE_IDR | HFI_GEN2_PICTURE_I |
+ 		HFI_GEN2_PICTURE_CRA | HFI_GEN2_PICTURE_BLA;
+ 	u32 driver_flags = 0;
++	bool noshow = inst_hfi_gen2->hfi_frame_info.picture_type & HFI_GEN2_PICTURE_NOSHOW;
+ 
+-	if (inst_hfi_gen2->hfi_frame_info.picture_type & HFI_GEN2_PICTURE_NOSHOW)
+-		driver_flags |= V4L2_BUF_FLAG_ERROR;
+-	else if (inst_hfi_gen2->hfi_frame_info.picture_type & keyframe)
+-		driver_flags |= V4L2_BUF_FLAG_KEYFRAME;
+-	else if (inst_hfi_gen2->hfi_frame_info.picture_type & HFI_GEN2_PICTURE_P)
+-		driver_flags |= V4L2_BUF_FLAG_PFRAME;
+-	else if (inst_hfi_gen2->hfi_frame_info.picture_type & HFI_GEN2_PICTURE_B)
+-		driver_flags |= V4L2_BUF_FLAG_BFRAME;
++	/*
++	 * A non-display picture is a normal decoding result. It carries no
++	 * payload and no display, but it is not an error, so it must not be
++	 * reported with V4L2_BUF_FLAG_ERROR nor classified as a display frame.
++	 */
++	if (!noshow) {
++		if (inst_hfi_gen2->hfi_frame_info.picture_type & keyframe)
++			driver_flags |= V4L2_BUF_FLAG_KEYFRAME;
++		else if (inst_hfi_gen2->hfi_frame_info.picture_type & HFI_GEN2_PICTURE_P)
++			driver_flags |= V4L2_BUF_FLAG_PFRAME;
++		else if (inst_hfi_gen2->hfi_frame_info.picture_type & HFI_GEN2_PICTURE_B)
++			driver_flags |= V4L2_BUF_FLAG_BFRAME;
+ 
+-	if (inst_hfi_gen2->hfi_frame_info.data_corrupt || inst_hfi_gen2->hfi_frame_info.overflow)
+-		driver_flags |= V4L2_BUF_FLAG_ERROR;
++		if (inst_hfi_gen2->hfi_frame_info.data_corrupt || inst_hfi_gen2->hfi_frame_info.overflow)
++			driver_flags |= V4L2_BUF_FLAG_ERROR;
++	}
+ 
+ 	if (hfi_flags & HFI_BUF_FW_FLAG_LAST ||
+ 	    hfi_flags & HFI_BUF_FW_FLAG_PSC_LAST)
+@@ -348,10 +354,12 @@ static int iris_hfi_gen2_handle_input_buffer(struct iris_inst *inst,
+ static int iris_hfi_gen2_handle_output_buffer(struct iris_inst *inst,
+ 					      struct iris_hfi_buffer *hfi_buffer)
+ {
++	struct iris_inst_hfi_gen2 *inst_hfi_gen2 = to_iris_inst_hfi_gen2(inst);
+ 	struct v4l2_m2m_ctx *m2m_ctx = inst->m2m_ctx;
+ 	struct v4l2_m2m_buffer *m2m_buffer, *n;
+ 	struct iris_buffer *buf;
+ 	bool found = false;
++	bool noshow;
+ 	int ret;
+ 
+ 	if (hfi_buffer->flags & HFI_BUF_FW_FLAG_LAST) {
+@@ -390,7 +398,12 @@ static int iris_hfi_gen2_handle_output_buffer(struct iris_inst *inst,
+ 
+ 	buf->flags = iris_hfi_gen2_get_driver_buffer_flags(inst, hfi_buffer->flags);
+ 
+-	if (!buf->data_size && inst->state == IRIS_INST_STREAMING &&
++	noshow = inst->domain == DECODER &&
++		inst_hfi_gen2->hfi_frame_info.picture_type & HFI_GEN2_PICTURE_NOSHOW;
++	if (noshow)
++		buf->data_size = 0;
++
++	if (!buf->data_size && inst->state == IRIS_INST_STREAMING && !noshow &&
+ 	    !(hfi_buffer->flags & HFI_BUF_FW_FLAG_LAST)) {
+ 		buf->flags |= V4L2_BUF_FLAG_ERROR;
+ 	}

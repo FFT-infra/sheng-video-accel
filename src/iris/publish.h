@@ -7,9 +7,11 @@
 
 #pragma once
 
+#include "../util/options.h"
 #include "alloc.h"
 #include "slots.h"
 
+#include <functional>
 #include <memory>
 
 namespace iris {
@@ -34,5 +36,14 @@ std::unique_ptr<CopyEngine> make_cpu_copy();
 // Returns nullptr if EGL/GBM cannot be initialised, so the caller can fall
 // back to the CPU engine.
 std::unique_ptr<CopyEngine> make_gpu_copy(int render_fd);
+
+// A CopyEngine that picks its backend on the first copy. Initialising EGL
+// costs about 0.1 s on SM8550, and a client that publishes Direct or Import
+// never copies: with this engine vaCreateContext pays nothing and the first
+// Copy pays for the backend. Thread-safe; the backend is built once.
+std::unique_ptr<CopyEngine> make_deferred_copy(int render_fd, CopyMode mode);
+// Same, with the backend built by an explicit factory (tests, and any caller
+// that wants a backend other than the two above).
+std::unique_ptr<CopyEngine> make_deferred_copy(std::function<std::unique_ptr<CopyEngine>()> factory);
 
 } // namespace iris

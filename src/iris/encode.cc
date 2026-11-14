@@ -163,11 +163,15 @@ void EncoderSession::configure(
         set_control(V4L2_CID_MPEG_VIDEO_BITRATE_MODE, bitrate_mode(params.rate_mode), "bitrate mode");
         if (params.bitrate)
             set_control(V4L2_CID_MPEG_VIDEO_BITRATE, static_cast<int32_t>(params.bitrate), "bitrate");
-        if (params.rate_mode == RateMode::Cbr) {
-            const uint32_t peak = params.peak_bitrate ? params.peak_bitrate : params.bitrate;
-            if (peak)
-                set_control(V4L2_CID_MPEG_VIDEO_BITRATE_PEAK, static_cast<int32_t>(peak), "peak bitrate");
-        }
+        // CBR always has a peak (its target when the client gave none). VBR
+        // has one only when the client's maximum is above its target, and
+        // leaving it unwritten would hand the firmware a default instead of
+        // the ceiling the client asked for.
+        const uint32_t peak = params.rate_mode == RateMode::Cbr && !params.peak_bitrate
+            ? params.bitrate
+            : params.peak_bitrate;
+        if (peak)
+            set_control(V4L2_CID_MPEG_VIDEO_BITRATE_PEAK, static_cast<int32_t>(peak), "peak bitrate");
     }
     set_control(V4L2_CID_MPEG_VIDEO_B_FRAMES, 0, "b frames");
     set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, gop_control(params.gop_size), "gop size");
@@ -349,12 +353,12 @@ void EncoderSession::apply_dynamic(const EncodeParams& params)
         set_control(V4L2_CID_MPEG_VIDEO_BITRATE, static_cast<int32_t>(params.bitrate), "bitrate");
         applied_.bitrate = params.bitrate;
     }
-    if (params.rate_mode == RateMode::Cbr) {
-        const uint32_t peak = params.peak_bitrate ? params.peak_bitrate : params.bitrate;
-        if (peak && peak != applied_.peak_bitrate) {
-            set_control(V4L2_CID_MPEG_VIDEO_BITRATE_PEAK, static_cast<int32_t>(peak), "peak bitrate");
-            applied_.peak_bitrate = peak;
-        }
+    const uint32_t peak = params.rate_mode == RateMode::Cbr && !params.peak_bitrate
+        ? params.bitrate
+        : params.peak_bitrate;
+    if (peak && peak != applied_.peak_bitrate) {
+        set_control(V4L2_CID_MPEG_VIDEO_BITRATE_PEAK, static_cast<int32_t>(peak), "peak bitrate");
+        applied_.peak_bitrate = peak;
     }
     if (params.gop_size != applied_.gop_size) {
         set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, gop_control(params.gop_size), "gop size");
@@ -396,6 +400,10 @@ void EncoderSession::take_output_slot(Clock::time_point limit)
     // every CAPTURE slot unrearmed.
     while (free_output_.empty()) {
         if (complete_one())
+            continue;
+        // complete_one() pumps OUTPUT even when no coded frame is ready, so a
+        // consumed input may have refilled the slot without a completion.
+        if (!free_output_.empty())
             continue;
         if (Clock::now() >= limit)
             throw Error(VA_STATUS_ERROR_TIMEDOUT, "encoder input buffer was not returned");
@@ -520,6 +528,11 @@ bool EncoderSession::complete_one()
     // ticket, so a later completion can never overwrite it.
     if (!healthy_)
         throw Error(VA_STATUS_ERROR_ENCODING_ERROR, "encoder session failed");
+    // The firmware returns an input buffer when it has read the picture,
+    // which is before the coded frame exists. Harvest those first: the slot
+    // becomes usable again immediately, and vaSyncSurface on the input
+    // surface is answered without waiting for the access unit.
+    pump_output();
     const std::optional<Dequeued> done = device_->dequeue_buffer(Queue::Capture);
     if (!done)
         return false;
@@ -582,12 +595,29 @@ bool EncoderSession::complete_one()
 
     if (!done->last())
         device_->queue_buffer(Queue::Capture, slot.index, slot.length, 0, 0);
-    if (auto output = device_->dequeue_buffer(Queue::Output))
-        free_output_.push_back(output->index);
+    pump_output();
     if (done->last())
         drained_ = true;
     cold_ = false;
     return true;
+}
+
+void EncoderSession::pump_output()
+{
+    // Called with mutex_ held. A freed input slot is usable again even while
+    // its picture is still being coded, which is exactly what the kernel
+    // promises: OUTPUT DQBUF returns ownership of the raw buffer.
+    while (auto output = device_->dequeue_buffer(Queue::Output)) {
+        free_output_.push_back(output->index);
+        if (!output->timestamp_us)
+            continue;
+        input_released_.insert(output->timestamp_us);
+        // A client that never syncs its input surfaces never drains this
+        // set. Keep it bounded; an answer dropped here is recovered from
+        // completed_/claimed, or by waiting for the access unit.
+        while (input_released_.size() > 64)
+            input_released_.erase(input_released_.begin());
+    }
 }
 
 EncodeResult EncoderSession::wait(EncodeTicket ticket)
@@ -635,9 +665,45 @@ EncodeResult EncoderSession::wait_timeout(EncodeTicket ticket, uint64_t timeout_
     }
 }
 
+void EncoderSession::wait_input(EncodeTicket ticket)
+{
+    const Clock::time_point limit = deadline();
+    // Idempotent: a client that syncs the same input surface twice must not
+    // block the second time. The set is pruned at each claim and capped in
+    // pump_output, so keeping the answer costs bounded memory.
+    auto settled = [&] {
+        return input_released_.count(ticket.timestamp_us) != 0 || completed_.count(ticket.timestamp_us) != 0
+            || claimed(ticket);
+    };
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (settled())
+                return;
+            require(healthy_, "encoder is in a failed state", VA_STATUS_ERROR_ENCODING_ERROR);
+            require(!finished_, "encoder finished with a picture outstanding", VA_STATUS_ERROR_OPERATION_FAILED);
+            require(ticket_known(ticket), "ticket does not belong to this session", VA_STATUS_ERROR_INVALID_PARAMETER);
+            pump_output();
+            if (settled())
+                return;
+            // No input completion yet: one coded completion is the wait the
+            // client would otherwise do through the coded buffer.
+            complete_one();
+            if (settled())
+                return;
+        }
+        require(Clock::now() < limit, "encoder did not release the input buffer", VA_STATUS_ERROR_TIMEDOUT);
+        device_->poll(POLLIN | POLLPRI, kPollMs);
+    }
+}
+
 void EncoderSession::claim(EncodeTicket ticket)
 {
     claimed_us_ = std::max(claimed_us_, ticket.timestamp_us);
+    // Nothing at or below the newest claimed ticket can still be asked about
+    // by an input sync that has not already been answered.
+    while (!input_released_.empty() && *input_released_.begin() <= claimed_us_)
+        input_released_.erase(input_released_.begin());
 }
 
 bool EncoderSession::claimed(EncodeTicket ticket) const

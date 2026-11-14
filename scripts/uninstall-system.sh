@@ -29,6 +29,13 @@ case "$alias_path" in
     ''|/*/msm_drv_video.so) ;;
     *) fail "unexpected driver alias path: $alias_path" ;;
 esac
+# Manifests written before the qcom alias shipped do not carry this key, so an
+# empty value means an older install, not a malformed one.
+compat_alias_path=$destdir$(get driver_compat_alias_path)
+case "$compat_alias_path" in
+    ''|/*/qcom_drv_video.so) ;;
+    *) fail "unexpected compatible driver alias path: $compat_alias_path" ;;
+esac
 
 # Two layouts exist. The current one records the shared node rule; manifests
 # written before the browser launcher was removed record a launcher path and a
@@ -82,6 +89,10 @@ actual=$(sha256sum "$driver" | awk '{print $1}')
 if [ -n "$alias_path" ] && [ -L "$alias_path" ] \
     && [ "$(readlink "$alias_path")" = v4l2_drv_video.so ]; then
     rm -f "$alias_path"
+fi
+if [ -n "$compat_alias_path" ] && [ -L "$compat_alias_path" ] \
+    && [ "$(readlink "$compat_alias_path")" = v4l2_drv_video.so ]; then
+    rm -f "$compat_alias_path"
 fi
 rm -f "$driver"
 if [ -n "$node_lib" ]; then

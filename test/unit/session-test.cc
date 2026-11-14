@@ -14,7 +14,6 @@
 extern "C" {
 #include <sys/stat.h>
 }
-#include <functional>
 #include <string>
 #include <vector>
 
@@ -296,6 +295,9 @@ void test_timestamped_corrupt_completion_fails_target_at_once()
     h.session->service();
     CHECK(!b.pending && b.error);
     CHECK(h.session->stats().errors == 1);
+    // Invariant 18, the other direction: a corrupt shown picture is failed,
+    // never published as a hidden one, so `completed` does not move.
+    CHECK(h.session->stats().completed == 1);
     // The target is failed before any drain: a wait reports the decode error,
     // not a timeout, and no STOP was needed to get there.
     CHECK_THROWS(h.session->wait(b), VA_STATUS_ERROR_DECODING_ERROR);
@@ -322,6 +324,33 @@ void test_timestamped_hidden_picture_is_published_not_failed()
     h.session->service();
     CHECK(b.completed && !b.error);
     CHECK(h.session->stats().errors == 0);
+}
+
+void test_noshow_completion_never_lands_on_a_shown_surface()
+{
+    // Invariant 18, in the direction the hidden-picture case does not cover:
+    // a NOSHOW completion that names a shown picture must fail that picture.
+    // Its token comes from the error-timestamp patch, its shape (ERROR, no
+    // picture-type bit, no payload) says alt-ref, and the target was
+    // submitted with one completion and no invisible half to explain the
+    // extra one. Publishing it would put a decoded-but-never-shown frame on
+    // the surface the client asked to display.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    Target a;
+    h.submit(a);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(a.completed && !a.error);
+    h.fake->inject_timestamped_errors(1);
+    Target b;
+    h.submit(b);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(!b.completed && b.error);
+    CHECK(h.session->stats().errors == 1);
+    CHECK(h.session->stats().completed == 1);
+    CHECK_THROWS(h.session->wait(b), VA_STATUS_ERROR_DECODING_ERROR);
 }
 
 void test_vp9_altref_superframe_is_one_picture()
@@ -468,6 +497,41 @@ void test_released_install_completions_are_not_errors()
         CHECK(h.session->stats().errors == 0);
         CHECK(h.session->stats().drops == 0);
     }
+}
+
+void test_released_hidden_install_unit_is_not_an_error()
+{
+    // A hidden install unit whose client half is also show_frame=0 returns two
+    // identical NOSHOW completions under one token. Releasing the target before
+    // either returns leaves both halves orphaned: neither is a decode failure,
+    // and an Import buffer is still lent for each, so the session must consume
+    // both without an error, a misplacement or a wait on a target that is gone.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    Target a;
+    h.submit(a);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(a.completed && !a.error);
+
+    h.fake->inject_hidden_install_unit();
+    Target b;
+    b.completions = 2;
+    b.hidden = true;
+    h.submit(b);
+    h.session->release(b);
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(h.session->stats().errors == 0);
+    CHECK(h.session->stats().misplaced == 0);
+    CHECK(!b.completed);
+    CHECK(!b.error);
+    // Both halves have the NOSHOW shape, so both take the invisible branch
+    // and stats().drops stays 0. A visible payload completion would report
+    // the one drop in the branch below; with two NOSHOW halves there are no
+    // pixels to abandon. The load-bearing invariant here is that an
+    // abandoned picture never becomes a decode error.
+    CHECK(h.session->stats().drops == 0);
 }
 
 void test_eio_fails_session_and_all_pending()
@@ -741,6 +805,84 @@ void test_import_queues_client_buffer_per_picture()
     h.session->wait(ta);
     CHECK(same_buffer(h.fake->capture_fd(0), a.fd));
     CHECK(h.session->stats().misplaced == 0);
+}
+
+void test_import_released_target_completes_instead_of_dropping()
+{
+    // Chrome destroys a surface as soon as it has composited the frame, often
+    // while the picture is still with the firmware. Under Import the client's
+    // buffer is already in the firmware's hands and the backlog holds its own
+    // duplicate of the fd, so the picture is delivered rather than lost: the
+    // session keeps a copy of the target and publishes the completion. A
+    // Chrome session read `completed=177 drops=541` because it counted these
+    // as drops instead.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    const Layout layout = capture_layout_of({});
+    Target t;
+    t.publish = Publish::Import;
+    {
+        ClientBuffer a(layout);
+        t.destination = a.stable.get();
+        h.submit(t);
+        CHECK(h.session->capture_queued() == 1);
+        CHECK(same_buffer(h.fake->capture_fd(0), a.fd));
+        // The client drops the surface and its buffer mid-flight. Nothing may
+        // read that memory after this point: `destination` is a dangling
+        // pointer from here on and the Import path must not touch it.
+        h.session->release(t);
+        CHECK(!t.pending);
+    }
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(h.session->stats().drops == 0);
+    CHECK(h.session->stats().completed == 1);
+    CHECK(h.session->stats().errors == 0);
+    CHECK(h.session->stats().misplaced == 0);
+    CHECK(h.session->capture_queued() == 0);
+    CHECK(h.session->capture_held() == 0);
+    // The copy of the target dies with its token, so a second release of the
+    // same (now reused) Target is a no-op rather than a second completion.
+    h.session->release(t);
+    CHECK(h.session->stats().completed == 1);
+}
+
+void test_import_released_superframe_completes_its_halves()
+{
+    // The released target may be a picture the firmware decodes as two (a
+    // VP9 alt-ref superframe). Both halves were lent at submit, so the
+    // retained target has to answer for both: dropping the first and
+    // keeping the second, or the reverse, leaves a slot queued for a token
+    // that no longer exists and stalls the next picture.
+    Harness h;
+    h.fake->set_auto_tick(false);
+    const Layout layout = capture_layout_of({});
+    Target t;
+    t.publish = Publish::Import;
+    t.completions = 2;
+    h.fake->inject_altref_superframe();
+    {
+        ClientBuffer a(layout);
+        t.destination = a.stable.get();
+        h.submit(t);
+        CHECK(h.session->capture_queued() == 2);
+        CHECK(same_buffer(h.fake->capture_fd(0), a.fd));
+        CHECK(same_buffer(h.fake->capture_fd(1), a.fd));
+        // The surface, and with it the buffer, is gone before either half
+        // returns.
+        h.session->release(t);
+        CHECK(!t.pending);
+    }
+    h.fake->tick(1);
+    h.session->service();
+    CHECK(h.session->stats().errors == 0);
+    CHECK(h.session->stats().drops == 0);
+    CHECK(h.session->stats().misplaced == 0);
+    // The invisible half is consumed, not published; the client picture is
+    // the second completion and the only one counted.
+    CHECK(h.session->stats().completed == 1);
+    CHECK(h.session->capture_queued() == 0);
+    CHECK(h.session->capture_held() == 0);
 }
 
 void test_import_misplaced_completion_is_an_error()
@@ -1023,10 +1165,13 @@ int main()
         { "timestamped corrupt completion fails target at once",
             test_timestamped_corrupt_completion_fails_target_at_once },
         { "timestamped hidden picture is published", test_timestamped_hidden_picture_is_published_not_failed },
+        { "noshow completion never lands on a shown surface",
+            test_noshow_completion_never_lands_on_a_shown_surface },
         { "VP9 alt-ref superframe is one picture", test_vp9_altref_superframe_is_one_picture },
         { "install hidden frame needs no extra target", test_install_hidden_frame_needs_no_extra_target },
         { "hidden install unit publishes its client half", test_hidden_install_unit_publishes_its_client_half },
         { "released install completions are not errors", test_released_install_completions_are_not_errors },
+        { "released hidden install unit is not an error", test_released_hidden_install_unit_is_not_an_error },
         { "EIO fails session and all pending", test_eio_fails_session_and_all_pending },
         { "decode-order timeout is terminal", test_decode_order_timeout_is_terminal },
         { "display-order timeout drains then recovers", test_display_order_timeout_drains_then_recovers },
@@ -1038,6 +1183,10 @@ int main()
         { "visible rectangle prefers sane kernel compose", test_visible_rectangle_prefers_kernel_compose_when_sane },
         { "stable layout", test_stable_layout },
         { "import queues the client buffer per picture", test_import_queues_client_buffer_per_picture },
+        { "import released target completes instead of dropping",
+            test_import_released_target_completes_instead_of_dropping },
+        { "import released superframe completes its halves",
+            test_import_released_superframe_completes_its_halves },
         { "import misplaced completion is an error", test_import_misplaced_completion_is_an_error },
         { "import rejected on a display-order kernel", test_import_rejected_on_display_order_kernel },
         { "import rejected for an unqualified codec", test_import_rejected_for_an_unqualified_codec },

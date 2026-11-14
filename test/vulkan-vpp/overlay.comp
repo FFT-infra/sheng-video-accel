@@ -1,0 +1,279 @@
+// SPDX-License-Identifier: MIT
+//
+// Global-alpha compositing for the VA video processor: the main surface is
+// copied into the output at its own scale, the overlay surface is scaled into
+// one rectangle of the output, and every pixel inside that rectangle becomes
+//
+//     out = alpha * overlay + (1 - alpha) * main
+//
+// and, when the blend state sets VA_BLEND_PREMULTIPLIED_ALPHA,
+//
+//     out = overlay + (1 - alpha) * main
+//
+// because the source already carries its alpha. The premultiplied form is
+// mixed around the plane's neutral code (16 for luma, 128 for chroma): a
+// fully transparent premultiplied sample is that neutral, so the mix has to
+// take the offset off the main term rather than off the source.
+//
+// The main pass is an offset copy rather than a plain one because a decoded
+// frame's surface is wider than its picture — 3048 columns in a 3056-column
+// stride, say — so the rectangle the client names is the picture, and the
+// output is its size. It has to cover the output exactly: a smaller rectangle
+// would be a scale, which is the other kernel's job.
+//
+// This is what `overlay_vaapi` asks for: FFmpeg submits two
+// VAProcPipelineParameterBuffers in one picture, the first naming the main
+// surface over the whole output and the second naming the overlay surface, its
+// output_region and a VABlendState with VA_BLEND_GLOBAL_ALPHA. The three
+// DMA-BUFs (main, overlay, destination) are bound as flat uint[] storage
+// buffers and every address comes from push constants.
+//
+// The mix runs on the encoded Y'CbCr codes, not on RGB. For a *global* alpha
+// that is the same picture: a limited-range code is an affine function of the
+// normalised value (16 + 219 v for luma, 128 + 224 c for chroma), so
+// `a*o + (1-a)*m` on codes equals the same mix on the normalised values, and
+// the mix of two encoded triples equals encoding the mix of the two encoded
+// RGB triples. Per-pixel alpha would need the RGB space; this kernel has one
+// scalar.
+//
+// The overlay sample position is the same swscale point map the scale kernel
+// uses, over the rectangle instead of the whole output:
+//
+//     inc = ((src << 16) + (dst >> 1)) / dst
+//     src_index(i) = (i * inc + (inc >> 1)) >> 16
+//
+// Each invocation owns one 32-bit destination word: four luma pixels and two
+// chroma pairs for NV12, two luma samples and one chroma pair for P010 (the
+// `bytes` push constant selects; a P010 sample keeps the ten bits in the top
+// of its 16-bit word). No two invocations write the same word. The rectangle
+// is even on both axes, so every 2x2 luma block is either wholly inside it or
+// wholly outside, and a destination chroma cell is never half blended.
+
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0, std430) readonly buffer Main { uint s[]; };
+layout(set = 0, binding = 1, std430) readonly buffer Overlay { uint o[]; };
+layout(set = 0, binding = 2, std430) writeonly buffer Dst { uint d[]; };
+layout(push_constant) uniform Params {
+    uint m_stride, m_uv, m_y;
+    // Where the main pass's rectangle starts inside its surface.
+    uint m_x, m_row;
+    uint o_stride, o_uv, o_y;
+    uint d_stride, d_uv, d_y;
+    // Overlay surface size, and the rectangle it is drawn into.
+    uint o_width, o_height;
+    uint r_x, r_y, r_w, r_h;
+    uint dst_width, dst_height;
+    // Bytes per sample: 1 for NV12, 2 for P010. Both ends share it.
+    uint bytes;
+    float alpha;
+    // Non-zero when the overlay's colours are already multiplied by alpha.
+    uint premult;
+    // Whether the destination is full range, and which interpolation method
+    // samples the overlay.
+    uint full, interp;
+    // The overlay region this layer reads: origin and size inside the
+    // overlay surface.
+    uint o_x, o_row, o_crop_w, o_crop_h;
+} p;
+
+// One sample as its own code value: 0..255 for NV12, 0..1023 for P010.
+float code(uint off)
+{
+    uint w = s[off >> 2];
+    uint shift = (off & 3u) << 3;
+    return p.bytes == 1u ? float((w >> shift) & 255u) : float((w >> shift) & 0xffffu) / 64.0;
+}
+
+float code_overlay(uint off)
+{
+    uint w = o[off >> 2];
+    uint shift = (off & 3u) << 3;
+    return p.bytes == 1u ? float((w >> shift) & 255u) : float((w >> shift) & 0xffffu) / 64.0;
+}
+
+// The code as the bits of the destination word: the 8-bit code for NV12, the
+// 10-bit code shifted into the top of its 16-bit word for P010.
+uint code_bits(float v)
+{
+    float top = p.bytes == 1u ? 255.0 : 1023.0;
+    uint u = uint(clamp(floor(v + 0.5), 0.0, top));
+    return p.bytes == 1u ? u : (u << 6);
+}
+
+// 16.16 source step per destination sample, rounded to nearest like swscale.
+uint step(uint src, uint dst)
+{
+    return ((src << 16) + (dst >> 1)) / dst;
+}
+
+uint pick(uint i, uint inc)
+{
+    return (i * inc + (inc >> 1)) >> 16;
+}
+
+// The method one axis actually runs: the client's own, or the driver's pick
+// when it asked for "advanced" — the area average when the axis shrinks, where
+// a two-tap filter aliases, and the cubic when it grows.
+uint method(uint src, uint dst)
+{
+    if (p.interp != 4u)
+        return p.interp;
+    if (src > dst)
+        return 2u;
+    if (src < dst)
+        return 3u;
+    return 1u;
+}
+
+// Up to four (index, weight) taps for one axis of the overlay's region: the
+// point map, the four-tap blend, the area average, or the cubic.
+int axis_taps(uint d, uint dst, uint src, uint m, out int idx[4], out float wgt[4])
+{
+    if (m == 0u) {
+        uint inc = ((src << 16) + (dst >> 1)) / dst;
+        idx[0] = int(pick(d, inc));
+        wgt[0] = 1.0;
+        return 1;
+    }
+    if (m == 2u) {
+        uint a = (d * src) / dst;
+        uint b = ((d + 1u) * src + dst - 1u) / dst;
+        if (b <= a)
+            b = a + 1u;
+        b = min(b, src);
+        a = min(a, b - 1u);
+        uint n = b - a;
+        if (n <= 4u) {
+            for (int i = 0; i < 4; ++i) {
+                idx[i] = min(int(a) + i, int(b) - 1);
+                wgt[i] = 1.0 / float(n);
+            }
+            return int(n);
+        }
+        for (int i = 0; i < 4; ++i) {
+            idx[i] = int(a) + int((uint(i) * (n - 1u)) / 3u);
+            wgt[i] = 0.25;
+        }
+        return 4;
+    }
+    float v = clamp((float(d) + 0.5) * (float(src) / float(dst)) - 0.5, 0.0, float(src - 1u));
+    uint i0 = uint(floor(v));
+    float f = v - float(i0);
+    if (m == 1u) {
+        idx[0] = int(i0);
+        idx[1] = int(min(i0 + 1u, src - 1u));
+        wgt[0] = 1.0 - f;
+        wgt[1] = f;
+        return 2;
+    }
+    float f2 = f * f, f3 = f2 * f;
+    vec4 w = vec4(-0.5 * f3 + f2 - 0.5 * f, 1.5 * f3 - 2.5 * f2 + 1.0,
+        -1.5 * f3 + 2.0 * f2 + 0.5 * f, 0.5 * f3 - 0.5 * f2);
+    for (int i = 0; i < 4; ++i) {
+        idx[i] = clamp(int(i0) - 1 + i, 0, int(src) - 1);
+        wgt[i] = w[i];
+    }
+    return 4;
+}
+
+// One overlay code at destination offset (dx, dy) inside the rectangle. The
+// chroma plane is half scale on both axes, so its region and its sample
+// positions are too: a destination chroma cell and the overlay chroma cell it
+// reads are the same half-scale coordinate.
+float sample_code(uint plane, uint dx, uint dy, uint comp, uint bpp)
+{
+    const uint dw = plane == 0u ? p.r_w : p.r_w >> 1;
+    const uint dh = plane == 0u ? p.r_h : p.r_h >> 1;
+    const uint sw = plane == 0u ? p.o_crop_w : p.o_crop_w >> 1;
+    const uint sh = plane == 0u ? p.o_crop_h : p.o_crop_h >> 1;
+    int xi[4], yi[4];
+    float xw[4], yw[4];
+    int nx = axis_taps(dx, dw, sw, method(sw, dw), xi, xw);
+    int ny = axis_taps(dy, dh, sh, method(sh, dh), yi, yw);
+    const uint ox = plane == 0u ? p.o_x : p.o_x >> 1;
+    const uint oy = plane == 0u ? p.o_row : p.o_row >> 1;
+    float v = 0.0;
+    for (int j = 0; j < ny; ++j) {
+        float rowsum = 0.0;
+        for (int i = 0; i < nx; ++i) {
+            uint off = (plane == 0u ? p.o_y : p.o_uv)
+                + (oy + uint(yi[j])) * p.o_stride + (ox + uint(xi[i])) * bpp + comp * p.bytes;
+            rowsum += xw[i] * code_overlay(off);
+        }
+        v += yw[j] * rowsum;
+    }
+    return v;
+}
+
+// The code that carries zero on a plane: the luma floor of the destination's
+// range, and the chroma midpoint, which is 128 (or 512 for ten bits) in both
+// ranges. A premultiplied sample that is fully transparent sits on it.
+float neutral(uint plane)
+{
+    if (plane == 0u)
+        return p.full != 0u ? 0.0 : (p.bytes == 1u ? 16.0 : 64.0);
+    return p.bytes == 1u ? 128.0 : 512.0;
+}
+
+float mix_codes(float main_code, float overlay_code, float n)
+{
+    if (p.premult != 0u)
+        return overlay_code + (1.0 - p.alpha) * (main_code - n);
+    return p.alpha * overlay_code + (1.0 - p.alpha) * main_code;
+}
+
+// Whether destination pixel (x, y) lands in the rectangle. Columns past the
+// visible width are clamped first, so the padding bytes of the last word carry
+// the last column's value rather than a read outside the plane.
+bool inside(uint x, uint y)
+{
+    return x >= p.r_x && x < p.r_x + p.r_w && y >= p.r_y && y < p.r_y + p.r_h;
+}
+
+void main()
+{
+    uint per_word = 4u / p.bytes;
+    uint words = (p.dst_width * p.bytes + 3u) / 4u;
+    uint word = gl_GlobalInvocationID.x;
+    if (word >= words)
+        return;
+    uint row = gl_GlobalInvocationID.y;
+    if (row >= p.dst_height + (p.dst_height >> 1))
+        return;
+
+    if (row < p.dst_height) {
+        uint packed = 0u;
+        for (uint k = 0u; k < per_word; ++k) {
+            uint dx = min(word * per_word + k, p.dst_width - 1u);
+            float m = code(p.m_y + (row + p.m_row) * p.m_stride + (dx + p.m_x) * p.bytes);
+            if (inside(dx, row))
+                m = mix_codes(m, sample_code(0u, dx - p.r_x, row - p.r_y, 0u, p.bytes), neutral(0u));
+            packed |= code_bits(m) << (k * 8u * p.bytes);
+        }
+        d[(p.d_y + row * p.d_stride + word * 4u) >> 2] = packed;
+    } else {
+        uint cy = row - p.dst_height;
+        uint cells = 2u / p.bytes;
+        uint cw = p.dst_width >> 1;
+        // The rectangle is even, so a chroma cell is inside exactly when its
+        // own half-scale coordinates are.
+        uint rx = p.r_x >> 1, ry = p.r_y >> 1;
+        uint rw = p.r_w >> 1, rh = p.r_h >> 1;
+        uint packed = 0u;
+        for (uint k = 0u; k < cells; ++k) {
+            uint cx = min(word * cells + k, cw - 1u);
+            uint m_off = p.m_uv + (cy + (p.m_row >> 1)) * p.m_stride + (cx + (p.m_x >> 1)) * 2u * p.bytes;
+            float u = code(m_off);
+            float v = code(m_off + p.bytes);
+            if (cx >= rx && cx < rx + rw && cy >= ry && cy < ry + rh) {
+                // The chroma cell covers the 2x2 luma block, so it samples the
+                // overlay at the same half-scale offset the block starts at.
+                u = mix_codes(u, sample_code(1u, cx - rx, cy - ry, 0u, 2u * p.bytes), neutral(1u));
+                v = mix_codes(v, sample_code(1u, cx - rx, cy - ry, 1u, 2u * p.bytes), neutral(1u));
+            }
+            packed |= (code_bits(u) | (code_bits(v) << (8u * p.bytes))) << (k * 16u);
+        }
+        d[(p.d_uv + cy * p.d_stride + word * 4u) >> 2] = packed;
+    }
+}

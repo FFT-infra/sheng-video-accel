@@ -18,7 +18,9 @@ root=${IRIS_SOAK_DIR:-$(iris_artifact_dir concurrency-soak)}
 duration=${IRIS_SOAK_SECONDS:-7200}
 fps=${IRIS_SOAK_FPS:-24}
 temperature_interval=${IRIS_SOAK_TEMPERATURE_INTERVAL_SECONDS:-30}
-max_temperature=${IRIS_SOAK_MAX_TEMP_MILLIC:-85000}
+# Same backstop as scripts/iris-experiment-guard.sh: below the zones'
+# 110000 millidegree critical trip, not at a comfort line.
+max_temperature=${IRIS_SOAK_MAX_TEMP_MILLIC:-100000}
 grace=${IRIS_SOAK_EXIT_GRACE_SECONDS:-300}
 guard_file=${IRIS_SOAK_GUARD_FILE:-$(dirname "$root")/iris-concurrency-soak.guard}
 allow_stale_guard=${IRIS_SOAK_ALLOW_STALE_GUARD:-0}

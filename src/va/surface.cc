@@ -15,6 +15,7 @@
 extern "C" {
 #include <fcntl.h>
 #include <libdrm/drm_fourcc.h>
+#include <linux/dma-buf.h>
 #include <unistd.h>
 #include <va/va_drmcommon.h>
 }
@@ -34,7 +35,64 @@ VAStatus guarded(VADriverContextP ctx, const char* where, auto&& body)
 
 uint32_t fourcc_for(uint32_t rt_format)
 {
+    if (rt_format & VA_RT_FORMAT_RGB32)
+        return VA_FOURCC_BGRA;
     return (rt_format & VA_RT_FORMAT_YUV420_10) ? VA_FOURCC_P010 : VA_FOURCC_NV12;
+}
+
+// Blend a settled picture's grain into the job's display buffer. The source
+// is the CAPTURE slot a Direct target holds, or the buffer a Copy or Import
+// target published into. Returns why it could not, or null when it did.
+const char* blend_into(const Surface::GrainJob& job, const iris::Target& source)
+{
+    const iris::FrameRef& frame = source.frame;
+    iris::StableBuffer* from_buffer = frame ? nullptr : source.destination;
+    if (!source.completed || source.error || (!frame && !from_buffer))
+        return "film grain: the picture it grains did not decode";
+    iris::StableBuffer& destination = *job.destination;
+    bool blended = false;
+    try {
+        // A Direct completion's CAPTURE slot is storage-aligned: its layout
+        // is the pool's rectangle, not the picture the client's surfaces
+        // name. The picture sits at the top left of that storage with the
+        // pool stride, so the blend reads it as the display surface's
+        // geometry.
+        iris::Layout from = frame ? frame->layout() : from_buffer->layout();
+        from.width = destination.layout().width;
+        from.height = destination.layout().height;
+        uint8_t* src = frame ? frame->map() : from_buffer->map();
+        const int source_fd = frame ? frame->fd() : from_buffer->fd();
+        uint8_t* dst = destination.map();
+        // The same coherency the CPU copy engine uses: wait for whoever still
+        // reads the destination, then bracket both buffers' CPU access.
+        iris::wait_dma_buf(destination.fd(), true, 5000);
+        iris::dma_buf_cpu_sync(source_fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ);
+        iris::dma_buf_cpu_sync(destination.fd(), DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE);
+        blended = apply_grain(job.params, from, src, destination.layout(), dst);
+        iris::dma_buf_cpu_sync(destination.fd(), DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE);
+        iris::dma_buf_cpu_sync(source_fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
+    } catch (const std::exception&) {
+        return "film grain: the blend could not map the surfaces";
+    }
+    if (!blended)
+        return "film grain: the picture is not a layout this driver decodes";
+    job.trace(
+        "va grain %ux%u source=%s", destination.layout().width, destination.layout().height, frame ? "frame" : "stable");
+    return nullptr;
+}
+
+// Take the job off its display surface and record what it left behind. Only
+// this surface's own job is touched: a newer picture may have replaced it.
+void settle_grain_job(DriverData& d, const std::shared_ptr<Surface::GrainJob>& job, bool ok)
+{
+    if (auto display = job->display.lock()) {
+        std::lock_guard<std::recursive_mutex> lock(d.mutex);
+        if (display->grain != job)
+            return;
+        display->grain.reset();
+        display->grain_pixels = ok;
+        display->failed = !ok;
+    }
 }
 
 // Wait for the surface's picture outside the driver mutex, then report.
@@ -43,6 +101,19 @@ uint32_t fourcc_for(uint32_t rt_format)
 VAStatus wait_for(DriverData& d, std::shared_ptr<iris::Session> session, const std::shared_ptr<Surface>& s)
 {
     iris::require(!s->failed, "surface decode failed", VA_STATUS_ERROR_DECODING_ERROR);
+    std::shared_ptr<Surface::GrainJob> job;
+    {
+        std::lock_guard<std::recursive_mutex> lock(d.mutex);
+        job = s->grain;
+    }
+    if (job) {
+        // endPicture settles a grained picture before it returns, so a job
+        // still on the surface means another thread is inside that call. A VA
+        // client serializes calls on a surface, and waiting here would have
+        // nothing that ends it.
+        throw iris::Error(
+            VA_STATUS_ERROR_SURFACE_BUSY, "film grain: the display surface's picture has not finished");
+    }
     if (!session) {
         // The owner was destroyed between our two reads. destroyContext
         // drains before it drops the context, so the target is settled now.
@@ -63,12 +134,6 @@ VAStatus wait_for(DriverData& d, std::shared_ptr<iris::Session> session, const s
         throw;
     }
     return VA_STATUS_SUCCESS;
-}
-
-std::shared_ptr<iris::Session> session_of(DriverData& d, const Surface& s)
-{
-    auto owner = owner_of(d, s);
-    return owner ? owner->session : nullptr;
 }
 
 // The buffer's real length. DMA-BUF llseek reports it on the Iris kernel, so
@@ -103,15 +168,97 @@ std::unique_ptr<iris::StableBuffer> import_stable(int fd, uint64_t allocation, c
 
 } // namespace
 
+std::shared_ptr<iris::Session> session_of(DriverData& d, const Surface& s)
+{
+    auto owner = owner_of(d, s);
+    return owner ? owner->session : nullptr;
+}
+
+std::shared_ptr<Surface::GrainJob> queue_grain(DriverData& d, Context& c,
+    const std::shared_ptr<Surface>& decoded)
+{
+    if (c.profile != VAProfileAV1Profile0 || !c.picture.parameters)
+        return nullptr;
+    const auto& picture = *static_cast<const VADecPictureParameterBufferAV1*>(c.picture.parameters);
+    const auto& grain = picture.film_grain_info;
+    if (!grain.film_grain_info_fields.bits.apply_grain)
+        return nullptr;
+    const VASurfaceID display_id = picture.current_display_picture;
+    iris::require(picture.current_frame == c.picture.surface_id && display_id != VA_INVALID_ID
+            && display_id != picture.current_frame,
+        "film grain needs the picture on current_frame and a separate display surface",
+        VA_STATUS_ERROR_INVALID_PARAMETER);
+    const unsigned depth = picture.bit_depth_idx ? 10 : 8;
+
+    std::lock_guard<std::recursive_mutex> lock(d.mutex);
+    auto display = surface(d, display_id);
+    iris::require(display->width == decoded->width && display->height == decoded->height
+            && display->fourcc == decoded->fourcc
+            && display->fourcc == (depth == 10 ? VA_FOURCC_P010 : VA_FOURCC_NV12),
+        "film grain: the display surface is not this picture's size and format", VA_STATUS_ERROR_INVALID_SURFACE);
+    iris::require(!display->target.pending, "film grain: the display surface is decoding",
+        VA_STATUS_ERROR_SURFACE_BUSY);
+    auto job = std::make_shared<Surface::GrainJob>();
+    // The job names its display surface weakly: the surface owns the job, so
+    // a strong pointer back would keep the pair alive forever.
+    job->display = display;
+    ensure_stable(d, *display);
+    job->destination = display->stable;
+    job->params = grain_params(grain, depth, picture.matrix_coefficients);
+    job->trace = d.trace;
+    // Whatever this surface showed before belongs to an older picture.
+    display->grain = job;
+    display->grain_pixels = false;
+    display->failed = false;
+    return job;
+}
+
+void finish_grain(DriverData& d, const std::shared_ptr<Surface::GrainJob>& job,
+    const std::shared_ptr<iris::Session>& session, iris::Target& source)
+{
+    // FFmpeg decodes into a scratch current_frame that it recycles at the
+    // next access unit, so the picture is settled here: the target must be
+    // read while it still names this picture, not from a later wait on the
+    // display surface.
+    const char* failure = nullptr;
+    try {
+        session->wait(source);
+        failure = blend_into(*job, source);
+    } catch (...) {
+        settle_grain_job(d, job, false);
+        throw;
+    }
+    if (failure) {
+        settle_grain_job(d, job, false);
+        throw iris::Error(VA_STATUS_ERROR_INVALID_SURFACE, failure);
+    }
+    settle_grain_job(d, job, true);
+}
+
+void abandon_grain(DriverData& d, const std::shared_ptr<Surface::GrainJob>& job)
+{
+    settle_grain_job(d, job, false);
+}
+
+bool producing(DriverData& d, const Surface& surface)
+{
+    std::lock_guard<std::recursive_mutex> lock(d.mutex);
+    // A grain job exists only while endPicture is still blending it; after
+    // that the surface has pixels no caller has been handed yet.
+    return surface.rendering() || surface.grain != nullptr;
+}
+
 VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, unsigned height, VASurfaceID* ids,
     unsigned count, VASurfaceAttrib* attributes, unsigned attribute_count)
 {
     return guarded(ctx, "createSurfaces", [&] {
         auto& d = data(ctx);
         iris::require(width && height && count, "invalid surface geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
-        iris::require(format & (VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10), "unsupported RT format",
-            VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
-        const uint32_t fourcc = fourcc_for(format);
+        iris::require(format & (VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10 | VA_RT_FORMAT_RGB32),
+            "unsupported RT format", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+        iris::require(!(format & VA_RT_FORMAT_RGB32) || format == VA_RT_FORMAT_RGB32,
+            "RGB32 is the whole format, not a bit beside a YUV one", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+        uint32_t fourcc = fourcc_for(format);
         unsigned memory_type = VA_SURFACE_ATTRIB_MEM_TYPE_VA;
         const void* external = nullptr;
         for (unsigned i = 0; i < attribute_count; ++i) {
@@ -119,11 +266,20 @@ VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, 
             if (!(attribute.flags & VA_SURFACE_ATTRIB_SETTABLE))
                 continue;
             switch (attribute.type) {
-            case VASurfaceAttribPixelFormat:
+            case VASurfaceAttribPixelFormat: {
+                // A packed surface has two byte orders, so the client picks
+                // one; the YUV formats have exactly one fourcc each.
+                const uint32_t requested = attribute.value.type == VAGenericValueTypeInteger
+                    ? static_cast<uint32_t>(attribute.value.value.i) : 0;
+                const bool rgb = format == VA_RT_FORMAT_RGB32;
                 iris::require(attribute.value.type == VAGenericValueTypeInteger
-                        && static_cast<uint32_t>(attribute.value.value.i) == fourcc,
+                        && (rgb ? (requested == VA_FOURCC_BGRA || requested == VA_FOURCC_RGBA)
+                                : requested == fourcc),
                     "surface pixel format does not match the RT format", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+                if (rgb)
+                    fourcc = requested;
                 break;
+            }
             case VASurfaceAttribMemoryType:
                 memory_type = static_cast<unsigned>(attribute.value.value.i);
                 break;
@@ -216,6 +372,10 @@ VAStatus destroySurfaces(VADriverContextP ctx, VASurfaceID* ids, int count)
                     VA_STATUS_ERROR_SURFACE_BUSY);
                 doomed.push_back(it->second);
                 sessions.push_back(session_of(d, *it->second));
+                // A synthesis belongs to the picture that is running it, and
+                // that picture holds the job; the surface it would land on is
+                // being destroyed, so the job is dropped here.
+                it->second->grain.reset();
                 d.surfaces.erase(it);
             }
         }
@@ -249,8 +409,8 @@ VAStatus syncSurface(VADriverContextP ctx, VASurfaceID id)
             session = session_of(d, *s);
             owner = owner_of(d, *s);
             // An encode context has no decode session: vaSyncSurface means
-            // "the picture this surface was input to is done", which is the
-            // access unit's completion.
+            // "this surface is free to reuse", which the firmware answers
+            // when it has read the picture, before the access unit exists.
             if (owner && owner->encoding()) {
                 auto it = owner->enc_submitted.find(id);
                 if (it != owner->enc_submitted.end())
@@ -258,23 +418,12 @@ VAStatus syncSurface(VADriverContextP ctx, VASurfaceID id)
             }
         }
         if (encoded) {
-            // Claim it into the coded buffer the client named, not into a
-            // local. The access unit is the client's, and GStreamer's encoder
-            // syncs the surface and then maps the coded buffer; throwing the
-            // bytes away here left that map with nothing to return.
-            if (encoded->session && encoded->coded != VA_INVALID_ID) {
-                std::shared_ptr<Buffer> coded;
-                {
-                    std::lock_guard<std::recursive_mutex> lock(d.mutex);
-                    auto it = d.buffers.find(encoded->coded);
-                    if (it != d.buffers.end())
-                        coded = it->second;
-                }
-                if (coded)
-                    return claim_coded(d, coded, VA_TIMEOUT_INFINITE);
-            }
+            // Waiting for the unit here made every client that submits ahead
+            // serialise: FFmpeg syncs the input surface per picture. The
+            // unit is claimed by the coded buffer's own vaSyncBuffer or
+            // vaMapBuffer, which is where the bytes are wanted.
             if (encoded->session)
-                encoded->session->wait(encoded->ticket);
+                encoded->session->wait_input(encoded->ticket);
             return VA_STATUS_SUCCESS;
         }
         return wait_for(d, std::move(session), s);
@@ -323,7 +472,14 @@ VAStatus querySurfaceStatus(VADriverContextP ctx, VASurfaceID id, VASurfaceStatu
         // A client that polls instead of syncing still drives completions.
         if (s->rendering() && session)
             session->service();
-        *status = s->rendering() ? VASurfaceRendering : VASurfaceReady;
+        // A grained display surface is owed its pixels until its picture's
+        // endPicture has run the blend.
+        bool grain_owed = false;
+        {
+            std::lock_guard<std::recursive_mutex> lock(d.mutex);
+            grain_owed = s->grain != nullptr;
+        }
+        *status = (s->rendering() || grain_owed) ? VASurfaceRendering : VASurfaceReady;
         return VA_STATUS_SUCCESS;
     });
 }
@@ -335,7 +491,7 @@ VAStatus querySurfaceAttributes(VADriverContextP ctx, VAConfigID config, VASurfa
     auto it = d.configs.find(config);
     if (it == d.configs.end())
         return VA_STATUS_ERROR_INVALID_CONFIG;
-    VASurfaceAttrib list[8] = {};
+    VASurfaceAttrib list[10] = {};
     unsigned n = 0;
     auto add = [&](VASurfaceAttribType type, int value, unsigned flags) {
         list[n].type = type;
@@ -349,13 +505,29 @@ VAStatus querySurfaceAttributes(VADriverContextP ctx, VAConfigID config, VASurfa
     // the profile can decode into rather than the one the config defaulted to.
     add(VASurfaceAttribPixelFormat, VA_FOURCC_NV12, VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
     const VAProfile profile = it->second.profile;
-    // The encoder's raw port is NV12 only; P010 is a decode-only format here.
+    // The encoder's raw port is NV12 only. A decode surface follows the
+    // profile, and a VideoProc surface follows the config's RT format: the
+    // processor scales P010 as well as NV12, one kernel per sample width.
     const bool encoding = it->second.entrypoint == VAEntrypointEncSlice;
-    if (!encoding && d.capabilities.p010 && p010_decode_profile(profile))
+    // A VideoProc config creates the render target, not a decoded picture, so
+    // its floor is the kernel's rather than the node's; a client scaling down
+    // to a thumbnail is otherwise refused before the driver is called.
+    const bool vpp = profile == VAProfileNone && it->second.entrypoint == VAEntrypointVideoProc;
+    if (!encoding && d.capabilities.p010 && (p010_decode_profile(profile) || vpp))
         add(VASurfaceAttribPixelFormat, VA_FOURCC_P010, VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
-    add(VASurfaceAttribMinWidth, static_cast<int>(d.capabilities.min_width), VA_SURFACE_ATTRIB_GETTABLE);
+    // Packed surfaces exist for the processor's overlay input only: a client
+    // uploads BGRA or RGBA and asks for it to be composited onto a YUV frame.
+    if (vpp) {
+        add(VASurfaceAttribPixelFormat, VA_FOURCC_BGRA,
+            VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
+        add(VASurfaceAttribPixelFormat, VA_FOURCC_RGBA,
+            VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
+    }
+    const unsigned min_geometry = vpp ? kVppMinGeometry : d.capabilities.min_width;
+    add(VASurfaceAttribMinWidth, static_cast<int>(min_geometry), VA_SURFACE_ATTRIB_GETTABLE);
     add(VASurfaceAttribMaxWidth, static_cast<int>(d.capabilities.max_width), VA_SURFACE_ATTRIB_GETTABLE);
-    add(VASurfaceAttribMinHeight, static_cast<int>(d.capabilities.min_height), VA_SURFACE_ATTRIB_GETTABLE);
+    add(VASurfaceAttribMinHeight,
+        static_cast<int>(vpp ? kVppMinGeometry : d.capabilities.min_height), VA_SURFACE_ATTRIB_GETTABLE);
     add(VASurfaceAttribMaxHeight, static_cast<int>(d.capabilities.max_height), VA_SURFACE_ATTRIB_GETTABLE);
     add(VASurfaceAttribMemoryType,
         VA_SURFACE_ATTRIB_MEM_TYPE_VA | VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME | VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,

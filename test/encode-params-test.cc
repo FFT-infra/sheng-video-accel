@@ -140,7 +140,31 @@ void test_h264_translation()
     check(params.level == V4L2_MPEG_VIDEO_H264_LEVEL_4_1, "H.264 level 4.1");
     check(params.rate_mode == RateMode::Vbr, "VBR rate mode");
     check(params.bitrate == 5000000, "rate-control bitrate wins over the sequence bitrate");
-    check(params.peak_bitrate == 0, "VBR sends no peak bitrate");
+    check(params.peak_bitrate == 0, "a rate with no separate maximum sends no peak bitrate");
+
+    // VA's field is the controller's maximum and target_percentage names the
+    // target inside it. FFmpeg without -maxrate sends 2x the requested rate
+    // at 50 %, which used to program an encoder at twice the client's rate.
+    VAEncMiscParameterRateControl split = {};
+    split.bits_per_second = 8000000;
+    split.target_percentage = 50;
+    std::vector<uint32_t> split_storage = misc(VAEncMiscParameterTypeRateControl, split);
+    const EncodePicture split_input = h264_input(sequence, picture, { split_storage.data() });
+    const iris::EncodeParams split_params = encoder->translate(split_input);
+    check(split_params.bitrate == 4000000, "the target is the percentage of the maximum");
+    check(split_params.peak_bitrate == 8000000, "the maximum above the target is the peak");
+
+    // FFmpeg renders the rate-control misc once, with the first picture. A
+    // later picture without it must keep that target: falling back to the
+    // sequence field reprogrammed the controller with the maximum on every
+    // following picture, which is an encoder alternating between 4 and 8
+    // Mbit/s and producing 8.
+    VAEncSequenceParameterBufferH264 split_sequence = sequence;
+    split_sequence.bits_per_second = 8000000;
+    const EncodePicture later = h264_input(split_sequence, picture, {});
+    const iris::EncodeParams later_params = encoder->translate(later);
+    check(later_params.bitrate == 4000000, "a picture without rate control keeps the target");
+    check(later_params.peak_bitrate == 8000000, "and keeps the ceiling");
     check(params.gop_size == 60, "GOP from intra_period");
     check(params.cabac, "CABAC from the picture flags");
     check(params.min_qp == 10 && params.max_qp == 40, "QP bounds from the rate-control misc");
@@ -164,6 +188,41 @@ void test_h264_translation()
     check(cqp_params.rate_mode == RateMode::Cqp, "CQP rate mode");
     check(cqp_params.qp == 28, "CQP QP combines the picture and the slice delta");
     check(cqp_params.peak_bitrate == 0, "CQP sends no peak bitrate");
+}
+
+void test_h264_coded_size()
+{
+    auto encoder = iris::codec::make_h264_encoder(VAProfileH264High, RateMode::Vbr);
+    VAEncSequenceParameterBufferH264 sequence = h264_sequence();
+    const VAEncPictureParameterBufferH264 picture = h264_picture();
+    unsigned width = 0;
+    unsigned height = 0;
+
+    // FFmpeg's transcode declares a macroblock-aligned context (1920x1088)
+    // for a 1920x1080 picture and names the picture through the frame crop.
+    // Each chroma-sample offset removes two luma rows.
+    sequence.frame_cropping_flag = 1;
+    sequence.frame_crop_bottom_offset = 4;
+    check(encoder->coded_size(h264_input(sequence, picture), width, height), "H.264 names the picture");
+    check(width == 1920 && height == 1080, "the frame crop removes the aligned rows");
+    sequence.frame_crop_right_offset = 2;
+    check(encoder->coded_size(h264_input(sequence, picture), width, height), "H.264 names a cropped width");
+    check(width == 1916 && height == 1080, "the right crop removes four luma columns");
+
+    // Without cropping the macroblock grid is the picture.
+    sequence = h264_sequence();
+    check(encoder->coded_size(h264_input(sequence, picture), width, height), "H.264 names an uncropped picture");
+    check(width == 1920 && height == 1088, "an uncropped picture keeps the macroblock size");
+
+    // A crop that would erase the picture is not a geometry.
+    sequence.frame_cropping_flag = 1;
+    sequence.frame_crop_bottom_offset = 600;
+    check(!encoder->coded_size(h264_input(sequence, picture), width, height), "an oversized crop is refused");
+
+    // HEVC carries no such field: its picture is the context's geometry.
+    auto hevc = iris::codec::make_hevc_encoder(VAProfileHEVCMain, RateMode::Vbr);
+    EncodePicture hevc_input;
+    check(!hevc->coded_size(hevc_input, width, height), "HEVC takes the picture from the context");
 }
 
 void test_h264_rounding_and_rejections()
@@ -649,6 +708,7 @@ void test_unimplemented_features()
 int main()
 {
     test_h264_translation();
+    test_h264_coded_size();
     test_h264_rounding_and_rejections();
     test_hevc_translation();
     test_keyframe_request();

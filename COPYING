@@ -1,3 +1,10 @@
-This project is released under the following licenses:
-* GNU Lesser General Public License Version 2.1: See COPYING.LGPL
-* MIT License: See COPYING.MIT.
+The driver source in this tree is MIT licensed: see COPYING.MIT and the
+SPDX headers on the files. COPYING.LGPL retains the GNU Lesser General Public
+License Version 2.1 text from the upstream libva-v4l2 project, whose LGPL
+tiled-YUV sources are no longer part of this tree. It is kept for provenance;
+it does not license the current driver source.
+
+Package metadata keeps MIT AND LGPL-2.1-or-later so distributions that
+attribute the upstream history remain conservative. Both licence texts and
+this file are installed under /usr/share/licenses by the Fedora and Arch
+packages.

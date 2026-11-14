@@ -28,15 +28,85 @@ VAStatus guarded(VADriverContextP ctx, const char* where, auto&& body)
     }
 }
 
-// Packed NV12/P010 layout for a VAImage of the given size.
+bool rgb_fourcc(uint32_t fourcc)
+{
+    return fourcc == VA_FOURCC_BGRA || fourcc == VA_FOURCC_RGBA;
+}
+
+// I420 is the same 4:2:0 picture as NV12 with the chroma pair stored as two
+// separate planes instead of interleaved bytes. The surfaces the driver
+// decodes into are always NV12, so an I420 image is a client-side layout the
+// two copy paths translate, not a second surface format.
+bool planar_chroma(uint32_t fourcc)
+{
+    return fourcc == VA_FOURCC_I420;
+}
+
+unsigned bytes_of(uint32_t fourcc)
+{
+    if (fourcc == VA_FOURCC_P010)
+        return 2;
+    return rgb_fourcc(fourcc) ? 4 : 1;
+}
+
+// An image the copy paths can move between a surface and a client buffer:
+// the surface's own format, or I420 for the same 8-bit 4:2:0 picture.
+bool compatible(uint32_t image_fourcc, uint32_t surface_fourcc)
+{
+    return image_fourcc == surface_fourcc
+        || (planar_chroma(image_fourcc) && surface_fourcc == VA_FOURCC_NV12);
+}
+
+// The packed BGRA/RGBA surface the processor composes from is one plane of
+// 32-bit words; VA names the bytes in memory order.
+void fill_masks(VAImageFormat& format)
+{
+    if (format.fourcc == VA_FOURCC_BGRA) {
+        format.red_mask = 0x00ff0000;
+        format.green_mask = 0x0000ff00;
+        format.blue_mask = 0x000000ff;
+    } else if (format.fourcc == VA_FOURCC_RGBA) {
+        format.red_mask = 0x000000ff;
+        format.green_mask = 0x0000ff00;
+        format.blue_mask = 0x00ff0000;
+    }
+    if (rgb_fourcc(format.fourcc))
+        format.alpha_mask = 0xff000000;
+}
+
+// Packed layout for a VAImage of the given size.
 void fill_image(VAImage& image, uint32_t fourcc, unsigned width, unsigned height)
 {
-    const unsigned bytes = fourcc == VA_FOURCC_P010 ? 2 : 1;
+    const unsigned bytes = bytes_of(fourcc);
     image.format.fourcc = fourcc;
     image.format.byte_order = VA_LSB_FIRST;
-    image.format.bits_per_pixel = bytes == 2 ? 24 : 12;
+    image.format.bits_per_pixel = rgb_fourcc(fourcc) ? 32 : (bytes == 2 ? 24 : 12);
+    fill_masks(image.format);
     image.width = static_cast<uint16_t>(width);
     image.height = static_cast<uint16_t>(height);
+    if (rgb_fourcc(fourcc)) {
+        image.num_planes = 1;
+        image.pitches[0] = width * bytes;
+        image.offsets[0] = 0;
+        image.data_size = image.pitches[0] * height;
+        image.num_palette_entries = 0;
+        image.entry_bytes = 0;
+        return;
+    }
+    if (planar_chroma(fourcc)) {
+        // Three planes, each at its own pitch: the luma plane, then U and V
+        // as one byte per 2x2 block.
+        image.num_planes = 3;
+        image.pitches[0] = (width + 1) & ~1u;
+        image.pitches[1] = image.pitches[2] = image.pitches[0] / 2;
+        image.offsets[0] = 0;
+        image.offsets[1] = image.pitches[0] * height;
+        image.offsets[2] = image.offsets[1] + image.pitches[1] * ((height + 1) / 2);
+        image.data_size = image.offsets[2] + image.pitches[2] * ((height + 1) / 2);
+        image.num_palette_entries = 0;
+        image.entry_bytes = 0;
+        return;
+    }
     image.num_planes = 2;
     image.pitches[0] = width * bytes;
     image.pitches[1] = ((width + 1) & ~1u) * bytes;
@@ -51,20 +121,25 @@ void fill_image(VAImage& image, uint32_t fourcc, unsigned width, unsigned height
 // and size come from the DMA-BUF layout, not from a packed copy.
 void view_image(VAImage& image, uint32_t fourcc, unsigned width, unsigned height, const iris::Layout& layout)
 {
-    const unsigned bytes = fourcc == VA_FOURCC_P010 ? 2 : 1;
+    const unsigned bytes = bytes_of(fourcc);
     image.format.fourcc = fourcc;
     image.format.byte_order = VA_LSB_FIRST;
-    image.format.bits_per_pixel = bytes == 2 ? 24 : 12;
+    image.format.bits_per_pixel = rgb_fourcc(fourcc) ? 32 : (bytes == 2 ? 24 : 12);
+    fill_masks(image.format);
     image.width = static_cast<uint16_t>(width);
     image.height = static_cast<uint16_t>(height);
-    image.num_planes = 2;
     image.pitches[0] = layout.stride;
-    image.pitches[1] = layout.stride;
     image.offsets[0] = layout.data_offset;
-    image.offsets[1] = layout.chroma_offset();
     image.data_size = layout.size;
     image.num_palette_entries = 0;
     image.entry_bytes = 0;
+    if (rgb_fourcc(fourcc)) {
+        image.num_planes = 1;
+        return;
+    }
+    image.num_planes = 2;
+    image.pitches[1] = layout.stride;
+    image.offsets[1] = layout.chroma_offset();
 }
 
 // Copy the visible width x height from a surface's current pixels (held
@@ -84,9 +159,9 @@ void copy_pixels(DriverData& d, Surface& s, const VAImage& image, uint8_t* desti
         layout = s.stable->layout();
         fd = s.stable->fd();
     }
-    iris::require(layout.fourcc == image.format.fourcc, "image format does not match the surface",
+    iris::require(compatible(image.format.fourcc, layout.fourcc), "image format does not match the surface",
         VA_STATUS_ERROR_INVALID_IMAGE_FORMAT);
-    const unsigned bytes = layout.fourcc == VA_FOURCC_P010 ? 2 : 1;
+    const unsigned bytes = bytes_of(layout.fourcc);
     const unsigned width = std::min<unsigned>(image.width, layout.width);
     const unsigned height = std::min<unsigned>(image.height, layout.height);
     (void)d;
@@ -94,9 +169,28 @@ void copy_pixels(DriverData& d, Surface& s, const VAImage& image, uint8_t* desti
     for (unsigned row = 0; row < height; ++row)
         std::memcpy(destination + image.offsets[0] + static_cast<size_t>(row) * image.pitches[0],
             source + layout.data_offset + static_cast<size_t>(row) * layout.stride, width * bytes);
-    for (unsigned row = 0; row < (height + 1) / 2; ++row)
-        std::memcpy(destination + image.offsets[1] + static_cast<size_t>(row) * image.pitches[1],
-            source + layout.chroma_offset() + static_cast<size_t>(row) * layout.stride, ((width + 1) & ~1u) * bytes);
+    if (rgb_fourcc(layout.fourcc)) {
+        iris::dma_buf_cpu_sync(fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
+        return;
+    }
+    const unsigned chroma_width = (width + 1) & ~1u;
+    const uint8_t* uv = source + layout.chroma_offset();
+    if (planar_chroma(image.format.fourcc)) {
+        // De-interleave the surface's (u, v) pairs into two planes.
+        for (unsigned row = 0; row < (height + 1) / 2; ++row) {
+            const uint8_t* line = uv + static_cast<size_t>(row) * layout.stride;
+            uint8_t* u = destination + image.offsets[1] + static_cast<size_t>(row) * image.pitches[1];
+            uint8_t* v = destination + image.offsets[2] + static_cast<size_t>(row) * image.pitches[2];
+            for (unsigned col = 0; col < chroma_width / 2; ++col) {
+                u[col] = line[col * 2];
+                v[col] = line[col * 2 + 1];
+            }
+        }
+    } else {
+        for (unsigned row = 0; row < (height + 1) / 2; ++row)
+            std::memcpy(destination + image.offsets[1] + static_cast<size_t>(row) * image.pitches[1],
+                uv + static_cast<size_t>(row) * layout.stride, chroma_width * bytes);
+    }
     iris::dma_buf_cpu_sync(fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
 }
 
@@ -105,20 +199,42 @@ void copy_pixels(DriverData& d, Surface& s, const VAImage& image, uint8_t* desti
 VAStatus queryImageFormats(VADriverContextP ctx, VAImageFormat* formats, int* count)
 {
     auto& d = data(ctx);
+    // count is in/out: on entry it is the caller's list size, and the driver
+    // may write at most that many entries. FFmpeg sizes its array from
+    // vaMaxNumImageFormats (kMaxImageFormats) and hands that number back, so
+    // writing more entries than the driver advertised overflows the client's
+    // heap instead of returning an error.
+    VAImageFormat list[kMaxImageFormats] = {};
     int n = 0;
-    formats[n] = {};
-    formats[n].fourcc = VA_FOURCC_NV12;
-    formats[n].byte_order = VA_LSB_FIRST;
-    formats[n].bits_per_pixel = 12;
+    list[n].fourcc = VA_FOURCC_NV12;
+    list[n].byte_order = VA_LSB_FIRST;
+    list[n].bits_per_pixel = 12;
+    ++n;
+    // The same picture with the chroma pair split into two planes; the copy
+    // paths translate it to and from the surface's NV12.
+    list[n].fourcc = VA_FOURCC_I420;
+    list[n].byte_order = VA_LSB_FIRST;
+    list[n].bits_per_pixel = 12;
     ++n;
     if (d.capabilities.p010) {
-        formats[n] = {};
-        formats[n].fourcc = VA_FOURCC_P010;
-        formats[n].byte_order = VA_LSB_FIRST;
-        formats[n].bits_per_pixel = 24;
+        list[n].fourcc = VA_FOURCC_P010;
+        list[n].byte_order = VA_LSB_FIRST;
+        list[n].bits_per_pixel = 24;
         ++n;
     }
-    *count = n;
+    // The processor's packed overlay sources; a client uploads one and asks
+    // for it to be composited onto a YUV frame.
+    for (uint32_t fourcc : { VA_FOURCC_BGRA, VA_FOURCC_RGBA }) {
+        list[n].fourcc = fourcc;
+        list[n].byte_order = VA_LSB_FIRST;
+        list[n].bits_per_pixel = 32;
+        fill_masks(list[n]);
+        ++n;
+    }
+    if (formats != nullptr && count != nullptr && *count > 0)
+        std::copy_n(list, std::min(n, *count), formats);
+    if (count != nullptr)
+        *count = n;
     return VA_STATUS_SUCCESS;
 }
 
@@ -126,7 +242,9 @@ VAStatus createImage(VADriverContextP ctx, VAImageFormat* format, int width, int
 {
     return guarded(ctx, "createImage", [&] {
         auto& d = data(ctx);
-        iris::require(format && (format->fourcc == VA_FOURCC_NV12 || format->fourcc == VA_FOURCC_P010),
+        iris::require(format
+                && (format->fourcc == VA_FOURCC_NV12 || format->fourcc == VA_FOURCC_P010
+                    || planar_chroma(format->fourcc) || rgb_fourcc(format->fourcc)),
             "image format not supported", VA_STATUS_ERROR_INVALID_IMAGE_FORMAT);
         iris::require(width > 0 && height > 0, "image geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
         *image = {};
@@ -176,7 +294,7 @@ VAStatus deriveImage(VADriverContextP ctx, VASurfaceID id, VAImage* image)
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
             s = surface(d, id);
         }
-        if (s->rendering())
+        if (producing(d, *s))
             syncSurface(ctx, id);
         // A view, not a copy. FFmpeg's encode upload maps the derived image
         // and writes straight into it, then unmaps without ever calling
@@ -219,6 +337,12 @@ VAStatus deriveImage(VADriverContextP ctx, VASurfaceID id, VAImage* image)
             d.buffers[view.buf] = b;
             d.images[view.image_id] = view;
             ++s->derived_images;
+            // A surface derived before it ever held a decoded frame is the
+            // client's own memory: an upload maps this view and writes the
+            // frame into it. Reading it back must not demand a decode
+            // completion that will never arrive.
+            if (!s->target.frame)
+                s->client_pixels = true;
         }
         *image = view;
         return VA_STATUS_SUCCESS;
@@ -245,7 +369,7 @@ VAStatus getImage(VADriverContextP ctx, VASurfaceID id, int x, int y, unsigned w
         }
         iris::require(x == 0 && y == 0 && width == image.width && height == image.height,
             "partial vaGetImage is not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
-        if (s->rendering())
+        if (producing(d, *s))
             syncSurface(ctx, id);
         // An image obtained from vaDeriveImage already is a view of these
         // pixels; copying a surface onto itself would need a direction the
@@ -260,9 +384,109 @@ VAStatus getImage(VADriverContextP ctx, VASurfaceID id, int x, int y, unsigned w
     });
 }
 
-VAStatus putImage(VADriverContextP, VASurfaceID, VAImageID, int, int, unsigned, unsigned, int, int, unsigned, unsigned)
+// Client pixels in, surface memory out. No scaling and no bit-depth
+// conversion: the image's format must match the surface's, so what lands is
+// exactly the client's bytes. This is the path a client that creates its own
+// VAImage takes to fill a surface (FFmpeg falls back to it when the surface
+// is not derivable); without it an upload has no route into the driver.
+VAStatus putImage(VADriverContextP ctx, VASurfaceID id, VAImageID image_id, int sx, int sy, unsigned sw,
+    unsigned sh, int dx, int dy, unsigned dw, unsigned dh)
 {
-    return VA_STATUS_ERROR_UNIMPLEMENTED;
+    return guarded(ctx, "putImage", [&] {
+        auto& d = data(ctx);
+        std::shared_ptr<Surface> s;
+        VAImage image;
+        std::shared_ptr<Buffer> b;
+        {
+            std::lock_guard<std::recursive_mutex> lock(d.mutex);
+            s = surface(d, id);
+            auto it = d.images.find(image_id);
+            iris::require(it != d.images.end(), "invalid image", VA_STATUS_ERROR_INVALID_IMAGE);
+            image = it->second;
+            b = buffer(d, image.buf);
+        }
+        iris::require(sw == dw && sh == dh, "vaPutImage cannot scale", VA_STATUS_ERROR_UNIMPLEMENTED);
+        iris::require(!b->alias, "vaPutImage reads a client image, not a derived view",
+            VA_STATUS_ERROR_INVALID_IMAGE);
+        iris::require(sx >= 0 && sy >= 0 && dx >= 0 && dy >= 0 && sw && sh
+                && static_cast<uint64_t>(sx) + sw <= image.width
+                && static_cast<uint64_t>(sy) + sh <= image.height
+                && static_cast<uint64_t>(dx) + dw <= s->width && static_cast<uint64_t>(dy) + dh <= s->height,
+            "vaPutImage region outside the image or the surface", VA_STATUS_ERROR_INVALID_PARAMETER);
+        if (!rgb_fourcc(image.format.fourcc))
+            iris::require(!((sx | sy | dx | dy | sw | sh) & 1u),
+                "vaPutImage regions are even for 4:2:0", VA_STATUS_ERROR_INVALID_PARAMETER);
+        iris::require(compatible(image.format.fourcc, s->fourcc), "image format does not match the surface",
+            VA_STATUS_ERROR_INVALID_IMAGE_FORMAT);
+        if (producing(d, *s))
+            syncSurface(ctx, id);
+
+        uint8_t* destination = nullptr;
+        iris::Layout layout;
+        int fd = -1;
+        {
+            std::lock_guard<std::recursive_mutex> lock(d.mutex);
+            if (s->target.frame) {
+                destination = static_cast<uint8_t*>(s->target.frame->map());
+                layout = s->target.frame->layout();
+                fd = s->target.frame->fd();
+            } else {
+                iris::StableBuffer& stable = ensure_stable(d, *s);
+                destination = static_cast<uint8_t*>(stable.map());
+                layout = stable.layout();
+                fd = stable.fd();
+            }
+        }
+        iris::require(destination != nullptr && compatible(image.format.fourcc, layout.fourcc),
+            "surface memory does not match the image", VA_STATUS_ERROR_INVALID_IMAGE_FORMAT);
+
+        const unsigned bytes = bytes_of(layout.fourcc);
+        const uint8_t* source = b->data.data();
+        iris::dma_buf_cpu_sync(fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE);
+        for (unsigned row = 0; row < sh; ++row)
+            std::memcpy(destination + layout.data_offset + static_cast<size_t>(dy + row) * layout.stride
+                    + static_cast<size_t>(dx) * bytes,
+                source + image.offsets[0] + static_cast<size_t>(sy + row) * image.pitches[0]
+                    + static_cast<size_t>(sx) * bytes,
+                static_cast<size_t>(sw) * bytes);
+        if (rgb_fourcc(layout.fourcc)) {
+            iris::dma_buf_cpu_sync(fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE);
+            std::lock_guard<std::recursive_mutex> lock(d.mutex);
+            s->client_pixels = true;
+            s->failed = false;
+            return VA_STATUS_SUCCESS;
+        }
+        const unsigned chroma_width = sw & ~1u;
+        uint8_t* uv = destination + layout.chroma_offset();
+        if (planar_chroma(image.format.fourcc)) {
+            // Interleave the client's two planes into the surface's pairs.
+            for (unsigned row = 0; row < sh / 2; ++row) {
+                uint8_t* line = uv + static_cast<size_t>(dy / 2 + row) * layout.stride
+                    + static_cast<size_t>(dx);
+                const uint8_t* u = source + image.offsets[1]
+                    + static_cast<size_t>(sy / 2 + row) * image.pitches[1] + static_cast<size_t>(sx) / 2;
+                const uint8_t* v = source + image.offsets[2]
+                    + static_cast<size_t>(sy / 2 + row) * image.pitches[2] + static_cast<size_t>(sx) / 2;
+                for (unsigned col = 0; col < chroma_width / 2; ++col) {
+                    line[col * 2] = u[col];
+                    line[col * 2 + 1] = v[col];
+                }
+            }
+        } else {
+            for (unsigned row = 0; row < sh / 2; ++row)
+                std::memcpy(uv + static_cast<size_t>(dy / 2 + row) * layout.stride
+                        + static_cast<size_t>(dx) * bytes,
+                    source + image.offsets[1] + static_cast<size_t>(sy / 2 + row) * image.pitches[1]
+                        + static_cast<size_t>(sx) * bytes,
+                    static_cast<size_t>(sw) * bytes);
+        }
+        iris::dma_buf_cpu_sync(fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE);
+
+        std::lock_guard<std::recursive_mutex> lock(d.mutex);
+        s->client_pixels = true;
+        s->failed = false;
+        return VA_STATUS_SUCCESS;
+    });
 }
 
 VAStatus querySubpictureFormats(VADriverContextP, VAImageFormat*, unsigned*, unsigned* count)

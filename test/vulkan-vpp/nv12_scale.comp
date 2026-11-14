@@ -1,0 +1,359 @@
+// SPDX-License-Identifier: MIT
+//
+// NV12 nearest-neighbour scale (optionally from a crop, optionally rotated)
+// for the VA video processor. The two DMA-BUFs
+// are bound as flat uint[] storage buffers and every address (stride, luma and
+// chroma offsets, source and destination geometry, rotation) comes from push
+// constants, so this is the same kernel the driver dispatches, not a shader
+// with one test size baked in.
+//
+// The sample position is swscale's point map, so a client that swaps
+// `scale=WxH:flags=neighbor` for `scale_vaapi=w=W:h=H` gets the same pixels at
+// any ratio:
+//
+//     xInc = ((src << 16) + (dst >> 1)) / dst      (rounded 16.16 step)
+//     src_index(i) = (i * xInc + (xInc >> 1)) >> 16
+//
+// (libswscale/utils.c initFilter, SWS_POINT with filterSize 1, and the
+// lumXInc/chrXInc rounding in sws_init_context; verified byte-exact against
+// the host `scale` filter over the ratio matrix in nv12_scale_gate.sh.)
+//
+// Rotation follows the VA pipeline order: the source is rotated clockwise
+// first, then scaled to fill the output. So the point map runs on the rotated
+// size and `unrotate` walks each destination point back to the source. A
+// quarter turn makes the two planes transpose too, which is why the map is
+// applied to the chroma plane with its own half-size geometry rather than
+// derived from the luma coordinate. VA puts mirroring after the rotation, so
+// the flip is applied to the rotated coordinates before they are taken back,
+// with the rotated size rather than the source size.
+//
+// Each invocation owns one 32-bit destination word, so no two invocations
+// write the same word and a per-pixel oracle is meaningful instead of a race
+// that happens to pass. A luma word holds four pixels of one row; a chroma
+// word holds two (u,v) pairs. No 16-bit storage extension is needed. The plane
+// base and stride are 4-byte aligned by the CAPTURE layout (128-byte pitch,
+// page-aligned data offset), which is what makes a word write legal.
+//
+// The source may be ten bits: `src_wide` says so, and the conversion is the
+// exact one swscale applies — `code >> 2` before any filtering, so a 10-bit
+// code with its low two bits clear round-trips an 8-bit picture unchanged. The
+// driver dispatches p010_scale.spv for a ten-bit destination, so this kernel
+// only ever packs eight-bit words.
+
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0, std430) readonly buffer Src { uint s[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Dst { uint d[]; };
+layout(push_constant) uniform Params {
+    uint src_stride, src_uv, dst_stride, dst_uv;
+    uint src_y, dst_y;
+    // Crop origin in source pixels. VA hands a surface region to the
+    // processor, and the sampled rectangle starts there; both coordinates
+    // are even because a 4:2:0 chroma sample covers two luma columns.
+    uint src_x, src_row;
+    uint src_w, src_h, dst_w, dst_h;
+    // Clockwise quarter turns: VA_ROTATION_NONE/90/180/270 as 0/1/2/3.
+    uint rot;
+    // VA_MIRROR_HORIZONTAL as bit 0 and VA_MIRROR_VERTICAL as bit 1, applied
+    // after the rotation.
+    uint mirror;
+    // 0 samples the point map above, which is swscale's `flags=neighbor`
+    // exactly. 1 blends the four samples around the destination sample's
+    // centre, which is what VA_FILTER_INTERPOLATION_BILINEAR asks for. The
+    // driver maps the client's filter_flags onto this and refuses the
+    // unspecified "advanced" method rather than approximating it.
+    //
+    // 2 is the area average of every source sample the destination sample
+    // covers: exact when shrinking by an integer factor, and the only one of
+    // the three that does not alias. 3 is a four-tap cubic (Catmull-Rom) for
+    // enlargement, where a wider support is what keeps an edge from turning
+    // into a staircase. The driver picks between them by ratio; a client only
+    // ever names bilinear or nearest, and both are honoured as themselves.
+    uint interp;
+    // Non-zero when the source is ten bits too, so the kernel converts bit
+    // depth as well as scaling. This module always packs an eight-bit
+    // destination; p010_scale.comp is the one that packs ten.
+    uint src_wide;
+} p;
+
+// One source code as the eight-bit code this kernel packs: a ten-bit source
+// drops its two low bits, an eight-bit one is the code itself.
+uint to_dst(uint code)
+{
+    return p.src_wide != 0u ? code >> 2 : code;
+}
+
+uint src_byte(uint off)
+{
+    uint w = s[off >> 2];
+    return (w >> ((off & 3u) << 3)) & 255u;
+}
+
+// A source sample as its own code: one byte for eight bits, or the ten bits at
+// the top of a 16-bit word brought down to a plain 0..1023 code.
+uint src_code(uint off)
+{
+    if (p.src_wide == 0u)
+        return src_byte(off);
+    return ((s[off >> 2] >> ((off & 3u) << 3)) & 0xffffu) >> 6;
+}
+
+// 16.16 source step per destination sample, rounded to nearest like swscale.
+uint step(uint src, uint dst)
+{
+    return ((src << 16) + (dst >> 1)) / dst;
+}
+
+uint pick(uint i, uint inc)
+{
+    return (i * inc + (inc >> 1)) >> 16;
+}
+
+// Size of a w x h plane after the rotation. A quarter turn transposes it.
+uvec2 rotated(uint w, uint h)
+{
+    return (p.rot & 1u) != 0u ? uvec2(h, w) : uvec2(w, h);
+}
+
+// The point (rx, ry) of the rotated plane as the mirroring leaves it. `size`
+// is the rotated plane's size, because VA mirrors after rotating.
+uvec2 mirror_at(uvec2 at, uvec2 size)
+{
+    if ((p.mirror & 1u) != 0u)
+        at.x = size.x - 1u - at.x;
+    if ((p.mirror & 2u) != 0u)
+        at.y = size.y - 1u - at.y;
+    return at;
+}
+
+// The source point behind (rx, ry) of the rotated plane. A clockwise quarter
+// turn sends the source top-left corner to the top-right, 180 degrees to the
+// bottom-right and 270 to the bottom-left, so undoing it means reading the
+// rotated coordinates in that corner's order.
+uvec2 unrotate(uint rx, uint ry, uint w, uint h)
+{
+    if (p.rot == 1u)
+        return uvec2(ry, h - 1u - rx);
+    if (p.rot == 2u)
+        return uvec2(w - 1u - rx, h - 1u - ry);
+    if (p.rot == 3u)
+        return uvec2(w - 1u - ry, rx);
+    return uvec2(rx, ry);
+}
+
+// One source sample of the rotated plane, mirrored, already converted to the
+// destination's bit depth so the filter weights run on one scale.
+uint luma_at(uint rx, uint ry)
+{
+    uvec2 at = unrotate(rx, ry, p.src_w, p.src_h);
+    return to_dst(src_code(p.src_y + (p.src_row + at.y) * p.src_stride
+        + (p.src_x + at.x) * (1u + p.src_wide)));
+}
+
+uint chroma_at(uint rx, uint ry, uint c)
+{
+    uvec2 at = unrotate(rx, ry, p.src_w >> 1, p.src_h >> 1);
+    uint base = p.src_uv + (p.src_row >> 1) * p.src_stride + p.src_x * (1u + p.src_wide);
+    return to_dst(src_code(base + at.y * p.src_stride + (at.x * 2u + c) * (1u + p.src_wide)));
+}
+
+// Continuous position of destination sample `d` of `dst` inside a `src`-sized
+// axis: the centre of the destination sample mapped back into the source,
+// clamped to the source's own extent. A 1:1 scale lands on the sample itself,
+// so bilinear and nearest agree there.
+float axis_pos(uint d, uint dst, uint src)
+{
+    float v = (float(d) + 0.5) * (float(src) / float(dst)) - 0.5;
+    return clamp(v, 0.0, float(src - 1u));
+}
+
+// VA mirrors after the rotation, so a mirror reflects the continuous position
+// in the rotated plane and not an already-rounded index.
+float mirror_pos(float v, uint size, bool on)
+{
+    return on ? float(size - 1u) - v : v;
+}
+
+// The half-open source interval [lo, hi) that destination sample `d` of `dst`
+// covers on a `src`-sized axis. A destination sample owns every source sample
+// whose own footprint it overlaps, and at least one when the axis is enlarged.
+// Mirroring is a bijection on the samples, so the mirrored footprint is the
+// same interval reflected: [src-hi, src-lo).
+void span_axis(uint d, uint dst, uint src, bool on, out uint lo, out uint hi)
+{
+    uint a = (d * src) / dst;
+    uint b = ((d + 1u) * src + dst - 1u) / dst;
+    if (b <= a)
+        b = a + 1u;
+    b = min(b, src);
+    a = min(a, b - 1u);
+    if (on) {
+        lo = src - b;
+        hi = src - a;
+    } else {
+        lo = a;
+        hi = b;
+    }
+}
+
+// Catmull-Rom weights for the four taps around one fractional position. They
+// sum to one, so a constant picture is reproduced exactly.
+vec4 cubic_weights(float f)
+{
+    float f2 = f * f, f3 = f2 * f;
+    return vec4(-0.5 * f3 + f2 - 0.5 * f, 1.5 * f3 - 2.5 * f2 + 1.0,
+        -1.5 * f3 + 2.0 * f2 + 0.5 * f, 0.5 * f3 - 0.5 * f2);
+}
+
+// Which method runs on one axis: 0 the point map, 1 bilinear, 2 the area
+// average, 3 the cubic. The client names the first two (or nothing); 4 is
+// VA_FILTER_INTERPOLATION_ADVANCED, where the driver picks — area when the
+// axis shrinks, which is the only one of them that does not alias, and the
+// cubic when it enlarges, where a wider support is what keeps an edge from
+// turning into a staircase. The two axes are chosen independently, so a
+// picture that shrinks horizontally and grows vertically runs area on one and
+// the cubic on the other; both are linear, so the separable order does not
+// change the result.
+uint method(uint src, uint dst)
+{
+    if (p.interp != 4u)
+        return p.interp;
+    if (src > dst)
+        return 2u;
+    if (src < dst)
+        return 3u;
+    return 1u;
+}
+
+// The taps one axis contributes: up to four, as (index, weight) pairs, with
+// `count` of them. The point map and the area average are written as taps
+// too — the first has one tap of weight one, the second has one per covered
+// sample, each 1/n — so the two-dimensional result is always the same outer
+// product and no method has a path of its own.
+int axis_taps(uint d, uint dst, uint src, bool mirrored, uint m, out int idx[4], out float wgt[4])
+{
+    if (m == 0u) {
+        uint inc = ((src << 16) + (dst >> 1)) / dst;
+        uint at = pick(d, inc);
+        idx[0] = int(mirrored ? src - 1u - at : at);
+        wgt[0] = 1.0;
+        return 1;
+    }
+    if (m == 2u) {
+        uint lo, hi;
+        span_axis(d, dst, src, mirrored, lo, hi);
+        uint n = hi - lo;
+        if (n <= 4u) {
+            // Every covered sample, each with 1/n: exact.
+            for (int i = 0; i < 4; ++i) {
+                idx[i] = min(int(lo) + i, int(hi) - 1);
+                wgt[i] = 1.0 / float(n);
+            }
+            return int(n);
+        }
+        // A footprint wider than four samples samples four positions spread
+        // across it, each with 1/4. Weights still sum to one, so the average
+        // brightness is preserved; the four taps stand in for the span.
+        for (int i = 0; i < 4; ++i) {
+            idx[i] = int(lo) + int((uint(i) * (n - 1u)) / 3u);
+            wgt[i] = 0.25;
+        }
+        return 4;
+    }
+    float v = axis_pos(d, dst, src);
+    v = mirror_pos(v, src, mirrored);
+    uint i0 = uint(floor(v));
+    float f = v - float(i0);
+    if (m == 1u) {
+        idx[0] = int(i0);
+        idx[1] = int(min(i0 + 1u, src - 1u));
+        wgt[0] = 1.0 - f;
+        wgt[1] = f;
+        return 2;
+    }
+    vec4 w = cubic_weights(f);
+    for (int i = 0; i < 4; ++i) {
+        idx[i] = clamp(int(i0) - 1 + i, 0, int(src) - 1);
+        wgt[i] = w[i];
+    }
+    return 4;
+}
+
+// One luma code at destination column `dx`, luma row `row`, for the method
+// pair (mx, my). The separable order is free because every method is a linear
+// combination of source samples.
+uint luma_px(uint dx, uint row, uvec2 r, uint mx, uint my)
+{
+    int xi[4], yi[4];
+    float xw[4], yw[4];
+    int nx = axis_taps(dx, p.dst_w, r.x, (p.mirror & 1u) != 0u, mx, xi, xw);
+    int ny = axis_taps(row, p.dst_h, r.y, (p.mirror & 2u) != 0u, my, yi, yw);
+    float v = 0.0;
+    for (int j = 0; j < ny; ++j) {
+        float rowsum = 0.0;
+        for (int i = 0; i < nx; ++i)
+            rowsum += xw[i] * float(luma_at(uint(xi[i]), uint(yi[j])));
+        v += yw[j] * rowsum;
+    }
+    return uint(clamp(v + 0.5, 0.0, 255.0));
+}
+
+// The same for one chroma component of destination chroma column `cx`.
+uint chroma_px(uint cx, uint cy, uvec2 r, uint mx, uint my, uint dw, uint dh, uint c)
+{
+    int xi[4], yi[4];
+    float xw[4], yw[4];
+    int nx = axis_taps(cx, dw, r.x, (p.mirror & 1u) != 0u, mx, xi, xw);
+    int ny = axis_taps(cy, dh, r.y, (p.mirror & 2u) != 0u, my, yi, yw);
+    float v = 0.0;
+    for (int j = 0; j < ny; ++j) {
+        float rowsum = 0.0;
+        for (int i = 0; i < nx; ++i)
+            rowsum += xw[i] * float(chroma_at(uint(xi[i]), uint(yi[j]), c));
+        v += yw[j] * rowsum;
+    }
+    return uint(clamp(v + 0.5, 0.0, 255.0));
+}
+
+void main()
+{
+    uint word = gl_GlobalInvocationID.x;
+    uint words = (p.dst_w + 3u) >> 2;
+    if (word >= words)
+        return;
+    // Luma rows first, then the half-height chroma plane: one dispatch covers
+    // both buffers, and each row indexes the same word count.
+    uint row = gl_GlobalInvocationID.y;
+    if (row >= p.dst_h + (p.dst_h >> 1))
+        return;
+
+    if (row < p.dst_h) {
+        uvec2 r = rotated(p.src_w, p.src_h);
+        uint mx = method(r.x, p.dst_w), my = method(r.y, p.dst_h);
+        uint packed = 0u;
+        for (uint k = 0u; k < 4u; ++k) {
+            uint dx = word * 4u + k;
+            // Columns past the visible width land in the row padding; clamp so
+            // the read stays inside the source plane.
+            packed |= luma_px(min(dx, p.dst_w - 1u), row, r, mx, my) << (k * 8u);
+        }
+        d[(p.dst_y + row * p.dst_stride + word * 4u) >> 2] = packed;
+    } else {
+        uint cy = row - p.dst_h;
+        uint cw = p.src_w >> 1;
+        uint ch = p.src_h >> 1;
+        uint dw = p.dst_w >> 1;
+        uint dh = p.dst_h >> 1;
+        uvec2 r = rotated(cw, ch);
+        uint mx = method(r.x, dw), my = method(r.y, dh);
+        uint packed = 0u;
+        for (uint k = 0u; k < 2u; ++k) {
+            uint cx = word * 2u + k;
+            uint u = chroma_px(min(cx, dw - 1u), cy, r, mx, my, dw, dh, 0u);
+            uint v = chroma_px(min(cx, dw - 1u), cy, r, mx, my, dw, dh, 1u);
+            packed |= u << (k * 16u);
+            packed |= v << (k * 16u + 8u);
+        }
+        d[(p.dst_uv + cy * p.dst_stride + word * 4u) >> 2] = packed;
+    }
+}

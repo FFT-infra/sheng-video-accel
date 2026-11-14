@@ -1,0 +1,8 @@
+libva-v4l2-iris (0.1.0) unstable; urgency=medium
+
+  * Initial Debian packaging. The driver, the msm_drv_video.so alias libva
+    resolves by DRM name, the shared node rule, the three diagnostic commands
+    and the install provenance manifest come from scripts/install-system.sh,
+    the same path the Fedora spec and the Arch PKGBUILD use.
+
+ -- phxinyang <112766158+phxinyang@users.noreply.github.com>  Fri, 13 Nov 2026 00:00:00 +0000

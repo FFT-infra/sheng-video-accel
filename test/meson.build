@@ -7,6 +7,14 @@ session_test = executable(
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('session', session_test)
 
+# The copy engine is built on the first copy, never by vaCreateContext.
+deferred_copy_test = executable(
+  'deferred-copy-test',
+  ['unit/deferred-copy-test.cc', 'unit/fake_device.cc'],
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+test('deferred-copy', deferred_copy_test)
+
 # Annex-B reassembly for a requested IDR (src/codec/annexb.cc).
 annexb_test = executable(
   'annexb-test',
@@ -42,6 +50,30 @@ if va_drm_dep.found()
     'iris-va-import-probe',
     'iris-va-import-probe.cc',
     dependencies: [iris_core_dep, va_drm_dep],
+    cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+endif
+
+# Hardware probe, built but not registered as a meson test: the upload half of
+# the image API. vaPutImage and the derived-image write path are what put
+# client pixels into a surface; vaGetImage reads them back. No decode is
+# involved, so this runs against a render node alone.
+if va_drm_dep.found()
+  executable(
+    'iris-va-image-probe',
+    'iris-va-image-probe.cc',
+    dependencies: [va_drm_dep],
+    cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+endif
+
+# Hardware probe, built but not registered as a meson test: submits one
+# VideoProc picture with a surface region. FFmpeg has no crop_vaapi filter, so
+# this is the only client that can ask the driver for a crop; the gate compares
+# the result with `crop,scale=...:flags=neighbor`.
+if va_drm_dep.found()
+  executable(
+    'iris-va-vpp-probe',
+    'iris-va-vpp-probe.cc',
+    dependencies: [va_drm_dep],
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
 
@@ -139,9 +171,9 @@ av1_obu_test = executable(
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('av1-obu', av1_obu_test)
 
-# Held-picture release at EOS: the AV1 translator submits a tail without a
-# successor, and refuses a stream that continues after guessed refresh flags.
-# No hardware; this is the contract destroyContext relies on.
+# The make_av1() rollback path holds one picture until its successor names
+# the refreshed DPB slots. This host test keeps that former contract covered
+# while the default translator is make_av1_dpb().
 av1_translator_test = executable(
   'av1-translator-test',
   'av1-translator-test.cc',
@@ -178,12 +210,13 @@ encode_params_test = executable(
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('encode-params', encode_params_test)
 
-# The encoder session's control contract on a scripted Iris encoder node:
-# which V4L2 writes a VA deblocking request produces, and what happens on a
-# kernel that has no loop-filter controls at all.
+# The encoder session's two contracts on a scripted Iris encoder node: which
+# V4L2 writes a VA deblocking request produces (and what happens on a kernel
+# that has no loop-filter controls at all), and how a coded buffer's access
+# unit is claimed once when three VA entry points can ask for it.
 encode_session_test = executable(
   'encode-session-test',
-  'unit/encode-session-test.cc',
+  ['unit/encode-session-test.cc', '../src/va/buffer.cc'],
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('encode-session', encode_session_test)
@@ -203,6 +236,8 @@ test('iris-env-doc-check', find_program('iris-env-doc-check.sh'),
      args: [meson.project_source_root()])
 test('iris-codec-matrix-check', find_program('iris-codec-matrix-check.sh'),
      args: [meson.project_source_root()])
+test('iris-trace-vocab-check', find_program('python3'),
+     args: ['-I', files('iris-trace-vocab-check.py'), meson.project_source_root()])
 test('iris-experiment-guard-self-test', find_program('iris-experiment-guard-self-test.sh'),
      args: [meson.project_source_root()])
 test('iris-eos-check-self-test', find_program('iris-eos-check-self-test.sh'),

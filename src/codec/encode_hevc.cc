@@ -118,12 +118,30 @@ public:
 
         if (const auto* rate = static_cast<const VAEncMiscParameterRateControl*>(
                 find_misc(picture.misc, VAEncMiscParameterTypeRateControl))) {
-            if (rate->bits_per_second)
-                out.bitrate = rate->bits_per_second;
+            if (rate->bits_per_second) {
+                // The field is the rate controller's maximum; the target is
+                // target_percentage of it (va.h), so a client that asks for
+                // VBR without a maximum — 2x at 50 %, which is what FFmpeg
+                // sends without -maxrate — is not run at twice its rate.
+                const uint32_t percentage = rate->target_percentage ? rate->target_percentage : 100;
+                out.bitrate = static_cast<uint32_t>(
+                    static_cast<uint64_t>(rate->bits_per_second) * percentage / 100);
+                // A maximum above the target is the client's VBR ceiling.
+                if (rate->bits_per_second > out.bitrate)
+                    out.peak_bitrate = rate->bits_per_second;
+                bitrate_ = out.bitrate;
+                peak_bitrate_ = out.peak_bitrate;
+            }
             if (rate->min_qp)
                 out.min_qp = rate->min_qp;
             if (rate->max_qp)
                 out.max_qp = rate->max_qp;
+        } else if (bitrate_) {
+            // No rate control in this picture: keep what the client last
+            // configured instead of the sequence field, which is a rate and
+            // not the target the client asked for.
+            out.bitrate = bitrate_;
+            out.peak_bitrate = peak_bitrate_;
         }
         if (const auto* frame = static_cast<const VAEncMiscParameterFrameRate*>(
                 find_misc(picture.misc, VAEncMiscParameterTypeFrameRate))) {
@@ -224,7 +242,12 @@ public:
         // means the two buffers describe different pictures.
         require(params->pic_fields.bits.coding_type == (out.intra ? 1u : 2u),
             "coding_type does not match the slice type", VA_STATUS_ERROR_INVALID_PARAMETER);
-        out.peak_bitrate = out.rate_mode == RateMode::Cbr ? out.bitrate : 0;
+        // CBR names its target as the peak. VBR keeps the client's ceiling
+        // when it gave one above the target; CQP has no rate control at all.
+        if (out.rate_mode == RateMode::Cbr)
+            out.peak_bitrate = out.bitrate;
+        else if (out.rate_mode == RateMode::Cqp)
+            out.peak_bitrate = 0;
         require(out.rate_mode != RateMode::Cbr || out.bitrate > 0, "CBR needs a bitrate",
             VA_STATUS_ERROR_INVALID_PARAMETER);
         if (out.rate_mode == RateMode::Cqp) {
@@ -240,6 +263,13 @@ public:
 private:
     VAProfile profile_;
     RateMode rate_mode_;
+    // The rate the client configured most recently. FFmpeg renders the
+    // rate-control misc buffer once, with the first picture, so every later
+    // picture arrives without it; falling back to the sequence field there
+    // would reprogram the controller on each picture with a value that is a
+    // rate rather than the client's target.
+    uint32_t bitrate_ = 0;
+    uint32_t peak_bitrate_ = 0;
 };
 
 } // namespace

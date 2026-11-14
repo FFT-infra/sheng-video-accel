@@ -6,6 +6,20 @@ Run the host-side unit tests without hardware:
 meson test -C build-local
 ```
 
+`test/iris-packaging-check.sh` is the one host check that reads the packaging
+instead of the code. It runs inside `run-static-checks.sh` and fails when an
+installed path is missing from the spec's `%files`, when any of the three
+manifests (`packaging/fedora`, `packaging/arch`, `debian/`) stops delegating
+to `scripts/install-system.sh` or stops refreshing the provenance manifest
+after its own strip step, when `v4l-utils` is dropped from the runtime
+dependencies, or when a format forgets the Vulkan or FFmpeg build dependency
+the driver and its test stage need.
+
+Building the Debian package needs a Debian host or chroot: `dh_shlibdeps`
+aborts on a Fedora machine because there is no shlibs database for its
+libraries. `TEST-RESULTS.md` §"Debian packaging" records the chroot recipe and
+what the artifact was run against.
+
 ## On an installed system
 
 `scripts/iris-verify.sh` is the user-facing check, not a gate: it generates
@@ -20,6 +34,18 @@ does not work".
 ## Hardware Gates
 On the tablet, run the following verification gates:
 - `test/iris-browser-acceptance.sh --clip ...`: verifies Chrome `VaapiVideoDecoder` selection, platform decoder status, and zero dropped frames.
+- `test/remote/gate.sh -- command`: runs any target gate remotely under the experiment guard and writes `summary.json` (schema `qualcomm-iris-vaapi/target-run-v1`) with the boot, kernel, module hash, driver hash, resolved decoder and encoder names, exit status and guard state, plus the command's captured output in `guard/command.stdout`. Set `IRIS_REMOTE_HOST`; it does not deploy, so the recorded hashes are what the target actually holds. The command is landed in a per-run script and read by path: a heredoc fed to the guard's backgrounded `sh -s` child gets `/dev/null` for stdin and would run nothing while still reporting exit 0.
+- `test/vulkan-vpp/prereq.sh`: VPP prerequisite gate. On the target it builds a SPIR-V compute pipeline, imports two DMA-BUF fds as Vulkan external memory (one read, one written with coherent CPU read-back) and checks exact shader output for both DMA-BUF origins the driver uses (MSM GEM PRIME fd and system DMA heap). Run it through `test/remote/gate.sh`. Needs a Vulkan ICD, `libvulkan`, libdrm + `msm_drm.h`, Vulkan headers, a system DMA heap, an MSM render node, `cc` and `pkg-config`; CI has no GPU, so `run-static-checks.sh` only verifies the `SHA256SUMS` hash pin and script syntax. `make-spv.sh` regenerates both SPIR-V binaries on a host with `glslangValidator`.
+- `test/vulkan-vpp/nv12_scale_gate.sh`: NV12 scale primitive gate. The prereq above proves a flat DMA-BUF can be a compute source and destination; this one proves the NV12 plane math a real VPP output needs. It dispatches `nv12_scale.spv` over two imported DMA-BUFs laid out exactly like the Iris CAPTURE NV12 buffers (128-byte stride, 32-row luma, 16-row chroma behind luma) and checks **every** destination pixel against a CPU oracle that uses swscale's point positions and VA's rotation order, over a matrix of ratios, crops and clockwise quarter turns, for both DMA-BUF origins, with a distinct sample per source address so a wrong stride, offset, subsample, rotation or sample position cannot pass. A second pass runs the same kernel with the four-tap bilinear method (`--interp 1`), compared within one code of a double-precision model of the blend, plus the two invariants that hold at any ratio: a constant picture must come out that constant (the weights sum to one) and a 1:1 scale must reproduce the point map byte for byte. Run it through `test/remote/gate.sh`. Needs the same target prerequisites plus `spirv-val`; CI has no GPU, so it stays out of `meson test` and `run-static-checks.sh` only pins `nv12_scale.spv`, checks script syntax, and asserts the per-pixel oracle is intact. This is evidence for the VPP kernel only: it advertises no `VAProfileNone` / `VAEntrypointVideoProc` and changes no capability.
+- `test/vulkan-vpp/p010_scale_gate.sh`: the same gate for `p010_scale.spv`, built with `scale_probe.c --p010`. The oracle decodes the same 16-bit words the kernel copies, so the whole sample is compared, not only its top eight bits. Its crop cases start away from the origin: a chroma pair spans two luma columns and four bytes in P010, so a crop at 0 cannot separate the real origin from a pair at two bytes. The bilinear pass runs there too, on the ten-bit code rather than the padded word: a kernel that blended the words would leave bits in the low six and a clamp carried over from the 8-bit kernel would clip every highlight above 255.
+- `test/vulkan-vpp/rotation_model_check.py`: the host half of the rotation work, and the only part that runs in CI. It applies the same coordinate map as `scale_probe.c` to an NV12 frame and compares it with `crop,transpose,scale` (a half-turn is `hflip,vflip`, since ffmpeg 8 dropped the named one from the software filter), over non-square geometries and a crop. A second list does the same for the bilinear map against `flags=bilinear`, on upscales only: swscale widens its support when it downsamples while the kernel always takes two neighbours per axis, so a downscale is a different filter by design rather than a map to check. It checks the formula, not the driver.
+- `test/vulkan-vpp/transpose_vaapi_gate.sh`: rotation and mirroring through the whole VA path. Uploads a frame, runs `transpose_vaapi` in all seven directions (`clock`, `cclock`, `reversal`, `hflip`, `vflip`, `clock_flip`, `cclock_flip`), downloads it and compares byte for byte with FFmpeg's software filters, in NV12 and P010. Because `transpose_vaapi` refuses any direction missing from `pipeline_caps.mirror_flags`, the mirrored cases are also the caps check. It also requires the entrypoint to stay refused without `V4L2_VA_VPP`; `IRIS_VPP_INSTALLED=1` runs it against the installed package.
+- `test/vulkan-vpp/tonemap_gate.sh`: HDR10 to SDR tone mapping through the VA path. `iris-va-vpp-probe tonemap` builds the `VAProcFilterParameterBufferType` buffer (HDR10 metadata naming the mastering peak) and the pipeline buffer naming `VAProcFilterHighDynamicRangeToneMapping`, converts a synthetic P010 surface to NV12, and compares every output byte with its own implementation of the pipeline `tonemap.comp` documents, within 2 codes since the kernel is float32 and the model is double. Three properties are checked separately so a model and a kernel that share a mistake still fail: PQ black on 16/128/128, the mastering peak on 235, and a monotone ramp. Two peaks run one frame and their outputs must differ, which is what proves the metadata is read; an NV12 source, a filter without parameters and a rotation in the same picture must be refused, and so is the entrypoint without `V4L2_VA_VPP`. `IRIS_VPP_INSTALLED=1` runs it against the installed package. FFmpeg cannot be the client here: `tonemap_vaapi` refuses a raw P010 frame because it demands mastering-display side data a rawvideo input cannot carry.
+- `test/vulkan-vpp/overlay_gate.sh`: global-alpha compositing through the VA path. `iris-va-vpp-probe overlay` submits what `overlay_vaapi` submits — the main surface over the whole output, then the overlay surface into one rectangle with a `VABlendState` naming `VA_BLEND_GLOBAL_ALPHA` — and compares every output byte with its own double-precision model of the mix `overlay.comp` and `overlay_rgb.comp` document over fifteen cases on both sample widths, within 2 codes. The cases cover the Y'CbCr overlay, the stored-alpha form of the same mix on both bit depths, packed BGRA and RGBA overlays (two byte orders, both read the way VA names them), the BT.601 matrix, a packed overlay onto a tone-mapped main surface, and a main surface padded wider than its picture. Two endpoint runs are compared with the input frames themselves: alpha 0 over the whole surface must reproduce the main frame byte for byte and alpha 1 the overlay frame. Stored alpha also gets a check the model cannot give: the same picture with a premultiplied frame and with the straight one has to land within 1 code. Luma keying, a third pass, a blend before its base pass, an odd or out-of-bounds rectangle, a crop of the main surface and an alpha outside 0..1 must be refused, and so is the entrypoint without `V4L2_VA_VPP`. `IRIS_VPP_INSTALLED=1` runs it against the installed package.
+- `test/vulkan-vpp/overlay_vaapi_gate.sh`: the same composite through the real client. `overlay_vaapi` uploads a BGRA frame into a `VA_RT_FORMAT_RGB32` surface and always sets `VA_BLEND_PREMULTIPLIED_ALPHA` for an overlay input with an alpha channel, so this is the shape the probe cannot reproduce on its own. Both frames are a single colour, so the gate computes the one expected BT.709 triple itself and requires an exact match, plus the main frame byte for byte at alpha 0 with a black overlay. The entrypoint must stay refused without `V4L2_VA_VPP`.
+- `test/vulkan-vpp/crop_vaapi_gate.sh`: a VideoProc picture with a `surface_region`. `iris-va-vpp-probe` uploads an NV12 frame, runs one cropped scale and downloads the result; the gate compares it byte for byte with `crop=W:H:X:Y,scale=DWxDH:flags=neighbor`. No FFmpeg filter submits a region (there is no `crop_vaapi` in 8.1), which is why this one needs its own client. The last case asks for an odd region and requires a refusal.
+- `test/iris-va-image-gate.sh`: the upload half of the image API. Runs `iris-va-image-probe` (full-frame and regional `vaPutImage`, a derived-image write, and the three refusals) and then four `hwupload,hwdownload` round trips through FFmpeg — NV12 at 64x64 and 128x72, P010 at 64x64, NV12 at 32x32 — each compared byte for byte with the input. `IRIS_GATE_INSTALLED=1` runs the same cases from `/usr/lib64/dri` with no `LIBVA_DRIVERS_PATH`; `IRIS_IMAGE_PROBE` names the probe binary when the build tree is not beside the driver.
+- `test/iris-gstreamer-gate.sh --clip ...`: the client-side GStreamer half. Checks that libgstva's vendor allowlist is what keeps `gst-inspect-1.0 va` at 0 features and that `GST_VA_ALL_DRIVERS=1` registers the elements, then compares `vaav1dec` frame hashes with the software decode and decodes back what `vah264enc` and `vah265enc` produced. The decode comparison muxes the element's I420; a raw `fdsink` dump is not comparable because it ignores `GstVideoMeta`'s plane offset.
 - `test/iris-matrix.sh`: framemd5 output equivalence against software.
 - `test/iris-real-clip-gate.sh`: real 120-frame AV1 clip and the in-context DRC clip against software framemd5, with the session's completion and publish counts. Needs `IRIS_REAL_CLIP_DIR` holding the clips and software baselines; opt-in from `test/iris-hardware-suite.sh`. `IRIS_REAL_CLIP_SET=4k` runs only the short 3840x2160 AV1 Import probe; `all` does not include it. A guarded 4K probe is not a thermal, power or long-window result.
 - `test/iris-throughput.sh`: decode fps through this driver against the native V4L2 decoders, plus per-frame MD5 at every size it runs.
@@ -32,9 +58,12 @@ On the tablet, run the following verification gates:
 `annexb-test` covers the NAL splitting a requested IDR needs (both NAL
 layouts, the parameter sets a cut stream must carry);
 `encode-session-test` covers the session rules, including the on-demand
-IDR lever and the strictly rising timestamps.
+IDR lever and the strictly rising timestamps, and the coded buffer's claim:
+whichever of `vaSyncSurface`, `vaSyncBuffer` and `vaMapBuffer` arrives first
+takes the access unit, and the others succeed with those bytes rather than
+replacing them with an empty answer.
 
-Two probes build with the tree and run on the target only:
+These probes build with the tree and run on the target only:
 
 - `test/iris-import-probe.cc <decoder-node> <stream.264>`: the Import
   acceptance program — proves the firmware writes picture k into the k-th
@@ -51,6 +80,12 @@ Two probes build with the tree and run on the target only:
   PRIME_1 import, that the surface aliases the client's bytes, that an
   encode from it matches the same picture from a driver-allocated surface,
   and that a wrong pitch is refused.
+- `test/iris-va-image-probe.cc <render-node>`: the upload half of the image
+  API with no decode involved — a full-frame `vaPutImage` and a regional one,
+  a derived-image write, `vaGetImage` after each, and the refusals
+  (`vaPutImage` does not scale; 4:2:0 regions are even and inside both
+  surfaces). `test/iris-va-image-gate.sh` runs it and then the same two
+  routes through FFmpeg's `hwupload,hwdownload`.
 - `test/iris-encode-control-probe.cc <encoder-node>`: which loop-filter
   controls the node exposes, and that a deblocking request it cannot honour
   is refused rather than ignored.
@@ -151,9 +186,12 @@ test/iris-context-retirement-check.sh /path/to/trace.log # every destroyed conte
 ```
 
 Firmware experiments (anything that can reset the decoder) go through
-`scripts/iris-experiment-guard.sh -- command`, which records the boot ID and
-temperature, applies a timeout, and leaves an `interrupted` marker that must
-be reviewed before another run.
+`scripts/iris-experiment-guard.sh -- command`, which records the boot ID,
+temperature and pack state (`battery.log`), applies a timeout, and leaves an
+`interrupted` marker that must be reviewed before another run. The guard
+records a low or discharging pack instead of refusing it; report the start and
+end capacity with the result. `IRIS_EXPERIMENT_BATTERY_ROOT` overrides the
+power-supply directory for a host-side self-test.
 
 ## Full target hardware suite
 

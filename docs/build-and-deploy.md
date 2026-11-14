@@ -34,6 +34,13 @@ target. The remote lab directory is durable and defaults to
 resources and Qualcomm test tools
 stay there rather than under a disposable scratch directory.
 
+After the sync and before the rebuild, every tracked path is re-hashed on the
+target with `sha256sum -c` against the host's own listing. The digest the
+manifest records is therefore measured on the target rather than assumed from
+the sender: a sync that delivered an older tree fails here instead of
+producing a manifest that verifies against a library built from the wrong
+source. A checkout without `.git` has no file list to check and says so.
+
 Every successful deployment also writes
 `build/iris-vaapi-provenance.json`. Because `.git` is deliberately not copied
 to the target, `deploy.sh` resolves the full source commit and a SHA-256 over
@@ -44,6 +51,11 @@ and Meson versions, the target kernel, and the exact driver path, size and
 SHA-256. Deployment immediately verifies the manifest against the generated
 shared object; a copied, rebuilt or modified `.so` cannot retain a passing
 record accidentally.
+
+What the manifest verification alone does not prove is that the tree on the
+target is the tree the identity names — it compares the artifact and the
+identity against each other, both of which came from this host. The tracked
+path check above is what closes that gap.
 
 To re-check a deployed artifact later:
 
@@ -139,12 +151,18 @@ path. `iris-configure-clients` writes `hwdec=vaapi` and the Firefox VA pref into
 the invoking user's home only.
 
 Check the installed driver with nothing set at all. This is the property the
-package ships: libva resolves the driver through the `msm_drv_video.so` alias,
-and the driver resolves its own node.
+package ships: libva resolves the driver through the `msm_drv_video.so` alias
+(`qcom_drv_video.so` is installed beside it for recipes that name the sibling
+driver), and the driver resolves its own node.
 
 ```sh
 env -u LIBVA_DRIVERS_PATH -u LIBVA_DRIVER_NAME -u LIBVA_V4L2_VIDEO_PATH vainfo
 ```
+
+Unset the variable; an empty `LIBVA_DRIVERS_PATH=` is not the same thing. libva
+takes the empty string as "search no directory" and `vaInitialize` fails with
+`unknown libva error` even though the installed driver is fine, which is how a
+2026-11-12 probe lost its first run.
 
 There is no launcher and no desktop entry. An earlier revision shipped both,
 and the launcher exported `LIBVA_DRIVER_NAME`, both node paths, and an isolated
@@ -185,18 +203,39 @@ Validate Google
 Chrome; Fedora's Chromium decodes through its own native V4L2 stack and its
 result says nothing about this driver.
 
+### Recording a target run
+
+A gate result means nothing without the boot, module and driver it ran
+against, and those were being copied out of the target by hand for every
+claim. `test/remote/gate.sh` runs one command inside the remote checkout
+under `scripts/iris-experiment-guard.sh` and writes the identity, the exit
+status, the guard state and the source commit next to the command's output:
+
+```sh
+IRIS_REMOTE_HOST=sheng test/remote/gate.sh --out ~/Lab/Bridge/tmp/run-$$
+    -- sh test/iris-gstreamer-gate.sh --clip CLIP
+```
+
+The record is `summary.json` with schema `qualcomm-iris-vaapi/target-run-v1`,
+plus `identity.txt`, `command.stdout`, `command.stderr` and the guard
+directory copied back from the target. The runner does not deploy: it reports
+the driver and module hashes the target holds, so a run against a stale
+install is visible in the record instead of being remembered. A guard that
+stopped the run exits 3, and its state says why.
+
 ## Distribution packaging
 
 `scripts/install-system.sh` is enough for a lab target, but it needs a build
 tree, a checkout and root. For an image that should work on first boot, build
-a package instead. Both manifests live under `packaging/` and both install
-through that same script, so the packaged layout cannot drift from the one the
-lab uses:
+a package instead. All three manifests live under `packaging/` (and `debian/`)
+and all three install through that same script, so the packaged layout cannot
+drift from the one the lab uses:
 
 | Target | Manifest | libva driver directory |
 | --- | --- | --- |
 | Fedora aarch64 | `packaging/fedora/libva-v4l2-iris.spec` | `%{_libdir}/dri` |
 | Arch aarch64 | `packaging/arch/PKGBUILD` | `/usr/lib/dri` |
+| Debian/Ubuntu arm64 | `debian/rules` | `/usr/lib/$(DEB_HOST_MULTIARCH)/dri` |
 
 ```sh
 # Fedora
@@ -205,9 +244,31 @@ git archive --format=tar.gz --prefix=libva-v4l2-iris-0.1.0/ \
 rpmbuild -ba packaging/fedora/libva-v4l2-iris.spec \
     --define "source_commit $(git rev-parse HEAD)" \
     --define "tracked_sha256 $(git ls-files -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
+
+# Debian/Ubuntu, from a checkout
+dpkg-buildpackage -b -us -uc
+
+# Debian/Ubuntu, from a tarball that has no .git
+IRIS_SOURCE_COMMIT=$(git rev-parse HEAD) \
+IRIS_TRACKED_SOURCE_SHA256=$(git ls-files -z | xargs -0 sha256sum | sha256sum | awk '{print $1}') \
+IRIS_SOURCE_DIRTY=0 \
+    dpkg-buildpackage -b -us -uc
 ```
 
-Both declare `v4l-utils` as a hard runtime dependency. The diagnostic commands
+The Debian build reads the source identity from the checkout, or from
+`IRIS_SOURCE_COMMIT`, `IRIS_TRACKED_SOURCE_SHA256` and `IRIS_SOURCE_DIRTY` in
+the environment when it builds from a tarball with no `.git` — the same
+contract `rpmbuild --define` and the PKGBUILD's variables follow. With neither,
+the install is recorded dirty rather than claiming an identity nothing
+verified.
+
+All three build-depend on FFmpeg, because their test stage runs the host checks
+and three of those compare against it — the rotation model against software
+transpose, and two AV1 oracles against `libdav1d`. A machine that happens to
+have FFmpeg installed hides the missing build dependency until a clean build
+root runs the test stage and fails there.
+
+All three declare `v4l-utils` as a hard runtime dependency. The diagnostic commands
 resolve the decoder node by driver name because the number moves between boots
 on this device, and without `v4l2-ctl` they exit instead of falling back to a
 fixed `/dev/videoN` that may be a camera.
@@ -221,21 +282,28 @@ stack and reports `V4L2VideoDecoder` without loading this driver at all.
 Google Chrome has no such path and is the client this driver exists for; it is
 the one that moves from `FFmpegVideoDecoder` to `VaapiVideoDecoder`.
 
-`test/iris-packaging-check.sh` runs in CI and fails when a shipped desktop
-entry is missing from the spec's `%files`, when a manifest stops delegating to
-`install-system.sh`, when `TryExec` disagrees with the browser the entry
-launches, when `v4l-utils` is dropped, or when one of the three diagnostics
-stops being installed beside the launcher.
+`test/iris-packaging-check.sh` runs in CI and fails when an installed path is
+missing from the spec's `%files`, when any of the three manifests stops
+delegating to `install-system.sh`, when a manifest stops refreshing the
+provenance file after its own strip step, when `v4l-utils` is dropped, when a
+format forgets the Vulkan build dependency that the video processor needs, or
+when one of the three diagnostics stops being installed beside the driver.
 
-There is no Debian or Ubuntu package. Building on those distributions wants
-`libgbm-dev`, which is a Mesa package pinned to an exact `libgbm1`; installing
-it can downgrade a vendor-patched graphics stack on a device whose Mesa came
-from the vendor. The build needs only the headers, `gbm.pc` and the
-`libgbm.so` link-time symlink, and Meson treats GBM as optional
-(`meson.build:47-48`): without it the driver builds with the CPU copy engine
-and the GPU blit path in `iris/gpu_copy.cc` is not compiled in. That is a
-slower Copy policy, not a broken build, and it is not the configuration any
-record in `TEST-RESULTS.md` measured.
+Debian and Ubuntu packaging exists for one aarch64 target and is built in a
+clean chroot, not on the device. The reason it took until now is the build
+dependency, not the package: `libgbm-dev` is a Mesa package pinned to an exact
+`libgbm1`, and installing it into a vendor-Mesa system can downgrade the
+graphics stack the vendor shipped. A build chroot (`sbuild`, `pbuilder`) never
+touches the running system, which is what the Debian toolchain assumes anyway;
+installing build dependencies directly on the tablet is still the wrong move.
+Because Meson treats GBM as optional (`meson.build`), a machine without the
+development package still builds — the CPU copy engine stays and the GPU blit
+path in `iris/gpu_copy.cc` is not compiled in. That is a slower Copy policy,
+not a broken build, and it is not the configuration any record in
+`TEST-RESULTS.md` measured. The Debian package therefore build-depends on
+`libgbm-dev` and lets `${shlibs:Depends}` carry the runtime library, so a
+package built in a chroot installs on a device whose own Mesa already
+provides it.
 
 For the Arch image projects, drop `packaging/arch/PKGBUILD` into the image
 repository's `pkgs/libva-v4l2-iris/` directory and add it to the package list.
@@ -254,9 +322,26 @@ when the native V4L2 node can decode it.
 
 For experiments that may reset firmware, wrap the bounded command with
 `scripts/iris-experiment-guard.sh -- ...`. It records the initial boot ID,
-thermal samples and command output, enforces a timeout, and refuses to reuse a
-running guard file until the previous run has been inspected. A reset or
-thermal breach is a failed experiment, not evidence of codec support.
+thermal samples, pack state (`battery.log`: capacity, charging status, voltage,
+current and USB online), the display and network boundary
+(`display.log`: connector state, `enabled`, `dpms`, preferred mode string,
+brightness and fbcon blank level; `network.log`: `up`/`down` per interface;
+`command.txt`: the run's own argv, one argument per line) and command output,
+enforces a timeout, and refuses to reuse a running guard file until the
+previous run has been inspected. A power run is only attributable to decode
+when those boundaries are recorded: the kernel does not expose the active
+refresh rate to an unprivileged reader, so the report states the refresh it
+measured under rather than implying it from `display.log`. Battery
+level is a recorded boundary, not a start gate: a discharging or low pack is
+valid lab state, and the report must say what the pack did. Classify a long
+run by the recorded start/end capacity; a shortened window is a shortened
+result, not a cancelled experiment. Temperature works the same way at the top
+end: the ceiling (`IRIS_EXPERIMENT_MAX_TEMP_MILLIC`, default 100000) is a
+runaway backstop 10 K under the zones' 110000 critical trip, not a comfort
+line, and the firmware's own passive throttle band (90000/95000) is inside it.
+a record whose peak lands above 95000 must say so. A reset, a boot-ID change
+or a trip past the ceiling is a failed experiment, not evidence of codec
+support.
 
 Run the dedicated H.264 reconfiguration gate on the target:
 
@@ -305,7 +390,7 @@ as possible. Before the soak starts, every selected codec must pass an exact
 software/VA frame-MD5 oracle. During the run the script records progress,
 driver traces, boot ID, uptime and every readable thermal zone. It terminates
 workers and fails on a boot-ID change, an unreadable thermal inventory, a
-temperature above 85000 millidegrees Celsius, a driver timeout/timestamp
+temperature above 100000 millidegrees Celsius, a driver timeout/timestamp
 error, incomplete stateful teardown, too few decoded frames, or any worker
 failure.
 

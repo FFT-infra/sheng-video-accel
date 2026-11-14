@@ -155,8 +155,13 @@ done
 
 awk -v sz="$(basename "$clip")" '/^round /{n++; v[n]=$3; s[n]=$4; sub(/^va=/,"",v[n]); sub(/^sw=/,"",s[n]); sv+=v[n]; ss+=s[n]}
 END {
-    if (!n) { print "RESULT no rounds"; exit }
+    if (!n) { print "RESULT no rounds"; exit 1 }
     mv=sv/n; ms=ss/n
+    # One round is a usable measurement without a spread; an interval needs a
+    # second round, and dividing by n-1 without one was a crash after a
+    # complete measurement.
+    if (n < 2) { printf "RESULT clip=%s n=1 va=%.0fuW sw=%.0fuW va-sw=%.0fuW (one round, no interval)\n", \
+        sz, mv, ms, mv-ms; exit }
     for (i=1;i<=n;i++){qv+=(v[i]-mv)^2; qs+=(s[i]-ms)^2}
     # Two-sided 95% t interval; small-n table, n-1 degrees of freedom.
     t = (n==2)?12.706:(n==3)?4.303:(n==4)?3.182:(n==5)?2.776:2.571

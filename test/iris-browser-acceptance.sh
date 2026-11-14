@@ -109,7 +109,21 @@ esac
 # driver through libva's own resolution, which is the property being tested.
 driver_env=''
 if [ "$driver_source" = build-tree ]; then
-    driver_env="LIBVA_DRIVERS_PATH=$driver_dir"
+    # libva resolves this driver as msm_drv_video.so, because the render node
+    # it opens is msm's. A build directory ships only v4l2_drv_video.so, so a
+    # build-tree run needs a directory that also carries the alias; without it
+    # vaInitialize fails before a single picture and the gate reports a
+    # browser failure that is really a missing symlink.
+    if [ ! -e "$driver_dir/msm_drv_video.so" ]; then
+        alias_dir=$out/driver
+        rm -rf "$alias_dir"
+        mkdir -p "$alias_dir"
+        ln -s "$driver" "$alias_dir/v4l2_drv_video.so"
+        ln -s v4l2_drv_video.so "$alias_dir/msm_drv_video.so"
+        driver_env="LIBVA_DRIVERS_PATH=$alias_dir"
+    else
+        driver_env="LIBVA_DRIVERS_PATH=$driver_dir"
+    fi
 fi
 
 # Keep every experiment switch out of the environment: this is the default

@@ -5,6 +5,7 @@
 
 #include "driver.h"
 
+#include "../iris/vpp/scale.h"
 #include "../util/error.h"
 
 #include <algorithm>
@@ -88,6 +89,11 @@ iris::Publish publish_policy(const DriverData& d, const Surface& surface, const 
     return session.supports_import() ? iris::Publish::Import : iris::Publish::Copy;
 }
 
+bool vpp_available(const DriverData& d)
+{
+    return d.options.vpp_enabled && iris::vpp::compiled_in();
+}
+
 iris::StableBuffer& ensure_stable(DriverData& d, Surface& surface)
 {
     if (!surface.stable)
@@ -143,23 +149,26 @@ Capabilities probe_capabilities(const iris::Options& options)
         caps.import_formats.insert(V4L2_PIX_FMT_H264);
     if (caps.output_formats.count(V4L2_PIX_FMT_HEVC) && caps.nv12)
         caps.import_formats.insert(V4L2_PIX_FMT_HEVC);
+    if (caps.output_formats.count(V4L2_PIX_FMT_VP9) && caps.nv12)
+        caps.import_formats.insert(V4L2_PIX_FMT_VP9);
     if (caps.output_formats.count(V4L2_PIX_FMT_AV1) && caps.nv12)
         caps.import_formats.insert(V4L2_PIX_FMT_AV1);
     // import-qualified-end
-    // VP9 is absent from default qualification: the session-side blocker is
-    // gone — lending one picture one buffer per completion ran clean on the
-    // target (FFmpeg 515/515, misplaced=0, framemd5 equal to the software
-    // decode) — but Chrome releases a VP9 surface before its picture
-    // completes far more often than it does for H.264: 564 of 768 queueings
-    // carried abandoned=1 and 541 completions were dropped, against 2 and 4
-    // for the H.264 control. VP9 qualifies once that path is clean, not
-    // before. AV1's internal-DPB translator submits at vaEndPicture; Import
-    // lends one client buffer per completion, including the invisible half
-    // of a hidden install unit. The 2026-11-11 installed-package runs in
-    // TEST-RESULTS.md qualified this default path: 48/48 four-codec matrix,
-    // 120/120 AV1 and 80/80 DRC exact framemd5 under Import; the DRC clip
-    // switches to copy-gpu for its second half. Firefox 158 and Chrome 156
-    // both decode live AV1 pages with the selected hardware decoder.
+    // VP9 qualified on 2026-11-12 once a released surface stopped costing its
+    // picture: Chrome destroys a VP9 surface as soon as it has composited the
+    // frame, and the session used to drop the still-in-flight completion.
+    // The target now keeps the target and completes it (`target detached`),
+    // and the 2026-11-12 runs in TEST-RESULTS.md record 48/48 four-codec
+    // matrix, FFmpeg 515/515 with framemd5 equal to the software decode, and
+    // two guarded Chrome windows at 1705/1705 and 1588/1588 with drops=0,
+    // against a Copy baseline that dropped 3 of 1705. AV1's internal-DPB
+    // translator submits at vaEndPicture; Import lends one client buffer per
+    // completion, including the invisible half of a hidden install unit. The
+    // 2026-11-11 installed-package runs qualified that default path: 48/48
+    // four-codec matrix, 120/120 AV1 and 80/80 DRC exact framemd5 under
+    // Import; the DRC clip switches to copy-gpu for its second half. Firefox
+    // 158 and Chrome 156 both decode live AV1 pages with the selected
+    // hardware decoder.
 
     // The encoder is a second iris_driver node. Its absence is not fatal:
     // the display still decodes, and no encode entrypoint is advertised.
@@ -304,6 +313,16 @@ extern "C" VAStatus __attribute__((visibility("default"))) VA_DRIVER_INIT_FUNC(V
     vtable->vaSetSubpictureGlobalAlpha = setSubpictureGlobalAlpha;
     vtable->vaAssociateSubpicture = associateSubpicture;
     vtable->vaDeassociateSubpicture = deassociateSubpicture;
+
+    // The VPP vtable is separate and may be absent on an older libva. Only
+    // fill it in when this build and the client both opted in; otherwise a
+    // client that probes VAProfileNone gets nothing to call.
+    if (ctx->vtable_vpp && vpp_available(*d)) {
+        ctx->vtable_vpp->version = VA_DRIVER_VTABLE_VPP_VERSION;
+        ctx->vtable_vpp->vaQueryVideoProcFilters = queryVideoProcFilters;
+        ctx->vtable_vpp->vaQueryVideoProcFilterCaps = queryVideoProcFilterCaps;
+        ctx->vtable_vpp->vaQueryVideoProcPipelineCaps = queryVideoProcPipelineCaps;
+    }
 
     ctx->pDriverData = d;
     return VA_STATUS_SUCCESS;

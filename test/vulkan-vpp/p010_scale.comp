@@ -1,0 +1,300 @@
+// SPDX-License-Identifier: MIT
+//
+// P010 scale (optionally from a crop, optionally rotated) for the VA video
+// processor: the 10-bit sibling of nv12_scale.comp. Same sample map, same
+// interpolation methods, same crop semantics, same rotation, same rule that
+// one invocation owns one 32-bit destination word so no two invocations race.
+//
+// A P010 sample is a 16-bit little-endian word with the ten bits at the top
+// (the low six are zero), so a 32-bit word holds two samples instead of four
+// and a chroma word holds one (u,v) pair instead of two. The sample map is
+// swscale's SWS_POINT:
+//
+//     xInc = ((src << 16) + (dst >> 1)) / dst
+//     src_index(i) = (i * xInc + (xInc >> 1)) >> 16
+//
+// This kernel packs a ten-bit destination. Its source may be either depth:
+// `src_wide` says which, and an eight-bit source is shifted up by two, which
+// is the exact conversion swscale applies in the other direction.
+//
+// The crop origin is in luma pixels and even. A chroma pair spans two luma
+// columns and four bytes here (one 16-bit u, one 16-bit v), so the origin
+// lands at byte 2 * src_x of the chroma row — not src_x, which is what a
+// pair-at-2-bytes format like NV12 needs.
+
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0, std430) readonly buffer Src { uint s[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Dst { uint d[]; };
+layout(push_constant) uniform Params {
+    uint src_stride, src_uv, dst_stride, dst_uv;
+    uint src_y, dst_y;
+    uint src_x, src_row;
+    uint src_w, src_h, dst_w, dst_h;
+    // Clockwise quarter turns: VA_ROTATION_NONE/90/180/270 as 0/1/2/3.
+    uint rot;
+    // VA_MIRROR_HORIZONTAL as bit 0 and VA_MIRROR_VERTICAL as bit 1, applied
+    // after the rotation.
+    uint mirror;
+    // 0 samples the point map above (swscale's `flags=neighbor`). 1 blends the
+    // four samples around the destination sample's centre, which is what
+    // VA_FILTER_INTERPOLATION_BILINEAR asks for. 2 is the area average and 3
+    // the cubic; 4 lets the driver pick per axis.
+    uint interp;
+    // Non-zero when the source is ten bits too. The destination is always ten
+    // here.
+    uint src_wide;
+} p;
+
+// One source sample as a ten-bit code: the top ten bits of its 16-bit word
+// when the source is wide, or an eight-bit byte shifted up by two — the exact
+// conversion swscale applies in the other direction, so a 10-bit code whose
+// low two bits are clear round-trips an 8-bit picture unchanged. `off` is a
+// byte offset; a P010 sample is two bytes and an NV12 one is a byte.
+uint to_dst(uint off)
+{
+    if (p.src_wide != 0u)
+        return ((s[off >> 2] >> ((off & 3u) << 3)) & 0xffffu) >> 6;
+    return ((s[off >> 2] >> ((off & 3u) << 3)) & 255u) << 2;
+}
+
+uint step(uint src, uint dst)
+{
+    return ((src << 16) + (dst >> 1)) / dst;
+}
+
+uint pick(uint i, uint inc)
+{
+    return (i * inc + (inc >> 1)) >> 16;
+}
+
+// Size of a w x h plane after the rotation. A quarter turn transposes it.
+uvec2 rotated(uint w, uint h)
+{
+    return (p.rot & 1u) != 0u ? uvec2(h, w) : uvec2(w, h);
+}
+
+// Same mirroring and inverse rotation as nv12_scale.comp, in the same order:
+// VA rotates first, mirrors second, and scales last.
+uvec2 mirror_at(uvec2 at, uvec2 size)
+{
+    if ((p.mirror & 1u) != 0u)
+        at.x = size.x - 1u - at.x;
+    if ((p.mirror & 2u) != 0u)
+        at.y = size.y - 1u - at.y;
+    return at;
+}
+
+// The source is rotated clockwise first and scaled second, so each destination
+// point is mapped into the rotated plane and then taken back to the source.
+uvec2 unrotate(uint rx, uint ry, uint w, uint h)
+{
+    if (p.rot == 1u)
+        return uvec2(ry, h - 1u - rx);
+    if (p.rot == 2u)
+        return uvec2(w - 1u - rx, h - 1u - ry);
+    if (p.rot == 3u)
+        return uvec2(w - 1u - ry, rx);
+    return uvec2(rx, ry);
+}
+
+// One source sample of the rotated plane as a ten-bit code. A wide source's
+// luma sample is two bytes, a chroma sample is one half of a u,v pair that
+// spans four; an eight-bit source is one byte per sample and two per pair.
+uint luma_at(uint rx, uint ry)
+{
+    uvec2 at = unrotate(rx, ry, p.src_w, p.src_h);
+    return to_dst(p.src_y + (p.src_row + at.y) * p.src_stride + (p.src_x + at.x) * (1u + p.src_wide));
+}
+
+uint chroma_at(uint rx, uint ry, uint c)
+{
+    uvec2 at = unrotate(rx, ry, p.src_w >> 1, p.src_h >> 1);
+    uint off = p.src_uv + ((p.src_row >> 1) + at.y) * p.src_stride
+        + (p.src_x + at.x * 2u) * (1u + p.src_wide);
+    return to_dst(off + c * (1u + p.src_wide));
+}
+
+// Continuous position of destination sample `d` of `dst` inside a `src`-sized
+// axis: the destination sample's centre mapped back into the source and
+// clamped to its extent, so a 1:1 scale lands on the sample itself.
+float axis_pos(uint d, uint dst, uint src)
+{
+    float v = (float(d) + 0.5) * (float(src) / float(dst)) - 0.5;
+    return clamp(v, 0.0, float(src - 1u));
+}
+
+// VA mirrors after the rotation, so a mirror reflects the continuous position
+// in the rotated plane rather than an already-rounded index.
+float mirror_pos(float v, uint size, bool on)
+{
+    return on ? float(size - 1u) - v : v;
+}
+
+// A P010 word carries its ten bits at the top and zero in the low six. The
+// blend therefore happens on the code, not on the padded word: averaging two
+// padded words and rounding would leave bits in the low six, which is not a
+// legal P010 sample.
+uint pad16(uint code)
+{
+    return code << 6u;
+}
+
+// The half-open source interval [lo, hi) that destination sample `d` of `dst`
+// covers on a `src`-sized axis, reflected when the axis is mirrored.
+void span_axis(uint d, uint dst, uint src, bool on, out uint lo, out uint hi)
+{
+    uint a = (d * src) / dst;
+    uint b = ((d + 1u) * src + dst - 1u) / dst;
+    if (b <= a)
+        b = a + 1u;
+    b = min(b, src);
+    a = min(a, b - 1u);
+    if (on) {
+        lo = src - b;
+        hi = src - a;
+    } else {
+        lo = a;
+        hi = b;
+    }
+}
+
+// Catmull-Rom weights for the four taps around one fractional position; they
+// sum to one, so a constant picture stays constant.
+vec4 cubic_weights(float f)
+{
+    float f2 = f * f, f3 = f2 * f;
+    return vec4(-0.5 * f3 + f2 - 0.5 * f, 1.5 * f3 - 2.5 * f2 + 1.0,
+        -1.5 * f3 + 2.0 * f2 + 0.5 * f, 0.5 * f3 - 0.5 * f2);
+}
+
+// 0 the point map, 1 bilinear, 2 the area average, 3 the cubic; 4 asks the
+// driver to choose per axis, which is what VA_FILTER_INTERPOLATION_ADVANCED
+// means here: area when the axis shrinks, cubic when it grows.
+uint method(uint src, uint dst)
+{
+    if (p.interp != 4u)
+        return p.interp;
+    if (src > dst)
+        return 2u;
+    if (src < dst)
+        return 3u;
+    return 1u;
+}
+
+// Up to four (index, weight) taps for one axis. Every method is expressed as
+// taps, so the two-dimensional result is one outer product and no method has
+// a path of its own.
+int axis_taps(uint d, uint dst, uint src, bool mirrored, uint m, out int idx[4], out float wgt[4])
+{
+    if (m == 0u) {
+        uint inc = ((src << 16) + (dst >> 1)) / dst;
+        uint at = pick(d, inc);
+        idx[0] = int(mirrored ? src - 1u - at : at);
+        wgt[0] = 1.0;
+        return 1;
+    }
+    if (m == 2u) {
+        uint lo, hi;
+        span_axis(d, dst, src, mirrored, lo, hi);
+        uint n = hi - lo;
+        if (n <= 4u) {
+            for (int i = 0; i < 4; ++i) {
+                idx[i] = min(int(lo) + i, int(hi) - 1);
+                wgt[i] = 1.0 / float(n);
+            }
+            return int(n);
+        }
+        for (int i = 0; i < 4; ++i) {
+            idx[i] = int(lo) + int((uint(i) * (n - 1u)) / 3u);
+            wgt[i] = 0.25;
+        }
+        return 4;
+    }
+    float v = axis_pos(d, dst, src);
+    v = mirror_pos(v, src, mirrored);
+    uint i0 = uint(floor(v));
+    float f = v - float(i0);
+    if (m == 1u) {
+        idx[0] = int(i0);
+        idx[1] = int(min(i0 + 1u, src - 1u));
+        wgt[0] = 1.0 - f;
+        wgt[1] = f;
+        return 2;
+    }
+    vec4 w = cubic_weights(f);
+    for (int i = 0; i < 4; ++i) {
+        idx[i] = clamp(int(i0) - 1 + i, 0, int(src) - 1);
+        wgt[i] = w[i];
+    }
+    return 4;
+}
+
+uint luma_px(uint dx, uint row, uvec2 r, uint mx, uint my)
+{
+    int xi[4], yi[4];
+    float xw[4], yw[4];
+    int nx = axis_taps(dx, p.dst_w, r.x, (p.mirror & 1u) != 0u, mx, xi, xw);
+    int ny = axis_taps(row, p.dst_h, r.y, (p.mirror & 2u) != 0u, my, yi, yw);
+    float v = 0.0;
+    for (int j = 0; j < ny; ++j) {
+        float rowsum = 0.0;
+        for (int i = 0; i < nx; ++i)
+            rowsum += xw[i] * float(luma_at(uint(xi[i]), uint(yi[j])));
+        v += yw[j] * rowsum;
+    }
+    return pad16(uint(clamp(v + 0.5, 0.0, 1023.0)));
+}
+
+uint chroma_px(uint cx, uint cy, uvec2 r, uint mx, uint my, uint pairs, uint dh, uint c)
+{
+    int xi[4], yi[4];
+    float xw[4], yw[4];
+    int nx = axis_taps(cx, pairs, r.x, (p.mirror & 1u) != 0u, mx, xi, xw);
+    int ny = axis_taps(cy, dh, r.y, (p.mirror & 2u) != 0u, my, yi, yw);
+    float v = 0.0;
+    for (int j = 0; j < ny; ++j) {
+        float rowsum = 0.0;
+        for (int i = 0; i < nx; ++i)
+            rowsum += xw[i] * float(chroma_at(uint(xi[i]), uint(yi[j]), c));
+        v += yw[j] * rowsum;
+    }
+    return pad16(uint(clamp(v + 0.5, 0.0, 1023.0)));
+}
+
+void main()
+{
+    uint word = gl_GlobalInvocationID.x;
+    uint row = gl_GlobalInvocationID.y;
+    if (row >= p.dst_h + (p.dst_h >> 1))
+        return;
+
+    if (row < p.dst_h) {
+        // Two luma samples per word.
+        if (word >= ((p.dst_w + 1u) >> 1))
+            return;
+        uvec2 r = rotated(p.src_w, p.src_h);
+        uint mx = method(r.x, p.dst_w), my = method(r.y, p.dst_h);
+        uint packed = 0u;
+        for (uint k = 0u; k < 2u; ++k) {
+            uint dx = word * 2u + k;
+            packed |= luma_px(min(dx, p.dst_w - 1u), row, r, mx, my) << (k * 16u);
+        }
+        d[(p.dst_y + row * p.dst_stride + word * 4u) >> 2] = packed;
+    } else {
+        // Chroma samples are interleaved u,v and a word holds exactly one
+        // pair. Pair `word` sits at byte word * 4 in the destination row, and
+        // its source pair index is the one the same point map picks.
+        uint cy = row - p.dst_h;
+        uint pairs = p.dst_w >> 1;
+        if (word >= pairs)
+            return;
+        uint cw = p.src_w >> 1;
+        uint ch = p.src_h >> 1;
+        uvec2 r = rotated(cw, ch);
+        uint mx = method(r.x, pairs), my = method(r.y, p.dst_h >> 1);
+        d[(p.dst_uv + cy * p.dst_stride + word * 4u) >> 2]
+            = chroma_px(min(word, pairs - 1u), cy, r, mx, my, pairs, p.dst_h >> 1, 0u)
+            | (chroma_px(min(word, pairs - 1u), cy, r, mx, my, pairs, p.dst_h >> 1, 1u) << 16u);
+    }
+}

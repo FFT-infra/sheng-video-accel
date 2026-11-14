@@ -30,7 +30,9 @@ Version:        0.1.0
 Release:        3%{?dist}
 Summary:        VA-API backend for the Qualcomm Iris V4L2 stateful decoder and encoder
 
-# The backend carries both licences; see COPYING, COPYING.LGPL and COPYING.MIT.
+# Driver source is MIT; COPYING.LGPL retains upstream provenance. The AND is
+# conservative for distributions that attribute the upstream history. See
+# COPYING, COPYING.LGPL and COPYING.MIT.
 License:        MIT AND LGPL-2.1-or-later
 URL:            https://github.com/phxinyang/qualcomm-iris-vaapi
 Source0:        %{forgename}-%{version}.tar.gz
@@ -47,6 +49,16 @@ BuildRequires:  pkgconfig(libdrm) >= 2.4.52
 BuildRequires:  pkgconfig(egl)
 BuildRequires:  pkgconfig(glesv2)
 BuildRequires:  pkgconfig(gbm)
+# The VA video processor (scale, crop, rotation, mirroring, tone mapping,
+# compositing) is Vulkan compute and stays behind V4L2_VA_VPP at runtime, but
+# a package built without the loader and headers would not carry it at all.
+# All three package formats depend on it for the same reason.
+BuildRequires:  pkgconfig(vulkan)
+# %check runs the project's host checks, and three of them compare against
+# FFmpeg (the rotation model with software transpose, and two AV1 oracles that
+# need libdav1d). Without it a clean build root fails the test stage; a
+# developer machine that happens to have ffmpeg hides that.
+BuildRequires:  ffmpeg
 
 # The diagnostic commands resolve the decoder node by driver name with
 # v4l2-ctl, because the node number is not stable across boots on this device.
@@ -113,6 +125,10 @@ sh scripts/refresh-install-manifest.sh \
 # this SoC reports DRIVER=msm_dpu. The alias keeps clients that do not set the
 # variable (mpv, VLC, GStreamer) on this driver instead of software.
 %{_libdir}/dri/msm_drv_video.so
+# Client recipes written for the sibling distribution set
+# LIBVA_DRIVER_NAME=qcom; this alias keeps that name resolving to the same
+# driver instead of falling back to software.
+%{_libdir}/dri/qcom_drv_video.so
 # Read-only device report, one-command hardware check, and the opt-in mpv /
 # Firefox configuration. The first two source one shared node-resolution file.
 %{_bindir}/iris-device-check

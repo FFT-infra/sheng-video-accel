@@ -107,6 +107,33 @@ public:
 
     uint32_t v4l2_pixelformat() const override { return V4L2_PIX_FMT_H264; }
 
+    // An H.264 context may be macroblock-aligned (FFmpeg creates a 1920x1088
+    // context for a 1920x1080 picture), and the sequence parameters are where
+    // the client says how much of it is the picture: the coded size minus the
+    // frame crop. Chroma-format cropping offsets count chroma samples, so
+    // each removes two luma pixels.
+    bool coded_size(const EncodePicture& picture, unsigned& width, unsigned& height) const override
+    {
+        const auto* sequence = static_cast<const VAEncSequenceParameterBufferH264*>(picture.sequence);
+        if (sequence == nullptr || sequence->picture_width_in_mbs == 0 || sequence->picture_height_in_mbs == 0)
+            return false;
+        unsigned coded_width = unsigned(sequence->picture_width_in_mbs) * 16;
+        unsigned coded_height = unsigned(sequence->picture_height_in_mbs) * 16;
+        if (sequence->frame_cropping_flag) {
+            const uint64_t crop_x = uint64_t(sequence->frame_crop_left_offset)
+                + sequence->frame_crop_right_offset;
+            const uint64_t crop_y = uint64_t(sequence->frame_crop_top_offset)
+                + sequence->frame_crop_bottom_offset;
+            if (crop_x * 2 >= coded_width || crop_y * 2 >= coded_height)
+                return false;
+            coded_width -= unsigned(crop_x * 2);
+            coded_height -= unsigned(crop_y * 2);
+        }
+        width = coded_width;
+        height = coded_height;
+        return true;
+    }
+
     VABufferID coded_buf(const EncodePicture& picture) const override
     {
         const auto* params = static_cast<const VAEncPictureParameterBufferH264*>(picture.picture);
@@ -143,12 +170,31 @@ public:
 
         if (const auto* rate = static_cast<const VAEncMiscParameterRateControl*>(
                 find_misc(picture.misc, VAEncMiscParameterTypeRateControl))) {
-            if (rate->bits_per_second)
-                out.bitrate = rate->bits_per_second;
+            if (rate->bits_per_second) {
+                // The field is the rate controller's maximum; the target is
+                // target_percentage of it (va.h). A client asking for VBR
+                // without a maximum gets 2x its own rate at 50 % — FFmpeg
+                // fills that in when -maxrate is absent — so programming the
+                // raw field runs the encoder at twice the requested rate.
+                const uint32_t percentage = rate->target_percentage ? rate->target_percentage : 100;
+                out.bitrate = static_cast<uint32_t>(
+                    static_cast<uint64_t>(rate->bits_per_second) * percentage / 100);
+                // A maximum above the target is the client's VBR ceiling.
+                if (rate->bits_per_second > out.bitrate)
+                    out.peak_bitrate = rate->bits_per_second;
+                bitrate_ = out.bitrate;
+                peak_bitrate_ = out.peak_bitrate;
+            }
             if (rate->min_qp)
                 out.min_qp = rate->min_qp;
             if (rate->max_qp)
                 out.max_qp = rate->max_qp;
+        } else if (bitrate_) {
+            // No rate control in this picture: keep what the client last
+            // configured instead of the sequence field, which is a rate and
+            // not the target the client asked for.
+            out.bitrate = bitrate_;
+            out.peak_bitrate = peak_bitrate_;
         }
         if (const auto* frame = static_cast<const VAEncMiscParameterFrameRate*>(
                 find_misc(picture.misc, VAEncMiscParameterTypeFrameRate))) {
@@ -236,7 +282,12 @@ public:
         }
         require(params->pic_fields.bits.reference_pic_flag != 0,
             "non-reference pictures are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
-        out.peak_bitrate = out.rate_mode == RateMode::Cbr ? out.bitrate : 0;
+        // CBR names its target as the peak. VBR keeps the client's ceiling
+        // when it gave one above the target; CQP has no rate control at all.
+        if (out.rate_mode == RateMode::Cbr)
+            out.peak_bitrate = out.bitrate;
+        else if (out.rate_mode == RateMode::Cqp)
+            out.peak_bitrate = 0;
         require(out.rate_mode != RateMode::Cbr || out.bitrate > 0, "CBR needs a bitrate",
             VA_STATUS_ERROR_INVALID_PARAMETER);
         // CQP has no bitrate: the picture QP is what the bitstream carries,
@@ -255,6 +306,13 @@ public:
 private:
     VAProfile profile_;
     RateMode rate_mode_;
+    // The rate the client configured most recently. FFmpeg renders the
+    // rate-control misc buffer once, with the first picture, so every later
+    // picture arrives without it; falling back to the sequence field there
+    // would reprogram the controller on each picture with a value that is a
+    // rate rather than the client's target.
+    uint32_t bitrate_ = 0;
+    uint32_t peak_bitrate_ = 0;
 };
 
 } // namespace

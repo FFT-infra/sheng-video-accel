@@ -34,13 +34,102 @@ run() {
 # of the trace checkers shipped broken for a while because a typo made it grep
 # a path instead of a file, so parse every script we own on every run.
 echo "== shell syntax"
-for script in "$test_dir"/*.sh "$test_dir"/remote/*.sh "$root"/scripts/*.sh; do
+for script in "$test_dir"/*.sh "$test_dir"/remote/*.sh "$test_dir"/vulkan-vpp/*.sh \
+    "$root"/scripts/*.sh "$root"/packaging/kernel/*.sh; do
     [ -f "$script" ] || continue
     run "syntax $(basename "$script")" sh -n "$script"
 done
 
+echo "== VPP SPIR-V pin"
+# Both Vulkan gates run only on the target (CI has no GPU), so the checked-in
+# SPIR-V binaries are pinned by hash here. A stale or hand-edited .spv must
+# fail a host check rather than silently change what the target gate measures.
+# SHA256SUMS lists copy.spv (flat read/write prereq), nv12_scale.spv (the
+# nearest NV12 scale with crop and rotation), p010_scale.spv (the same map for
+# P010), tonemap.spv (HDR10 P010 to SDR NV12) and overlay.spv (global-alpha
+# compositing of two surfaces); sha256sum -c verifies every entry.
+run vpp-spv-pin sh -c 'cd "$1" && sha256sum -c SHA256SUMS' sh "$test_dir/vulkan-vpp"
+run vpp-spv-scale-pinned grep -Fq 'nv12_scale.spv' "$test_dir/vulkan-vpp/SHA256SUMS"
+run vpp-spv-p010-pinned grep -Fq 'p010_scale.spv' "$test_dir/vulkan-vpp/SHA256SUMS"
+run vpp-spv-tonemap-pinned grep -Fq 'tonemap.spv' "$test_dir/vulkan-vpp/SHA256SUMS"
+run vpp-spv-overlay-pinned grep -Fq 'overlay.spv' "$test_dir/vulkan-vpp/SHA256SUMS"
+# The scale gate must stay a per-pixel oracle, not a spot check: a stride or
+# chroma-offset bug can otherwise hide behind a handful of sampled bytes.
+run vpp-scale-pixel-oracle grep -Fq 'check_pixels(src, dst, &g)' "$test_dir/vulkan-vpp/scale_probe.c"
+# The probe is shared by both kernels and both gates; a rename or a moved
+# helper would leave a gate compiling nothing.
+run vpp-p010-gate-uses-probe grep -Fq 'scale_probe.c' "$test_dir/vulkan-vpp/p010_scale_gate.sh"
+run vpp-rotate-gate-uses-driver grep -Fq 'transpose_vaapi' "$test_dir/vulkan-vpp/transpose_vaapi_gate.sh"
+# The bilinear method is advertised in the pipeline caps, so both scale gates
+# have to measure it: the blend against its model, and the two invariants that
+# hold whatever the ratio is.
+for gate in nv12_scale_gate p010_scale_gate; do
+    run "vpp-$gate-bilinear" grep -Fq -- '--interp 1' "$test_dir/vulkan-vpp/$gate.sh"
+    run "vpp-$gate-bilinear-constant" grep -Fq -- '--constant' "$test_dir/vulkan-vpp/$gate.sh"
+done
+# The driver maps the client's filter_flags onto the kernel's methods. All
+# three are accepted and the caps name the best of them; a method the caps name
+# without a kernel would be over-advertising.
+run vpp-bilinear-accepted grep -Fq 'VA_FILTER_INTERPOLATION_BILINEAR' "$root/src/va/picture.cc"
+run vpp-advanced-accepted grep -Fq 'VA_FILTER_INTERPOLATION_ADVANCED' "$root/src/va/picture.cc"
+run vpp-advanced-advertised grep -Fq 'VA_FILTER_INTERPOLATION_ADVANCED' "$root/src/va/vpp.cc"
+# Advanced is a real kernel (the area average on a downscale, the cubic on an
+# upscale), so the gate has to prove it runs and that it differs from bilinear.
+run vpp-advanced-gate grep -Fq -- '--interp=advanced' "$test_dir/vulkan-vpp/crop_vaapi_gate.sh"
+run vpp-advanced-differs grep -Fq 'advanced and bilinear produced the same frame' \
+    "$test_dir/vulkan-vpp/crop_vaapi_gate.sh"
+# The tone mapper has no byte-exact reference, so the gate's verdict is the
+# probe's own model; a gate that stopped comparing, or a probe whose model went
+# missing, would leave the kernel unmeasured.
+run vpp-tonemap-gate-uses-probe grep -Fq 'iris-va-vpp-probe' "$test_dir/vulkan-vpp/tonemap_gate.sh"
+run vpp-tonemap-oracle grep -Fq 'expected_sdr' "$test_dir/iris-va-vpp-probe.cc"
+run vpp-tonemap-refusals grep -Fq -- '--source-nv12' "$test_dir/vulkan-vpp/tonemap_gate.sh"
+# The composite has an exact reference, so the gate compares both endpoint
+# frames byte for byte as well as the model. Losing either comparison would
+# let a kernel that ignored the alpha pass on a loose tolerance alone.
+run vpp-overlay-gate-uses-probe grep -Fq 'iris-va-vpp-probe' "$test_dir/vulkan-vpp/overlay_gate.sh"
+# The probe's model composites one layer at a time onto the pixels the
+# previous one left, which is what makes a stack correct; a model that reset
+# to the main frame each time would pass every single-layer case and be wrong
+# for every stack.
+run vpp-overlay-oracle grep -Fq 'apply_composite' "$test_dir/iris-va-vpp-probe.cc"
+run vpp-overlay-layers grep -Fq -- '--layers=' "$test_dir/vulkan-vpp/overlay_gate.sh"
+run vpp-overlay-endpoints grep -Fq 'alpha 0 did not reproduce the main frame' \
+    "$test_dir/vulkan-vpp/overlay_gate.sh"
+run vpp-overlay-refusals grep -Fq -- '--premultiplied' "$test_dir/vulkan-vpp/overlay_gate.sh"
+# The rotation map is the one piece of the kernel a host can check: it mirrors
+# scale_probe.c's coordinates and compares them with FFmpeg's software filters,
+# so a swapped axis fails here instead of on the target as a pixel mismatch.
+run vpp-rotation-model python3 "$test_dir/vulkan-vpp/rotation_model_check.py"
+# The driver embeds the shader, so the array in src/ is a second copy of the
+# pinned binary. Regenerate it from the .spv and require an identical file; a
+# hand edit here would ship a kernel no gate ever measured.
+run vpp-spv-header sh -c 'python3 "$1" "$2" | cmp -s - "$3"' sh \
+    "$test_dir/vulkan-vpp/spv-to-header.py" "$test_dir/vulkan-vpp/nv12_scale.spv" \
+    "$root/src/iris/vpp/nv12_scale_spv.h"
+run vpp-spv-p010-header sh -c 'python3 "$1" "$2" | cmp -s - "$3"' sh \
+    "$test_dir/vulkan-vpp/spv-to-header.py" "$test_dir/vulkan-vpp/p010_scale.spv" \
+    "$root/src/iris/vpp/p010_scale_spv.h"
+run vpp-spv-tonemap-header sh -c 'python3 "$1" "$2" | cmp -s - "$3"' sh \
+    "$test_dir/vulkan-vpp/spv-to-header.py" "$test_dir/vulkan-vpp/tonemap.spv" \
+    "$root/src/iris/vpp/tonemap_spv.h"
+run vpp-spv-overlay-header sh -c 'python3 "$1" "$2" | cmp -s - "$3"' sh \
+    "$test_dir/vulkan-vpp/spv-to-header.py" "$test_dir/vulkan-vpp/overlay.spv" \
+    "$root/src/iris/vpp/overlay_spv.h"
+run vpp-spv-overlay-rgb-header sh -c 'python3 "$1" "$2" | cmp -s - "$3"' sh \
+    "$test_dir/vulkan-vpp/spv-to-header.py" "$test_dir/vulkan-vpp/overlay_rgb.spv" \
+    "$root/src/iris/vpp/overlay_rgb_spv.h"
+
+echo "== remote gate command transport"
+# The guard backgrounds its child. A `sh -s` child fed by a heredoc reads
+# /dev/null in a non-interactive shell, so the command never runs while the
+# guard still reports exit 0 -- a run record that proves nothing. gate.sh must
+# land the command in a per-run file and read it by path.
+run gate-command-file grep -Fq 'remote_cmd' "$test_dir/remote/gate.sh"
+run gate-no-stdin-child sh -c '! grep -Fq "guard.sh -- sh -s" "$1"' sh "$test_dir/remote/gate.sh"
+
 echo "== python syntax"
-for script in "$test_dir"/*.py "$test_dir"/remote/*.py; do
+for script in "$test_dir"/*.py "$test_dir"/remote/*.py "$test_dir"/vulkan-vpp/*.py; do
     [ -f "$script" ] || continue
     run "syntax $(basename "$script")" python3 -m py_compile "$script"
 done
@@ -76,6 +165,7 @@ echo "== source invariants"
 run iris-source-invariants sh "$test_dir/iris-source-invariants.sh" "$root"
 run iris-env-doc-check sh "$test_dir/iris-env-doc-check.sh" "$root"
 run iris-codec-matrix-check sh "$test_dir/iris-codec-matrix-check.sh" "$root"
+run iris-trace-vocab-check python3 -I "$test_dir/iris-trace-vocab-check.py" "$root"
 run iris-experiment-guard-self-test sh "$test_dir/iris-experiment-guard-self-test.sh" "$root"
 run iris-eos-check-self-test sh "$test_dir/iris-eos-check-self-test.sh" "$root"
 run iris-clip-trace-check-self-test sh "$test_dir/iris-clip-trace-check-self-test.sh" "$root"

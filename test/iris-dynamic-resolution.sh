@@ -1,11 +1,16 @@
 #!/bin/sh
 
 # Exercise 640x360 <-> 1280x720 sequence changes on the Iris stateful decoder.
-# H.264 passes only when native V4L2/GStreamer decodes the complete changing-
-# resolution stream, one FFmpeg VA process matches software, and fresh VA
-# decoder contexts repeatedly decode each geometry. Both native and VA VP9
-# dynamic/session-churn probes reboot the target kernel/firmware, so requesting
-# VP9 fails before any compressed stream is submitted.
+# A codec passes only when native V4L2/GStreamer decodes the complete
+# changing-resolution stream, one FFmpeg VA process matches software, and
+# fresh VA decoder contexts repeatedly decode each geometry.
+#
+# VP9 was withdrawn here on the old tree: its context recreation and source
+# changes rebooted the tablet. Phase 5 re-enabled it on the decode-order
+# module, where neither reproduced (100 recreations plus 100 in-stream
+# switches, pixels equal to software), and `IRIS_DYNAMIC_CODECS=vp9` has run
+# since. Under `V4L2_VA_PUBLISH=import` the resolution change also rebuilds an
+# Import pool, which is a different path from that run.
 # Missing formats, elements or advertised support are failures, never SKIPs.
 
 set -eu
