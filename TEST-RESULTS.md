@@ -8755,6 +8755,34 @@ What this does not prove: two clips, 15 s and 8 s windows, and a drop count
 is a renderer statistic — this record says nothing about which layer would
 drop under a compositor load it did not see.
 
+### CPU cost of the same playback
+
+Frame counts and drop counts do not say what a decode costs the machine.
+Three interleaved rounds of HEVC, AV1 and VP9 1080p playback, this driver and
+the sibling alternating within each round, 15 s windows, same gate and same
+`LIBVA_DRIVERS_PATH` mechanism as above. The figure is CPU time summed over
+every process in the run's Chrome profile, divided by the window's wall time.
+Samples are per-pid high-water marks; a first-minus-last sum goes negative
+once Chrome's helper processes exit and their ticks leave the total.
+
+| clip | this driver | sibling |
+| --- | ---: | ---: |
+| H.264 1080p30 | 34.1 % | 35.0 % |
+| AV1 1080p30 | 35.4 % | 34.4 % |
+| VP9 1080p30 | 33.3 % | 33.6 % |
+
+Means of three rounds, one core as 100 %. Every cell is within a percentage
+point of its counterpart, and the sign of the difference flips between
+codecs, so this resolves no gap either way. It also does not contradict the
+decoder-layer measurement: this figure is the whole browser — renderer,
+compositor, GPU process and decoder — over video that the compositor works on
+regardless of which driver decoded it, so a decode-layer difference of a few
+percent is diluted below the noise here.
+
+What this does not prove: one 15 s clip per codec, three rounds, CPU time
+only. Power draw was not measured; the tablet was on external power at 99 %
+during these runs, and a power comparison needs it unplugged.
+
 ## AV1 correctness: the frames the sibling replaces with neutral gray (2026-11-14)
 
 This driver decodes AV1 byte-exactly against libdav1d on every clip measured.
