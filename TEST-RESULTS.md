@@ -8998,3 +8998,41 @@ decoder-package power; the idle baselines were taken after the decode runs
 rather than inside each round; two rounds per state, and the 1080p clip was
 not run in this shape. The browser sample covers 12 s of a 15 s window, so
 start-up and teardown are outside it.
+
+## The branch head as an installed package (2026-11-14)
+
+Every record above ran from a build tree through `LIBVA_DRIVERS_PATH`. This
+one installs the branch head and runs the same gates with no `LIBVA_*`
+variable in the environment, so libva resolves the driver from the render
+node and the `msm_drv_video.so` alias.
+
+- source commit `b9d6a4b430f18d198e69276f3f5eca1f8a24c48c`, `source_dirty=0`,
+  tracked digest `0356ad123936b264c74760ee83d2c6ae12eb5f5eb20e41031ae4bb098994b128`
+  (the code is `fa048e2`; every commit since is documentation)
+- artifact `a1b3ef16ba3a82c44c02920981d25bbb551144074f360adf55cd8d509457b61f`,
+  747,544 bytes, installed at `/usr/lib64/dri/v4l2_drv_video.so` with
+  `msm_drv_video.so` and `qcom_drv_video.so` pointing at it; manifest at
+  `/usr/local/share/iris-vaapi/install-manifest.txt`; previous driver
+  `f74ea6ad0defee68` kept in the manifest's backup path
+- target `sheng`, boot `4b73926c-a774-4ae4-8968-d0a26b20a9c3`, kernel
+  `7.2.6-sm8550-g42f3b40-iris1`, module `b90bd823fdab9895` (patches
+  0001-0004), no firmware reset
+
+| gate | result |
+| --- | --- |
+| `iris-matrix.sh` | PASS H.264, HEVC, VP9 and AV1 content against the native baselines; AV1 ledger `submitted=48 capture=48 drops=0 timeouts=0` |
+| `iris-encode-quality.sh` | H.264 and HEVC, 120 frames; HEVC SSIM mean 0.996808, worst 0.9963; decode-to-encode 0.995067; blank stream 0.000034 below the 0.90 floor |
+| `iris-gstreamer-gate.sh` | `driver=a1b3ef16ba3a82c4 source=installed`, `decode frames sw=300 gst=300 identical=yes`, `vah264enc` 300/300 at 6,462,414 bytes, `vah265enc` 300/300 at 20,941,657 bytes |
+| browser, 4K HEVC | `VaapiVideoDecoder`, platform, 449 frames, 0 dropped, `driver=installed:a1b3ef16ba3a` |
+| browser, AV1 1080p | same decoder and platform, 448 frames, 1 dropped (one renderer drop in that run; the five-codec matrix recorded 0) |
+
+The installed bytes are the same artifact the build-tree records used, so
+those records now describe what the system actually serves; the only
+difference is the source commit's documentation content. This closes the
+"installed package at the branch head" gap.
+
+What this does not prove: one run per gate, and the power campaign was not
+re-run on the installed copy — it is the same sha256, so it would measure the
+same bytes. `iris-matrix.sh` skips MPEG-2 and VP8 because the device does not
+advertise those formats. The AV1 browser run recorded one drop; a drop count
+is a renderer statistic, as the 4K cell above explains.
