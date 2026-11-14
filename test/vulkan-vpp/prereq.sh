@@ -45,7 +45,7 @@ if [ -z "$render" ]; then
 fi
 [ -n "$render" ] && [ -c "$render" ] || { echo "FAIL no MSM render node (set IRIS_RENDER_DEVICE)" >&2; exit 2; }
 
-scratch=${IRIS_TEST_SCRATCH_ROOT:-$HOME/Lab/Bridge/tmp}
+scratch=${IRIS_TEST_SCRATCH_ROOT:-${IRIS_LAB_ROOT:-$HOME/iris-vaapi-lab}/tmp}
 mkdir -p "$scratch"
 work=$(mktemp -d "$scratch/vpp-prereq.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM

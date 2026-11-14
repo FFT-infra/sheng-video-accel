@@ -15,7 +15,7 @@ set -eu
 . "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/lib/iris-env.sh"
 
 root=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
-: "${IRIS_AV1_DPB_ORACLE_DIR:=$HOME/Lab/Bridge/tmp/av1-dpb-oracle}"
+: "${IRIS_AV1_DPB_ORACLE_DIR:=${IRIS_LAB_ROOT:-$HOME/iris-vaapi-lab}/tmp/av1-dpb-oracle}"
 scratch=$IRIS_AV1_DPB_ORACLE_DIR
 mkdir -p "$scratch"
 

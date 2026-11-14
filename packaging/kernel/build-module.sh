@@ -17,7 +17,8 @@ usage() {
 usage: build-module.sh [--source DIR] [--work DIR] [--config FILE]
                        [--symvers FILE] [--patch NNNN]...
   --source    prepared ianchb/sm8550-mainline tree (default: $WORK/linux)
-  --work      scratch root for logs and artifacts (default: ~/Lab/Bridge/tmp/iris-kernel-module)
+  --work      scratch root for logs and artifacts (default:
+              ${IRIS_LAB_ROOT:-$HOME/iris-vaapi-lab}/tmp/iris-kernel-module)
   --config    running kernel config (default: /proc/config.gz, decompressed)
   --symvers   verified Module.symvers (default: regenerate from /proc/kallsyms)
   --patch     apply one numbered patch; repeatable, replaces the default set
@@ -26,7 +27,7 @@ EOF
 }
 
 kernel_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-work=${IRIS_KERNEL_BUILD_DIR:-$HOME/Lab/Bridge/tmp/iris-kernel-module}
+work=${IRIS_KERNEL_BUILD_DIR:-${IRIS_LAB_ROOT:-$HOME/iris-vaapi-lab}/tmp/iris-kernel-module}
 source_dir=
 config=
 symvers=

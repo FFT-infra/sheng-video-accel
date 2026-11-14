@@ -15,7 +15,7 @@ set -eu
 . "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/lib/iris-env.sh"
 
 root=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
-: "${IRIS_AV1_INSTALL_DIR:=$HOME/Lab/Bridge/tmp/av1-install-tu}"
+: "${IRIS_AV1_INSTALL_DIR:=${IRIS_LAB_ROOT:-$HOME/iris-vaapi-lab}/tmp/av1-install-tu}"
 scratch=$IRIS_AV1_INSTALL_DIR
 mkdir -p "$scratch"
 fixture="$root/test/fixtures/av1-two-frame-tu.obu"

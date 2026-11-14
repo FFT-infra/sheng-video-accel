@@ -7,7 +7,7 @@ set -eu
 
 root=${1:-$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)}
 checker="$root/test/iris-clip-trace-check.sh"
-scratch_base=${IRIS_TEST_SCRATCH_ROOT:-$HOME/Lab/Bridge/tmp}
+scratch_base=${IRIS_TEST_SCRATCH_ROOT:-${IRIS_LAB_ROOT:-$HOME/iris-vaapi-lab}/tmp}
 mkdir -p "$scratch_base"
 scratch=$(mktemp -d "$scratch_base/iris-clip-trace-check.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM
