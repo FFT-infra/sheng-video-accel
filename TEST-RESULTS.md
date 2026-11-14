@@ -8727,6 +8727,34 @@ when the tree lacks it. Installed-package runs are unaffected.
 What this does not prove: one clip per codec, 15 s windows, and the sibling
 rows are a local build rather than its distribution package.
 
+### The 4K cell
+
+The matrix above is 1080p. The same gate on two 3840x2160 HEVC clips, one
+synthetic (`hevc-4k.mp4`, 16 s, 480 frames) and one real (`jelly-4k-hevc.mp4`,
+10 s, 300 frames), interleaved runs on both drivers:
+
+| clip | this driver | sibling |
+| --- | --- | --- |
+| `hevc-4k.mp4`, 15 s window, 10 rounds | 446-450 frames, 0 dropped in 4 rounds, 2 or 4 in the other 6 (12 total) | 445-448 frames, 0 dropped in 9 rounds, 2 in one |
+| `jelly-4k-hevc.mp4`, 15 s window, 4 rounds | 445-447 frames, 0 dropped in 3 rounds, 2 in one | 440-441 frames, 0 dropped in all 4 |
+| `hevc-4k.mp4`, 8 s window, 8 rounds | 240 frames, 0 dropped in all 8 | 239-241, 0 dropped in all 8 |
+| `hevc-4k.mp4` looped to 40 s, 15 s window, 8 rounds | 450-451 frames, 0 dropped in 6 rounds, 2 in two | 450-451, 0 dropped in 7 rounds, 2 in one |
+
+The small drop counts are the renderer's, not the decoder's. A traced 15 s
+run that recorded 2 dropped frames has the session ledger
+`submitted=626 completed=626 errors=0 drops=0 timeouts=0 drains=1
+misplaced=0 retained=3` and 626 `publish=import` records — every picture the
+client asked for arrived with no error and no drop. A run that recorded 4
+has 621 publishes and `va destroy_context id=2 pending=6` at teardown, so the
+browser stopped consuming and closed the session with six pictures in flight.
+The 8 s window, which fits inside the 16 s clip and never crosses its loop
+point, records 0 on both drivers in all 8 rounds; the drops concentrate where
+the window crosses the loop or the clip ends.
+
+What this does not prove: two clips, 15 s and 8 s windows, and a drop count
+is a renderer statistic — this record says nothing about which layer would
+drop under a compositor load it did not see.
+
 ## AV1 correctness: the frames the sibling replaces with neutral gray (2026-11-14)
 
 This driver decodes AV1 byte-exactly against libdav1d on every clip measured.
