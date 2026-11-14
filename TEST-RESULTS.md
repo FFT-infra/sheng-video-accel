@@ -8291,6 +8291,36 @@ by both commits. The matrix and quality gates ran from the build tree, not
 from an installed package. 4K numbers are not comparable across runs on this
 tablet without pinning CPU and GPU frequency.
 
+<a id="cross-driver-benchmarks"></a>
+## Comparative benchmarks and overhead summary (SM8550 vs radxa-pkg) (2026-11-14)
+
+A consolidated index of head-to-head measurements conducted on the same tablet
+(`sheng`, SM8550, kernel `7.2.6-sm8550-g42f3b40-iris1`) comparing this driver
+against `radxa-pkg/qcom-va-driver`. Each row reflects the specific test
+protocol, clip length, and boot session detailed in the referenced subsections
+below.
+
+| Benchmark | Frames / Duration | This driver | Sibling (`radxa-pkg`) | Relative difference / Notes | Source section |
+| --- | --- | ---: | ---: | --- | --- |
+| HEVC Main 8-bit Decode 720p | 900 frames | 759.1 fps | 758.5 fps | Parity (+0.1%), client utime -17% (0.274 vs 0.331 s) | §"Pinned-clock HEVC throughput..." |
+| HEVC Main 8-bit Decode 1080p | 900 frames | 581.1 fps | 578.8 fps | Parity (+0.4%), client utime -16% (0.423 vs 0.501 s) | §"Pinned-clock HEVC throughput..." |
+| HEVC Main 8-bit Decode 4K | 480 frames | 358.6 fps | 358.0 fps | Parity (+0.2%), client utime -19% (0.403 vs 0.495 s) | §"Pinned-clock HEVC throughput..." |
+| HEVC Main 8-bit Encode 720p | 900 frames | 644.4 fps | 631.0 fps | +2.1% throughput, equal client utime (1.01 vs 1.08 s) | §"Pinned-clock HEVC throughput..." |
+| HEVC Main 8-bit Encode 1080p | 900 frames | 591.0 fps | 575.0 fps | +2.8% throughput, equal client utime (1.94 vs 1.91 s) | §"Pinned-clock HEVC throughput..." |
+| HEVC Main 8-bit Encode 4K | 480 frames | 167.2 fps | 163.2 fps | +2.5% throughput, equal client utime (4.82 vs 4.80 s) | §"Pinned-clock HEVC throughput..." |
+| 1080p Decode: H.264 | 300 frames | 738.2 fps | 729.6 fps | +1.2% throughput, utime 0.073 vs 0.089 s | §"Decode, six codecs at 1080p" |
+| 1080p Decode: VP9 Profile 0 | 300 frames | 477.1 fps | 471.8 fps | +1.1% throughput, utime 0.053 vs 0.052 s | §"Decode, six codecs at 1080p" |
+| 1080p Decode: AV1 Main 8-bit | 300 frames | 468.9 fps | 427.2 fps | +9.8% throughput, client utime -35% (0.028 vs 0.044 s) | §"Decode, six codecs at 1080p" |
+| 1080p Decode: AV1 Main 10-bit | 300 frames | 411.0 fps | 368.5 fps | +11.5% throughput, client utime -77% (0.029 vs 0.125 s) | §"Decode, six codecs at 1080p" |
+| 1080p Decode: HEVC Main10 | 300 frames | 490.4 fps | 502.2 fps | -2.4% throughput (scheduling), client utime -16% (0.118 vs 0.140 s) | §"Decode, six codecs at 1080p" |
+| Dual concurrent 1080p HEVC decodes | 600 frames/run | 835.8 ms | 829.2 ms | Wall-time parity (tie), aggregate utime -17% (0.254 vs 0.306 s) | §"Two concurrent decode sessions" |
+| 1080p HEVC decode -> H.264 encode | 300 frames (5 rds) | 436.9 fps | 435.0 fps | Throughput tie, client utime -23% (0.121 vs 0.157 s) | §"Transcode" |
+| Kodi 4K HEVC playback | 16 s clip | 18.92 s wall | 18.82 s wall | Wall-time parity (includes ~2.5 s startup), decoder CPU -6% (2.668 vs 2.848 s) | §"Kodi playback" |
+| VPP 1080p -> 720p Vulkan scale | 900 frames | 540.0 fps | 535.6 fps | Throughput tie (spread > delta), client utime -14% (0.541 vs 0.619 s); swscale is 287 fps / 8.4 s | §"VPP against the sibling..." |
+| VPP feature support | 30 frames | Mirroring, YUV & stacked overlays | Refused (-22) | This driver supports all 7 transpose directions and YUV overlays | §"VPP against the sibling..." |
+
+*Note*: Test workloads were captured under pinned clocks (`performance` governor at 2016/2803/2956 MHz, GPU at 680 MHz) using identical FFmpeg 8.1.3 builds unless noted otherwise. Kodi wall time encompasses application launch, rendering, and exit; video decoding alone remains at wall-time parity. VPP throughput difference (540.0 vs 535.6 fps) falls within the run-to-run variation margin across 5 interleaved rounds.
+
 ## Pinned-clock HEVC throughput against the sibling on one node (2026-11-14)
 
 Target `sheng`, boot `4b73926c-a774-4ae4-8968-d0a26b20a9c3`, kernel

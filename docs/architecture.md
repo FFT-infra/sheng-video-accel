@@ -461,6 +461,44 @@ mapper against the pipeline `tonemap.comp` documents, and
 `test/vulkan-vpp/overlay_gate.sh` checks the composite against the mix
 `overlay.comp` documents plus both of its endpoint frames byte for byte.
 
+### Verified bounds and refusals
+
+The video processor implements strict bounds and explicit refusals (returning a
+VA error status instead of dropping operations silently):
+
+- **Geometry floor**: The minimum scaling geometry is 2x2 (the Vulkan kernel
+  limit), allowing scaling down to thumbnail size independent of the V4L2
+  decoder node's minimum dimensions. Odd geometries and out-of-bounds crops are
+  refused.
+- **Scaling & crop**: `scale_vaapi` with nearest-neighbour is byte-identical to
+  libswscale `flags=neighbor`. The bilinear method matches within 1 code of a
+  four-tap double-precision model, invariant on constant surfaces and identical
+  to 1:1 point sampling. `crop_vaapi` matches `crop,scale` byte for byte.
+- **Transpose**: All seven `transpose_vaapi` directions (`clock`, `cclock`,
+  `reversal`, `hflip`, `vflip`, `clock_flip`, `cclock_flip`) match software
+  filters byte for byte across NV12 and P010.
+- **Bit-depth conversion**: NV12 to P010 (`code << 2`) and P010 to NV12
+  (`code >> 2`) conversions match swscale shifts without dithering. A picture
+  combining scaling and depth conversion matches `scale` then `format` byte for
+  byte in both directions.
+- **HDR10 tone mapping**: `VAProcFilterHighDynamicRangeToneMapping` maps P010
+  BT.2020/PQ to NV12 BT.709 via the BT.2390 EETF, within 1 code of the
+  documented pipeline. The mapper converts the surface at native size first;
+  subsequent passes in the same picture (crop, scale, transpose, or compositing)
+  operate on the converted frame and are verified within 1 code.
+- **Compositing**: Stacks up to sixteen blending layers in submission order.
+  Alpha 0 and alpha 1 endpoints match main and overlay surfaces byte-exact.
+  Constant overlay uploads via packed BGRA produce exact BT.709 codes.
+- **Explicit refusals**:
+  - Luma keying (`VA_BLEND_LUMA_KEY`).
+  - More than sixteen blending passes, or a blend state on the first pass.
+  - Any second filter or multiple filters in one picture.
+  - HDR-to-HDR tone mapping, or NV12 input to the HDR tone mapper.
+  - Colour conversion outside the HDR10-to-SDR tone mapper.
+  - Scaled `vaPutImage`.
+  - Blending passes with missing or invalid output regions.
+  - Output surface aliasing an input surface through the same DMA-BUF (`st_dev`/`st_ino`).
+
 ## 6. Environment surface
 
 Read once in `VA_DRIVER_INIT_FUNC`, stored in `Options`, passed down.
