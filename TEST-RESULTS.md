@@ -8726,3 +8726,114 @@ when the tree lacks it. Installed-package runs are unaffected.
 
 What this does not prove: one clip per codec, 15 s windows, and the sibling
 rows are a local build rather than its distribution package.
+
+## AV1 correctness: the frames the sibling replaces with neutral gray (2026-11-14)
+
+This driver decodes AV1 byte-exactly against libdav1d on every clip measured.
+The sibling does not: on all five AV1 clips here it substitutes flat neutral
+gray for a fixed set of frames and reports success, so a client sees a correct
+frame count, no dropped frames and a picture that is wrong.
+
+Same node, boot and module as the records above: `sheng`, boot
+`4b73926c-a774-4ae4-8968-d0a26b20a9c3`, kernel
+`7.2.6-sm8550-g42f3b40-iris1` (`qcom_iris` `b90bd823fdab9895`), decoder
+resolved by QUERYCAP name `iris_driver`. This driver
+`a1b3ef16ba3a82c4` (release build tree), sibling `f7dd97109f3a9965` (source
+commit `0980a1d`). FFmpeg 8.1.3, battery 98 % charging, thermal zone
+37100 millic, no firmware reset.
+
+### The measurement
+
+Every run decodes through FFmpeg's VA-API decoder, downloads the surfaces as
+NV12, converts to `yuv420p` (or `yuv420p10le` from P010) and writes
+`framemd5`. The baseline is libdav1d over the same file with no hardware in
+the path; a driver that mangles output cannot bless its own result.
+
+| clip | frames | this driver | sibling |
+| --- | ---: | --- | --- |
+| `av1-8-1080p.mkv` (SVT-AV1, 8-bit) | 300 | 0 mismatched | 65 mismatched |
+| `av1-10-1080p.mkv` (SVT-AV1, 10-bit) | 300 | 0 mismatched | 65 mismatched |
+| `av1-720.webm` | 120 | 0 mismatched | 42 mismatched |
+| `resize-av1.mkv` (dynamic resolution) | 80 | 0 mismatched | 62 mismatched |
+| `test-av1.webm` (matrix clip) | 48 | 0 mismatched | 40 mismatched |
+
+The 1080p result repeats exactly: six interleaved rounds of the 8-bit clip
+gave this driver 0 mismatched and 0 replacement records in every round, the
+sibling 65 and 65 in every round. It does not depend on the publish policy —
+`direct`, `copy` and `import` each gave this driver 300/300 exact and the
+sibling 65 mismatched. It is not an FFmpeg artifact: `vaav1dec` through
+GStreamer, remuxed so `GstVideoMeta` plane offsets are honoured, gave this
+driver 300 frames with 0 mismatched and no replacement record, and the
+sibling 300 frames with 65 mismatched and 65 records. The 10-bit clip was
+re-run on its own with the replacement count read from the log rather than
+inferred from the hashes: 65 records, 65 mismatched frames.
+
+Whole-clip PSNR against libdav1d, computed over a pipe with no intermediate
+file: this driver `y:inf u:inf v:inf`, the sibling `y:19.85 u:16.85
+v:16.41 average:18.49 min:11.78`.
+
+### What the replacement is
+
+Sampled frames confirm the content, not just the hashes. Frame 33, software
+decode: luma `min 19 / avg 126.242 / max 226`. Same frame, this driver:
+identical statistics and a byte-identical frame. Same frame, sibling:
+`min 128 / avg 128 / max 128` — every luma sample at the midpoint, which is
+what `fill_neutral_surface()` writes (`memset` 128 for NV12, `512 << 6` for
+P010). Frames 36, 59, 93, 153, 273 and 299 read the same way. None of the
+five keyframes (0, 60, 120, 180, 240) is in the mismatched set; frames 60 and
+120 were compared directly and are byte-identical to libdav1d on both drivers.
+
+The affected frame indices are `33 34 36 37 41 42 45 49 50 52 53 57 59`, then
+`93 94 96 97 101 102 105 109 110 112 113 117 119`, and the same 13 offsets in
+each of the last three GOPs: 65 frames at five identical GOP-relative
+positions. A defect that tracks the GOP structure exactly is not damage from
+the bitstream or the firmware; it is a userspace decision applied to a
+picture class.
+
+### Why it happens
+
+Our trace of the same clip, same node, names the mechanism. An AV1 access
+unit that installs a reference produces two CAPTURE completions under one
+token: an empty one with `flags=0x4041` (ERROR, timestamp-copy, mapped; no
+picture-type bit, `bytesused=0`) and the real picture later with `flags=0x4011`
+(PFRAME, payload). This driver consumes the empty completion as the install
+half — `capture token=36 index=2 flags=0x4041 publish=invisible` — and
+publishes the payload completion that follows. The run's ledger is
+`submitted=300 completed=300 errors=0 drops=0 timeouts=0 misplaced=0`, with
+65 `publish=invisible` records and 300 `publish=direct` records.
+
+The sibling treats the same empty completion as a damaged picture. Its trace
+shows `CAPTURE index=2 used=0 offset=0 ts=0:36 flags=4041`, then
+`replaced damaged picture token=36 with neutral gray`, then
+`CAPTURE index=10 used=3133440 offset=0 ts=0:36 flags=4011` — a full decoded
+picture, 3,133,440 bytes — and finally `discarding completed token=36`. It
+allocates a fresh surface, fills it gray, completes the client's surface with
+that, and throws the real picture away. Across the clip: 300 submissions, 365
+CAPTURE returns (300 with payload, 65 empty), 65 replacements and 65
+discards.
+
+The code is `recover_picture()` in the sibling's `src/decoder.cpp:258`, called
+from both the OUTPUT and CAPTURE paths (`:327`, `:348`) on any buffer with
+`V4L2_BUF_FLAG_ERROR`; `fill_neutral_surface()` is at `src/surface-copy.cpp:91`.
+Of the 65 replaced pictures, 40 had `original-show=1` and 25
+`original-show=0` — it replaces pictures the client was going to display, not
+only internal ones.
+
+This is also why `packaging/kernel/0007-*` was measured and rejected: removing
+the false ERROR from the completion fixes the sibling's symptom, but this
+driver already decodes these pictures exactly with the error present, so the
+patch buys nothing the qualified module does not do.
+
+The browser does not detect this. Chrome reported 448 frames and 0 dropped
+for the sibling on the same clip, as it did for this driver, because the
+acceptance gate counts media-pipeline frames and drops, not pixels. A user
+watching AV1 sees 13 gray flashes per GOP and the browser reports a clean
+playback.
+
+### What this does not prove
+
+One encoder (SVT-AV1), five clips, 8- and 10-bit. The sibling is a local build
+of commit `0980a1d`; a later revision may have changed `recover_picture()`, so
+this is a statement about the measured artifact, not about the project's
+present state. No AV1 clip with a real bitstream error was in the set, so
+nothing here says how either driver behaves on genuinely corrupt input.

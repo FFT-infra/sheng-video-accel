@@ -20,6 +20,7 @@
 #
 # Usage:
 #   test/iris-gstreamer-gate.sh --clip PATH [--out DIR] [--frames N]
+#                              [--driver PATH]
 #
 # Exit status is 0 only when the elements register with the override, the
 # decode is frame-identical to the software decode, and both encoder elements
@@ -43,11 +44,13 @@ usage() {
 clip=''
 out=''
 frames=60
+driver=''
 while [ $# -gt 0 ]; do
     case $1 in
         --clip) clip=$2; shift 2 ;;
         --out) out=$2; shift 2 ;;
         --frames) frames=$2; shift 2 ;;
+        --driver) driver=$2; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) fail "unknown argument: $1" ;;
     esac
@@ -57,6 +60,27 @@ done
 clip=$(CDPATH='' cd -- "$(dirname -- "$clip")" && pwd)/$(basename -- "$clip")
 [ -n "$out" ] || out=$(iris_artifact_dir gstreamer-gate)
 mkdir -p "$out"
+
+# The driver under test. Without --driver this is the installed package, and
+# the hash printed below is the one libva resolves. With --driver the build
+# tree is measured instead, through a directory that also carries the
+# msm_drv_video.so alias libva looks for: a build directory ships only
+# v4l2_drv_video.so, and libgstva then registers no element at all.
+driver_path=${driver:-/usr/lib64/dri/v4l2_drv_video.so}
+[ -f "$driver_path" ] || fail "driver not found: $driver_path"
+driver_path=$(CDPATH='' cd -- "$(dirname -- "$driver_path")" && pwd)/$(basename -- "$driver_path")
+driver_dir=$(dirname "$driver_path")
+if [ -n "$driver" ] && [ ! -e "$driver_dir/msm_drv_video.so" ]; then
+    alias_dir=$out/driver
+    rm -rf "$alias_dir"
+    mkdir -p "$alias_dir"
+    ln -s "$driver_path" "$alias_dir/v4l2_drv_video.so"
+    ln -s v4l2_drv_video.so "$alias_dir/msm_drv_video.so"
+    driver_dir=$alias_dir
+fi
+if [ -n "$driver" ]; then
+    export LIBVA_DRIVERS_PATH=$driver_dir
+fi
 
 command -v gst-launch-1.0 >/dev/null 2>&1 || fail "gst-launch-1.0 is not installed"
 command -v gst-inspect-1.0 >/dev/null 2>&1 || fail "gst-inspect-1.0 is not installed"
@@ -77,7 +101,8 @@ for element in vaav1dec vah264enc vah265enc; do
 done
 
 printf 'boot=%s\n' "$(cat /proc/sys/kernel/random/boot_id)"
-printf 'driver=%s\n' "$(sha256sum /usr/lib64/dri/v4l2_drv_video.so 2>/dev/null | cut -d' ' -f1)"
+printf 'driver=%s source=%s\n' "$(sha256sum "$driver_path" | cut -d' ' -f1)" \
+    "$([ -n "$driver" ] && echo build-tree || echo installed)"
 printf 'module=%s\n' "$(sha256sum "/lib/modules/$(uname -r)/kernel/drivers/media/platform/qcom/iris/qcom-iris.ko.zst" 2>/dev/null | cut -d' ' -f1)"
 printf 'va_plugin=%s\n' "$(sed -n 's/^ *Version *//p' "$listed" | head -1)"
 printf 'features_without_override=%s elements_with_override=%s\n' \
