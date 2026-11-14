@@ -8611,9 +8611,10 @@ buffer's, so the chroma plane never moves under it.
 Target `sheng`, boot `4b73926c-a774-4ae4-8968-d0a26b20a9c3`, kernel
 `7.2.6-sm8550-g42f3b40-iris1`, encoder node `/dev/video1` resolved by
 QUERYCAP name `iris_driver`, render node `/dev/dri/renderD128`. Source commit
-`bba3ef2` plus the change recorded here; build tree
-(`LIBVA_DRIVERS_PATH=$HOME/iris-vaapi-lab/src/build/src`, driver sha256
-`ad990dfc800e64a6...`), not an installed package.
+`fa048e2`; build tree (`LIBVA_DRIVERS_PATH=$HOME/iris-vaapi-lab/src/build/src`,
+driver sha256 `ad990dfc800e64a6...`), not an installed package. The sibling is
+`radxa-pkg/qcom-va-driver` built in the same tree layout, driver
+`f7dd97109f3a9965`.
 
 ### Gates
 
