@@ -180,9 +180,8 @@ BILINEAR_CASES = [
 
 def scratch():
     """Lab scratch before the system default: this tree keeps media off /tmp."""
-    lab = os.environ.get("IRIS_LAB_ROOT") or os.path.expanduser("~/iris-vaapi-lab")
     for candidate in (os.environ.get("IRIS_TEST_SCRATCH_ROOT"), os.environ.get("TMPDIR"),
-                      os.path.join(lab, "tmp")):
+                      os.path.expanduser("~/Lab/Bridge/tmp")):
         if candidate and os.path.isdir(candidate):
             return candidate
     return None

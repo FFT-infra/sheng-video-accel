@@ -87,7 +87,7 @@ if [ -n "$keep" ]; then
     mkdir -p "$work"
     cleanup=''
 else
-    scratch=${IRIS_LAB_ROOT:-$HOME/iris-vaapi-lab/tmp}
+    scratch=${IRIS_LAB_ROOT:-$HOME/Lab/Bridge/tmp}
     mkdir -p "$scratch"
     work=$(mktemp -d "$scratch/iris-verify.XXXXXX")
     cleanup=$work

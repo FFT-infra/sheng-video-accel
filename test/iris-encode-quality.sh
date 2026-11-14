@@ -26,8 +26,8 @@
 #   LIBVA_DRIVERS_PATH        directory holding the driver to measure
 #                             (default <checkout>/build/src; name
 #                             /usr/lib64/dri to measure an installed package)
-#   IRIS_ENCODE_QUALITY_DIR   scratch directory (default
-#                             ${IRIS_LAB_ROOT:-$HOME/iris-vaapi-lab}/tmp)
+#   IRIS_ENCODE_QUALITY_DIR   scratch directory (default $IRIS_LAB_ROOT or
+#                             ~/Lab/Bridge/tmp)
 #   IRIS_ENCODE_FRAMES        frames per codec (default 120)
 #   IRIS_ENCODE_SIZE          WxH (default 1920x1080)
 #   IRIS_ENCODE_SSIM_MIN      per-frame SSIM floor (default 0.90)
@@ -38,7 +38,7 @@ set -eu
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 . "$root/test/lib/iris-env.sh"
 
-scratch=${IRIS_ENCODE_QUALITY_DIR:-${IRIS_LAB_ROOT:-$HOME/iris-vaapi-lab}/tmp}
+scratch=${IRIS_ENCODE_QUALITY_DIR:-${IRIS_LAB_ROOT:-$HOME/Lab/Bridge/tmp}}
 mkdir -p "$scratch"
 work=$(mktemp -d "$scratch/iris-encode-quality.XXXXXX")
 trap 'rm -rf "$work"' 0 1 2 15
