@@ -66,10 +66,11 @@ BuildRequires:  ffmpeg
 Requires:       v4l-utils
 
 # The upstream project and the sibling distribution package were named
-# libva-v4l2 before the qcom rename; keep old client recipes resolving. The
-# sibling package last used version 1.1.1, which is why the bound sits above it
+# libva-v4l2 before the qcom rename. Replace that package without also
+# providing its name: a Provides and Obsoletes on the same name whose bound
+# covers this package's own EVR makes DNF schedule the package twice. The
+# sibling's last version was 1.1.1, which is why the bound sits above it
 # rather than at this package's 0.x version.
-Provides:       libva-v4l2 = %{version}-%{release}
 Obsoletes:      libva-v4l2 < 1.2
 # Both packages install libva's msm alias, so they cannot coexist.
 Conflicts:      qcom-va-driver

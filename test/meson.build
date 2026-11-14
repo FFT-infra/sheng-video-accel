@@ -250,6 +250,8 @@ test('iris-setup-path-check', find_program('iris-setup-path-check.sh'),
      args: [meson.project_source_root()])
 test('iris-packaging-check', find_program('iris-packaging-check.sh'),
      args: [meson.project_source_root()])
+test('iris-spec-selfobsolete-check', find_program('iris-spec-selfobsolete-check.sh'),
+     args: ['--self-test', meson.project_source_root()])
 test('iris-make-dist-check', find_program('iris-make-dist-check.sh'),
      args: [meson.project_source_root()])
 test('iris-kernel-patch-check', find_program('iris-kernel-patch-check.sh'),
