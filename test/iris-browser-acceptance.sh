@@ -145,8 +145,8 @@ trap 'kill "$browser_pid" 2>/dev/null || true; wait "$browser_pid" 2>/dev/null |
 
 # Independent of the browser's self-report: which Chrome process holds the
 # Iris node, and which one mapped the driver. Software decode never opens the
-# node. Compare the full symlink target so one node number cannot be mistaken
-# for another that starts with the same digits.
+# node. Compare the full symlink target so /dev/video1 cannot be mistaken for
+# /dev/video11.
 #
 # This has to sample while the decode is in flight. Sampling after playback
 # stops finds a GPU process that has already closed the node and unmapped the

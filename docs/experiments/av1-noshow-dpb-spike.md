@@ -1,5 +1,9 @@
 # Experiment: AV1 internal DPB slot translation (host spike, 2026-11-10)
 
+`<scratch>` stands for the operator's scratch directory and `<lab-root>` for
+the deployment tree; evidence keeps its relative layout without publishing
+absolute paths.
+
 Branch: `exp/av1-noshow-dpb`, from `origin/main` `65686a2`.
 Status: **shipped as the default in PR #4 (consolidated into PR #5)**. The host prototype, guarded
 native V4L2 completion probe and guarded real VA-API sessions below
@@ -368,7 +372,7 @@ have made this a failed experiment; neither happened.
 The DPB translator was finally run through a real VA-API client (FFmpeg
 `vaapi` hwaccel) on `sheng`, using a **clean full-source sync** of commit
 `6191d13` into `<scratch>/av1-dpb-target/`. The old
-`~/Lab/iris-vaapi-lab/src` tree was not used: its `src/codec/av1.cc` turned
+`<lab-root>/src` tree was not used: its `src/codec/av1.cc` turned
 out to be a different, older internal-DPB implementation that expects kernel
 0005, so a mixed tree would have invalidated every result. At the time of this
 run a local-only patch to `src/va/picture.cc` selected `make_av1_dpb()` and

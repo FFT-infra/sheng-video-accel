@@ -1484,7 +1484,7 @@ periodic IDR is the only keyframe source.
 ## Decode throughput and the build type (2026-10-22)
 
 A user-space cost measurement taken while investigating decode throughput.
-The clips are `/tmp/iris-enc/media/clip-{hevc,h264}.mp4`: 1920x1080, 900
+The clips are `<scratch>/iris-enc/media/clip-{hevc,h264}.mp4`: 1920x1080, 900
 frames, decoded 300 frames each with `-hwaccel vaapi
 -hwaccel_output_format vaapi -f null`, so the frames stay on the VA surface
 and nothing is downloaded. Wall clock and CPU come from `-benchmark`; the
@@ -2092,7 +2092,7 @@ against the table in both directions.
 VAEntrypointVLD`.
 
 `test/iris-matrix.sh`, 48 frames, artifacts under
-`~/Lab/iris-vaapi-lab/artifacts/va-matrix`:
+`<lab-root>/artifacts/va-matrix`:
 
 | Codec | Result |
 | --- | --- |
@@ -2379,7 +2379,7 @@ Iris IRQ delta over the IDR and segment runs: 1829.
 
 ### Rollback
 
-`~/Lab/kernel-iris-syncframe/` on the target holds the stock module
+`<scratch>/kernel-iris-syncframe/` on the target holds the stock module
 (`qcom-iris-stock.ko`, `8e8487ef…`, the decompressed file), the installed
 stock `.zst` (`4e29b74d…`), the new module, the target `Module.symvers` and
 `stock.sha256`. `rollback.sh` restores the stock `.zst` and re-runs
@@ -2437,7 +2437,7 @@ separate change with its own hardware gate.
 
 ### Artifacts
 
-`~/Lab/iris-vaapi-lab/artifacts/av1-grain-roundtrip/` on the target:
+`<lab-root>/artifacts/av1-grain-roundtrip/` on the target:
 `source.webm`, `grain-sw.md5` (60 frames), `grain-va.md5` (empty), and
 `grain-va.log` with the trace above.
 
@@ -2518,7 +2518,7 @@ is the failure it fixes. This run closes it on hardware.
   `9b16a40179a08e414d0f4bb38ea54f5bb12ada2b9ce176f0dc6b3b602e7bc83d`;
   vermagic `7.2.6-sm8550-g42f3b40-iris1 SMP preempt mod_unload aarch64`,
   note `aarch64 feature: PAC` (same as the stock module).
-- Installed with `~/Lab/kernel-iris-syncframe/install.sh`; the previous
+- Installed with `<scratch>/kernel-iris-syncframe/install.sh`; the previous
   module (0001–0003, `802c40c0…`) is kept as `qcom-iris.0003.ko.zst`.
 - Boot ID `40916c73-1560-484d-bd2e-82fed9bab285`. Decoder `/dev/video0`,
   encoder `/dev/video1` at this boot.
@@ -2800,7 +2800,7 @@ both directions, so the next profile cannot drift from the document.
 
 Same harness (`test/iris-browser-acceptance.sh`), same clips, 20 s window,
 build-tree driver on both sides. libva-v4l2 is the Radxa backend, 1.0.0
-built on the target (`/tmp/piano-bench/build`, sha256 `798cfd62a91c…`; the
+built on the target (`<scratch>/piano-bench/build`, sha256 `798cfd62a91c…`; the
 scratch directory keeps the name the run used).
 
 | Clip | This driver | libva-v4l2 |
@@ -2846,8 +2846,8 @@ pictures on that stream rather than synthesising grain.
 On the target: `<lab-root>/artifacts/browser-acceptance/` (one
 directory per row above, each with `summary.json`, `cdp.json`,
 `browser.log` and `iris-node-holders.txt`),
-`/tmp/iris-bench/lab*/artifacts/browser-acceptance/` for the rows that
-were run under a scratch lab root, `/tmp/iris-bench/av110-va.md5` and
+`<scratch>/iris-bench/lab*/artifacts/browser-acceptance/` for the rows that
+were run under a scratch lab root, `<scratch>/iris-bench/av110-va.md5` and
 `av110-sw.md5` for the frame MD5s, and
 `<lab-root>/media/10bit/av1-640x360-10bit.mp4` for the clip.
 
@@ -2885,7 +2885,7 @@ wrapper decodes through a different client stack. It is the first full run
 of this suite through the driver and replaces the three-vector probe that
 was recorded earlier.
 
-Artifact: `/tmp/iris-bench/vp9-va.md` on the target (per-vector marks), plus
+Artifact: `<scratch>/iris-bench/vp9-va.md` on the target (per-vector marks), plus
 `vp9res-va.md5` / `vp9res-sw.md5` for the resize vector above.
 
 ## Chrome's decode path, measured inside the browser (2026-10-23)
@@ -2929,7 +2929,7 @@ One number is not clean: the HEVC 8-bit window dropped 2 frames where the
 same clip measured 0 earlier. The build and the boot both changed, so this
 is recorded as observed rather than attributed.
 
-Artifacts: `/tmp/iris-bench/lab-import/{h264,sintel-1080p30-hevc-b3,
+Artifacts: `<scratch>/iris-bench/lab-import/{h264,sintel-1080p30-hevc-b3,
 sintel-1080p30-hevc10,sintel-1080p30-vp9,hw-av1}/` on the target
 (`browser.log`, `cdp.json`, `summary.json`).
 
@@ -3314,7 +3314,7 @@ pins the new one.
 
 Framemd5 oracle, `resize-av1.mkv` (80 frames, one VA context, one
 1280x720 -> 854x480 change), `V4L2_VA_TRACE=1`, build tree
-`~/Lab/qualcomm-iris-vaapi/build-def/src`:
+`<lab-root>/build-def/src`:
 
 | Build | Runs | 80/80 frames, exit 0 |
 | --- | --- | --- |
@@ -3519,7 +3519,7 @@ into it. `staged`'s memory therefore reads `stale` before the blits land and
 
 Run on the target, kernel `7.2.6-sm8550-g42f3b40-iris1`, boot ID
 `ebe7a2b2-9ae2-4725-ad33-be856e6ec7a1`, source `7173756` plus the
-working-tree change (copied to the target's `~/Lab/qualcomm-iris-vaapi`,
+working-tree change (copied to the target's `<lab-root>`,
 whose checkout is at `3cfaa7e` and was not otherwise updated), build tree
 `build-alloc` (probe `1413ac6f9ad4…`), encoder node `/dev/video3`
 ("Iris Encoder") and render node `/dev/dri/renderD128`, both resolved by
@@ -4259,7 +4259,7 @@ family, and whether the `translate` cost growth recorded in the 2026-10-22
 4K section is real accumulation.
 
 Driver `bd1b0015…`, kernel `7.2.6-sm8550-g42f3b40-iris1`, source tree
-`~/Lab/iris-vaapi-lab/src` built from `feat/encode-entrypoints`. Two boots
+`<lab-root>/src` built from `feat/encode-entrypoints`. Two boots
 were used because the tablet reset itself mid-run; the corpus result is the
 same on both (see the reboot note at the end). Node `/dev/video17` on the
 first boot, `/dev/video0` on the second; the node is resolved by the
@@ -5631,7 +5631,7 @@ filesystem is case-insensitive and collided Linux's `xt_TCPMSS.c` /
 after the `-iris1` release. `localversion` was derived from `uname -r`, and a
 333-entry video-subsystem `Module.symvers` was regenerated from
 `/proc/kallsyms`; sorting shows its symbol set matches the earlier lab copy
-`~/Lab/kernel-iris-syncframe/Module.symvers`, whose `stock.sha256` check
+`<scratch>/kernel-iris-syncframe/Module.symvers`, whose `stock.sha256` check
 passes. Patches 0001-0004 and 0006 applied in order by `git apply`; the 0005
 marker `iris_hfi_gen2_requeue_output_buffer` is absent from the applied tree.
 The running config has `CONFIG_ARM64_BTI=y`, `CONFIG_ARM64_PTR_AUTH=y`,

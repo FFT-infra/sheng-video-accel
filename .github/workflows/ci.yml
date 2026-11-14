@@ -75,6 +75,7 @@ jobs:
             iris-clip-trace-check-self-test \
             iris-experiment-guard-self-test \
             iris-packaging-check \
+            iris-make-dist-check \
             iris-install-manifest-check \
             iris-node-check \
             iris-deploy-path-check \

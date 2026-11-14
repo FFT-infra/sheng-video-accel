@@ -76,8 +76,8 @@ IRIS_TRACKED_SOURCE_SHA256=<sha256-of-tracked-paths> \
 ```
 
 The decoder node is resolved by the `iris_driver` name in
-`test/remote/setup.sh`. Do not hardcode a node number: V4L2 numbering changes
-across boots and that number may belong to the camera subsystem. Override the
+`test/remote/setup.sh`. Do not hardcode `/dev/video17`: V4L2 numbering changes
+across boots and that node may belong to the camera subsystem. Override the
 resolved node for a run with `LIBVA_V4L2_VIDEO_PATH`.
 
 After deployment, run the short positive oracle before external corpora:
@@ -213,7 +213,7 @@ status, the guard state and the source commit next to the command's output:
 
 ```sh
 IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh \
-    --out "$HOME/iris-vaapi-lab/tmp/run-$$" \
+    --out ~/Lab/Bridge/tmp/run-$$ \
     -- sh test/iris-gstreamer-gate.sh --clip CLIP
 ```
 

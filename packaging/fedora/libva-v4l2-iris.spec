@@ -22,7 +22,7 @@
 %global debug_package %{nil}
 %global _source_commit %{?source_commit}%{!?source_commit:0000000000000000000000000000000000000000}
 %global _tracked_sha256 %{?tracked_sha256}%{!?tracked_sha256:0000000000000000000000000000000000000000000000000000000000000000}
-%global _source_dirty %{?source_commit:%{?tracked_sha256:0}}%{!?source_commit:1}
+%global _source_dirty %{?source_commit:%{?tracked_sha256:0}}%{!?source_commit:1}%{?source_commit:%{!?tracked_sha256:1}}
 
 Name:           libva-v4l2-iris
 Version:        0.1.0
@@ -61,8 +61,7 @@ BuildRequires:  ffmpeg
 
 # The diagnostic commands resolve the decoder node by driver name with
 # v4l2-ctl, because the node number is not stable across boots on this device.
-# Without v4l-utils they refuse to fall back to a fixed number that may be a
-# camera.
+# Without v4l-utils they refuse to guess /dev/video0, which may be a camera.
 # No browser is required: the driver is useful to any VA-API client.
 Requires:       v4l-utils
 

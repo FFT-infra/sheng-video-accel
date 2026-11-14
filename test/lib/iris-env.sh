@@ -7,9 +7,9 @@
 # Two things used to be copy-pasted (and drift) across every script: the
 # decoder node and the scratch directory.
 #
-# The node number is not stable. This device enumerated the decoder at one
-# number on one boot and another on the next, with the camera subsystem taking
-# over the old number, so a hardcoded default silently points
+# The node number is not stable. This device enumerated the decoder as
+# /dev/video17 on one boot and /dev/video0 on the next, with the camera
+# subsystem taking over the old number, so a hardcoded default silently points
 # a "hardware decode" test at a camera. Resolve by driver name instead.
 #
 # The scratch directory used to default under a trash path that is wiped on a
@@ -17,7 +17,7 @@
 
 # iris_resolve_device: echo the decoder node.
 # Honours an explicit override, otherwise probes for the iris driver. Fail
-# closed when no Iris node is found: a fixed number may be a camera after reboot.
+# closed when no Iris node is found: /dev/video0 may be a camera after reboot.
 iris_resolve_device() {
     if [ -n "${LIBVA_V4L2_VIDEO_PATH:-}" ]; then
         printf '%s\n' "$LIBVA_V4L2_VIDEO_PATH"
