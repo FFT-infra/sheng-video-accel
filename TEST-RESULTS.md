@@ -8646,9 +8646,18 @@ sibling encodes roughly a third of the bits and the wall times are not a
 like-for-like measure. Under CQP, where both produce the same bytes, this
 driver is 1.1 % faster.
 
+The rate gap is a rate-control difference, not a speed one. Asked for
+1,600 kbps the sibling delivers 1,631,217 bps and this driver 1,673,128 bps,
+and both then score the same fidelity: SSIM 0.866634 and 0.868831 against
+the source. At 5,000 kbps this driver delivers 5,007,842 bps at SSIM
+0.936295, while the sibling stays at 1,636,836 bps and 0.867035 — it does not
+follow the request upward. The same delivered bitrate buys the same quality
+on both, so the sibling's lower `-b:v 5M` wall time is spent on fewer bits.
+
 ### What this does not prove
 
 The gate and the measurements ran from the build tree, not from an installed
 package. One clip and one size; 4K transcode was not run. No GUI client was
-driven through a transcode window, and the VBR comparison measures two
-different delivered rates rather than two implementations of one rate.
+driven through a transcode window. The rate-control comparison uses one clip
+and one target, so it shows the sibling does not follow a raised target
+rather than mapping its rate-control curve.
