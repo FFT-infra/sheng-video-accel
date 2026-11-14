@@ -8518,6 +8518,16 @@ schedule the pictures, not in what either driver asks for. In the browser,
 where a user meets this codec, the two are at parity: 450 frames and 0
 dropped against 448 and 0.
 
+Probed again on 2026-11-14 over the whole clip, both drivers, with the
+release build tree: `DQBUF` 1204 against 1203 (EAGAIN 602 against 603),
+`DQEVENT` 303 against 303, `QBUF` 621 against 621, and the same
+`QUERYBUF`/`EXPBUF` shape at session setup. `poll` is entered four times in
+the entire 300-frame run on both, so the earlier guess that a missed 10 ms
+poll wake explained the gap is disproven — this workload does not poll per
+frame. Client utime stays about 21 % lower on this driver. No userspace
+difference remains to remove; the residual is firmware scheduling, and the
+sync path was left alone rather than reshaped for 2 % of one profile.
+
 ### Two concurrent decode sessions
 
 Two FFmpeg processes decoding the HEVC 1080p clip at once, five interleaved
@@ -8751,6 +8761,22 @@ The 8 s window, which fits inside the 16 s clip and never crosses its loop
 point, records 0 on both drivers in all 8 rounds; the drops concentrate where
 the window crosses the loop or the clip ends.
 
+Publish policy does not explain the drops. Twelve further 15 s runs on the
+same clip, three per policy: `auto` dropped 0, 2, 0; `import` 2, 2, 0;
+`direct` 0, 2, 2; `copy` 2, 0, 0. Every run passed with 448-450 frames and a
+platform decoder. A traced run that dropped nothing shows 626 captures,
+626 completions, one drain at finish and no reconfiguration anywhere in the
+window, so the loop crossing does not produce a driver-level event at all.
+
+The same traced cell names one real difference. The sibling copies every
+picture through the GPU — 621 `surface copy mode=gpu` records for the run,
+mean 4387 us, 2.72 s of copy time — because Chrome exports its surfaces and
+the sibling has no import path. This driver published 626 `publish=import`
+records with no copy. The copy paces delivery one picture at a time; it is a
+plausible reason the sibling records fewer boundary drops at 4K, but that is
+a hypothesis, not a measurement, and the copy is also 2.72 s of GPU work
+the import path does not do.
+
 What this does not prove: two clips, 15 s and 8 s windows, and a drop count
 is a renderer statistic — this record says nothing about which layer would
 drop under a compositor load it did not see.
@@ -8896,3 +8922,79 @@ of commit `0980a1d`; a later revision may have changed `recover_picture()`, so
 this is a statement about the measured artifact, not about the project's
 present state. No AV1 clip with a real bitstream error was in the set, so
 nothing here says how either driver behaves on genuinely corrupt input.
+
+## Whole-device power per delivered frame, both clock states (2026-11-14)
+
+The earlier power records here compare this driver with software decode
+(E2). This one compares the two hardware drivers, unplugged, screen off.
+Target `sheng`, boot `4b73926c-a774-4ae4-8968-d0a26b20a9c3`, kernel
+`7.2.6-sm8550-g42f3b40-iris1` (`qcom_iris` `b90bd823fdab9895`, patches
+0001-0004), decoder resolved by QUERYCAP name `iris_driver`. This driver
+`a1b3ef16ba3a82c4` (release build tree, source `fa048e2`), sibling
+`f7dd97109f3a9965` (source `0980a1d`). FFmpeg 8.1.3, clip `hevc-4k.mp4`
+(3840x2160, 480 frames) decoded in an endless loop with
+`-hwaccel vaapi -hwaccel_output_format vaapi -f null -`; the process is
+killed after the window. Battery 89 % to 87 %, discharging, backlight 0 for
+every window and restored afterwards, peak thermal 42.2 C, no reset.
+
+The gauge is the whole device: `|current_now| x voltage_now`, 200-ish
+samples per window. Frame counts come from ffmpeg's `-progress` file, so
+energy is reported per delivered frame. That matters here: the two drivers
+do not decode at the same rate under the default governor, and a fixed
+window of saturated decode is therefore not the same amount of work.
+
+Runs are ABBA (this driver, sibling, sibling, this driver), two independent
+runs per clock state, 45 s of steady state after a 5 s ramp. Idle baselines
+were measured separately in the same clock states, screen off, 45 s each:
+3.289 W pinned, 2.994 W with the default governor.
+
+| 4K HEVC decode | this driver | sibling |
+| --- | ---: | ---: |
+| `performance` governor + GPU at max, throughput | 385.2 / 385.6 fps | 382.8 / 386.8 fps |
+| `performance` governor + GPU at max, whole device | 5.161 / 5.206 W | 5.289 / 5.378 W |
+| `performance` governor + GPU at max, decrement per frame | 4.86 / 4.97 mJ | 5.22 / 5.40 mJ |
+| default `schedutil`, throughput | 354.0 / 353.8 fps | 269.7 / 267.2 fps |
+| default `schedutil`, whole device | 4.243 / 4.281 W | 4.022 / 4.003 W |
+| default `schedutil`, decrement per frame | 3.53 / 3.64 mJ | 3.81 / 3.78 mJ |
+| default `schedutil`, whole-device energy per frame | 11.99 / 12.10 mJ | 14.91 / 14.98 mJ |
+| default `schedutil`, client CPU per frame | 3001 / 3015 us | 3695 / 3695 us |
+
+With the clocks pinned the two decode at the same rate and this driver
+spends 7.5 % less per frame on its own share of the power. Under the
+governor a user actually gets, this driver delivers 32 % more frames per
+second; the fixed-window wattage reads 6 % higher for it because it is
+doing 32 % more work, while energy per delivered frame is 20 % lower
+(11.99 mJ against 14.91 mJ) and the baseline-subtracted decrement is 5.6 %
+lower. The client CPU column agrees with the CPU records above.
+
+A saturation comparison by wattage alone points the wrong way when the
+work rate differs, and an earlier draft of this page read the fixed-window
+numbers as a deficit. It is not one: per delivered frame this driver is
+ahead in both clock states, and the gap is larger in the state users run.
+
+### In the browser
+
+Chrome 156 playing the same clip at display rate, screen off, battery 85 %,
+ABBA, two rounds per driver, 12 s of sampling inside each run's 15 s measured
+window after warm-up. Both arms decoded 447-450 frames with 0 dropped, so
+the work rate is identical.
+
+| 4K HEVC in Chrome | this driver | sibling |
+| --- | ---: | ---: |
+| whole device | 4.471 / 4.452 W | 4.553 / 4.614 W |
+| decrement over the 3.098 W idle baseline | 1.373 / 1.354 W | 1.455 / 1.516 W |
+
+This driver's decode-plus-compositor increment is 8.2 % lower. The traced
+cell above gives the likely reason and it is visible in the work: the
+sibling copies every 4K picture through the GPU (mean 4.4 ms) because Chrome
+exports its surfaces and it has no import path, while this driver publishes
+the client's own buffer. This is a per-delivered-frame comparison, not a
+saturation one.
+
+What this does not prove: one 4K clip, decode only in the saturation part and
+browser playback in the table above — no encode, no standby, no Firefox; the
+gauge measures the whole device, so these are increments, not
+decoder-package power; the idle baselines were taken after the decode runs
+rather than inside each round; two rounds per state, and the 1080p clip was
+not run in this shape. The browser sample covers 12 s of a 15 s window, so
+start-up and teardown are outside it.
