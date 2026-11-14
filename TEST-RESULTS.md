@@ -8504,6 +8504,20 @@ slot is free. That build ran 0.598-0.626 s over 300 frames (mean 0.612)
 against 0.596-0.618 s (mean 0.605) for the unchanged one, so the pump is
 load-bearing for pipeline depth and was reverted.
 
+Re-measured on the release build after the transcode work, 26 interleaved
+pinned-clock rounds on the same clip: 0.6104 s against 0.5998 s, a paired
+difference of +10.6 ms ± 6.4 ms, slower in 19 of 26 rounds. The client CPU is
+still 21 % lower (0.1166 s against 0.1478 s). The gap does not grow with
+`-async_depth` (1, 2, 4 and 8 all sit inside 0.59-0.63 s on both drivers), so
+it is not pipeline depth. It scales weakly with stream length: three passes
+over the clip (900 frames) give 1.712 s against 1.694 s. A request-level
+`strace` comparison shows the same successful work in both drivers — 4 OUTPUT
+and 32 CAPTURE buffers, 264 against 262 successful `DQBUF`, 132 against 133
+failing `DQEVENT` — so the difference is in how the kernel and firmware
+schedule the pictures, not in what either driver asks for. In the browser,
+where a user meets this codec, the two are at parity: 450 frames and 0
+dropped against 448 and 0.
+
 ### Two concurrent decode sessions
 
 Two FFmpeg processes decoding the HEVC 1080p clip at once, five interleaved
