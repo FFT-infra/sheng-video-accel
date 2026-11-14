@@ -6,6 +6,26 @@ A libva driver for the Qualcomm Iris V4L2 video decoder and encoder, hardware-op
 
 Kernel patches, diagnostic scripts, and packaging specs are provided in this repository as supporting assets for hardware validation and deployment.
 
+## Project identity
+
+Five names describe the same component. Each is fixed by a different consumer,
+so renaming one does not rename the others:
+
+| Layer | Name | Fixed by |
+| --- | --- | --- |
+| Repository | `qualcomm-iris-vaapi` | downstream `Source0` URLs and product lockfiles |
+| Meson project | `libva-v4l2` | `meson.build`; inherited from the upstream fork |
+| Source archive | `libva-v4l2-iris-<version>.tar.gz` | `scripts/make-dist.sh`, `%autosetup -n` |
+| Package (RPM, deb, PKGBUILD) | `libva-v4l2-iris` | `packaging/` and `debian/` |
+| Runtime VA driver | `v4l2_drv_video.so`, `LIBVA_DRIVER_NAME=v4l2` | libva's `<name>_drv_video.so` convention |
+
+`msm_drv_video.so` and `qcom_drv_video.so` are installed aliases of the same
+driver, for clients that resolve by DRM driver name or that set
+`LIBVA_DRIVER_NAME=qcom`. The source archive is an upstream build artifact:
+`.gitattributes` keeps CI, agent instructions and experiment records out of it,
+while the three distribution packaging formats stay in because the shipped
+spec runs `test/iris-packaging-check.sh` against them.
+
 ## Capabilities
 
 ### Decode

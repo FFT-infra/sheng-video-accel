@@ -1,5 +1,11 @@
 # Qualcomm Iris VA-API Test Results
 
+**Evidence archive.** This file is a chronological record of runs, including
+superseded baselines, refuted hypotheses and interrupted experiments. It is not
+a statement of what currently works: read `docs/STATE.md` for the current
+qualified combination, and `data/iris-codec-capabilities.json` for the current
+capability boundary. Sections here remain the evidence behind any claim.
+
 Primary latest documented target: Fedora 44 ARM64 Snapdragon SM8550 tablet,
 kernel `7.2.6-sm8550-g42f3b40-iris1`. Device numbers are historical and must be resolved
 through `iris_resolve_device`; target labels below distinguish separate boots

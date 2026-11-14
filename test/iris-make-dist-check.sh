@@ -58,6 +58,31 @@ if grep -qE "^$prefix(\.git/|build[^/]*/|.*\.tar\.gz\$)" "$entries"; then
     fail 'archive carries git metadata, build output or another archive'
 fi
 
+# The archive is a source artifact, so CI, agent instructions and experiment
+# records stay in the repository. .gitattributes carries the exclusions and
+# git archive applies them. The negation matters: a removed or misspelled rule
+# would otherwise ship these files with no failing check.
+for path in \
+    .gitattributes \
+    .gitignore \
+    .github/workflows/ci.yml \
+    AGENTS.md \
+    docs/experiments/av1-noshow-dpb-spike.md; do
+    if grep -Fxq "$prefix$path" "$entries"; then
+        fail "repository-only file leaked into the source archive: $path"
+    fi
+done
+
+# Distribution packaging and the trace vocabulary stay in: the package's own
+# %check runs these gates against the unpacked tree, so excluding either
+# would make the tarball fail its own tests on an aarch64 build root.
+for path in \
+    meson_options.txt \
+    debian/rules \
+    docs/architecture.md; do
+    grep -Fxq "$prefix$path" "$entries" || fail "archive is missing $path"
+done
+
 # Exactly the inputs the two package builds need. A missing one turns into a
 # build failure only on an aarch64 build root, which is why it is checked here.
 for path in \
@@ -93,4 +118,4 @@ fi
 grep -q 'working tree is dirty' "$work/dirty.out" \
     || fail 'dirty-tree failure did not name its cause'
 
-echo "PASS make-dist: prefix, contents, reproducibility and dirty refusal"
+echo "PASS make-dist: prefix, contents, repository-only exclusions, reproducibility and dirty refusal"

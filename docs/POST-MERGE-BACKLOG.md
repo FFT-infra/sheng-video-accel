@@ -1,5 +1,11 @@
 # Post-merge hardware and upstream backlog (2026-11-10)
 
+**Historical ledger.** This file records the state of workstreams as they were
+triaged, including entries that were later implemented, superseded or
+reversed. It is not the current to-do list: `docs/STATE.md` names the current
+qualified combination, and `data/iris-codec-capabilities.json` is the current
+capability boundary. Keep the entries below as provenance, not as instructions.
+
 This is the completion ledger for the work consolidated into PR #5 (which
 subsumes PR #4). The 2026-11-10 draft (PR #3) froze the baseline and listed
 every open workstream; PR #4 implemented the AV1 held-picture removal; PR #5

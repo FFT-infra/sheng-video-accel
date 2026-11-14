@@ -14,9 +14,14 @@ under `src/`.
 - One source of truth per fact, updated in the same commit as the change:
   codec capability and publish-policy qualification live in
   `data/iris-codec-capabilities.json`; the environment surface lives in
-  `README.md`; the trace vocabulary lives in `docs/architecture.md` §8.
-  Checks enforce the first two; nothing enforces the third, which is exactly
-  why it drifts.
+  `README.md`; the trace vocabulary lives in `docs/architecture.md` §8;
+  kernel patch hashes live in `packaging/kernel/SHA256SUMS`; the source
+  archive boundary lives in `.gitattributes` and `scripts/make-dist.sh`.
+  Checks enforce all five. The current qualified combination in
+  `docs/STATE.md`, the patch rationale in `packaging/kernel/README.md` and
+  the backlog are prose; nothing enforces them, which is exactly why they
+  drift. `TEST-RESULTS.md` and `docs/POST-MERGE-BACKLOG.md` are historical
+  records, not current-state sources.
 - Evidence before capability. A codec, profile or publish policy is
   advertised only after its hardware gate passed and TEST-RESULTS.md records
   the run (docs/architecture.md §9). The Import policy additionally keeps one

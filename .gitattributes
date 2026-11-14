@@ -1,2 +1,14 @@
 *.patch -whitespace
 *.diff -whitespace
+
+# The source archive is a buildable artifact, not a repository clone. VCS and
+# CI metadata, agent instructions and experiment records stay in the repo;
+# git archive honours export-ignore while the working tree keeps the files.
+# Distribution packaging stays in the archive because the shipped spec runs
+# test/iris-packaging-check.sh against all three formats from the unpacked
+# tree. test/iris-make-dist-check.sh asserts both halves of the split.
+/.gitattributes export-ignore
+/.gitignore export-ignore
+/.github/ export-ignore
+/AGENTS.md export-ignore
+/docs/experiments/ export-ignore

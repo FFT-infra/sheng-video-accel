@@ -6,6 +6,20 @@
 
 仓库内包含的内核补丁、诊断脚本与打包规则均作为硬件验证与部署配套提供。
 
+## 项目身份
+
+同一个组件有五个名字，分别由不同的消费方固定，改其中一个不会自动改其余的：
+
+| 层 | 名字 | 由谁固定 |
+| --- | --- | --- |
+| 仓库 | `qualcomm-iris-vaapi` | 下游 `Source0` URL 与整机仓的锁定文件 |
+| Meson 工程 | `libva-v4l2` | `meson.build`，沿用上游 fork 的名字 |
+| 源码包 | `libva-v4l2-iris-<version>.tar.gz` | `scripts/make-dist.sh`、`%autosetup -n` |
+| 软件包（RPM、deb、PKGBUILD） | `libva-v4l2-iris` | `packaging/` 与 `debian/` |
+| 运行时 VA 驱动 | `v4l2_drv_video.so`，`LIBVA_DRIVER_NAME=v4l2` | libva 的 `<name>_drv_video.so` 约定 |
+
+`msm_drv_video.so` 和 `qcom_drv_video.so` 是同一个驱动的安装别名，供按 DRM 驱动名解析、或设置 `LIBVA_DRIVER_NAME=qcom` 的客户端使用。源码包是上游构建产物：`.gitattributes` 把 CI、Agent 说明和实验记录排除在外；三种发行版打包格式仍留在包里，因为随包的 spec 会对它们运行 `test/iris-packaging-check.sh`。
+
 ## 支持特性
 
 ### 解码
