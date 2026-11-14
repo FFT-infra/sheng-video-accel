@@ -32,22 +32,15 @@ Hardware encode verification requires an active Iris IRQ counter increase, error
 
 ### Video processing
 
-| Entrypoint | Operation | Input | Output | Verification |
+| Entrypoint | Supported operations | Input | Output | Verification |
 | --- | --- | --- | --- | --- |
-| `VAEntrypointVideoProc` (`VAProfileNone`, opt-in) | scale at any ratio with nearest-neighbour or bilinear interpolation, optional crop, rotation and mirroring; bit-depth conversion between NV12 and P010; HDR10 to SDR tone mapping; global-alpha compositing of up to sixteen layers over the main surface, each Y'CbCr or packed BGRA/RGBA | NV12, P010, BGRA, RGBA | NV12, P010 | `scale_vaapi` byte-identical to swscale `flags=neighbor`; the bilinear method within one code of a four-tap model, constant-invariant and identical to the point map at 1:1; a crop matches `crop,scale`; a cross-depth picture matches `scale` then `format` byte for byte in both directions; all seven `transpose_vaapi` directions match the software filters; the tone mapper within 1 code of its documented pipeline, alone and followed by any of the seven transpose directions, a crop-scale or a composite; the composite's 0 and 1 alpha endpoints match their input frames byte for byte; `overlay_vaapi` over a BGRA upload produces the exact BT.709 codes of a constant overlay |
+| `VAEntrypointVideoProc` (`VAProfileNone`, opt-in) | Scale at any ratio (nearest-neighbour, bilinear, or driver-selected: area-average down, bicubic up), crop, rotation, mirroring; NV12/P010 bit-depth conversion; HDR10 to SDR tone mapping; up to 16-layer compositing (Y'CbCr or packed BGRA/RGBA) | NV12, P010, BGRA, RGBA | NV12, P010 | `scale_vaapi` nearest-neighbour and crop byte-identical to swscale; bilinear within 1 code of 4-tap model; tone mapper within 1 code of BT.2390/BT.709 pipeline; composite alpha 0 and 1 endpoints match input frames byte-exact |
 
-The processor is off unless `V4L2_VA_VPP` is set. It runs the pinned Vulkan compute kernel on the surface DMA-BUFs and offers one operation, a scale at the ratio the client asks for, sampling where swscale samples, starting from the surface region the client names and applied after the clockwise quarter turn the client asks for. The interpolation method comes from the picture's `filter_flags`: the default and `VA_FILTER_INTERPOLATION_NEAREST_NEIGHBOR` are the point map, `VA_FILTER_INTERPOLATION_BILINEAR` blends the four samples around the destination sample's centre, and `VA_FILTER_INTERPOLATION_ADVANCED` is the driver's own pick per axis — the area average when an axis shrinks, where a two-tap filter aliases, and a four-tap cubic when it grows. The pipeline caps name advanced, because the field holds one method rather than a bit set and that is the best of the three. NV12 and P010 surfaces are scaled by the same taps, one kernel per destination sample width, and either source depth feeds either output: the kernel converts `code >> 2` on the way down to eight bits and `code << 2` on the way up to ten before it samples, which is the conversion swscale applies, so a picture that only changes bit depth is byte-identical to `format` and a scale in the same picture matches `scale` then `format`. Colour conversion and the filters outside the one below are refused. Mirroring on either axis, or on both, runs after the rotation and before the scale, so every `transpose_vaapi` direction a client can name works. Its geometry floor is the kernel's own 2x2 rather than the decoder node's minimum, so a client can scale down to a thumbnail. One filter is implemented: `VAProcFilterHighDynamicRangeToneMapping` with HDR10 metadata takes a P010 BT.2020/PQ surface to SDR NV12 through the BT.2390 EETF, the BT.2020 to BT.709 matrix and the BT.709 OETF. It converts the whole surface at its own size and runs first, so a crop, a scale, a rotation, a mirror or a second buffer in the same picture is a later pass over the converted frame rather than a refusal. An NV12 source, HDR-to-HDR and a second filter are still refused. The processor also composites: a picture may carry one main pipeline buffer and up to sixteen blending passes on top of it, each mixing a surface into one even rectangle of the output with a `VABlendState` — the shape `overlay_vaapi` submits, generalised to a stack. The passes run in submission order, so a later one covers an earlier one; the driver copies the main rectangle into the output and then reads the output back for each layer, which is why one kernel serves any number of them. The overlay is either the output's own Y'CbCr format, mixed on the coded values of both planes, or a packed `VA_RT_FORMAT_RGB32` surface (`VA_FOURCC_BGRA` or `VA_FOURCC_RGBA`), converted to the output frame's BT.601, BT.709 or BT.2020 matrix while it is mixed. The overlay is sampled from its own surface region, so a client composites part of a surface rather than all of it, with the same interpolation method the scale kernel runs. Both forms implement `VA_BLEND_GLOBAL_ALPHA` and `VA_BLEND_PREMULTIPLIED_ALPHA`, the flag FFmpeg sets for an overlay input with an alpha channel: with it, a packed overlay's own alpha byte multiplies the global one, so a surface with a real alpha channel produces the picture that channel describes. The output's range comes from `output_color_properties`: a full-range destination is encoded on 0..255 rather than 16..235. Luma keying is refused, and an alpha of 0 or 1 reproduces the main or the overlay frame byte for byte.
+Video processing runs via pinned Vulkan compute kernels on surface DMA-BUFs. It is disabled by default and enabled whenever the `V4L2_VA_VPP` environment variable is set to a non-empty value (e.g. `V4L2_VA_VPP=0` also enables it). Dispatches wait for pending decode completions before reading source surfaces. Shaders, execution order, and pipeline constraints are documented in [docs/architecture.md](docs/architecture.md).
 
 ## Performance
 
-HEVC Main 8-bit throughput on the SM8550 tablet, FFmpeg 8.1.3, five
-interleaved runs per cell with every CPU policy at its maximum
-(2016/2803/2956 MHz) and the GPU at 680 MHz. Clips are synthetic I/P at GOP 60
-and VBR 5/10/20 Mbps; encoding includes the CPU NV12 upload and runs at
-`-async_depth 4`; decoding excludes download and rendering. 900 frames per run
-at 720p and 1080p, 480 at 4K, so process start-up is amortised. The comparison
-is the sibling `radxa-pkg/qcom-va-driver` built and run on the same node and
-clips.
+HEVC Main 8-bit throughput on the SM8550 tablet, FFmpeg 8.1.3, five interleaved runs per cell with CPU policies at max (`performance`, 2016/2803/2956 MHz) and GPU at 680 MHz (`userspace`). Synthetic I/P clips at GOP 60, `-async_depth 4`. Decode excludes download/display; encode includes CPU NV12 upload. Compared against `radxa-pkg/qcom-va-driver` on the same node and clips:
 
 | Operation | 720p | 1080p | 4K |
 | --- | ---: | ---: | ---: |
@@ -56,29 +49,7 @@ clips.
 | Encode, this driver | 644 fps | 591 fps | 167 fps |
 | Encode, sibling | 631 fps | 575 fps | 163 fps |
 
-Decode is at parity; encode is 2.1-2.8 % ahead at all three sizes. Decode also
-costs 16-19 % less client CPU per process (0.27/0.42/0.40 s against
-0.33/0.50/0.50 s), consistent with this driver deferring the copy engine until
-a copy is actually requested. The sibling's published table is SC8280XP and is
-not comparable with these SM8550 numbers.
-
-Across six 1080p codecs on the same node, H.264, HEVC 8-bit and VP9 decode are
-at parity (+1.1 to +1.3 %); AV1 decode is 9.8 % faster at 8 bits and 11.5 % at
-10 bits, with 35 % and 77 % less client CPU; HEVC 10-bit is 2.4 % behind while
-using 16 % less CPU. Decoding 1080p HEVC into H.264 runs at parity with 23 %
-less client CPU. Kodi playback of 1080p and 4K is at parity in wall time, with
-6 % less CPU at 4K. Two simultaneous 1080p HEVC decodes finish in the same
-wall time (836 against 829 ms per 600 frames) with 17 % less aggregate client
-CPU.
-
-The VA video processor scales 1080p to 720p at 536 fps on 0.54 s of client CPU
-per 900 frames, against 287 fps and 8.4 s for
-`hwdownload,format=nv12,scale=1280:720` behind the same hardware decode: the
-scale runs on the GPU instead of a copy out to the CPU. Against the sibling's
-Vulkan backend, built from the same sources with its VPP option, throughput is
-a tie (540 against 536 fps) with 14 % less client CPU; the sibling refuses
-mirroring and YUV overlays, which this driver renders. VPP is opt-in
-(`V4L2_VA_VPP`).
+Decode throughput sits at parity (within 0.4%), while client CPU time is 16–19% lower (0.27/0.42/0.40 s vs 0.33/0.50/0.50 s per 900 frames) due to deferred copy-engine initialization. Encode throughput is 2.1–2.8% ahead across all resolutions with equal client CPU time (1.01/1.94/4.82 s vs 1.08/1.91/4.80 s). The sibling's published table is SC8280XP and is not comparable with these SM8550 numbers. Detailed multi-codec sweeps (including AV1 8/10-bit), concurrency, transcode, power, and VPP benchmarks are documented in [TEST-RESULTS.md](TEST-RESULTS.md#cross-driver-benchmarks).
 
 ## Requirements
 
@@ -146,13 +117,7 @@ Imported DMA-BUF surfaces must match native CAPTURE layout (single linear object
 | `V4L2_VA_SYNC_TIMEOUT_MS` | 2000 | Bounded session wait timeout in milliseconds |
 | `V4L2_VA_COPY` | gpu | Copy engine selection (`gpu` or `cpu`) |
 | `V4L2_VA_PUBLISH` | auto | Force publication mode (`auto`, `direct`, `import`, `copy`) |
-| `V4L2_VA_VPP` | off | Opt in to the `VAProfileNone` / `VAEntrypointVideoProc` entrypoint (NV12/P010 scale at any ratio with any of the three interpolation methods, bit-depth conversion, rotation, mirroring, HDR10 to SDR tone mapping, and global-alpha compositing of up to sixteen layers, including packed BGRA/RGBA overlays) |
+| `V4L2_VA_VPP` | off | Enable Vulkan video processing (`VAEntrypointVideoProc`: scale, crop, rotate, mirror, NV12/P010 conversion, tone map, overlay) |
 | `V4L2_VA_DUMP` | off | Directory path to dump submitted access units |
 
-GStreamer's VA plugin (`libgstva`) filters VA drivers by vendor string before
-it registers any element, and this driver's vendor string is not on its list:
-`gst-inspect-1.0 va` reports `0 features` and `vaav1dec` does not exist.
-`GST_VA_ALL_DRIVERS=1` is the plugin's own override and registers the
-elements; libva still resolves this driver through its `msm_drv_video.so`
-alias, so no `LIBVA_*` variable is involved. `test/iris-gstreamer-gate.sh`
-checks both states on the target.
+> **Tip (GStreamer)**: The GStreamer VA plugin (`libgstva`) filters drivers by a vendor allowlist. To register elements with this driver (`vaav1dec`, etc.), set `GST_VA_ALL_DRIVERS=1`. Libva resolves the driver automatically via `msm_drv_video.so` without needing `LIBVA_*` variables; `test/iris-gstreamer-gate.sh` checks both states on the target.
