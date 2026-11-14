@@ -91,8 +91,8 @@ if [ "\$free_kb" -lt 2097152 ]; then
     printf 'WARN only %s KiB free on the target; corpus runs may fail\n' "\$free_kb" >&2
 fi
 
-# The decoder node moved between boots on this device (an earlier session
-# recorded /dev/video17, which is now the camera subsystem). Resolve it by
+# The decoder node moved between boots on this device (a number recorded
+# earlier now belongs to the camera subsystem). Resolve it by
 # driver name instead of hardcoding a number.
 node=''
 for candidate in /dev/video*; do

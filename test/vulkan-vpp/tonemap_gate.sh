@@ -2,7 +2,7 @@
 
 # HDR10 to SDR tone mapping through the VA video processor, on the target:
 #
-#   IRIS_REMOTE_HOST=sheng test/remote/gate.sh -- sh test/vulkan-vpp/tonemap_gate.sh
+#   IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh -- sh test/vulkan-vpp/tonemap_gate.sh
 #
 # The client is `iris-va-vpp-probe tonemap`: FFmpeg's tonemap_vaapi refuses a
 # raw P010 frame (it demands mastering-display side data, which a rawvideo

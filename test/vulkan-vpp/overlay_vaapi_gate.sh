@@ -2,7 +2,7 @@
 
 # The packed-overlay path through the real client, on the target:
 #
-#   IRIS_REMOTE_HOST=sheng test/remote/gate.sh -- sh test/vulkan-vpp/overlay_vaapi_gate.sh
+#   IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh -- sh test/vulkan-vpp/overlay_vaapi_gate.sh
 #
 # overlay_gate.sh drives a probe that submits what overlay_vaapi submits. This
 # gate drives overlay_vaapi itself, because two things about the real client

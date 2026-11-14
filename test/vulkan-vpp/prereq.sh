@@ -2,7 +2,7 @@
 
 # VPP prerequisite gate, run on the target under test/remote/gate.sh:
 #
-#   IRIS_REMOTE_HOST=sheng test/remote/gate.sh -- sh test/vulkan-vpp/prereq.sh
+#   IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh -- sh test/vulkan-vpp/prereq.sh
 #
 # It proves the two facts a zero-copy Vulkan video processor needs before any
 # VAProfileNone/VideoProc capability is advertised (docs/architecture.md):

@@ -61,7 +61,8 @@ BuildRequires:  ffmpeg
 
 # The diagnostic commands resolve the decoder node by driver name with
 # v4l2-ctl, because the node number is not stable across boots on this device.
-# Without v4l-utils they refuse to guess /dev/video0, which may be a camera.
+# Without v4l-utils they refuse to fall back to a fixed number that may be a
+# camera.
 # No browser is required: the driver is useful to any VA-API client.
 Requires:       v4l-utils
 

@@ -2,7 +2,7 @@
 
 # NV12 scale primitive gate, run on the target under test/remote/gate.sh:
 #
-#   IRIS_REMOTE_HOST=sheng test/remote/gate.sh -- sh test/vulkan-vpp/nv12_scale_gate.sh
+#   IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh -- sh test/vulkan-vpp/nv12_scale_gate.sh
 #
 # The flat read/write prereq (prereq.sh) proved a DMA-BUF can be a compute
 # source and destination. It did not prove the NV12 plane math a real VPP

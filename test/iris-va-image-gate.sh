@@ -2,7 +2,7 @@
 
 # The upload half of the image API, on the target:
 #
-#   IRIS_REMOTE_HOST=sheng test/remote/gate.sh -- sh test/iris-va-image-gate.sh
+#   IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh -- sh test/iris-va-image-gate.sh
 #
 # A client that brings its own pixels has two routes into a surface: an image
 # it creates and hands over with vaPutImage, or a derived image it maps and

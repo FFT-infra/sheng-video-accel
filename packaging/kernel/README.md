@@ -76,7 +76,7 @@ kernel module hash, boot ID, resolved decoder/encoder nodes, battery state and
 thermal zones. Keep the verified rollback copy from `build-module.sh`.
 
 ```sh
-work=~/Lab/Bridge/tmp/iris-kernel-module
+work=${IRIS_LAB_ROOT:-$HOME/iris-vaapi-lab}/tmp/iris-kernel-module
 sudo cp "$work/qcom-iris.ko.zst" \
     /lib/modules/$(uname -r)/kernel/drivers/media/platform/qcom/iris/
 sudo depmod -a

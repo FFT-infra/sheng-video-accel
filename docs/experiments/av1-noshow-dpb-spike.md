@@ -33,7 +33,7 @@ changing the bit writer. It does not ask whether the hardware accepts it.
 
 ## What was built
 
-`~/Lab/Bridge/tmp/av1-noshow-spike/slot-remap.cc`, compiled on the host against
+`<scratch>/av1-noshow-spike/slot-remap.cc`, compiled on the host against
 `src/codec/av1_obu.cc` and the system `va/va_dec_av1.h`:
 
 ```
@@ -309,7 +309,7 @@ the translator, did not touch `src/va/`, and added no hardware evidence.
 
 The read-only guarded probe described in the previous section was run on
 `sheng` with the installed 0001-0004 module. The tool is a standalone native
-V4L2 program in `~/Lab/Bridge/tmp/av1-noshow-spike/`; it is **not** in the
+V4L2 program in `<scratch>/av1-noshow-spike/`; it is **not** in the
 repository, loads no VA driver, changes no kernel module and uses no build-tree
 override. The decoder was resolved at runtime by `iris_driver` QUERYCAP
 (`scripts/lib/iris-node.sh`), with no fixed node number in the launcher.
@@ -320,7 +320,7 @@ and second `show_frame=1`; libdav1d decodes the whole stream to 20 frames on
 the host. Each TU was queued as one OUTPUT buffer with `timestamp = TU+1`, so
 token 0 remains reserved for "the firmware gave this completion no timestamp".
 
-Evidence (all artifacts under `~/Lab/Bridge/tmp/av1-noshow-probe/`):
+Evidence (all artifacts under `<scratch>/av1-noshow-probe/`):
 
 - Source commit `2e04d77585d2faf1ba3230dd8d261f21ed1735e0`, boot ID
   `7a26df99-f7ac-4148-9c80-135ba3adc661` (unchanged after the run), kernel
@@ -367,7 +367,7 @@ have made this a failed experiment; neither happened.
 
 The DPB translator was finally run through a real VA-API client (FFmpeg
 `vaapi` hwaccel) on `sheng`, using a **clean full-source sync** of commit
-`6191d13` into `~/Lab/Bridge/tmp/av1-dpb-target/`. The old
+`6191d13` into `<scratch>/av1-dpb-target/`. The old
 `~/Lab/iris-vaapi-lab/src` tree was not used: its `src/codec/av1.cc` turned
 out to be a different, older internal-DPB implementation that expects kernel
 0005, so a mixed tree would have invalidated every result. At the time of this
@@ -380,7 +380,7 @@ the run. Nothing was installed, no module was changed or loaded, no reboot.
 For a control, the same clean tree was built a second time with
 `make_av1()` selected (`build-baseline/src/v4l2_drv_video.so`, SHA-256
 `2a7a6e8a…`, no `av1_dpb.cc` symbols). Both runs used the **same fixed clip**
-`~/Lab/Bridge/tmp/av1-dpb-fixed.webm` (SHA-256 `9ecd7d59…`, 48-frame
+`<scratch>/av1-dpb-fixed.webm` (SHA-256 `9ecd7d59…`, 48-frame
 320x180 `testsrc2`/libaom-av1 with `-lag-in-frames 12`), resolved the decoder
 by `iris_driver` QUERYCAP, and ran under
 `scripts/iris-experiment-guard.sh`. Both guards returned `status=complete`,
@@ -472,8 +472,8 @@ hidden-picture, sequence-restart and EOS paths; they do not by themselves
 qualify the installed package or a browser client. A `DESTDIR` staging run
 would not be an installation either. The remaining gates are listed below.
 
-Artifacts: `~/Lab/Bridge/tmp/av1-dpb-va/` and
-`~/Lab/Bridge/tmp/av1-baseline-va/` (guard state, command stdout/stderr
+Artifacts: `<scratch>/av1-dpb-va/` and
+`<scratch>/av1-baseline-va/` (guard state, command stdout/stderr
 trace, `dump/iris-session-*.bin`, `provenance.txt`, framemd5 files). The Direct
 and Import launches reuse these directories, so the files hold the latest pair
 of each policy.

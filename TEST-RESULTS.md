@@ -3,7 +3,9 @@
 Primary latest documented target: Fedora 44 ARM64 Snapdragon SM8550 tablet,
 kernel `7.2.6-sm8550-g42f3b40-iris1`. Device numbers are historical and must be resolved
 through `iris_resolve_device`; target labels below distinguish separate boots
-and replacement endpoints without exposing private network addresses.
+and replacement endpoints without exposing private network addresses. `<scratch>`
+and `<lab-root>` stand for the operator's scratch directory and deployment tree;
+the records keep their relative layout without publishing the absolute paths.
 
 ## Passed
 
@@ -2841,13 +2843,13 @@ pictures on that stream rather than synthesising grain.
 
 ### Artifacts
 
-On the target: `~/iris-vaapi-lab/artifacts/browser-acceptance/` (one
+On the target: `<lab-root>/artifacts/browser-acceptance/` (one
 directory per row above, each with `summary.json`, `cdp.json`,
 `browser.log` and `iris-node-holders.txt`),
 `/tmp/iris-bench/lab*/artifacts/browser-acceptance/` for the rows that
 were run under a scratch lab root, `/tmp/iris-bench/av110-va.md5` and
 `av110-sw.md5` for the frame MD5s, and
-`~/iris-vaapi-lab/media/10bit/av1-640x360-10bit.mp4` for the clip.
+`<lab-root>/media/10bit/av1-640x360-10bit.mp4` for the clip.
 
 ## VP9 conformance through the driver, first full suite (2026-10-22)
 
@@ -2998,7 +3000,7 @@ later runs at 854x480 and 1080p show zero errors, and the pre-fix tree at
 plays; nothing is attributed to the fix. It is recorded as an open
 rendition-dependent observation, not a conclusion.
 
-Scratch artifacts: `~/Lab/Bridge/tmp/iris-bench/` on the target
+Scratch artifacts: `<scratch>/iris-bench/` on the target
 (`site/ab-*/browser.log` per run, `vp9alt/` for the local alt-ref probes,
 `olddrv/` for the previous driver).
 
@@ -3109,10 +3111,10 @@ of the held-picture contract and this client, not of the header fix. It
 belongs in the record as a client that does not decode AV1 through this
 driver.
 
-Artifacts: `~/Lab/Bridge/tmp/iris-bench/av1-720/` on the target
+Artifacts: `<scratch>/iris-bench/av1-720/` on the target
 (`hw-all.md5`, `sw-nv12.md5`, `hw1080.md5`, `sw1080.md5`, `rt-real/`,
 `browser-av1/`), and
-`~/Lab/Bridge/tmp/av1-hdr/` on the builder (the dumped access units, the
+`<scratch>/av1-hdr/` on the builder (the dumped access units, the
 `trace_headers` diffs, and the one-bit patch that proved the field).
 
 ## AV1 and H.264 resolution change inside one VA context (2026-10-23)
@@ -3246,7 +3248,7 @@ So the `S_FMT` change stays — it is a contract requirement
 new segment at a geometry the stream never named — but in-context AV1 DRC
 stays **unqualified**. `data/iris-codec-capabilities.json` and
 `docs/architecture.md` carry that, and the target-side evidence is
-`~/Lab/Bridge/tmp/iris-bench/av1-720/` (`out-a.log` success, `out-b.log`
+`<scratch>/iris-bench/av1-720/` (`out-a.log` success, `out-b.log`
 failure, `gst.strace`, `flag-a.log`, `dd-c.dmesg`).
 
 ### The installed package, no environment overrides (2026-10-24)
@@ -3271,7 +3273,7 @@ Kernel `7.2.6-sm8550-g42f3b40-iris1`, boot
 installed package, not a `DESTDIR` staging run and not a build-tree
 override.
 
-Artifacts on the target: `~/Lab/Bridge/tmp/iris-bench/av1-720/`
+Artifacts on the target: `<scratch>/iris-bench/av1-720/`
 (`resize-av1.mkv`, `resize-h264.mkv`, `hw.md5`, `sw.md5`, `hwmd5.log`).
 
 ## Correction (2026-10-24): the in-context DRC defect is in this driver
@@ -3377,7 +3379,7 @@ frames on both builds, byte-identical to each other. That output differs from
 the software decode of the same file, which is a property of the GPU copy's
 colour conversion and not of this change; it is the same on both builds.
 
-Artifacts: `~/Lab/Bridge/tmp/iris-bench/av1-720/` — `f-*.log` and `v-*.log`
+Artifacts: `<scratch>/iris-bench/av1-720/` — `f-*.log` and `v-*.log`
 passing, `n-*.log`/`q-*.log` the before/after pair with the kernel trace,
 `cp-*.log` the Copy path after the fix, `pub-copy-*.log` before it.
 
@@ -3404,7 +3406,7 @@ this driver's, not the firmware's through a different client. Source commit
 
 Neither number is a driver defect count. Every failure was classified by
 running each vector directly and reading the kernel's own message
-(`~/Lab/Bridge/tmp/fluster/h264-failures.csv`, and the same method for HEVC):
+(`<scratch>/fluster/h264-failures.csv`, and the same method for HEVC):
 
 H.264, 63 failures:
 
@@ -3737,7 +3739,7 @@ driver that was there before: `artifact_sha256` in
 file is 399920 bytes, and the previous installed driver was 8961024. The old
 file was a local `scripts/install-system.sh` build with symbols and the new one
 is the RPM's stripped payload; they shared only the name. The previous driver
-is backed up at `~/Lab/Bridge/tmp/rollback-driver-20261024T090903Z/` with its
+is backed up at `<scratch>/rollback-driver-20261024T090903Z/` with its
 SHA-256 recorded, and `install-system.sh`'s own copy is at
 `/usr/local/share/iris-vaapi/backup/v4l2_drv_video.so`, same hash.
 
@@ -4154,7 +4156,7 @@ kernel `7.2.6-sm8550-g42f3b40-iris1`, boot `36ef0142-…`, decoder
 `/dev/video17`. VP9 is not qualified for Import in the capability table, so
 `V4L2_VA_PUBLISH=import` cannot reach it. The measurement used a scratch
 copy of the deploy tree with one extra line in `driver.cc` qualifying
-`V4L2_PIX_FMT_VP9` (`~/Lab/Bridge/tmp/vp9-import-probe` on the target, not
+`V4L2_PIX_FMT_VP9` (`<scratch>/vp9-import-probe` on the target, not
 committed); everything else is the tree above.
 
 Clip: 1280x720, 480 frames, `libvpx-vp9` two-pass with `-lag-in-frames 25
@@ -4198,7 +4200,7 @@ table's stated blocker is gone, but the Chrome path is not clean. VP9 stays
 drops beyond the Copy baseline, and `completed` within a few pictures of
 `submitted` before that changes.
 
-Artifacts: `~/Lab/Bridge/tmp/vp9probe/` on the target (`trace720-*.log`,
+Artifacts: `<scratch>/vp9probe/` on the target (`trace720-*.log`,
 `acc2/`, `acc-copy2/`, `acc-prefix/`, `acc-h264/`).
 
 ### Regression on the final tree
@@ -4266,7 +4268,7 @@ first boot, `/dev/video0` on the second; the node is resolved by the
 ### The corpus, three decoders
 
 `fluster run -ts VP9-TEST-VECTORS`, `-j 4 -t 30`, per-vector CSV
-(`~/Lab/Bridge/tmp/vp9-fl/run/vp9-{sw,va,va2}.csv`). The software arm is the
+(`<scratch>/vp9-fl/run/vp9-{sw,va,va2}.csv`). The software arm is the
 same FFmpeg build decoding with libvpx, which is what the corpus reference
 MD5s come from, so it is the control that tells a driver defect from a
 corpus/reference mismatch:
@@ -4439,8 +4441,8 @@ measurement in flight, and because `panic_on_oops` is 0 on this boot, so the
 first one did not panic — the tablet reset for another reason. Neither is
 this driver's code, and neither is fixed here.
 
-Artifacts on the target: `~/Lab/Bridge/tmp/vp9-fl/run/` (CSV and JSON for
-every arm), `~/Lab/Bridge/tmp/dec-perf/` (probes `probe8.sh` through
+Artifacts on the target: `<scratch>/vp9-fl/run/` (CSV and JSON for
+every arm), `<scratch>/dec-perf/` (probes `probe8.sh` through
 `probe23.sh`, raw window CSVs `p10-*`/`p15-*`/`p17-*`, `nalscan.cc`,
 `naldrift.cc`/`naldrift2.cc`, `patch_timer_cpu.py`/`patch_timer_freq.py` and
 the scratch tree `timer/src` they patch, the trace `p16i.trace`, and the raw
@@ -4745,14 +4747,14 @@ Three small fixes to `test/iris-kernel-patch-check.sh`'s cross-repo half
   fragile on dash-based CI or if the trailing lines move; it is now a plain
   `if ... then printf ... fi`.
 - The stale experimental clone
-  `~/Lab/Bridge/tmp/sheng-fedora-packages/...` was a second fallback
+  `<scratch>/sheng-fedora-packages/...` was a second fallback
   candidate. It pins `8dd655e…` with `phxinyang/` URLs and produced four
   false URL-pin failures. Only the explicit `IRIS_DOWNSTREAM_SPEC` override
   and the sibling `../sheng-fedora-packages` checkout remain.
 - A spec with zero `Source6-9` lines now fails instead of silently passing.
   `packaging/kernel/README.md` documents the same resolution rules.
 
-Verification of that check, fixtures under `~/Lab/Bridge/tmp/iris-check-fixtures`:
+Verification of that check, fixtures under `<scratch>/iris-check-fixtures`:
 
 | Fixture | Exit | Result |
 | --- | --- | --- |
@@ -5065,7 +5067,7 @@ host-only self-test covers that header-only difference as a passing case.
 `IRIS_REAL_CLIP_SET=4k` runs only this lane in
 `test/iris-real-clip-gate.sh`; `all` still runs the 720p and DRC clips. Both
 lanes were re-run on the target with the final checker and its scratch root
-set to the project's `~/Lab/Bridge/tmp`:
+set to the project's `<scratch>`:
 
 | Lane | Framemd5 | Session | Publish |
 | --- | --- | --- | --- |
@@ -5095,7 +5097,7 @@ Firefox 158 has no CDP, so the evidence is a WebDriver BiDi
 `getVideoPlaybackQuality()` frame/drop delta over a 10-second window, Firefox's
 own `MOZ_LOG` (`PlatformDecoderModule`, `FFmpegVideo`, `MediaFormatReader`),
 and the driver's `V4L2_VA_TRACE=1` ledger. The harness lives in
-`~/Lab/Bridge/tmp/ff-final-20261110/` on the target. Firefox was launched on
+`<scratch>/ff-final-20261110/` on the target. Firefox was launched on
 Wayland with `media.hardware-video-decoding.force-enabled=true` and
 `MOZ_DISABLE_RDD_SANDBOX=1`; the real-site runs use the same local HTTP/CONNECT
 relay as the Chrome runs and do not modify the site or the video. No
@@ -5154,7 +5156,7 @@ reload in this run). The decoder resolved by `iris_driver` QUERYCAP to
 The build came from a clean tree containing only the 154 tracked files of that
 commit; no build-tree `LIBVA_DRIVERS_PATH` override was used for the gates.
 Rollback snapshot:
-`~/Lab/Bridge/tmp/rollback-3-20261110T182904Z/v4l2_drv_video.so` (previous
+`<scratch>/rollback-3-20261110T182904Z/v4l2_drv_video.so` (previous
 installed SHA-256
 `84a329258baf6b2fdf2e1da8f1038b35a35b3e159637238daf55982da1daeb43`), plus the
 installer's own `/usr/local/share/iris-vaapi/backup/v4l2_drv_video.so`.
@@ -5167,8 +5169,8 @@ concurrent records after the fix for interleaved trace lines.
 
 Installed-package hardware gates, each under
 `scripts/iris-experiment-guard.sh` with `IRIS_EXPERIMENT_DIR` under
-`~/Lab/Bridge/tmp` and `V4L2_VA_PUBLISH=import`. Artifacts:
-`~/Lab/Bridge/tmp/gates5-20261110T182908Z/`. All three guards ended
+`<scratch>` and `V4L2_VA_PUBLISH=import`. Artifacts:
+`<scratch>/gates5-20261110T182908Z/`. All three guards ended
 `status=complete`, no reset or thermal breach (battery 74->73%, peak zone
 37000 millic, boot ID unchanged).
 
@@ -5201,7 +5203,7 @@ selected decoder with a frame/drop window.
 | Firefox live YouTube | AV1 / VP9 1920x1080 | 114 decoded at second sample (first sample had no video element) | `av1`, `VA-API FFmpeg init successful` | 129 `publish=direct`, 98 `publish=invisible`, no decode error |
 | Firefox live Bilibili | AV1 640x360 | 251 / 0 | `av1`, `VA-API FFmpeg init successful` | 447 `publish=direct`, 201 `publish=invisible`, no decode error |
 | Firefox live YouTube, `media.av1.enabled=false` (control) | VP9 1920x1080 | 251 / 0 | `vp9`, `VA-API FFmpeg init successful` | 488 `publish=direct`, 42 `publish=invisible`, no decode error |
-| Chrome local 1280x720 AV1 clip | AV1 | 287 / 0 | `VaapiVideoDecoder`, `kIsPlatformVideoDecoder=true`, GPU process holds `/dev/video17` | driver `installed:e97a861f8b66...`; see `~/Lab/Bridge/tmp/browser-clean-final/chrome-local` |
+| Chrome local 1280x720 AV1 clip | AV1 | 287 / 0 | `VaapiVideoDecoder`, `kIsPlatformVideoDecoder=true`, GPU process holds `/dev/video17` | driver `installed:e97a861f8b66...`; see `<scratch>/browser-clean-final/chrome-local` |
 | Chrome live YouTube | AV1 1920x1080 | 251 / 0 | `VaapiVideoDecoder`, `kIsPlatformVideoDecoder=true`, GPU process holds `/dev/video17` | 662 `publish=import`, 496 `publish=invisible`, `session finish submitted=442 completed=442 errors=0 drops=0 timeouts=0 drains=1 misplaced=0`; 4 `publish=drop` are released-surface completions after a decoder switch |
 | Chrome live Bilibili | AV1 640x360 | 251 / 0 | `VaapiVideoDecoder`, `kIsPlatformVideoDecoder=true`, GPU process holds `/dev/video17` | 750 `publish=import`, 342 `publish=invisible`, 3 `publish=drop` from released surfaces |
 | Chromium local AV1 (control) | AV1 | 288 / 0 | `Dav1dVideoDecoder`, `kIsPlatformVideoDecoder=false` | software decoder; Chromium 152 does not select VA-API for this local file |
@@ -5216,20 +5218,20 @@ frames in the window; the live-page windows report 0. Firefox's own
 is a browser-side decoder selection, so no per-client AV1 claim is made for
 it; the Firefox, Chrome and FFmpeg evidence above is the qualification.
 
-Artifacts: `~/Lab/Bridge/tmp/gates5-20261110T182908Z/`,
-`~/Lab/Bridge/tmp/ff-final-20261110/ff-av1-clean-1/`,
+Artifacts: `<scratch>/gates5-20261110T182908Z/`,
+`<scratch>/ff-final-20261110/ff-av1-clean-1/`,
 `ff-av1-clean-2/`, `ff-av1-clean-3/`, `ff-clean-youtube/`,
 `ff-clean-bilibili/`, `ff-clean-youtube-noav1/`,
-`~/Lab/Bridge/tmp/site-final-20261110/final-clean-chrome-youtube/`,
+`<scratch>/site-final-20261110/final-clean-chrome-youtube/`,
 `final-clean-chrome-bilibili/`,
-`~/Lab/Bridge/tmp/browser-clean-final/`.
+`<scratch>/browser-clean-final/`.
 
 ## Complete AV1 browser matrix (2026-11-11)
 
 The one-off browser probes above are now a repo-owned, repeatable matrix:
 `test/iris-av1-browser-matrix.sh` with `test/iris-firefox-media.py`
 (WebDriver BiDi + MOZ_LOG), `test/iris-chrome-media.py` (CDP Media domain)
-and a generated corpus (`~/Lab/Bridge/tmp/av1-browser-corpus/`). Each case
+and a generated corpus (`<scratch>/av1-browser-corpus/`). Each case
 launches the installed package directly, with no `LIBVA_*`, publish or node
 override, on Wayland; a 30-second window reports decoded/dropped frames, the
 selected decoder, the driver's `V4L2_VA_TRACE=1` ledger and a live `/proc` fd
@@ -5429,7 +5431,7 @@ Host gates: `sh test/run-static-checks.sh` PASS,
 `meson test -C build-local --print-errorlogs` 25/25, `git diff --check` clean.
 GitHub Actions `build-and-check` passed (`.github/workflows/ci.yml` installs
 `ffmpeg` and asserts `libdav1d` for the two AV1 oracle checks). Target runs
-used `IRIS_EXPERIMENT_DIR` under `~/Lab/Bridge/tmp/gates-final2-20261111` with
+used `IRIS_EXPERIMENT_DIR` under `<scratch>/gates-final2-20261111` with
 `V4L2_VA_PUBLISH=import`.
 
 | Gate | Result |
@@ -5448,7 +5450,7 @@ generate the oracle). Each clip was then decoded through the installed
 package (`LIBVA_DRIVERS_PATH=/usr/lib64/dri`, `V4L2_VA_PUBLISH=import`) and
 compared by ordered framemd5 hashes. The run was wrapped in
 `scripts/iris-experiment-guard.sh` with `IRIS_EXPERIMENT_DIR` under
-`~/Lab/Bridge/tmp/av1-syntax-corpus/a11-guard`:
+`<scratch>/av1-syntax-corpus/a11-guard`:
 `status=complete`, boot `7a26df99-f7ac-4148-9c80-135ba3adc661` unchanged,
 no reset, thermal zones 37600 millic, battery 85% Discharging, driver
 `323c07cbd42f5a152cfca4278a78d64d726534a85f95f0d0db22379e4317a37d`.
@@ -5655,7 +5657,7 @@ module, consistent with `CONFIG_MODVERSIONS` and BTF being off. The
 a partial `Module.symvers`; the `__ksymtab` comparison is the actual load
 check.
 
-A rollback copy under `~/Lab/Bridge/tmp/wp1-verify/out/` was compared
+A rollback copy under `<scratch>/wp1-verify/out/` was compared
 byte-for-byte with the installed `qcom-iris.ko.zst` before the second build.
 Battery was 96% Discharging, thermal zones 24400..37000 millic. No module was
 installed, `depmod` was not run, the device was not rebooted, and the boot ID,
@@ -5695,9 +5697,9 @@ experiment rather than the installation.
 | Boot ID after reboot / during guard | `17928711-7fd8-4f87-a024-9bf6b5bc44b6` |
 | Decoder | `iris_driver` QUERYCAP name `qcom-iris-decoder`, card `Iris Decoder`, node `/dev/video5` after reboot (`/dev/video17` before). Formats `H264 HEVC VP90 AV01`. |
 | Encoder | `iris_driver` QUERYCAP name `qcom-iris-encoder` |
-| Rollback | `~/Lab/Bridge/tmp/wp1-verify/out/rollback-qcom-iris.ko.zst`, `sha256sum -c` verified before install; restore script `~/Lab/Bridge/tmp/wp1-rollback.sh` was not run |
+| Rollback | `<scratch>/wp1-verify/out/rollback-qcom-iris.ko.zst`, `sha256sum -c` verified before install; restore script `<scratch>/wp1-rollback.sh` was not run |
 
-Before installing, `~/Lab/Bridge/tmp/wp1-install.sh` re-checked the rollback
+Before installing, `<scratch>/wp1-install.sh` re-checked the rollback
 copy, copied the built module, ran `depmod -a` and rebooted. The reboot changes
 the boot ID by design; both IDs are recorded above.
 
@@ -5707,7 +5709,7 @@ the boot ID by design; both IDs are recorded above.
 drops=0` with `session finish submitted=515 completed=515 errors=0 drops=0
 timeouts=0 drains=1 misplaced=0`. All six framemd5 files are byte-identical
 (md5 `653d13e6913e9dec741f77116509b376`) and are retained under
-`~/Lab/Bridge/tmp/wp1-baseline-0001-0004/`. A raw V4L2 slow-CAPTURE probe
+`<scratch>/wp1-baseline-0001-0004/`. A raw V4L2 slow-CAPTURE probe
 (640-frame H.264, two CAPTURE slots, `delay_us=2000` and `10000`, OUTPUT
 buffers tagged with TIMECODE metadata) reported `submitted=640 completed=632
 last_before_end=0 epipe=0 errors=0 tc_checked=632 tc_mismatch=0
@@ -5719,7 +5721,7 @@ slow-CAPTURE defect that 0006 addresses is therefore **not reproduced** on
 SM8550 with the qualified module, so a clean run with 0006 can only be called
 "no regression", never "fixed".
 
-**Final guarded run**: `~/Lab/Bridge/tmp/wp1-verify/guard-20261111T193559Z`,
+**Final guarded run**: `<scratch>/wp1-verify/guard-20261111T193559Z`,
 `IRIS_EXPERIMENT_TIMEOUT_SECONDS=1800`,
 `IRIS_EXPERIMENT_MAX_TEMP_MILLIC=85000`,
 `status=complete`, `finished_at=2026-11-11T19:37:00Z`, boot ID unchanged,
@@ -6024,7 +6026,7 @@ A run earlier in this session reported `PASS provenance verified` for a commit
 whose change was not in the tree on the tablet, and the sync was worked around
 by hand. The mechanism was reproduced here instead of argued about, from a
 clone carrying a marker comment in `src/codec/encode_h264.cc` and a scratch
-remote root (`~/Lab/Bridge/tmp/deploy-probe-target`, since removed):
+remote root (`<scratch>/deploy-probe-target`, since removed):
 
 | Probe | Action | Result |
 | --- | --- | --- |
@@ -6136,7 +6138,7 @@ comparison reads that copy instead of the freed buffer
 
 Source commit `966a7df` (host tree clean), build-tree override, driver
 `0ef0f34cc6eb8ccd468f431d71485d64230d0e14fd918e6340e0cd9230caceb8` built from
-`~/Lab/Bridge/tmp/fix1-tree` on the target, kernel
+`<scratch>/fix1-tree` on the target, kernel
 `7.2.6-sm8550-g42f3b40-iris1`, boot `5feea1b5-94ff-4793-94d2-689b3cdb23ca`,
 decoder resolved at runtime to `/dev/video17`. Every run below is guarded
 (`scripts/iris-experiment-guard.sh`, 85000 millic ceiling); all guards reported
@@ -6206,8 +6208,8 @@ tree and Phase 5 re-enabled it — and now says what the code does.
 If a later run shows drops beyond the Copy baseline or a non-zero `misplaced`,
 the table returns to `fallback` before any claim.
 
-Artifacts on the target: `~/Lab/Bridge/tmp/vp9final-{matrix,ffmpeg,chrome}`,
-`~/Lab/Bridge/tmp/vp9retain-{b,c,d}`, `~/Lab/Bridge/tmp/vp9copy-{a,b}`.
+Artifacts on the target: `<scratch>/vp9final-{matrix,ffmpeg,chrome}`,
+`<scratch>/vp9retain-{b,c,d}`, `<scratch>/vp9copy-{a,b}`.
 
 ## E2 closed: the battery-side A/B runs under the new ceiling (2026-11-12)
 
@@ -6764,7 +6766,7 @@ the node and the hash harness held fixed.
 | `radxa-pkg/qcom-va-driver` v1.1.1 | AV1 720p 78/120 (42 differ, first at frame 33), 4K 29/30 (frame 25), VP9 10-bit 120/120 | AV1 720p 120/120, 4K 30/30, VP9 10-bit 120/120 |
 
 The sibling backend was built on the target at
-`~/Lab/Bridge/tmp/radxa-v111/src` (`meson setup build --buildtype=release
+`<scratch>/radxa-v111/src` (`meson setup build --buildtype=release
 -Dcdsp_vpp=disabled -Dvulkan_vpp=disabled`, `ninja -C build`) and reached
 through `LIBVA_DRIVERS_PATH` plus `LIBVA_DRIVER_NAME=qcom`. It was never
 installed, so the system driver stayed
@@ -7436,7 +7438,7 @@ Runs `run-20261113T092702Z` (build tree) and `run-20261113T093308Z`
 `b971f26`, six cases `max_diff=0` both ways. The artifact installed by
 `scripts/install-system.sh build` is the same bytes the build tree ran
 (`fe3a1822`), with `c6dea809` kept as the rollback copy at
-`~/iris-vaapi-lab/rollback/v4l2_drv_video.so.c6dea809`. Identity: kernel
+`<lab-root>/rollback/v4l2_drv_video.so.c6dea809`. Identity: kernel
 `7.2.6-sm8550-g42f3b40-iris1`, module `b90bd823…`, boot `4b73926c…`, decoder
 `Iris Decoder` on `/dev/video0`, encoder `Iris Encoder` on `/dev/video1`.
 
@@ -7969,7 +7971,7 @@ reasoning that swscale's 10-to-8 path dithers by a count that depends on the
 sample position. That reasoning does not hold for the default path: FFmpeg
 picks the dither from `sws_flags`, and with the point map and no dither flag
 the conversion is a plain `code >> 2`. Measured on the host before any code
-changed (`~/Lab/Bridge/tmp/bitdepth2/`): a P010 frame converted to NV12 differs
+changed (`<scratch>/bitdepth2/`): a P010 frame converted to NV12 differs
 from `(word >> 6) >> 2` on 0 of 4096 luma and 0 of 2048 chroma samples, and
 `code << 2` in the other direction is exact for a code whose low two bits are
 clear.
@@ -8090,7 +8092,7 @@ costs. The sibling driver's figure was copied as a bound on a single
 Three claims about the DSP backend were recorded without a measurement and
 all three were wrong. They are corrected here from probes run on `sheng`,
 boot `4b73926c…`, kernel `7.2.6-sm8550-g42f3b40-iris1`. The probes are
-throwaway C programs under `~/Lab/Bridge/tmp/fastrpc-probe/`; none of them is
+throwaway C programs under `<scratch>/fastrpc-probe/`; none of them is
 in the repository, because none of them gates a capability.
 
 | claim | measurement | verdict |
