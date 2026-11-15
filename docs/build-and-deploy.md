@@ -439,6 +439,46 @@ guard file records a running test; a later invocation refuses to hide an
 interrupted or rebooted soak until the operator inspects it and deliberately
 sets `IRIS_SOAK_ALLOW_STALE_GUARD=1`.
 
+## 8K geometry and two-client gates
+
+The soak above uses 640x360 lanes. Two more target-only gates cover the
+geometry and resolution edges. Both need a guard wrapper, because a failed
+allocation at 8K can reset the firmware.
+
+Generate the 8K clips and their software baselines once, on the target, in a
+scratch directory (never in the repository):
+
+```sh
+for spec in 'h264 libx264 -preset ultrafast' 'hevc libx265 -preset ultrafast' \
+            'vp9 libvpx-vp9 -b:v 8M -deadline realtime -cpu-used 8' \
+            'av1 libsvtav1 -preset 12'; do
+    set -- $spec
+    ffmpeg -f lavfi -i testsrc2=size=7680x4320:rate=24 -frames:v 4 \
+        -c:v "$2" "${@:3}" -pix_fmt yuv420p -g 4 -y "$1.mkv"
+    ffmpeg -i "$1.mkv" -pix_fmt yuv420p -f framemd5 "$1-sw.md5"
+done
+```
+
+Run the 8K gate under the experiment guard. It checks the pool sizing, exact
+pixels, terminal LAST and zero completion errors for all four codecs:
+
+```sh
+IRIS_8K_DIR=/path/to/8k-clips sh test/iris-8k-gate.sh
+```
+
+For the two-player gate, generate two finite 1920x1080 H.264 clips and a
+`<clip>.sw.md5` software baseline beside each. Both processes decode under
+real-time pacing with their own VA display and driver trace:
+
+```sh
+IRIS_TWO_PLAYER_CLIP_A=/path/to/a.mp4 \
+IRIS_TWO_PLAYER_CLIP_B=/path/to/b.mp4 \
+    sh test/iris-two-player-gate.sh
+```
+
+Neither gate is a Meson test: both need the Iris decoder node. A run whose
+boot ID changes, or that trips the thermal ceiling, is a failed experiment.
+
 ## Host-side release gate
 
 The CI and local release sequence is:

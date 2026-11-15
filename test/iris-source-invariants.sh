@@ -12,6 +12,23 @@ matrix="$root/test/iris-matrix.sh"
 structure_matrix="$root/test/iris-structure-matrix.sh"
 concurrency_soak="$root/test/iris-concurrency-soak.sh"
 dynamic_resolution="$root/test/iris-dynamic-resolution.sh"
+eightk_gate="$root/test/iris-8k-gate.sh"
+two_player_gate="$root/test/iris-two-player-gate.sh"
+
+# The two new target gates must stay exact pixel oracles and must refuse a
+# pool that would reintroduce the 8K ENOMEM. These are text guards for the
+# scripts themselves: the driver's pool sizing has a FakeDevice unit test.
+if ! grep -Fq 'framemd5 differs from the software baseline' "$eightk_gate" \
+    || ! grep -Fq 'CAPTURE pool=$pool exceeds the 8K memory budget' "$eightk_gate"; then
+    echo "FAIL 8K gate no longer checks both exact pixels and the pool budget" >&2
+    exit 1
+fi
+if ! grep -Fq 'framemd5 differs from the software baseline' "$two_player_gate" \
+    || ! grep -Fq 'run_player a' "$two_player_gate" \
+    || ! grep -Fq 'run_player b' "$two_player_gate"; then
+    echo "FAIL two-player gate no longer runs two independent exact-pixel clients" >&2
+    exit 1
+fi
 
 if grep -Eq 'printf .* /dev/video0|echo .* /dev/video0' "$env_helper" \
     || ! grep -q 'no /dev/video\* node reports iris_driver' "$env_helper"; then
