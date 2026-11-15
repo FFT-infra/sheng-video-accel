@@ -34,7 +34,7 @@ self_obsolete() {
 }
 
 if [ "${1:-}" = --self-test ]; then
-    scratch_root=${IRIS_TEST_SCRATCH_ROOT:-$HOME/Lab/Bridge/tmp}
+    scratch_root=${IRIS_TEST_SCRATCH_ROOT:-$HOME/iris-vaapi-lab/tmp}
     mkdir -p "$scratch_root"
     work=$(mktemp -d "$scratch_root/iris-spec-selfobsolete.XXXXXX")
     trap 'rm -rf "$work"' EXIT HUP INT TERM

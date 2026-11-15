@@ -20,7 +20,7 @@ if [ ! -e "$root/.git" ] || ! git -C "$root" rev-parse --git-dir >/dev/null 2>&1
     exit 0
 fi
 
-scratch_root=${IRIS_TEST_SCRATCH_ROOT:-${TMPDIR:-$HOME/Lab/Bridge/tmp}}
+scratch_root=${IRIS_TEST_SCRATCH_ROOT:-${TMPDIR:-$HOME/iris-vaapi-lab/tmp}}
 mkdir -p "$scratch_root"
 work=$(mktemp -d "$scratch_root/iris-make-dist.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM

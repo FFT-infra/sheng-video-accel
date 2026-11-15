@@ -38,7 +38,7 @@ if ! command -v "$glslang" >/dev/null 2>&1; then
     exit 2
 fi
 
-scratch=${TMPDIR:-$HOME/Lab/Bridge/tmp}
+scratch=${TMPDIR:-$HOME/iris-vaapi-lab/tmp}
 work=$(mktemp -d "$scratch/vpp-spv.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
