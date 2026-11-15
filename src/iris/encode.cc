@@ -184,7 +184,8 @@ void EncoderSession::configure(
     require(!cqp || params.qp >= 1, "CQP needs a picture QP", VA_STATUS_ERROR_INVALID_PARAMETER);
     set_control(V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE, cqp ? 0 : 1, "frame rc enable");
     if (cqp) {
-        // Rate control off: the I/P QP controls decide every picture.
+        // Rate control off: the per-picture-type QP controls decide every
+        // picture, including the B control the firmware does not derive.
         set_frame_qp(params.qp);
     } else {
         set_control(V4L2_CID_MPEG_VIDEO_BITRATE_MODE, bitrate_mode(params.rate_mode), "bitrate mode");
@@ -310,6 +311,13 @@ void EncoderSession::set_frame_qp(int qp)
         "i-frame qp");
     set_control(h264 ? V4L2_CID_MPEG_VIDEO_H264_P_FRAME_QP : V4L2_CID_MPEG_VIDEO_HEVC_P_FRAME_QP, qp,
         "p-frame qp");
+    // The B control has a default of its own (QP 20 on this kernel) and is
+    // not derived from the other two. Left alone, a CQP session with B
+    // pictures codes them at that default whatever the client asked for: at
+    // QP 26 that measured 15.5 Mbit/s against 4.6, and at QP 30 19.2 against
+    // 2.2. Inert while B pictures are off.
+    if (h264)
+        set_control(V4L2_CID_MPEG_VIDEO_H264_B_FRAME_QP, qp, "b-frame qp");
 }
 
 void EncoderSession::configure_deblocking(const EncodeParams& params)

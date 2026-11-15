@@ -57,7 +57,7 @@
         ]
       },
       "experimental": [
-        "B-frames: opt-in with V4L2_VA_B_FRAMES, one B per P. The firmware holds each queued picture until the next one arrives, so the client must keep three pictures in flight (FFmpeg -async_depth 3); with its default two the session stalls at the first pair boundary. The intra period is rounded to a whole number of (P, B) groups, without which the firmware's IDR lands inside a pair and the stream is corrupt from that IDR on. Gate: 300 frames of 720p H.264, 45.06 dB mean PSNR, B pictures present (TEST-RESULTS.md)."
+        "B-frames: opt-in with V4L2_VA_B_FRAMES, one B per P. The firmware holds each queued picture until the next one arrives, so the client must keep three pictures in flight (FFmpeg -async_depth 3); with its default two the session stalls at the first pair boundary. The intra period is rounded to a whole number of (P, B) groups, without which the firmware's IDR lands inside a pair and the stream is corrupt from that IDR on. Gate: 300 frames of 720p H.264, 45.06 dB mean PSNR, B pictures present. On a 300-frame 720p natural clip at CQP the encoder spends 20.5 % fewer bits at QP 26 (3652.6 against 4593.3 kbit/s at 37.25 against 37.26 dB) and 12.1 % fewer at QP 30, where libx264 saves 26.8 % and 18.2 %; at VBR it buys 0.5-0.6 dB for 6-10 % more rate (TEST-RESULTS.md)."
       ]
     },
     {

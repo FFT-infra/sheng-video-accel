@@ -8240,3 +8240,63 @@ puts the median gap between access units at 0.98 ms and between completions at
 firmware's pace rather than on a userspace cost this measurement can separate
 from scheduling jitter. The figure above is the reference number for H.264
 720p decode on this target, alongside the HEVC sweep in `README.md`.
+
+## What B pictures buy in CQP and VBR (2026-11-15)
+
+Target `sheng`, kernel `7.2.6-sm8550-g42f3b40-iris1` (patches 0001-0004),
+FFmpeg 8.1.3, driver from the build tree in every run, not the installed
+package. Content: 300 frames of 1280x720 at 30 fps cut from a 25.7 Mbit/s
+intermediate of Big Buck Bunny, so the source is natural detail rather than
+synthetic noise. Each arm is one encode of that clip with `-g 60` (programmed
+as 59, see above) and `-async_depth 3`; the numbers are the bit rate over the
+300 pictures and PSNR/SSIM of the decoded pictures against the source.
+
+The before column is driver `946c527b…`, which advertised `l1` and left the B
+QP control alone. The after column is `dfb0f516…`, which sets it. The two
+bf=0 columns are identical in every arm, which is the point: the new control
+is inert when B pictures are off, and those arms also reproduced the earlier
+boot's figures bit-for-bit. The VBR bf=1 pairs are unchanged for the same kind
+of reason: the two drivers differ only in that control, and with rate control
+on the firmware does not consult per-picture QPs.
+
+| arm | before bf=0 | before bf=1 | after bf=0 | after bf=1 |
+| --- | --- | --- | --- | --- |
+| CQP 26, kbit/s | 4593.3 | 15511.0 | 4593.3 | 3652.6 |
+| CQP 26, PSNR / SSIM | 37.26 / 0.940753 | 38.87 / 0.957305 | 37.26 / 0.940753 | 37.25 / 0.942132 |
+| CQP 30, kbit/s | 2174.0 | 19245.3 | 2174.0 | 1911.6 |
+| CQP 30, PSNR / SSIM | 34.68 / 0.902505 | 36.91 / 0.938941 | 34.68 / 0.902505 | 34.78 / 0.905728 |
+| VBR 1500k, kbit/s | 1477.3 | 1622.7 | 1477.3 | 1622.7 |
+| VBR 1500k, PSNR / SSIM | 33.15 / 0.883485 | 33.69 / 0.896269 | 33.15 / 0.883485 | 33.69 / 0.896269 |
+| VBR 3000k, kbit/s | 2981.0 | 3156.1 | 2981.0 | 3156.1 |
+| VBR 3000k, PSNR / SSIM | 35.55 / 0.927111 | 36.17 / 0.936301 | 35.55 / 0.927111 | 36.17 / 0.936301 |
+
+libx264 at `-preset medium` on the same source, as the bound the content can
+reward at all:
+
+| arm | bf=0 | bf=1 |
+| --- | --- | --- |
+| CQP 26, kbit/s | 4491.3 | 3285.9 |
+| CQP 26, PSNR / SSIM | 38.50 / 0.955159 | 38.57 / 0.956735 |
+| CQP 30, kbit/s | 2086.7 | 1707.3 |
+| CQP 30, PSNR / SSIM | 35.84 / 0.923775 | 36.02 / 0.927561 |
+
+Read the CQP rows as the comparison that isolates the feature: with rate
+control holding QP, B pictures buy bitrate at the same quality. At QP 26 the
+encoder drops from 4593.3 to 3652.6 kbit/s at 37.26 against 37.25 dB and a
+higher SSIM, 20.5 % less data; at QP 30 it drops 12.1 % and gains 0.10 dB;
+libx264 saves 26.8 % and 18.2 % on the same arms. VBR instead spends the
+target it is given: at 1500k the output rises 9.8 % in rate for 0.54 dB, at
+3000k 5.9 % for 0.62 dB.
+
+The before column is the reason this measurement exists. The kernel's
+`V4L2_CID_MPEG_VIDEO_H264_B_FRAME_QP` has its own default, QP 20, and is not
+derived from the I and P controls. `set_frame_qp()` set only those two, so a
+CQP session with B pictures coded them at QP 20 whatever the client asked
+for, and the rate more than tripled at QP 26 and grew almost ninefold at QP
+30. The fix sets the B control too; the code comment records both rows.
+
+What this does not prove: one clip, one resolution, one firmware build, and
+PSNR/SSIM against a lossy source. The libx264 numbers are a reference for
+what this content offers, not a claim that the two encoders are compared
+under identical tuning; libx264 at both QPs also sits above the firmware on
+quality, which B pictures do not close.
