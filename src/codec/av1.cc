@@ -86,7 +86,8 @@ public:
         for (const auto& [data, size] : picture.slice_data)
             held_data_.insert(held_data_.end(), data, data + size);
         const char* tile_reject = nullptr;
-        require(av1_tiles_fit(held_data_.size(), held_tiles_, &tile_reject), tile_reject,
+        const bool tiles_fit = av1_tiles_fit(held_data_.size(), held_tiles_, &tile_reject);
+        require(tiles_fit, tile_reject ? tile_reject : "AV1 tile payload does not fit the slice data",
             VA_STATUS_ERROR_INVALID_BUFFER);
         held_emits_sequence_header_ = emit_sequence_header_;
         emit_sequence_header_ = false;

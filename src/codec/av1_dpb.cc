@@ -181,7 +181,12 @@ private:
         if (tiles.empty())
             tiles.push_back({ 0, static_cast<uint32_t>(data.size()) });
         const char* reject = nullptr;
-        require(av1_tiles_fit(data.size(), tiles, &reject), reject, VA_STATUS_ERROR_INVALID_BUFFER);
+        // Sequence the check before reading the reason: as arguments of one
+        // call their order is unspecified, and a compiler that reads
+        // `reject` first hands require a null message.
+        const bool fit = av1_tiles_fit(data.size(), tiles, &reject);
+        require(fit, reject ? reject : "AV1 tile payload does not fit the slice data",
+            VA_STATUS_ERROR_INVALID_BUFFER);
     }
 
     bool pending_referenced(const VADecPictureParameterBufferAV1& params) const
