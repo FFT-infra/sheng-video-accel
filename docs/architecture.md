@@ -36,7 +36,8 @@ flight than the default (invariant 10).
 Non-goals: being a generic backend for stateless request-API decoders (that
 is upstream `mxsrc/libva-v4l2`'s job and stays on `master`), VP9, AV1 and
 10-bit encode, HEVC B-frames, ROI, multi-slice and tiles, `VAEntrypointEncSliceLP`,
-video post-processing, and shipping a custom Chromium.
+and shipping a custom Chromium. (Video post-processing is supported via
+an opt-in Vulkan compute backend under `V4L2_VA_VPP`).
 
 ## 2. Target and kernel contract
 
