@@ -373,6 +373,10 @@ public:
         // data buffer and let each parameter set locate its NAL by offset.
         // Pair by index when the counts match, otherwise address into the
         // single blob.
+        require(!picture.slice_parameters.empty(), "HEVC picture has no slice parameters",
+            VA_STATUS_ERROR_INVALID_PARAMETER);
+        require(!picture.slice_data.empty(), "HEVC picture has no slice data",
+            VA_STATUS_ERROR_INVALID_PARAMETER);
         std::vector<std::pair<const uint8_t*, size_t>> nals;
         const bool paired = picture.slice_data.size() == picture.slice_parameters.size();
         for (size_t i = 0; i < picture.slice_parameters.size(); ++i) {
@@ -385,6 +389,7 @@ public:
             const size_t prefix = start_code_length(nal, nal_size);
             nals.emplace_back(nal + prefix, nal_size - prefix);
         }
+        require(nals.front().second > 0, "HEVC slice data is empty", VA_STATUS_ERROR_INVALID_PARAMETER);
         const unsigned first_type = (nals.front().first[0] >> 1) & 63;
         require(started_ || (first_type >= 16 && first_type <= 21), "HEVC decode must start at an IRAP picture",
             VA_STATUS_ERROR_DECODING_ERROR);
@@ -559,6 +564,13 @@ std::vector<uint8_t> hevc_pps(const VAPictureParameterBufferHEVC& picture)
     writer.bit(picture.pic_fields.bits.tiles_enabled_flag);
     writer.bit(picture.pic_fields.bits.entropy_coding_sync_enabled_flag);
     if (picture.pic_fields.bits.tiles_enabled_flag) {
+        // The PPS declares one size per column/row less one, and VA stores
+        // them in 19- and 21-entry arrays. A larger count would announce
+        // more syntax than the loop writes and shift everything after it.
+        require(picture.num_tile_columns_minus1 <= 19, "HEVC tile column count exceeds the VA array",
+            VA_STATUS_ERROR_INVALID_PARAMETER);
+        require(picture.num_tile_rows_minus1 <= 21, "HEVC tile row count exceeds the VA array",
+            VA_STATUS_ERROR_INVALID_PARAMETER);
         writer.ue(picture.num_tile_columns_minus1);
         writer.ue(picture.num_tile_rows_minus1);
         // VA carries the explicit column/row sizes; a stream with uniform

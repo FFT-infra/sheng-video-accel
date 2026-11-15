@@ -177,7 +177,10 @@ public:
         unsigned zeros = 0;
         while (!bit() && zeros < 32)
             ++zeros;
-        return ((1u << zeros) - 1) + bits(zeros);
+        // A truncated header reads 32 zero bits at most; 1u << 32 would be
+        // undefined. The saturated value is rejected by the caller's bounds.
+        const uint32_t prefix = zeros >= 32 ? 0xffffffffu : (1u << zeros) - 1;
+        return prefix + bits(zeros);
     }
     int32_t se()
     {

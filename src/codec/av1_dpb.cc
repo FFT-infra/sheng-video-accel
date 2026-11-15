@@ -180,6 +180,8 @@ private:
         }
         if (tiles.empty())
             tiles.push_back({ 0, static_cast<uint32_t>(data.size()) });
+        const char* reject = nullptr;
+        require(av1_tiles_fit(data.size(), tiles, &reject), reject, VA_STATUS_ERROR_INVALID_BUFFER);
     }
 
     bool pending_referenced(const VADecPictureParameterBufferAV1& params) const
@@ -214,6 +216,9 @@ private:
         if (intra)
             return;
         for (unsigned i = 0; i < 7; ++i) {
+            // The index is a client uint8_t; ref_frame_map holds eight.
+            require(remapped.ref_frame_idx[i] < kSlots, "AV1 ref_frame_idx outside the eight reference slots",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
             const VASurfaceID id = remapped.ref_frame_map[remapped.ref_frame_idx[i]];
             require(id != VA_INVALID_SURFACE, "AV1 reference slot is empty",
                 VA_STATUS_ERROR_INVALID_PARAMETER);

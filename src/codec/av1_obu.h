@@ -56,6 +56,12 @@ struct AV1TileEntry {
     uint32_t size;
 };
 
+// The tile group writer reads each entry through these offsets without a
+// length check, and the client fills them. Rejects an entry that does not
+// address the concatenated slice data, and the empty tile that would make
+// the four-byte size prefix wrap.
+bool av1_tiles_fit(size_t data_size, const std::vector<AV1TileEntry>& tiles, const char** reject_reason);
+
 // Tells a picture that refreshes all eight reference slots by definition (a
 // shown key frame or a switch frame) apart from one whose refresh_frame_flags
 // the frame header has to carry. Those pictures need no successor to be

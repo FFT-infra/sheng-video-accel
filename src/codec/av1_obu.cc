@@ -25,6 +25,9 @@ enum FrameType {
 constexpr unsigned PRIMARY_REF_NONE = 7;
 constexpr unsigned REFS_PER_FRAME = 7;
 constexpr unsigned NUM_REF_FRAMES = 8;
+// width_in_sbs_minus_1[63] / height_in_sbs_minus_1[63] in the VA struct: at
+// most 63 explicit sizes, the 64th tile takes the remainder.
+constexpr unsigned kMaxExplicitTiles = 63;
 constexpr unsigned MAX_SEGMENTS = 8;
 constexpr unsigned SEG_LVL_MAX = 8;
 constexpr unsigned MAX_TILE_WIDTH = 4096;
@@ -240,20 +243,31 @@ bool write_tile_info(BitWriter& writer, const VADecPictureParameterBufferAV1& pi
                 break;
         }
     } else {
+        // width_in_sbs_minus_1[]/height_in_sbs_minus_1[] hold 63 explicit
+        // entries (the 64th tile's size is implied), and tile_cols/tile_rows
+        // are uint8_t from the client.
         unsigned start_sb = 0;
         unsigned i = 0;
-        for (; start_sb < sb_cols && i < picture.tile_cols; ++i) {
+        for (; start_sb < sb_cols && i < picture.tile_cols && i < kMaxExplicitTiles; ++i) {
             const unsigned max_width = std::min(sb_cols - start_sb, max_tile_width_sb);
             writer.ns(picture.width_in_sbs_minus_1[i], max_width);
             start_sb += picture.width_in_sbs_minus_1[i] + 1;
         }
+        if (start_sb < sb_cols) {
+            *reject_reason = "tile widths do not cover the frame";
+            return false;
+        }
         tile_cols_log2 = ceil_log2(picture.tile_cols);
         start_sb = 0;
         i = 0;
-        for (; start_sb < sb_rows && i < picture.tile_rows; ++i) {
+        for (; start_sb < sb_rows && i < picture.tile_rows && i < kMaxExplicitTiles; ++i) {
             const unsigned max_height = sb_rows - start_sb;
             writer.ns(picture.height_in_sbs_minus_1[i], max_height);
             start_sb += picture.height_in_sbs_minus_1[i] + 1;
+        }
+        if (start_sb < sb_rows) {
+            *reject_reason = "tile heights do not cover the frame";
+            return false;
         }
         tile_rows_log2 = ceil_log2(picture.tile_rows);
     }
@@ -589,6 +603,29 @@ bool write_global_motion_params(BitWriter& writer, const VADecPictureParameterBu
 
 } // namespace
 
+bool av1_tiles_fit(size_t data_size, const std::vector<AV1TileEntry>& tiles, const char** reject_reason)
+{
+    static const char* unused = nullptr;
+    if (!reject_reason)
+        reject_reason = &unused;
+    *reject_reason = nullptr;
+    if (tiles.empty()) {
+        *reject_reason = "the picture carries no tile payload";
+        return false;
+    }
+    for (const AV1TileEntry& tile : tiles) {
+        if (tile.size == 0) {
+            *reject_reason = "a tile payload is empty";
+            return false;
+        }
+        if (tile.offset > data_size || tile.size > data_size - tile.offset) {
+            *reject_reason = "a tile payload is outside the slice data";
+            return false;
+        }
+    }
+    return true;
+}
+
 bool av1_refreshes_all_slots(const VADecPictureParameterBufferAV1& picture)
 {
     const auto& info = picture.pic_info_fields.bits;
@@ -637,6 +674,23 @@ bool av1_build_frame_obu(std::vector<uint8_t>& payload,
     }
     if (picture.profile != 0) {
         *reject_reason = "only AV1 profile 0 is supported";
+        return false;
+    }
+    // ref_frame_idx[] and primary_ref_frame are uint8_t from the client and
+    // index arrays of eight. An intra frame does not use its references, so
+    // only the primary index is checked there.
+    const bool intra = picture.pic_info_fields.bits.frame_type == 0
+        || picture.pic_info_fields.bits.frame_type == 2;
+    if (!intra) {
+        for (unsigned i = 0; i < REFS_PER_FRAME; ++i) {
+            if (picture.ref_frame_idx[i] >= NUM_REF_FRAMES) {
+                *reject_reason = "ref_frame_idx outside the eight reference slots";
+                return false;
+            }
+        }
+    }
+    if (picture.primary_ref_frame > PRIMARY_REF_NONE) {
+        *reject_reason = "primary_ref_frame outside the eight reference slots";
         return false;
     }
     // Film grain: the access unit rebuilt here asks the firmware for no grain
