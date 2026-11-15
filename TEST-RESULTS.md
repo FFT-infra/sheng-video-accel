@@ -8300,3 +8300,9 @@ PSNR/SSIM against a lossy source. The libx264 numbers are a reference for
 what this content offers, not a claim that the two encoders are compared
 under identical tuning; libx264 at both QPs also sits above the firmware on
 quality, which B pictures do not close.
+
+The gate above was run again on the shipped driver, `dfb0f516…`, boot
+`3d667b4c-60b4-4f8c-95bf-d70fefb966e2`, same kernel, encoder `/dev/video2`:
+300/300 pictures at 45.057333 dB with `I B P B P B P B P B`, the repeat
+byte-identical, the depth-two client still stops at 61 pictures with rc 251,
+and the gate-off and HEVC arms still report `has_b_frames=0`.
