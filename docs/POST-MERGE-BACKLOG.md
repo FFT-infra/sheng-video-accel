@@ -572,6 +572,15 @@ A DSP backend is therefore a scope decision, not a toolchain wall: the
 remaining work is the QAIC-generated skeleton, the host-side FastRPC client,
 and a second backend behind `VAEntrypointVideoProc`.
 
+Correction, 2026-11-15: the last two paragraphs above are wrong. QAIC builds
+and the skeleton links with the Qualcomm compiler as well as with `ld.lld`,
+and the module still does not load — the signed CDSP domain compares every
+loadable segment against a Qualcomm hash-and-signature block, and the unsigned
+domain that exists for exactly this case is refused at create by the
+`kailua.cdsp.prod` firmware. There is no code left to write on this side of
+that wall. The measurements are in `TEST-RESULTS.md` §"A CDSP module must be
+Qualcomm-signed, and the unsigned PD is refused".
+
 A userspace probe settles the
 question on `sheng`: `test/vulkan-vpp/prereq.sh` builds a SPIR-V compute
 pipeline, imports two DMA-BUF fds as Vulkan external memory (one read, one

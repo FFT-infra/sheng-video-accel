@@ -8305,3 +8305,67 @@ that does not survive a like-for-like build is measurement, not behaviour.
 What this does not prove: 1080p Main10 only, one clip, one kernel module. A
 different profile or a 4K Main10 stream could still differ; neither was
 measured here.
+
+## A CDSP module must be Qualcomm-signed, and the unsigned PD is refused (`e2c7a26`, 2026-11-15)
+
+The CDSP VPP stopped at a wall that is outside this repository: the signed
+domain will not load a module whose loadable segments are not covered by a
+Qualcomm hash-and-signature block, and the unsigned domain — the one place an
+unsigned module belongs — is refused at create by the production firmware.
+Measured on `sheng`, boot `3d667b4c…`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`. Everything below is a throwaway program under
+the lab scratch tree; nothing of it is in the repository, because nothing of it
+gates a capability.
+
+The earlier record said the remaining CDSP work was "only QAIC". That is now
+wrong in both directions, and the toolchain half is the easy part:
+
+| claim | measurement | verdict |
+| --- | --- | --- |
+| no QAIC, so no skeleton | QAIC builds against system GHC + `ghc-syb-devel`; it turns `iris_vpp.idl` into `_stub.c`/`_skel.c`, and the skel links three ways — host `ld.lld`, Qualcomm `ld.qcld`, and Qualcomm `hexagon-clang` 19.0.02 with its own `v73/G0/pic` sysroot | the skeleton exists and is correct enough to export `iris_vpp_skel_handle_invoke`, `_qaic_version`, `_uri` and `iris_vpp_slim` |
+| no Hexagon linker | the Open Access 19.0.02 archive (896,567,081 bytes) does contain `hexagon-clang` and `elf32` target libs; `ld.qcld` needs no Open Access archive at all | the toolchain is not the blocker |
+| the shell image blocks the create | copying `fastrpc_shell_3` over `fastrpc_shell_unsigned_3` leaves `FASTRPC_IOCTL_INIT_CREATE` at `0xFFFFFFFF80000416` | the refusal is upstream of the shell's contents, again |
+
+All three link recipes produce a module the CDSP rejects with
+`AEE_EUNABLETOLOAD` (`0x80000406`); `fastrpc_test -d 3 -U 0` on the same boot
+passes 3/3, so the signed domain, the shell and the calculator skeleton all
+work. What separates a module that loads from one that does not is the file's
+contents, not its name, its directory, its soname, its architecture or its
+linker:
+
+- the calculator skel copied to `libiris_vpp_skel.so` in the same directory and
+  opened through the same URI form loads (`0x0`);
+- one byte changed inside its RX `PT_LOAD` (file offset `0x5380`) makes
+  `remote_handle_open` return `0x80000406`;
+- one byte changed in the unmapped gap between its two `PT_LOAD`s (offset
+  `0x5800`) still loads (`0x0`);
+- zeroing the 0x19e8-byte block at file offset `0x1000` makes it fail with
+  `0x80000406`.
+
+That block is a signed hash segment — `Qualcomm Technologies, Inc`,
+`Qualcomm Cryptographic Operations`, `QDSR Sub-CA 1`, SHA-256 digests, and
+`SW_ID`/`HW_ID`/`OEM_ID`/`DEBUG` attributes — carried in a `PT_NULL` program
+header whose `p_vaddr` sits above the image. The loader compares the loadable
+segments against it; a module without a valid block is not loadable from a file.
+
+The one module that loads without a block is the exception that proves the
+rule: `libQ6MSFR_manager_skel.so` is listed in the firmware's own
+`map_SHARED_LIBS_kailua.cdsp.prodQ.txt`, is therefore already inside the
+image, and resolves by name — a copy under any other name returns
+`0x80000406`, while its own name returns `0x80000442`
+(`AEE_ENOSUCHSYMBOL`), which is `dlsym` failing after a successful `dlopen`.
+
+The escape hatch is closed on this firmware. With
+`DSPRPC_CONTROL_UNSIGNED_MODULE` set, `strace` shows
+`FASTRPC_IOCTL_INIT_CREATE` returning `0xFFFFFFFF80000416`
+(`AEE_ERESOURCENOTFOUND`) before any module is named; the signed path on the
+same open returns 0. The firmware is the `kailua.cdsp.prod` build, and its
+production variant does not create unsigned domains at all.
+
+What this does not prove: that no Qualcomm-signed module could ever work — the
+calculator does — and that a different firmware build would refuse the
+unsigned PD. What would unblock a CDSP backend is one of two things this
+repository cannot supply: a signing key accepted by `kailua.cdsp.prod`, or a
+CDSP firmware that creates unsigned domains. Neither is a code change, so no
+CDSP backend was written and `data/iris-codec-capabilities.json` is
+unchanged.
