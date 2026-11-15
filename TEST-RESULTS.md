@@ -8478,23 +8478,36 @@ What this does not prove: one clip, one browser build, one boot.
 
 ### Encode at FFmpeg's default async depth (found while measuring encode power)
 
-`-async_depth` decides how many pictures the client keeps in flight. At
-`-async_depth 4` a 1080p HEVC encode runs at 601-604 fps on this driver; at
-FFmpeg's default (2) it drops to 500-503, a 17 % loss for a client that does
-not pass the option. 3000 frames of `testsrc2` at 1920x1080 through
-`format=nv12,hwupload`, `-c:v hevc_vaapi -b:v 10M -f null -`, three rounds
-each.
+`-async_depth` decides how many pictures the client keeps in flight; FFmpeg
+defaults to 2. 3000 frames of `testsrc2` at 1920x1080 through
+`format=nv12,hwupload`, `-c:v hevc_vaapi -f hevc`, release build, two rounds
+per cell, pinned CPU and GPU clocks:
 
-The same encode without the upload is unaffected: transcoding the 720p clip
-runs at 0.60-0.64 s at the default depth and 0.44-0.45 s at depth 4, so the
-shallow-depth penalty belongs to the uploaded-input path. `submit` waits for
-the DMA-BUF's write fence before queueing, because the kernel attaches none
-and vb2 would otherwise queue the buffer as it finds it. At depth 4 the wait
-is hidden by other work; at depth 2 it sits on the client's critical path.
+| `-async_depth` | `-b:v 10M` | `-b:v 1M` |
+| --- | ---: | ---: |
+| 1 | 264.0-265.5 | 360.1-362.0 |
+| 2 | 530.5-532.4 | 598.0-599.0 |
+| 3 | 599.6-602.5 | 600.7-602.3 |
+| 4 | 601.6-603.1 | 601.1-602.5 |
 
-No change was made for this. Handing the fence to the kernel needs a
-different interface, and dropping the wait trades a correctness guarantee for
-throughput. Recorded here so the next attempt starts from the measurement.
+Both requests converge on the same ~601 fps ceiling from depth 3 up, so the
+depth-2 cell is not a lost picture: it is a picture that cannot overlap the
+work a larger access unit adds. A 10 Mbit/s request costs 12 % at depth 2, a
+1 Mbit/s request costs nothing there. Transcoding instead of uploading shows
+the same coupling (720p, 300 frames, depth 2: 0.465-0.497 s at 5 Mbit/s
+against 0.437-0.456 s at 1 Mbit/s), so the uploaded-input path is not
+involved.
+
+An earlier reading of this cell blamed the DMA-BUF write-fence wait in
+`submit`. A diagnostic build that skipped the wait measured 516 fps at depth
+2 against 518 with it, 1000 frames per arm, and 5 of 3000 frames showed a
+wait of 100 µs or more, 199 µs on average. The wait is not the cost and it
+stays: the kernel attaches no fence, so vb2 would otherwise queue a surface
+the client is still writing.
+
+No change was made for this. What remains is the firmware's per-picture cost
+growing with the access unit while two pictures are in flight, which no
+userspace change reaches.
 
 The same run measured encode power: 5.66-6.97 mJ/frame for the full encoder
 lifetime, with the idle baseline drifting between arms — too noisy at three
