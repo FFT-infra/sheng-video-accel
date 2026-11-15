@@ -131,3 +131,34 @@ jobs:
             --expected-source-commit "$commit" \
             --expected-tracked-source-sha256 "$digest" \
             --expected-source-dirty 0
+
+  # The behaviour tests drive a fake V4L2 node through every queue
+  # transition, which is where a use-after-free hides from a green suite.
+  # This job runs the same tests with the sanitizers that find it.
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build pkg-config g++ \
+            libva-dev libdrm-dev \
+            libegl-dev libgles-dev libgbm-dev \
+            ffmpeg
+
+      - name: Configure
+        run: meson setup build-asan -Db_sanitize=address,undefined -Db_lundef=false
+
+      - name: Build
+        run: ninja -C build-asan
+
+      # halt_on_error makes an undefined-behaviour report fail the test
+      # instead of scrolling past it; abort_on_error does the same for ASan.
+      - name: Meson test
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: meson test -C build-asan --print-errorlogs

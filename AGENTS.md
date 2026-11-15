@@ -43,6 +43,14 @@ meson test -C build-local --print-errorlogs
 git diff --check
 ```
 
+A change to lifetimes, queues or the VA glue also runs the sanitizer build,
+which is what CI enforces for it:
+
+```sh
+meson setup build-asan -Db_sanitize=address,undefined -Db_lundef=false
+meson test -C build-asan --print-errorlogs
+```
+
 For a claim about the target, record the source commit, driver hash, resolved
 node, boot ID, decoder name, frame and drop counts, and whether the runtime
 used the installed package or a build-tree override. A `DESTDIR` staging run
