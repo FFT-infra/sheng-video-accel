@@ -542,13 +542,14 @@ driver needs.
 
 What a CDSP backend would still need:
 
-- A DSP-side skel for v73. Host clang compiles `--target=hexagon -mv73` to a
-  `QUALCOMM DSP6` object, but `ld.lld` has no `elf32hexagon` emulation and
-  clang looks for a `hexagon-ld` that is not installed, so producing the
-  shared object needs the Open Access toolchain
-  (`Hexagon_open_access.Core.19.0.02`, Linux ARM64). It downloads from
-  `softwarecenter.qualcomm.com`; no complete copy has been checksum-verified
-  here yet.
+- A DSP-side skel for v73. The toolchain is not the obstacle: host clang 22
+  compiles `--target=hexagon -mv73 -mhvx=v73` to a `QUALCOMM DSP6` object,
+  and `ld.lld` links it — it has no `-m elf32hexagon` emulation *name* but
+  selects the target from the input, so `ld.lld -shared` produces a valid
+  Hexagon shared object. A 1,552-line HVX VPP kernel compiles and links this
+  way to a 53,944-byte `libiris_vpp_skel.so` carrying 1,490 HVX vector
+  instructions. What is still missing is QAIC, which generates the skeleton
+  wrapper from the IDL.
 - A second VPP backend behind `VAEntrypointVideoProc` and its own client,
   kept in step with the Vulkan path that already passes every gate.
 
