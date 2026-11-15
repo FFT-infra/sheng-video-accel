@@ -324,7 +324,7 @@ void Session::queue_import_next()
     if (entry.lent >= entry.completions)
         return; // fully lent; the firmware still holds one of them
     auto it = pending_.find(entry.token);
-    Target* target = it == pending_.end() ? nullptr : it->second;
+    TargetPtr target = it == pending_.end() ? nullptr : it->second;
     // A retained target has no destination to check: its surface, and with
     // it the buffer, is gone, and the entry holds the duplicate of that fd.
     if (target && !target->detached && (target->publish == Publish::Direct || !target->destination)) {
@@ -400,18 +400,18 @@ void Session::clear_import_backlog()
 // ---------------------------------------------------------------------------
 // Submission
 
-void Session::submit(const uint8_t* data, size_t size, Target& target)
+void Session::submit(const uint8_t* data, size_t size, const TargetPtr& target)
 {
     std::lock_guard<std::mutex> lock(mutex_);
     require(state_ != SessionState::Failed, "decoder session failed", VA_STATUS_ERROR_DECODING_ERROR);
     require(state_ != SessionState::Finished, "decoder session finished", VA_STATUS_ERROR_OPERATION_FAILED);
     require(size > 0 && size <= config_.au_capacity, "access unit does not fit the OUTPUT slot",
         VA_STATUS_ERROR_NOT_ENOUGH_BUFFER);
-    require(target.completions >= 1, "a picture produces at least one completion",
+    require(target->completions >= 1, "a picture produces at least one completion",
         VA_STATUS_ERROR_INVALID_PARAMETER);
     // A target that still owns a token from an earlier picture is being
     // reused without release(); treat it as released.
-    if (target.pending)
+    if (target->pending)
         release_locked(target);
 
     pump(0);
@@ -436,8 +436,8 @@ void Session::submit(const uint8_t* data, size_t size, Target& target)
         pump(20);
     }
 
-    if (state_ == SessionState::Configured && target.fourcc != 0)
-        config_.capture_fourcc = target.fourcc;
+    if (state_ == SessionState::Configured && target->fourcc != 0)
+        config_.capture_fourcc = target->fourcc;
     std::memcpy(slot->mapping, data, size);
     if (dump_) {
         std::fwrite(data, 1, size, static_cast<FILE*>(dump_));
@@ -447,22 +447,22 @@ void Session::submit(const uint8_t* data, size_t size, Target& target)
     device_->queue_buffer(Queue::Output, slot->index, static_cast<unsigned>(size), token, 0);
     slot->queued = true;
     slot->token = token;
-    target.token = token;
-    target.pending = true;
-    target.completed = false;
-    target.error = false;
-    target.invisible = 0;
-    target.frame.reset();
-    pending_[token] = &target;
+    target->token = token;
+    target->pending = true;
+    target->completed = false;
+    target->error = false;
+    target->invisible = 0;
+    target->frame.reset();
+    pending_[token] = target;
     ++stats_.submitted;
     if (pool_.capture_memory() == CaptureMemory::Import) {
         // The bitstream may run ahead; the client's buffer goes in only
         // when the firmware has nothing else to write into. The fd is
         // duplicated so the entry survives a released (or destroyed)
         // surface: its picture still needs a buffer.
-        const int fd = target.destination ? fcntl(target.destination->fd(), F_DUPFD_CLOEXEC, 0) : -1;
+        const int fd = target->destination ? fcntl(target->destination->fd(), F_DUPFD_CLOEXEC, 0) : -1;
         import_backlog_.push_back(
-            { token, fd, target.completions, 0, target.destination ? target.destination->layout() : Layout {} });
+            { token, fd, target->completions, 0, target->destination ? target->destination->layout() : Layout {} });
         queue_import_next();
     }
     trace_("submit token=%llu bytes=%zu output=%u", static_cast<unsigned long long>(token), size, slot->index);
@@ -603,15 +603,14 @@ bool Session::handle_capture_returns()
                 }
             }
             if (hidden != pending_.end()) {
-                auto held = retain_for_completion(hidden);
-                Target& target = held ? *held : *hidden->second;
+                TargetPtr target = hidden->second;
                 forget(hidden);
                 frame->layout().data_offset = returned->data_offset;
                 // A hidden picture carries no output plane in the firmware's
                 // accounting (bytes=0) but it did decode it, and the stream
                 // displays it later through show_existing_frame; publish
                 // what it decoded all the same.
-                publish(target, frame, *returned, "capture noshow");
+                publish(*target, frame, *returned, "capture noshow");
                 cold_ = false;
                 ++stats_.completed;
                 ++progress_;
@@ -652,8 +651,7 @@ bool Session::handle_capture_returns()
                 }
                 continue;
             }
-            auto held = retain_for_completion(it);
-            Target& target = held ? *held : *it->second;
+            TargetPtr target = it->second;
             if (noshow_shape && returned->last()) {
                 // A resolution-change boundary marks the end of the old
                 // segment with an empty LAST buffer. On this firmware the
@@ -665,7 +663,7 @@ bool Session::handle_capture_returns()
                     static_cast<unsigned long long>(returned->timestamp_us), returned->index, returned->flags);
                 continue;
             }
-            if (noshow_shape && (target.completions - target.invisible) > 1) {
+            if (noshow_shape && (target->completions - target->invisible) > 1) {
                 // A two-completion access unit starts with an invisible
                 // install/alt-ref half: ERROR, no picture-type bit and no
                 // payload, under the same token the client's picture will
@@ -676,7 +674,7 @@ bool Session::handle_capture_returns()
                 // waits forever. A picture the firmware really rejected
                 // carries a picture-type bit (0x4049 for the truncated HEVC
                 // in TEST-RESULTS) and falls through to the failure below.
-                ++target.invisible;
+                ++target->invisible;
                 trace_("capture token=%llu index=%u flags=%#x publish=invisible",
                     static_cast<unsigned long long>(returned->timestamp_us), returned->index, returned->flags);
                 continue;
@@ -688,8 +686,8 @@ bool Session::handle_capture_returns()
             // left the buffer's owner pending and kept the misplaced count
             // at zero.
             if (pool_.capture_memory() == CaptureMemory::Import && slot_token != returned->timestamp_us) {
-                target.pending = false;
-                target.error = true;
+                target->pending = false;
+                target->error = true;
                 ++stats_.errors;
                 ++stats_.misplaced;
                 forget(it);
@@ -705,21 +703,21 @@ bool Session::handle_capture_returns()
                 continue;
             }
             forget(it);
-            target.pending = false;
-            if (noshow_shape && (target.hidden || target.invisible > 0)) {
+            target->pending = false;
+            if (noshow_shape && (target->hidden || target->invisible > 0)) {
                 // A hidden client picture completes with no pixels. The
                 // second NOSHOW half of an install unit is that picture even
                 // when its own show_frame=0 made the target hidden; the
                 // counter above already consumed the internal install half.
                 // Publishing without pixels is what a hidden surface needs.
                 frame->layout().data_offset = returned->data_offset;
-                publish(target, frame, *returned, "capture noshow");
+                publish(*target, frame, *returned, "capture noshow");
                 cold_ = false;
                 ++stats_.completed;
                 ++progress_;
                 continue;
             }
-            target.error = true;
+            target->error = true;
             ++stats_.errors;
             trace_("capture token=%llu index=%u flags=%#x publish=error",
                 static_cast<unsigned long long>(returned->timestamp_us), returned->index, returned->flags);
@@ -740,16 +738,15 @@ bool Session::handle_capture_returns()
                 static_cast<unsigned long long>(returned->timestamp_us), returned->index, returned->flags);
             continue;
         }
-        auto held = retain_for_completion(it);
-        Target& target = held ? *held : *it->second;
+        TargetPtr target = it->second;
         forget(it);
         if (pool_.capture_memory() == CaptureMemory::Import && slot_token != returned->timestamp_us) {
             // The firmware wrote this picture into a buffer queued for a
             // different token. Neither surface can be trusted: the one this
             // token belongs to got nothing, the one the buffer belongs to
             // got foreign pixels. Fail both; never publish either.
-            target.pending = false;
-            target.error = true;
+            target->pending = false;
+            target->error = true;
             ++stats_.errors;
             ++stats_.misplaced;
             if (auto owner = pending_.find(slot_token); owner != pending_.end()) {
@@ -764,7 +761,7 @@ bool Session::handle_capture_returns()
             continue;
         }
         frame->layout().data_offset = returned->data_offset;
-        publish(target, frame, *returned);
+        publish(*target, frame, *returned);
         cold_ = false;
         ++stats_.completed;
         ++progress_;
@@ -815,11 +812,11 @@ void Session::publish(Target& target, FrameRef frame, const Dequeued& completion
 // ---------------------------------------------------------------------------
 // Waiting
 
-void Session::wait(Target& target)
+void Session::wait(const TargetPtr& target)
 {
     std::unique_lock<std::mutex> lock(mutex_);
-    if (!target.pending) {
-        require(!target.error, "target decode failed", VA_STATUS_ERROR_DECODING_ERROR);
+    if (!target->pending) {
+        require(!target->error, "target decode failed", VA_STATUS_ERROR_DECODING_ERROR);
         return;
     }
     require(state_ != SessionState::Failed, "decoder session failed", VA_STATUS_ERROR_DECODING_ERROR);
@@ -827,7 +824,7 @@ void Session::wait(Target& target)
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(sync_timeout_ms());
     uint64_t seen_progress = progress_;
     bool drained = false;
-    while (target.pending) {
+    while (target->pending) {
         require(state_ != SessionState::Failed, "decoder session failed", VA_STATUS_ERROR_DECODING_ERROR);
         if (progress_ != seen_progress) {
             seen_progress = progress_;
@@ -841,7 +838,7 @@ void Session::wait(Target& target)
                 // flushes the reorder window; after it, a still-pending
                 // target is a real failure.
                 trace_("sync timeout token=%llu pending=%zu queued=%u held=%u action=drain",
-                    static_cast<unsigned long long>(target.token), pending_.size(), pool_.capture_queued(),
+                    static_cast<unsigned long long>(target->token), pending_.size(), pool_.capture_queued(),
                     pool_.capture_held());
                 drain("timeout", true);
                 restart();
@@ -850,13 +847,13 @@ void Session::wait(Target& target)
                 continue;
             }
             trace_("sync timeout token=%llu pending=%zu queued=%u held=%u action=fail",
-                static_cast<unsigned long long>(target.token), pending_.size(), pool_.capture_queued(),
+                static_cast<unsigned long long>(target->token), pending_.size(), pool_.capture_queued(),
                 pool_.capture_held());
             // Invalidate the token so a late completion is dropped rather
             // than written into a surface the client has moved on from.
-            forget_token(target.token);
-            target.pending = false;
-            target.error = true;
+            forget_token(target->token);
+            target->pending = false;
+            target->error = true;
             throw Error(VA_STATUS_ERROR_TIMEDOUT, "surface sync timeout");
         }
         lock.unlock();
@@ -864,26 +861,16 @@ void Session::wait(Target& target)
         lock.lock();
         pump(0);
     }
-    require(!target.error, "target decode failed", VA_STATUS_ERROR_DECODING_ERROR);
+    require(!target->error, "target decode failed", VA_STATUS_ERROR_DECODING_ERROR);
 }
 
 // ---------------------------------------------------------------------------
 // Release, drain, restart, reconfigure, finish
 
-void Session::forget(std::map<uint64_t, Target*>::iterator it)
+void Session::forget(std::map<uint64_t, TargetPtr>::iterator it)
 {
     retained_.erase(it->first);
     pending_.erase(it);
-}
-
-std::unique_ptr<Target> Session::retain_for_completion(std::map<uint64_t, Target*>::iterator it)
-{
-    // Only the retained map owns its target. A surface-owned target survives
-    // the erase and must stay the object the completion writes to, because
-    // vaSyncSurface polls its `pending` flag.
-    if (retained_.find(it->first) == retained_.end())
-        return nullptr;
-    return std::make_unique<Target>(*it->second);
 }
 
 void Session::forget_token(uint64_t token)
@@ -892,9 +879,9 @@ void Session::forget_token(uint64_t token)
         forget(it);
 }
 
-void Session::release_locked(Target& target)
+void Session::release_locked(const TargetPtr& target)
 {
-    if (target.pending) {
+    if (target->pending) {
         // The token leaves the map, but an Import backlog entry stays: the
         // picture is already in the OUTPUT queue and must be given a buffer
         // like every other picture, or every later completion lands in a
@@ -908,31 +895,34 @@ void Session::release_locked(Target& target)
         // ledger stays exact instead of calling a delivered picture a drop.
         // A Copy or Direct target cannot do that: its pixels land in the
         // surface's own buffer or frame, which is about to be destroyed.
-        if (pool_.capture_memory() == CaptureMemory::Import && target.publish == Publish::Import) {
-            Target& kept = retained_[target.token];
-            kept = target;
-            kept.detached = true;
+        if (pool_.capture_memory() == CaptureMemory::Import && target->publish == Publish::Import) {
+            // A copy, not the surface's own target: the surface may be
+            // reused or destroyed while this picture is still with the
+            // firmware, and the completion must not touch it.
+            auto kept = std::make_shared<Target>(*target);
+            kept->detached = true;
             // The buffer outlives the surface only as this entry's duplicate
             // fd. Null the pointer so no later path can read a freed
             // StableBuffer; every Import decision uses the entry's copy of
             // the layout instead.
-            kept.destination = nullptr;
-            kept.pending = true;
-            pending_[target.token] = &kept;
+            kept->destination = nullptr;
+            kept->pending = true;
+            retained_[kept->token] = kept;
+            pending_[kept->token] = kept;
             ++retained_total_;
-            trace_("target detached token=%llu", static_cast<unsigned long long>(target.token));
+            trace_("target detached token=%llu", static_cast<unsigned long long>(kept->token));
         } else {
-            forget_token(target.token);
+            forget_token(target->token);
         }
-        target.pending = false;
+        target->pending = false;
     }
-    target.frame.reset();
-    target.completed = false;
-    target.error = false;
-    target.token = 0;
+    target->frame.reset();
+    target->completed = false;
+    target->error = false;
+    target->token = 0;
 }
 
-void Session::release(Target& target)
+void Session::release(const TargetPtr& target)
 {
     std::lock_guard<std::mutex> lock(mutex_);
     release_locked(target);

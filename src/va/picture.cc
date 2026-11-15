@@ -75,16 +75,16 @@ std::unique_ptr<iris::codec::Encoder> make_encoder(VAProfile profile, iris::Rate
 // publish policy from the surface's export history.
 void submit(DriverData& d, Context& c, Surface& s, const iris::codec::AccessUnit& au)
 {
-    s.target.publish = publish_policy(d, s, *c.session);
-    if (s.target.publish != iris::Publish::Direct)
-        s.target.destination = &ensure_stable(d, s);
+    s.target->publish = publish_policy(d, s, *c.session);
+    if (s.target->publish != iris::Publish::Direct)
+        s.target->destination = &ensure_stable(d, s);
     else
-        s.target.destination = nullptr;
-    s.target.width = s.width;
-    s.target.height = s.height;
-    s.target.fourcc = s.fourcc;
-    s.target.hidden = au.hidden;
-    s.target.completions = au.completions;
+        s.target->destination = nullptr;
+    s.target->width = s.width;
+    s.target->height = s.height;
+    s.target->fourcc = s.fourcc;
+    s.target->hidden = au.hidden;
+    s.target->completions = au.completions;
     s.failed = false;
     c.session->submit(au.bytes.data(), au.bytes.size(), s.target);
 }
@@ -101,10 +101,10 @@ struct Pixels {
 Pixels pixels_of(DriverData& d, Surface& s)
 {
     Pixels p;
-    if (s.target.frame) {
-        p.fd = s.target.frame->fd();
-        p.size = s.target.frame->length();
-        p.layout = s.target.frame->layout();
+    if (s.target->frame) {
+        p.fd = s.target->frame->fd();
+        p.size = s.target->frame->length();
+        p.layout = s.target->frame->layout();
     } else {
         iris::StableBuffer& stable = ensure_stable(d, s);
         p.fd = stable.fd();
@@ -134,7 +134,7 @@ bool same_buffer(const Pixels& a, const Pixels& b)
 // caller must not hold the driver mutex: this waits on a session.
 void wait_for_pixels(const std::shared_ptr<Surface>& s, const std::shared_ptr<iris::Session>& session)
 {
-    if (!session || !s->target.pending)
+    if (!session || !s->target->pending)
         return;
     try {
         session->wait(s->target);
@@ -414,7 +414,7 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
                 "VPP input and output must each be NV12 or P010", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
         // A pending decode has neither a frame nor a stable buffer yet; its
         // pixels arrive at the wait below.
-        iris::require(source->target.pending || source->target.frame || source->stable,
+        iris::require(source->target->pending || source->target->frame || source->stable,
             "VPP source holds no pixels", VA_STATUS_ERROR_OPERATION_FAILED);
 
         // A surface region is the crop: the kernel samples inside that
@@ -469,7 +469,7 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
                                     : ov_fourcc == target->fourcc,
                 "the overlay is the output's format or a packed RGBA/BGRA surface",
                 VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
-            iris::require(layer.surface->target.pending || layer.surface->target.frame || layer.surface->stable,
+            iris::require(layer.surface->target->pending || layer.surface->target->frame || layer.surface->stable,
                 "the overlay surface holds no pixels", VA_STATUS_ERROR_OPERATION_FAILED);
             layer.rect = blend.output_region;
             const VARectangle& rect = layer.rect;
@@ -1048,9 +1048,9 @@ VAStatus beginPicture(VADriverContextP ctx, VAContextID id, VASurfaceID surface_
         s->pixels_session.reset();
         c->session->release(s->target);
         s->failed = false;
-        if (s->target.frame && d.copier)
-            d.copier->forget(s->target.frame->id());
-        s->target.frame.reset();
+        if (s->target->frame && d.copier)
+            d.copier->forget(s->target->frame->id());
+        s->target->frame.reset();
         d.trace("va begin_picture ctx=%u surface=%u", id, surface_id);
         return VA_STATUS_SUCCESS;
     });

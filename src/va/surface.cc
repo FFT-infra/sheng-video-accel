@@ -118,7 +118,7 @@ VAStatus wait_for(DriverData& d, std::shared_ptr<iris::Session> session, const s
         // The owner was destroyed between our two reads. destroyContext
         // drains before it drops the context, so the target is settled now.
         iris::require(!s->rendering(), "rendering surface has no live session", VA_STATUS_ERROR_INVALID_SURFACE);
-        iris::require(!s->target.error, "surface decode failed", VA_STATUS_ERROR_DECODING_ERROR);
+        iris::require(!s->target->error, "surface decode failed", VA_STATUS_ERROR_DECODING_ERROR);
         return VA_STATUS_SUCCESS;
     }
     try {
@@ -196,7 +196,7 @@ std::shared_ptr<Surface::GrainJob> queue_grain(DriverData& d, Context& c,
             && display->fourcc == decoded->fourcc
             && display->fourcc == (depth == 10 ? VA_FOURCC_P010 : VA_FOURCC_NV12),
         "film grain: the display surface is not this picture's size and format", VA_STATUS_ERROR_INVALID_SURFACE);
-    iris::require(!display->target.pending, "film grain: the display surface is decoding",
+    iris::require(!display->target->pending, "film grain: the display surface is decoding",
         VA_STATUS_ERROR_SURFACE_BUSY);
     auto job = std::make_shared<Surface::GrainJob>();
     // The job names its display surface weakly: the surface owns the job, so
@@ -214,7 +214,7 @@ std::shared_ptr<Surface::GrainJob> queue_grain(DriverData& d, Context& c,
 }
 
 void finish_grain(DriverData& d, const std::shared_ptr<Surface::GrainJob>& job,
-    const std::shared_ptr<iris::Session>& session, iris::Target& source)
+    const std::shared_ptr<iris::Session>& session, const iris::TargetPtr& source)
 {
     // FFmpeg decodes into a scratch current_frame that it recycles at the
     // next access unit, so the picture is settled here: the target must be
@@ -223,7 +223,7 @@ void finish_grain(DriverData& d, const std::shared_ptr<Surface::GrainJob>& job,
     const char* failure = nullptr;
     try {
         session->wait(source);
-        failure = blend_into(*job, source);
+        failure = blend_into(*job, *source);
     } catch (...) {
         settle_grain_job(d, job, false);
         throw;
@@ -397,9 +397,9 @@ VAStatus destroySurfaces(VADriverContextP ctx, VASurfaceID* ids, int count)
                 sessions[i]->release(s->target);
             if (s->stable && d.copier)
                 d.copier->forget(s->stable->id());
-            if (s->target.frame && d.copier)
-                d.copier->forget(s->target.frame->id());
-            s->target.frame.reset();
+            if (s->target->frame && d.copier)
+                d.copier->forget(s->target->frame->id());
+            s->target->frame.reset();
         }
         return VA_STATUS_SUCCESS;
     });
@@ -573,10 +573,10 @@ VAStatus exportSurfaceHandle(VADriverContextP ctx, VASurfaceID id, uint32_t mem_
         bool persistent = false;
         {
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
-            if (s->target.frame) {
+            if (s->target->frame) {
                 // Direct: hand out the CAPTURE slot itself.
-                fd = s->target.frame->fd();
-                layout = s->target.frame->layout();
+                fd = s->target->frame->fd();
+                layout = s->target->frame->layout();
             } else {
                 // Before any decode, or a Copy surface: the stable buffer.
                 // Exporting before the first decode marks the surface
@@ -584,13 +584,13 @@ VAStatus exportSurfaceHandle(VADriverContextP ctx, VASurfaceID id, uint32_t mem_
                 auto& stable = ensure_stable(d, *s);
                 fd = stable.fd();
                 layout = stable.layout();
-                if (!s->target.completed && !s->persistent_export) {
+                if (!s->target->completed && !s->persistent_export) {
                     s->persistent_export = true;
                     persistent = true;
                 }
             }
         }
-        iris::require(!(flags & VA_EXPORT_SURFACE_WRITE_ONLY) || !s->target.frame,
+        iris::require(!(flags & VA_EXPORT_SURFACE_WRITE_ONLY) || !s->target->frame,
             "a decoded CAPTURE slot cannot be exported writable", VA_STATUS_ERROR_UNIMPLEMENTED);
 
         auto& desc = *static_cast<VADRMPRIMESurfaceDescriptor*>(descriptor);
@@ -625,7 +625,7 @@ VAStatus exportSurfaceHandle(VADriverContextP ctx, VASurfaceID id, uint32_t mem_
             }
         }
         d.trace("va export_surface id=%u persistent=%d source=%s fd=%d pitch=%u", id, persistent ? 1 : 0,
-            s->target.frame ? "frame" : "stable", desc.objects[0].fd, layout.stride);
+            s->target->frame ? "frame" : "stable", desc.objects[0].fd, layout.stride);
         return VA_STATUS_SUCCESS;
     });
 }

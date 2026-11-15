@@ -58,8 +58,10 @@ struct Surface {
     unsigned width = 0, height = 0;
     uint32_t fourcc = VA_FOURCC_NV12;
     VAContextID owner = VA_INVALID_ID;
-    // Session-side state: token, held frame, completion.
-    iris::Target target;
+    // Session-side state: token, held frame, completion. Shared with the
+    // session, which may outlive the surface through a retained Import
+    // picture; the allocation is the one place the target's lifetime starts.
+    iris::TargetPtr target = std::make_shared<iris::Target>();
     // Memory the client may already have imported. Allocated on the first
     // export/derive/import that happens before a decode, or when the copy
     // policy is forced. Never replaced once handed out. Shared because a
@@ -104,10 +106,10 @@ struct Surface {
     // Pixels this driver blended here from another surface's decode. They
     // live in `stable`, and no session owns this surface.
     bool grain_pixels = false;
-    bool rendering() const { return target.pending; }
+    bool rendering() const { return target->pending; }
     bool has_pixels() const
     {
-        return (target.completed || vpp_pixels || client_pixels || grain_pixels) && (target.frame || stable);
+        return (target->completed || vpp_pixels || client_pixels || grain_pixels) && (target->frame || stable);
     }
 };
 
@@ -323,7 +325,7 @@ std::shared_ptr<Surface::GrainJob> queue_grain(DriverData& d, Context& c, const 
 // before the decode surface is reused. Throws when the picture or the blend
 // failed, which fails the endPicture call.
 void finish_grain(DriverData& d, const std::shared_ptr<Surface::GrainJob>& job,
-    const std::shared_ptr<iris::Session>& session, iris::Target& source);
+    const std::shared_ptr<iris::Session>& session, const iris::TargetPtr& source);
 
 // The picture never reached the session (a submit failure): the display
 // surface must not report a synthesis that will never run.

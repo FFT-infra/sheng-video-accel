@@ -253,14 +253,14 @@ VAStatus acquireBufferHandle(VADriverContextP ctx, VABufferID id, VABufferInfo* 
         auto& s = *sit->second;
         int fd = -1;
         unsigned size = 0;
-        if (s.target.frame) {
-            fd = s.target.frame->fd();
-            size = s.target.frame->length();
+        if (s.target->frame) {
+            fd = s.target->frame->fd();
+            size = s.target->frame->length();
         } else {
             auto& stable = ensure_stable(d, s);
             fd = stable.fd();
             size = stable.size();
-            if (!s.target.completed)
+            if (!s.target->completed)
                 s.persistent_export = true;
         }
         // A second vaAcquireBufferHandle for the same buffer hands back the

@@ -86,6 +86,11 @@ struct Target {
     uint32_t fourcc = 0;
 };
 
+// The session, the surface and this driver's own retained copy each hold the
+// target through a shared pointer, so a completion that is still running
+// past forget() cannot read a destroyed target.
+using TargetPtr = std::shared_ptr<Target>;
+
 struct SessionConfig {
     uint32_t codec_pixelformat = 0; // V4L2_PIX_FMT_H264 / HEVC / VP9 / AV1
     uint32_t capture_fourcc = 0; // VA_FOURCC_NV12 or P010
@@ -137,7 +142,7 @@ public:
     // copies the bytes into a free OUTPUT slot and queues it. Blocks only
     // while every OUTPUT slot is busy (servicing completions meanwhile),
     // bounded by the sync timeout. Throws iris::Error.
-    void submit(const uint8_t* data, size_t size, Target& target);
+    void submit(const uint8_t* data, size_t size, const TargetPtr& target);
 
     // Service completions without blocking. Safe to call from any VA entry
     // point; a no-op when nothing is ready.
@@ -146,21 +151,17 @@ public:
     // Block until `target` is completed or failed, within the bound. In
     // display-order mode a timeout triggers one STOP/LAST/START drain before
     // giving up. Throws Error(TIMEDOUT / DECODING_ERROR).
-    void wait(Target& target);
+    void wait(const TargetPtr& target);
 
     // The caller is about to reuse `target` for a new picture (beginPicture)
     // or destroy it. Releases the held frame and invalidates a still-pending
     // token so a late completion is dropped, never published.
-    void release(Target& target);
-    void release_locked(Target& target);
-    // Erases a token from `pending_` together with any retained copy.
-    void forget(std::map<uint64_t, Target*>::iterator it);
+    void release(const TargetPtr& target);
+    void release_locked(const TargetPtr& target);
+    // Erases a token from `pending_` together with any retained copy. A
+    // caller that still holds the pointer keeps the target alive.
+    void forget(std::map<uint64_t, TargetPtr>::iterator it);
     void forget_token(uint64_t token);
-    // A cancelled completion still has to read and write the target, and
-    // forget() destroys the retained copy that an Import target lives in.
-    // Returns that copy so the caller keeps it alive past the erase; null
-    // when the target belongs to its surface and forget() leaves it alone.
-    std::unique_ptr<Target> retain_for_completion(std::map<uint64_t, Target*>::iterator it);
 
     // Finish the stream: flush, STOP, wait LAST. After this no submit is
     // accepted. Called from destroyContext.
@@ -216,12 +217,12 @@ private:
     uint64_t next_token_ = 1;
     // Live tokens -> targets. A token leaves the map when it completes,
     // errors, or its target is released.
-    std::map<uint64_t, Target*> pending_;
+    std::map<uint64_t, TargetPtr> pending_;
     // Storage for targets whose surface outlived the client's interest: an
-    // Import picture the firmware still owns. The map owns the copy so the
-    // pointer in `pending_` stays valid until the completion is handled; the
-    // entry is erased with the token, never later.
-    std::map<uint64_t, Target> retained_;
+    // Import picture the firmware still owns. The map holds its own copy of
+    // the target, shared with `pending_`, so the entry stays valid until the
+    // completion is handled; it is erased with the token, never later.
+    std::map<uint64_t, TargetPtr> retained_;
     unsigned retained_total_ = 0;
     bool source_change_ = false;
     bool saw_last_ = false;
