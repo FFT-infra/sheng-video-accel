@@ -8479,29 +8479,23 @@ What this does not prove: one clip, one browser build, one boot.
 ### Encode at FFmpeg's default async depth (found while measuring encode power)
 
 `-async_depth` decides how many pictures the client keeps in flight. At
-`-async_depth 4` this driver and the other VAAPI implementation are within
-1 % on a 1080p HEVC encode; at FFmpeg's default (2) this driver loses 12 %.
-3000 frames of `testsrc2` at 1920x1080 through `format=nv12,hwupload`,
-`-c:v hevc_vaapi -b:v 10M -f null -`, three rounds each, both drivers
-interleaved:
-
-| depth | this driver | other implementation |
-| --- | ---: | ---: |
-| 4 | 601-604 fps | 595-596 fps |
-| default (2) | 500-503 fps | 574 fps |
+`-async_depth 4` a 1080p HEVC encode runs at 601-604 fps on this driver; at
+FFmpeg's default (2) it drops to 500-503, a 17 % loss for a client that does
+not pass the option. 3000 frames of `testsrc2` at 1920x1080 through
+`format=nv12,hwupload`, `-c:v hevc_vaapi -b:v 10M -f null -`, three rounds
+each.
 
 The same encode without the upload is unaffected: transcoding the 720p clip
-at live speed is equal or faster here at both depths (default 0.60/0.64 s
-against 0.75/0.68 s, depth 4 0.44/0.45 s against 0.47/0.49 s). That points at
-the input fence: `EncoderSession::submit` waits for the DMA-BUF's write fence
-before queueing, because the kernel attaches none and vb2 would otherwise
-queue the buffer as it finds it, while the other implementation queues
-without that wait. At depth 4 the wait is hidden; at depth 2 it is on the
-client's critical path.
+runs at 0.60-0.64 s at the default depth and 0.44-0.45 s at depth 4, so the
+shallow-depth penalty belongs to the uploaded-input path. `submit` waits for
+the DMA-BUF's write fence before queueing, because the kernel attaches none
+and vb2 would otherwise queue the buffer as it finds it. At depth 4 the wait
+is hidden by other work; at depth 2 it sits on the client's critical path.
 
 No change was made for this. Handing the fence to the kernel needs a
 different interface, and dropping the wait trades a correctness guarantee for
 throughput. Recorded here so the next attempt starts from the measurement.
-The same run measured encode power: 5.66-6.97 mJ/frame against 6.10-6.67,
-with the idle baseline drifting between arms — too noisy at three rounds to
-separate, so no verdict is claimed.
+
+The same run measured encode power: 5.66-6.97 mJ/frame for the full encoder
+lifetime, with the idle baseline drifting between arms — too noisy at three
+rounds to support a verdict, so none is claimed.
