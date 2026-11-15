@@ -8388,9 +8388,10 @@ QUERYCAP name (`/dev/video1`; the encoder is `/dev/video2`), driver loaded as
 a build-tree override through `LIBVA_DRIVERS_PATH`, CPU governor
 `performance`, GPU `userspace` at 680 MHz, the two drivers alternating round
 by round. Decode is `-hwaccel vaapi -hwaccel_output_format vaapi -f null -`.
-"release" is a `-Dbuildtype=release` build of `0b3f0ad`; the cells marked
-"debugopt" were measured before that build existed, on the same tree at
-Meson's default `debugoptimized`.
+"release" is a `-Dbuildtype=release` build of `0b3f0ad`
+(`7ee853c7ebd4…`); the cells marked "debugopt" were measured before that
+build existed, on the same tree at Meson's default `debugoptimized`
+(`9acfc7f7c18d…`, and `14289d6b722a…` for the HEVC before/after pair).
 
 ### HEVC repeated VPS, SPS and PPS on every access unit
 
