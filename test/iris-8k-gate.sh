@@ -7,7 +7,9 @@
 # all four qualified codecs decode at 8K, byte for byte, with a terminal LAST.
 #
 # The driver is chosen by the caller's environment. Leave LIBVA_DRIVERS_PATH
-# unset to test the installed package, or point it at a build tree.
+# unset to test the installed package, or point it at a build tree. The VA
+# driver name is never unset here: a run that names a build tree needs libva
+# to load that driver, not the installed one.
 #
 # Usage:
 #   IRIS_8K_DIR=DIR sh test/iris-8k-gate.sh
@@ -77,7 +79,7 @@ run_clip() {
     md5="$out/va.md5"
 
     # shellcheck disable=SC2086
-    if ! env -u LIBVA_DRIVER_NAME V4L2_VA_TRACE=1 $set_publish \
+    if ! env V4L2_VA_TRACE=1 $set_publish \
         ffmpeg -y -hide_banner -loglevel error -vaapi_device "$render" \
         -hwaccel vaapi -hwaccel_output_format vaapi -i "$clip_dir/$clip" \
         -vf 'hwdownload,format=nv12,format=yuv420p' -f framemd5 "$md5" \
