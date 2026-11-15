@@ -23,6 +23,8 @@ core_sources = [
 	'iris/msm_alloc.c',
 	'iris/publish.cc',
 	'iris/session.cc',
+	'iris/session_publish.cc',
+	'iris/session_submit.cc',
 	'iris/encode.cc',
 	'iris/vpp/scale.cc',
 	'codec/h264.cc',
