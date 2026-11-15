@@ -293,6 +293,15 @@ inline constexpr unsigned kVppMinGeometry = 2;
 // the client opted in with V4L2_VA_VPP. Never probes the GPU.
 bool vpp_available(const DriverData& d);
 
+// The VideoProc queries without the ABI around them: the entry points in
+// vpp.cc resolve the context, take the driver lock and turn a thrown error
+// into a status; these decide the answer, so a host test can drive them with
+// a constructed DriverData instead of a VADisplay.
+VAStatus query_vpp_filters(DriverData& d, VAContextID id, VAProcFilterType* filters, unsigned* count);
+VAStatus query_vpp_filter_caps(DriverData& d, VAContextID id, VAProcFilterType type, void* caps, unsigned* count);
+VAStatus query_vpp_pipeline_caps(DriverData& d, VAContextID id, VABufferID* filters, unsigned count,
+    VAProcPipelineCaps* caps);
+
 // Translate an iris::Error / std::exception into a VA status, logging once.
 VAStatus report(VADriverContextP ctx, const char* where, const std::exception& error);
 

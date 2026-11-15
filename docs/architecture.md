@@ -317,7 +317,9 @@ Closed -> Configured -> Streaming -> Finishing -> Closed
 ```
 src/
   va/                 VA entry points; thin, no ioctl, no policy
-    driver.cc         vtable, object tables, init/terminate, one recursive mutex for tables only
+    driver.cc         vtable, init/terminate, capability probe; one recursive
+                      mutex for tables only
+    tables.cc         id -> object lookups (surface, context, buffer, owner)
     config.cc         profiles/entrypoints from the capability table
     surface.cc        create/destroy/sync/query/export/derive/getImage
     picture.cc        begin/render/end -> codec translator -> Session::submit,
@@ -325,15 +327,18 @@ src/
                       or for a VideoProc context -> iris::vpp::scale_nv12_or_p010
                       or iris::vpp::tonemap_hdr10_to_sdr
                       or iris::vpp::overlay
-    vpp.cc            the three vtable_vpp queries; no GPU probe
+    vpp.cc            the three vtable_vpp queries over ABI-free answer
+                      functions taking DriverData&; no GPU probe
     image.cc          images and subpictures (minimal); derive aliases a surface
   iris/               the only code that touches /dev/videoN
     device.{h,cc}     Device interface (ioctl/poll/mmap virtuals) + real implementation;
                       discovery by `iris_driver` QUERYCAP name, decoder and
                       encoder nodes, roles told apart by which queue carries
                       the compressed format
-    session.{h,cc}    Session: the only ioctl sequencer (state machine of §4),
-                      publish dispatch, Import backlog
+    session.{h,cc}    Session: the only ioctl sequencer (state machine of §4).
+    session_submit.cc access units into OUTPUT, the one-buffer Import window,
+                      token bookkeeping and release
+    session_publish.cc servicing both queues, completion handling, publish, wait
     encode.{h,cc}     EncoderSession: configure, submit/wait split, STOP/drain
                       on finish (§4.1)
     slots.{h,cc}      Frame + SlotPool: allocate, export, requeue, and the

@@ -67,6 +67,7 @@ v4l2_drv_video = shared_module('v4l2_drv_video',
 	sources: [
 		'va/driver.cc',
 		'va/report.cc',
+		'va/tables.cc',
 		'va/config.cc',
 		'va/surface.cc',
 		'va/picture.cc',
