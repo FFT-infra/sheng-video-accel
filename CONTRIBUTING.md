@@ -1,6 +1,8 @@
 # Contributing
 
-Contributions should preserve the project's explicit hardware-decoder contract: real media playback, selected decoder evidence, frame/drop counters, and safe fallbacks matter more than a video that merely plays.
+A change keeps the hardware-decoder contract: real media playback, evidence
+that the selected decoder ran, frame and drop counters, and a safe fallback
+when the hardware path is unavailable. A video that plays is not the bar.
 
 ---
 

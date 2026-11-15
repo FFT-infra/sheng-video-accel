@@ -24,44 +24,42 @@
 
 ### 解码
 
-| 编码格式 | 规格 | 缓冲策略 | 验证基准 |
+| 编码格式 | 规格 | 缓冲策略 | 一致性 |
 | --- | --- | --- | --- |
-| H.264 | Constrained Baseline, Main, High | Import（零拷贝） | 逐帧 MD5 一致，Fluster 72/135 |
-| HEVC | Main, Main 10 | Import（零拷贝） | 逐帧 MD5 一致，Fluster 141/147 |
-| VP9 | Profile 0, Profile 2 | Import（零拷贝） | 逐帧 MD5 一致，2026-11-12 Chrome 含 alt-ref 实机验证 |
-| AV1 | Profile 0（8/10 位） | Import（零拷贝，解码顺序内核） | 逐帧 MD5 一致，2026-11-11 安装包与浏览器实机验证；1080p 与 4K 10 位以 P010 Import 与 libdav1d 逐帧一致；film grain 合成在 8 位与 10 位逐帧一致 |
+| H.264 | Constrained Baseline, Main, High | Import（零拷贝） | Fluster 72/135 |
+| HEVC | Main, Main 10 | Import（零拷贝） | Fluster 141/147 |
+| VP9 | Profile 0, Profile 2 | Import（零拷贝） | Fluster 176/305 |
+| AV1 | Profile 0（8/10 位） | Import（零拷贝，解码顺序内核） | 8 位与 10 位均与 libdav1d 逐帧一致，含 film grain 合成 |
 
-硬件解码的判定标准：媒体表面报告选中了硬件解码器（Chrome 为 `VaapiVideoDecoder` 且 `kIsPlatformVideoDecoder=true`，Firefox 为 VA-API 初始化成功），并给出测试窗口内的解码帧数与丢帧数。
+只有 `data/iris-codec-capabilities.json` 标记为 `production: supported` 的编码格式才对外声明 VA profile。一致性列的数字都来自与软件解码的逐帧比对；具体运行、语料，以及每个未通过向量的归类记录在 `TEST-RESULTS.md`。浏览器会话只有在媒体表面报告了选中的解码器，并给出解码帧数与丢帧数时，才算走硬件。
 
 AV1 film grain 合成已支持。客户端给出独立的 `current_display_picture` 时，驱动以 grain 关闭的方式解码该访问单元，并在画面 `endPicture` 内同步把 grain 混合到显示表面，赶在客户端复用无 grain 的 `current_frame` 之前完成。以 side data 导出 grain 参数的客户端仍自行合成。`test/iris-av1-grain-gate.sh` 要求每个下载帧与 libdav1d 的加 grain 输出逐字节一致。
 
 ### 编码
 
-| 编码格式 | 接口入口 | 输入格式 | 码流封装 | 验证基准 |
+| 编码格式 | 接口入口 | 输入格式 | 码流封装 | 一致性 |
 | --- | --- | --- | --- | --- |
-| H.264 | `VAEntrypointEncSlice`（CBR、VBR、CQP） | NV12 | Annex-B | 1080p FFmpeg，GOP 60，IRQ 增量确认 |
-| HEVC | `VAEntrypointEncSlice`（CBR、VBR、CQP） | NV12 | Annex-B | 1080p FFmpeg，GOP 60，IRQ 增量确认 |
-
-硬件编码的判定标准：测试执行后 Iris 硬件中断计数产生有效增量，输出码流可正常解码，且 SPS 参数与请求的 profile 及分辨率完全匹配。
+| H.264 | `VAEntrypointEncSlice`（CBR、VBR、CQP） | NV12 | Annex-B | 1080p SSIM 0.9986；CBR 与 VBR 下按请求码率输出 |
+| HEVC | `VAEntrypointEncSlice`（CBR、VBR、CQP） | NV12 | Annex-B | 1080p SSIM 0.9968；CBR 与 VBR 下按请求码率输出 |
 
 ### 视频处理
 
-| 接口入口 | 支持特性 | 输入格式 | 输出格式 | 验证基准 |
+| 接口入口 | 支持特性 | 输入格式 | 输出格式 | 一致性 |
 | --- | --- | --- | --- | --- |
-| `VAEntrypointVideoProc`（`VAProfileNone`，需显式开启） | 任意比例缩放（最近邻 / 双线性 / 驱动自选：缩小区域均值、放大三次插值）、裁剪、旋转、镜像；NV12 与 P010 双向位深转换；HDR10 转 SDR 色调映射；最多十六层叠加合成（Y'CbCr 或打包 BGRA/RGBA） | NV12、P010、BGRA、RGBA | NV12、P010 | `scale_vaapi` 最近邻与裁剪与 swscale 逐字节一致；双线性与四点模型相差不超过 1 个码值；色调映射与 BT.2390/BT.709 管线相差不超过 1 个码值；合成 alpha 0 与 1 两端与输入帧逐字节一致 |
+| `VAEntrypointVideoProc`（`VAProfileNone`，需显式开启） | 任意比例缩放（最近邻 / 双线性 / 驱动自选：缩小区域均值、放大三次插值）、裁剪、旋转、镜像；NV12 与 P010 双向位深转换；HDR10 转 SDR 色调映射；最多十六层叠加合成（Y'CbCr 或打包 BGRA/RGBA） | NV12、P010、BGRA、RGBA | NV12、P010 | 最近邻缩放与裁剪与 swscale 逐字节一致；双线性与四点模型相差不超过 1 个码值；色调映射与 BT.2390/BT.709 管线相差不超过 1 个码值；合成 alpha 0 与 1 两端与输入帧逐字节一致 |
 
 视频处理基于 Vulkan 计算内核实现，默认关闭，环境变量 `V4L2_VA_VPP` 存在且非空即启用（例如 `V4L2_VA_VPP=0` 也算启用）。调度管线会自动等待前序解码完成再读取源表面。关于着色器实现、执行顺序与管线约束，详见 [docs/architecture.md](docs/architecture.md)。
 
 ## 性能
 
-SM8550 平板上的 HEVC Main 8-bit 吞吐，FFmpeg 8.1.3。每个格五轮交错运行，三个 CPU policy 都锁在 performance governor 的最高频（2016/2803/2956 MHz），`3d00000.gpu` 锁在 680 MHz。片源为 GOP 60 的 x265 合成 I/P 帧，`-async_depth 4`；编码计入 CPU 端 NV12 上传，解码不下载、不显示。
+HEVC Main 8-bit，FFmpeg 8.1.3。CPU 锁最高频，GPU 锁 680 MHz。解码不计下载与显示，编码计入 CPU 端 NV12 上传。
 
 | 操作 | 720p | 1080p | 4K |
 | --- | ---: | ---: | ---: |
 | 解码 | 759 fps | 581 fps | 359 fps |
 | 编码 | 644 fps | 591 fps | 167 fps |
 
-900 帧的解码客户端 CPU 耗时在三档分辨率下为 0.27/0.42/0.40 s；按需延迟启动拷贝引擎，让不申请拷贝的流水线不启动 GPU 拷贝后端。编码客户端 CPU 耗时为 1.01/1.94/4.82 s。更多编解码器（含 AV1 8/10 位）、并发、转码、功耗及 VPP 跑分详见 [TEST-RESULTS.md](TEST-RESULTS.md)。
+这个 SoC 的吞吐主要跟着 DVFS 走，不锁频测到的是调频策略。多编码格式、转码、并发、功耗与 VPP 数据，以及每个数字的测法，见 [TEST-RESULTS.md](TEST-RESULTS.md)。
 
 ## 运行环境
 
@@ -107,42 +105,10 @@ Debian 包请在 chroot（`sbuild`、`pbuilder`）里构建：`libgbm-dev` 绑�
 - `iris-device-check`：只读检测设备节点、固件版本、内核驱动绑定状态及支持格式。
 - `iris-verify`：执行轻量级软硬件闭环测试，通过 Iris 中断计数验证编解码通路。
 
-## 常用客户端配置指南
+## 客户端配置
 
-大多数应用程序无需配置特殊环境变量：libva 会通过 `msm_drv_video.so` 符号链接自动加载本驱动。以下是常见客户端的最佳实践：
-
-### 播放器与串流
-
-- **mpv**：指定硬解参数启动：
-  ```sh
-  mpv --hwdec=vaapi <视频文件>
-  ```
-  亦可在 `~/.config/mpv/mpv.conf` 中追加 `hwdec=vaapi` 实现开箱即用（或直接运行 `scripts/iris-configure-clients.sh` 自动配置）。
-- **VLC**：在「首选项 -> 输入 / 编解码器 -> 硬件加速解码」中选择 **VA-API video decoder via DRM**。
-- **Sunshine / Moonlight**：在 Sunshine 配置页面中将编码器选为 `h264_vaapi` 或 `hevc_vaapi`，即可启用低延迟硬件串流。
-
-### 网页浏览器
-
-- **Google Chrome / Chromium**：在线播放支持格式时会自动启用硬解。在 `chrome://media-internals` 中查看对应播放器实例进行确认：
-  - `kVideoDecoderName`: `VaapiVideoDecoder`
-  - `kIsPlatformVideoDecoder`: `true`
-- **Firefox**：在 `about:config` 中将 `media.hardware-video-decoding.force-enabled` 设为 `true` 开启硬件加速（或直接运行 `scripts/iris-configure-clients.sh` 自动配置）。
-
-### FFmpeg 与 GStreamer
-
-- **FFmpeg 硬件解码**：
-  ```sh
-  ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -i input.mp4 -f null -
-  ```
-- **FFmpeg 硬件编码（H.264 / HEVC）**：
-  ```sh
-  ffmpeg -vaapi_device /dev/dri/renderD128 -i input.yuv -vf 'format=nv12,hwupload' -c:v h264_vaapi -b:v 4M out.mp4
-  ffmpeg -vaapi_device /dev/dri/renderD128 -i input.yuv -vf 'format=nv12,hwupload' -c:v hevc_vaapi -b:v 4M out.mp4
-  ```
-- **GStreamer**：GStreamer 默认按厂商白名单过滤 VA 插件。设置以下环境变量即可完整注册 `vaav1dec`、`vah264enc` 与 `vah265enc` 元素：
-  ```sh
-  export GST_VA_ALL_DRIVERS=1
-  ```
+mpv、VLC、Sunshine、Firefox、GStreamer 的逐项配置，以及 FFmpeg 的硬解、硬编命令，见
+[docs/build-and-deploy.md](docs/build-and-deploy.md#client-setup)。
 
 ## 缓冲与发布模型
 
@@ -150,13 +116,13 @@ Debian 包请在 chroot（`sbuild`、`pbuilder`）里构建：`libgbm-dev` 绑�
 
 - **Direct**：客户端在解码后直接导出驱动分配的表面，实现零拷贝。
 - **Import**：客户端在解码前传入预分配的 DMA-BUF 缓冲区，在应用了解码顺序补丁的内核上实现零拷贝。
-- **Copy**：固件解码至驱动内部缓冲槽位，再由 GPU 复制至客户端表面。用于未打补丁的原版内核，以及同一 VA 上下文内 AV1 分辨率切换后的后半段。AV1 在应用了解码顺序补丁的内核上走 Import 零拷贝路径（2026-11-11 安装包实机验证，见 TEST-RESULTS.md）。
+- **Copy**：固件解码至驱动内部缓冲槽位，再由 GPU 复制至客户端表面。用于未打补丁的原版内核，以及同一 VA 上下文内 AV1 分辨率切换后的后半段。AV1 在应用了解码顺序补丁的内核上走 Import 零拷贝路径。
 
 导入的 DMA-BUF 表面必须严格符合 CAPTURE 布局规范（单线性对象，128 字节对齐跨度）。不符合规范的表面直接返回 `VA_STATUS_ERROR_INVALID_PARAMETER`。
 
 ## 已知限制
 
-- **AV1 动态分辨率切换与浏览器选择**：驱动内部维护八槽 DPB，在 `vaEndPicture` 直接提交当前帧。同一 VA 上下文分辨率改变后，若客户端继续沿用旧 CAPTURE 几何导出表面，驱动检测到跨距不匹配时改用 GPU 拷贝发布，避免跨距错位。Chromium 152 播放本地文件默认走内置软件解码；Chrome 156 在线页面与 Firefox 158 已验证硬解。
+- **AV1 动态分辨率切换**：驱动内部维护八槽 DPB，在 `vaEndPicture` 直接提交当前帧。同一 VA 上下文分辨率改变后，若客户端继续沿用旧 CAPTURE 几何导出表面，驱动检测到跨距不匹配时改用 GPU 拷贝发布，避免跨距错位。Chromium 播放本地文件时会自行选择 AV1 解码器，可能落到内置软件解码；会话是否走硬件以 [docs/build-and-deploy.md](docs/build-and-deploy.md#browser-acceptance-gate) 的浏览器验收门禁为准。
 - **原版内核降级**：在缺少显示延迟控制或强制关键帧控制的内核上，解码降级为 GPU 拷贝，关键帧请求通过临时改动 intra period 实现。
 - **编码高级特性**：仅支持单图单切片结构。多切片、分块（Tiles）及 ROI 配置直接返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。B 帧需通过 `V4L2_VA_B_FRAMES` 显式开启，且仅限 H.264；客户端管线需至少保持三帧在途（FFmpeg：`-bf 1 -async_depth 3`）。
 - **封装头信息**：头信息声明为 `VA_ENC_PACKED_HEADER_NONE`，参数集随码流带内传输。
@@ -174,5 +140,3 @@ Debian 包请在 chroot（`sbuild`、`pbuilder`）里构建：`libgbm-dev` 绑�
 | `V4L2_VA_VPP` | off | 启用 Vulkan 视频处理后端（`VAEntrypointVideoProc`：缩放、裁剪、旋转、镜像、位深转换、色调映射、多层合成） |
 | `V4L2_VA_B_FRAMES` | off | 启用 H.264 编码器的 B 帧；要求客户端管线保持三帧以上在途（FFmpeg：`-async_depth 3`） |
 | `V4L2_VA_DUMP` | off | 提交的码流单元转储目录路径 |
-
-> **提示（GStreamer）**：GStreamer 的 VA 插件（`libgstva`）默认按厂商白名单过滤驱动。若需注册本驱动的元素（如 `vaav1dec`），需设置环境变量 `GST_VA_ALL_DRIVERS=1`。驱动本身仍由 libva 自动通过 `msm_drv_video.so` 符号链接加载，无需配置 `LIBVA_*` 变量；`test/iris-gstreamer-gate.sh` 在目标机上验证这两种状态。

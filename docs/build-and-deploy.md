@@ -162,7 +162,7 @@ env -u LIBVA_DRIVERS_PATH -u LIBVA_DRIVER_NAME -u LIBVA_V4L2_VIDEO_PATH vainfo
 Unset the variable; an empty `LIBVA_DRIVERS_PATH=` is not the same thing. libva
 takes the empty string as "search no directory" and `vaInitialize` fails with
 `unknown libva error` even though the installed driver is fine, which is how a
-2026-11-12 probe lost its first run.
+probe lost its first run.
 
 There is no launcher and no desktop entry. An earlier revision shipped both,
 and the launcher exported `LIBVA_DRIVER_NAME`, both node paths, and an isolated
@@ -186,12 +186,12 @@ kVideoDecoderName = VaapiVideoDecoder
 kIsPlatformVideoDecoder = true
 ```
 
-The qualified Chrome 151 run on August 30, 2026 reached this gate with the
-project driver mapped in the GPU process and a dynamically resolved Iris node,
-`VaapiVideoDecoder`, and `kIsPlatformVideoDecoder=true`; its VA trace then
-showed repeated `vaBeginPicture`/`vaEndPicture` and `stateful capture complete`
-events. The Fedora Chromium 151 run is a separate native-V4L2 baseline and
-reported `V4L2VideoDecoder`; that result does not prove the project's VA driver.
+The qualified run reached this gate with the project driver mapped in the GPU
+process and a dynamically resolved Iris node, `VaapiVideoDecoder` and
+`kIsPlatformVideoDecoder=true`; its VA trace showed repeated
+`vaBeginPicture`/`vaEndPicture` and `stateful capture complete` events. A Fedora
+Chromium run is a separate native-V4L2 baseline and reports `V4L2VideoDecoder`;
+that result does not prove this driver.
 
 Also record decoded/dropped frame counts, confirm the Iris V4L2 context and
 OUTPUT/CAPTURE activity in a trace-enabled diagnostic run, and compare the
@@ -199,9 +199,46 @@ device boot ID before and after. Small videos may fall below Chromium's
 hardware-decoder performance threshold, so a low-resolution
 `FFmpegVideoDecoder` result is not a release verdict. H.264, HEVC, VP9 and
 AV1 are the qualified VA profiles (each with its own caveat in the README).
-Validate Google
-Chrome; Fedora's Chromium decodes through its own native V4L2 stack and its
-result says nothing about this driver.
+Validate Google Chrome; Fedora's Chromium decodes through its own native V4L2
+stack and its result says nothing about this driver.
+
+### Client setup
+
+The package installs the driver and the `msm_drv_video.so` alias, so a client
+needs no environment variable to find it. What each client still needs is its
+own setting. `iris-configure-clients` writes the mpv and Firefox ones into the
+invoking user's home; the rest are set in the client.
+
+| Client | Setting |
+| --- | --- |
+| mpv | `hwdec=vaapi` in `~/.config/mpv/mpv.conf`, or `--hwdec=vaapi` per run |
+| VLC | Preferences -> Input / Codecs -> Hardware-accelerated decoding: **VA-API video decoder via DRM** |
+| Sunshine | Encoder `h264_vaapi` or `hevc_vaapi` |
+| Firefox | `media.hardware-video-decoding.force-enabled` = `true` in `about:config` (or in `user.js`, which `iris-configure-clients` writes) |
+| Chrome | Nothing; confirm with the browser gate above |
+| GStreamer | `GST_VA_ALL_DRIVERS=1`, because the plugin filters drivers by vendor allowlist |
+
+FFmpeg decodes through the VA driver with its own flags; the input needs the
+raw-video geometry when it is not a container:
+
+```sh
+# decode, frames stay on the GPU
+ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -i input.mp4 -f null -
+
+# encode from raw NV12, 1280x720 at 30 fps
+ffmpeg -vaapi_device /dev/dri/renderD128 -f rawvideo -pix_fmt yuv420p \
+    -s 1280x720 -r 30 -i input.yuv -vf format=nv12,hwupload \
+    -c:v h264_vaapi -b:v 4M out.h264
+ffmpeg -vaapi_device /dev/dri/renderD128 -f rawvideo -pix_fmt yuv420p \
+    -s 1280x720 -r 30 -i input.yuv -vf format=nv12,hwupload \
+    -c:v hevc_vaapi -b:v 4M out.hevc
+```
+
+`h264_vaapi` and `hevc_vaapi` are the qualified encoders. B pictures are off
+unless `V4L2_VA_B_FRAMES` is set, and then the client needs three pictures in
+flight: `-bf 1 -async_depth 3`. At FFmpeg's default `-async_depth 2` a B
+picture session stops after the first pair, which is the firmware holding the
+newest picture rather than a driver defect.
 
 ### Recording a target run
 

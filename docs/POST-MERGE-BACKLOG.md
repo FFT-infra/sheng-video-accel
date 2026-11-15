@@ -1,4 +1,4 @@
-# Post-merge hardware and upstream backlog (2026-11-10)
+# Post-merge hardware and upstream backlog
 
 **Historical ledger.** This file records the state of workstreams as they were
 triaged, including entries that were later implemented, superseded or
@@ -7,7 +7,7 @@ qualified combination, and `data/iris-codec-capabilities.json` is the current
 capability boundary. Keep the entries below as provenance, not as instructions.
 
 This is the completion ledger for the work consolidated into PR #5 (which
-subsumes PR #4). The 2026-11-10 draft (PR #3) froze the baseline and listed
+subsumes PR #4). The first draft (PR #3) froze the baseline and listed
 every open workstream; PR #4 implemented the AV1 held-picture removal; PR #5
 consolidated the independent-oracle syntax corpus, film-grain boundary analysis,
 and final documentation sync. Items below are marked with their current state in
@@ -18,8 +18,8 @@ browser hardware claim.
 
 ## 0. Frozen baseline
 
-Historical baseline recorded from the remote state on 2026-11-10, before PR #4
-changed `src/`. It is not the current installed-package state; re-read before
+Historical baseline recorded from the remote state, before PR #4 changed
+`src/`. It is not the current installed-package state; re-read before
 starting any item. A later merge, a target reinstall, or a kernel module swap
 invalidates the whole list.
 
