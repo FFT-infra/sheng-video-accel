@@ -34,7 +34,7 @@ spec runs `test/iris-packaging-check.sh` against them.
 | --- | --- | --- | --- |
 | H.264 | Constrained Baseline, Main, High | Import (zero-copy) | Fluster 72/135 |
 | HEVC | Main, Main 10 | Import (zero-copy) | Fluster 141/147 |
-| VP9 | Profile 0, Profile 2 | Import (zero-copy) | 175/305 vectors |
+| VP9 | Profile 0, Profile 2 | Import (zero-copy) | Fluster 176/305 |
 | AV1 | Profile 0 (8/10-bit) | Import (zero-copy, decode-order kernel) | Bit-exact against libdav1d, 8 and 10 bit; film grain synthesis included |
 
 A profile is advertised only for the codecs marked `production: supported` in

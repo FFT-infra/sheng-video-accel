@@ -28,7 +28,7 @@
 | --- | --- | --- | --- |
 | H.264 | Constrained Baseline, Main, High | Import（零拷贝） | Fluster 72/135 |
 | HEVC | Main, Main 10 | Import（零拷贝） | Fluster 141/147 |
-| VP9 | Profile 0, Profile 2 | Import（零拷贝） | 175/305 个测试向量 |
+| VP9 | Profile 0, Profile 2 | Import（零拷贝） | Fluster 176/305 |
 | AV1 | Profile 0（8/10 位） | Import（零拷贝，解码顺序内核） | 8 位与 10 位均与 libdav1d 逐帧一致，含 film grain 合成 |
 
 只有 `data/iris-codec-capabilities.json` 标记为 `production: supported` 的编码格式才对外声明 VA profile。一致性列的数字都来自与软件解码的逐帧比对；具体运行、语料，以及每个未通过向量的归类记录在 `TEST-RESULTS.md`。浏览器会话只有在媒体表面报告了选中的解码器，并给出解码帧数与丢帧数时，才算走硬件。
