@@ -29,6 +29,9 @@ clips_dir=${IRIS_BROWSER_CLIPS_DIR:-}
 out_base=${IRIS_BROWSER_OUT:-$(iris_artifact_dir browser-av1)}
 seconds=${IRIS_BROWSER_SECONDS:-30}
 mode=${1:-all}
+# The usage line spells the modes with a leading `--`; accept both forms so
+# the documented invocation works without a second spelling to remember.
+mode=${mode#--}
 case $mode in all|local-only|sites-only) ;; *) echo "FAIL unknown mode: $mode" >&2; exit 2 ;; esac
 [ -n "$clip" ] || [ -n "$clips_dir" ] || { echo 'FAIL IRIS_BROWSER_CLIP or IRIS_BROWSER_CLIPS_DIR is required' >&2; exit 2; }
 

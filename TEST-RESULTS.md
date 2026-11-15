@@ -8513,6 +8513,63 @@ The same run measured encode power: 5.66-6.97 mJ/frame for the full encoder
 lifetime, with the idle baseline drifting between arms — too noisy at three
 rounds to support a verdict, so none is claimed.
 
+## Installed-package validation across every gate (2026-11-15)
+
+Target `sheng`, boot `fc7fda72-72c8-42eb-8503-3914dd2dd5aa`, kernel
+`7.2.6-sm8550-g42f3b40-iris1` (`qcom_iris` `b90bd823fdab9895`, patches
+0001-0004), decoder `/dev/video0` and encoder `/dev/video1` resolved by
+`iris_driver`. Source `d0dbbf559b736937891515950d87b870616117a0`, artifact
+`3c9a857d73f9a36ac0445ec1319b0223d206777c9e34ff579ec2cdf956af7b8a`,
+10,674,800 bytes, installed with `scripts/install-system.sh` and recorded in
+`/usr/local/share/iris-vaapi/install-manifest.txt`. The previous driver
+`a1b3ef16ba3a82c4` is kept in the manifest's backup path. This is a live
+system install, not a `DESTDIR` staging run.
+
+The artifact is a `debugoptimized` build with debug sections; the previous
+install was a stripped 747,544-byte build. `src/` differs between the two
+source commits only in comments, and the machine-code difference is a build
+configuration difference, not a source difference.
+
+| gate | result |
+| --- | --- |
+| `iris-matrix.sh` | H.264, VP9, HEVC and AV1 each `submitted=48 capture=48 drops=0 timeouts=0`, frame MD5 equal to the native V4L2 baseline; AV1 `noshow=23` |
+| `iris-structure-matrix.sh` | all-I, IP-G12, B2 and B4, 48 frames each, exact |
+| `iris-encode-quality.sh` | 1080p: H.264 SSIM mean 0.998596 / worst 0.9985, HEVC 0.996808 / 0.9963; 4K (60 frames): H.264 0.998798 / 0.9987, HEVC 0.997493 / 0.9973; blank controls 0.000034 and 0.000036 below the 0.90 floor |
+| native GStreamer | `v4l2h264dec`, `v4l2vp9dec`, `v4l2h265dec`, `v4l2av1dec` all reach EOS |
+| `iris-gstreamer-gate.sh` | `GST_VA_ALL_DRIVERS=1` registers 7 elements; AV1 decode 48/48 identical to software; `vah264enc` and `vah265enc` each 48/48 frames decode back |
+| `iris-zero-copy-suite.sh` | 24/24 frames `publish=direct` |
+| `iris-hevc-scaling-check.sh` | 48 frames, IQ matrix exact against software |
+| `iris-av1-grain-gate.sh` | 8-bit 20 frames and 10-bit 2 frames, every frame equal to libdav1d's grained output |
+| `iris-dynamic-resolution.sh` | 101 contexts, 100 in-stream switches, every segment complete, zero drops |
+| `iris-concurrency-soak.sh` | SHORTENED 120 s, dual-h264 and mixed, 2,880 frames per lane, `teardown_timeouts=0` |
+| `iris-alloc-chain.sh` | `msm-coherent`, `msm-write-combined` and `dma-heap` rungs plus the negative controls |
+| `iris-va-image-gate.sh` | `vaPutImage`, region upload, derived-image write and I420 paths; four `hwupload,hwdownload` round trips |
+| VPP | crop 3 cases, transpose 7 directions x 2 formats, tonemap 2 peaks x 2 sizes with 3 refusals, overlay-VA 3 cases, overlay 32 cases with 9 refusals, NV12 scale 27 cases, P010 scale 12 cases; pixel-exact against the client-side oracle |
+| VP9 Import, alt-refs | 120-frame 1280x720 `libvpx-vp9` clip (`-lag-in-frames 25 -auto-alt-ref 1`): 120/120 publishes under Import, EOS `submitted=120 capture=120 drops=0 timeouts=0`, frame MD5 equal to software |
+| HEVC Main10 | 48-frame P010 decode, frame MD5 equal to software |
+| AV1 10-bit | 48-frame P010 decode, frame MD5 equal to software |
+| AV1 4K | 48-frame 3840x2160 decode, frame MD5 equal to software |
+| decode throughput | 300 frames: H.264 674.2 / 537.6 / 267.6 fps and HEVC 684.9 / 549.5 / 202.7 fps at 720p / 1080p / 4K; native V4L2 572.5 / 384.6 / 205.2 and 460.8 / 429.8 / 189.2 fps |
+| encode throughput | H.264 327.9 / 350.1 / 128.8 fps and HEVC 447.1 / 484.7 / 155.4 fps at 720p / 1080p / 4K (300 frames at 720p and 1080p, 120 at 4K; CPU NV12 upload included) |
+| Chrome 1080p H.264 | `VaapiVideoDecoder`, platform=true, 598 frames, 0 dropped, GPU process holds `/dev/video0` |
+| Chrome 4K H.264 | same decoder and platform, 597 frames, 0 dropped |
+| Chrome 720p AV1 | same decoder and platform, 715 frames, 0 dropped |
+| Chrome 720p VP9 | same decoder and platform, 478 frames, 0 dropped |
+| Firefox 720p AV1 | 727 frames decoded, 12 dropped, hardware path logged, 897 direct publishes |
+| teardown trace | zero sync timeouts, complete stateful drain, the retired context destroyed after release |
+
+`v4l2-compliance` reports 41/48: the same seven kernel-interface failures
+listed in "The one failure, and why it is not this driver" above, not a
+userspace regression. Fluster conformance was not run because its vectors
+are not present on the target.
+
+What this does not prove: the throughput cells are unpinned-clock regression
+guards, so do not compare them with the pinned-clock table in the
+performance section. The VP9 Import window is one 120-frame clip, not the
+published corpus. The soak was shortened to 120 s. The 4K lanes were run
+after the short soak had cooled the device; they are not thermal or power
+results.
+
 ## B pictures in the H.264 encoder (2026-11-15)
 
 Target `sheng`, boot `fc7fda72-72c8-42eb-8503-3914dd2dd5aa`, kernel
