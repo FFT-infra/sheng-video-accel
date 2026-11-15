@@ -30,44 +30,52 @@ spec runs `test/iris-packaging-check.sh` against them.
 
 ### Decode
 
-| Codec | Profile | Buffer Mode | Verification |
+| Codec | Profile | Buffer mode | Conformance |
 | --- | --- | --- | --- |
-| H.264 | Constrained Baseline, Main, High | Import (zero-copy) | Bit-exact MD5, Fluster 72/135 |
-| HEVC | Main, Main 10 | Import (zero-copy) | Bit-exact MD5, Fluster 141/147 |
-| VP9 | Profile 0, Profile 2 | Import (zero-copy) | Bit-exact MD5, 2026-11-12 Chrome alt-ref runs |
-| AV1 | Profile 0 (8/10-bit) | Import (zero-copy, decode-order kernel) | Bit-exact MD5, 2026-11-11 installed-package and browser runs; 1080p and 4K 10-bit exact against libdav1d over P010 Import; film grain synthesis exact at 8 and 10 bits |
+| H.264 | Constrained Baseline, Main, High | Import (zero-copy) | Fluster 72/135 |
+| HEVC | Main, Main 10 | Import (zero-copy) | Fluster 141/147 |
+| VP9 | Profile 0, Profile 2 | Import (zero-copy) | 175/305 vectors |
+| AV1 | Profile 0 (8/10-bit) | Import (zero-copy, decode-order kernel) | Bit-exact against libdav1d, 8 and 10 bit; film grain synthesis included |
 
-Hardware decode verification requires a media surface that reports the selected hardware decoder (for Chrome, `VaapiVideoDecoder` with `kIsPlatformVideoDecoder=true`; for Firefox, successful VA-API initialization) together with decoded and dropped frame counts over the test window.
+A profile is advertised only for the codecs marked `production: supported` in
+`data/iris-codec-capabilities.json`. Every number in the Conformance column is
+a frame-by-frame comparison against a software decode; `TEST-RESULTS.md` holds
+the run, the corpus and the classification of every vector that does not pass.
+A browser session counts as hardware only when the media surface reports the
+selected decoder together with decoded and dropped frame counts.
 
 AV1 film grain synthesis is supported. When a client names a separate `current_display_picture`, the driver decodes the access unit with grain off and blends the grain onto that surface in user space, synchronously with the picture's `endPicture`, before the client can recycle the ungrained `current_frame`. Clients that export grain parameters as side data keep blending it themselves. `test/iris-av1-grain-gate.sh` requires every downloaded frame to be byte-identical to libdav1d's own grained output.
 
 ### Encode
 
-| Codec | Entrypoint | Input | Output | Verification |
+| Codec | Entrypoint | Input | Output | Conformance |
 | --- | --- | --- | --- | --- |
-| H.264 | `VAEntrypointEncSlice` (CBR, VBR, CQP) | NV12 | Annex-B | 1080p FFmpeg, GOP 60, IRQ delta |
-| HEVC | `VAEntrypointEncSlice` (CBR, VBR, CQP) | NV12 | Annex-B | 1080p FFmpeg, GOP 60, IRQ delta |
-
-Hardware encode verification requires an active Iris IRQ counter increase, error-free bitstream decoding, and valid sequence parameters matching requested profile and geometry.
+| H.264 | `VAEntrypointEncSlice` (CBR, VBR, CQP) | NV12 | Annex-B | SSIM 0.9986 at 1080p; encodes the requested rate under CBR and VBR |
+| HEVC | `VAEntrypointEncSlice` (CBR, VBR, CQP) | NV12 | Annex-B | SSIM 0.9968 at 1080p; encodes the requested rate under CBR and VBR |
 
 ### Video processing
 
-| Entrypoint | Supported operations | Input | Output | Verification |
+| Entrypoint | Supported operations | Input | Output | Conformance |
 | --- | --- | --- | --- | --- |
-| `VAEntrypointVideoProc` (`VAProfileNone`, opt-in) | Scale at any ratio (nearest-neighbour, bilinear, or driver-selected: area-average down, bicubic up), crop, rotation, mirroring; NV12/P010 bit-depth conversion; HDR10 to SDR tone mapping; up to 16-layer compositing (Y'CbCr or packed BGRA/RGBA) | NV12, P010, BGRA, RGBA | NV12, P010 | `scale_vaapi` nearest-neighbour and crop byte-identical to swscale; bilinear within 1 code of 4-tap model; tone mapper within 1 code of BT.2390/BT.709 pipeline; composite alpha 0 and 1 endpoints match input frames byte-exact |
+| `VAEntrypointVideoProc` (`VAProfileNone`, opt-in) | Scale at any ratio (nearest-neighbour, bilinear, or driver-selected: area-average down, bicubic up), crop, rotation, mirroring; NV12/P010 bit-depth conversion; HDR10 to SDR tone mapping; up to 16-layer compositing (Y'CbCr or packed BGRA/RGBA) | NV12, P010, BGRA, RGBA | NV12, P010 | Nearest-neighbour scale and crop byte-identical to swscale; bilinear within 1 code of the 4-tap model; tone mapper within 1 code of BT.2390/BT.709; composite alpha 0 and 1 match the input |
 
 Video processing runs via pinned Vulkan compute kernels on surface DMA-BUFs. It is disabled by default and enabled whenever the `V4L2_VA_VPP` environment variable is set to a non-empty value (e.g. `V4L2_VA_VPP=0` also enables it). Dispatches wait for pending decode completions before reading source surfaces. Shaders, execution order, and pipeline constraints are documented in [docs/architecture.md](docs/architecture.md).
 
 ## Performance
 
-HEVC Main 8-bit throughput on the SM8550 tablet, FFmpeg 8.1.3, five interleaved runs per cell with CPU policies at max (`performance`, 2016/2803/2956 MHz) and GPU at 680 MHz (`userspace`). Synthetic I/P clips at GOP 60, `-async_depth 4`. Decode excludes download/display; encode includes CPU NV12 upload.
+HEVC Main 8-bit, FFmpeg 8.1.3, CPU pinned at its maximum frequency and GPU
+at 680 MHz. Decode excludes download and display; encode includes the CPU NV12
+upload.
 
 | Operation | 720p | 1080p | 4K |
 | --- | ---: | ---: | ---: |
 | Decode | 759 fps | 581 fps | 359 fps |
 | Encode | 644 fps | 591 fps | 167 fps |
 
-Decode client CPU time is 0.27/0.42/0.40 s per 900 frames at the three sizes; the deferred copy-engine initialization keeps the GPU copy backend idle on a pipeline that never asks for a copy. Encode client CPU time is 1.01/1.94/4.82 s. Detailed multi-codec sweeps (including AV1 8/10-bit), concurrency, transcode, power, and VPP benchmarks are documented in [TEST-RESULTS.md](TEST-RESULTS.md).
+Clocks are pinned because throughput on this SoC follows DVFS more than it
+follows the driver; an unpinned run measures the governor. Multi-codec sweeps,
+transcode, concurrency, power and VPP numbers, and the method behind each cell
+are in [TEST-RESULTS.md](TEST-RESULTS.md).
 
 ## Requirements
 
@@ -115,42 +123,11 @@ The package installs the driver binary along with the `msm_drv_video.so` and `qc
 - `iris-device-check`: Inspects device nodes, firmware version, bound driver, and exposed capabilities.
 - `iris-verify`: Validates hardware decode and encode pipelines via Iris interrupt counter verification.
 
-## Client Configuration
+## Client setup
 
-Most applications require no special environment variables: libva resolves the driver automatically via `msm_drv_video.so`. Recommended setup for common clients:
-
-### Media Players & Streaming
-
-- **mpv**: Run with hardware decoding enabled:
-  ```sh
-  mpv --hwdec=vaapi <video-file>
-  ```
-  To enable permanently, add `hwdec=vaapi` to `~/.config/mpv/mpv.conf` (or run `scripts/iris-configure-clients.sh`).
-- **VLC**: Select **VA-API video decoder via DRM** in Preferences -> Input / Codecs -> Hardware-accelerated decoding.
-- **Sunshine / Moonlight**: Select `h264_vaapi` or `hevc_vaapi` in Sunshine configuration for low-latency hardware game streaming.
-
-### Web Browsers
-
-- **Google Chrome / Chromium**: Hardware decode activates automatically on supported media. Verify active decoding via `chrome://media-internals`:
-  - `kVideoDecoderName`: `VaapiVideoDecoder`
-  - `kIsPlatformVideoDecoder`: `true`
-- **Firefox**: Enable VA-API by setting `media.hardware-video-decoding.force-enabled` to `true` in `about:config` (or run `scripts/iris-configure-clients.sh`).
-
-### FFmpeg & GStreamer
-
-- **FFmpeg Decode**:
-  ```sh
-  ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -i input.mp4 -f null -
-  ```
-- **FFmpeg Encode (H.264 / HEVC)**:
-  ```sh
-  ffmpeg -vaapi_device /dev/dri/renderD128 -i input.yuv -vf 'format=nv12,hwupload' -c:v h264_vaapi -b:v 4M out.mp4
-  ffmpeg -vaapi_device /dev/dri/renderD128 -i input.yuv -vf 'format=nv12,hwupload' -c:v hevc_vaapi -b:v 4M out.mp4
-  ```
-- **GStreamer**: GStreamer filters VA drivers by vendor allowlist. To register elements (`vaav1dec`, `vah264enc`, `vah265enc`), set:
-  ```sh
-  export GST_VA_ALL_DRIVERS=1
-  ```
+Per-client settings (mpv, VLC, Sunshine, Firefox, GStreamer) and the FFmpeg
+decode and encode commands are in
+[docs/build-and-deploy.md](docs/build-and-deploy.md#client-setup).
 
 ## Memory Models
 
@@ -158,13 +135,13 @@ The driver selects buffer publishing policies dynamically:
 
 - **Direct**: Application exports an allocated surface after decode. Zero-copy.
 - **Import**: Application allocates and passes DMA-BUFs before decode. Zero-copy when running on decode-order patched kernels.
-- **Copy**: Firmware decodes to driver-owned slots; frames are blitted via GPU into application buffers. Used on stock kernels and for the second half of an in-context AV1 resolution change. AV1 uses the Import policy on decode-order patched kernels (qualified 2026-11-11 on the installed package, see TEST-RESULTS.md).
+- **Copy**: Firmware decodes to driver-owned slots; frames are blitted via GPU into application buffers. Used on stock kernels and for the second half of an in-context AV1 resolution change. AV1 uses the Import policy on decode-order patched kernels.
 
 Imported DMA-BUF surfaces must match native CAPTURE layout (single linear object, 128-byte aligned pitch). Other configurations return `VA_STATUS_ERROR_INVALID_PARAMETER`.
 
 ## Known Limits
 
-- **AV1 dynamic resolution change & browser selection**: The internal eight-slot DPB emits each picture at `vaEndPicture` without holding frames across access units. After an in-context resolution change, if a client continues exporting surfaces with the previous CAPTURE geometry, the driver falls back to GPU copy for those pictures to avoid pitch corruption. For local file playback, Chromium 152 chooses its built-in software AV1 decoder; hardware AV1 is verified on live Chrome 156 web pages and in Firefox 158.
+- **AV1 dynamic resolution change**: The internal eight-slot DPB emits each picture at `vaEndPicture` without holding frames across access units. After an in-context resolution change, if a client continues exporting surfaces with the previous CAPTURE geometry, the driver falls back to GPU copy for those pictures to avoid pitch corruption. Chromium chooses its own AV1 decoder for local files and may pick the software one; the browser acceptance gate in [docs/build-and-deploy.md](docs/build-and-deploy.md#browser-acceptance-gate) decides whether a session is on the hardware.
 - **Stock kernel fallback**: On kernels without display-delay or sync-frame controls, decode degrades to GPU copy and requested IDRs are handled via intra-period repositioning.
 - **Encode features**: Single full-picture slice only. Multi-slice, tiles and ROI return `VA_STATUS_ERROR_UNIMPLEMENTED`. B pictures are opt-in with `V4L2_VA_B_FRAMES` and are H.264 only; they need a client pipeline of at least three pictures (FFmpeg: `-bf 1 -async_depth 3`).
 - **Packed headers**: Extradata emission reports `VA_ENC_PACKED_HEADER_NONE`. Parameter sets are carried in-band.
@@ -182,5 +159,3 @@ Imported DMA-BUF surfaces must match native CAPTURE layout (single linear object
 | `V4L2_VA_VPP` | off | Enable Vulkan video processing (`VAEntrypointVideoProc`: scale, crop, rotate, mirror, NV12/P010 conversion, tone map, overlay) |
 | `V4L2_VA_B_FRAMES` | off | Opt in to B pictures in the H.264 encoder; requires a client pipeline of three pictures or more (FFmpeg: `-async_depth 3`) |
 | `V4L2_VA_DUMP` | off | Directory path to dump submitted access units |
-
-> **Tip (GStreamer)**: The GStreamer VA plugin (`libgstva`) filters drivers by a vendor allowlist. To register elements with this driver (`vaav1dec`, etc.), set `GST_VA_ALL_DRIVERS=1`. Libva resolves the driver automatically via `msm_drv_video.so` without needing `LIBVA_*` variables; `test/iris-gstreamer-gate.sh` checks both states on the target.
