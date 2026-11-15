@@ -1609,10 +1609,9 @@ the driver:
   the attribute is known. GStreamer returns -1 only for
   `VA_ATTRIB_NOT_SUPPORTED` (`gstvad.c:171-201`), so value zero passes and
   the encoder proceeds with no packed headers requested.
-  **Correction:** an earlier revision of this file claimed another backend
-  answers `VA_ENC_PACKED_HEADER_NONE` and "fails the same check". That was
-  wrong. Zero is not the rejection value, and that backend passes this
-  check too.
+  **Correction:** an earlier revision of this file claimed that a driver
+  answering `VA_ENC_PACKED_HEADER_NONE` "fails the same check". That was
+  wrong: zero is not a rejection value, and the check passes.
 
 ### MP4 without a remux
 
@@ -3635,8 +3634,8 @@ refused or promoted:
 GStreamer's `vah264enc`/`vah265enc` before the first frame: its
 `gst_va_display_get_packed_headers` returns -1 only for
 `VA_ATTRIB_NOT_SUPPORTED`, so zero passes. An earlier section of this file
-claimed another backend answered NONE and "fails the same check"; that was
-wrong, and it is corrected in place.
+claimed NONE "fails the same check"; that was wrong, and it is corrected in
+place.
 
 ### What was verified, and where
 

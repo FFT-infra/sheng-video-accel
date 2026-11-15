@@ -109,7 +109,7 @@ numbers, and drives nine pictures (one key frame, eight inter frames).
    the key-frame error-resilient syntax, so every following header field shifts.
    ffmpeg's `av1_frame_merge` rejected it with `zero_bit out of range: 1`. A
    hidden install frame must be *built* from the parsed parameters with
-   `show=0` (another backend's `frame(... bool show ...)`), not patched into a shown frame.
+   `show=0` (`frame(... bool show ...)`), not patched into a shown frame.
    The earlier `slot-remap.cc` stream was rejected by libdav1d for the same
    reason: concatenated per-call temporal units plus fake tile payloads, not a
    single valid multi-frame TU.
@@ -259,9 +259,9 @@ means the DPB translator itself still lacks a pixel-level oracle; the test
 proves the container shape is real AV1, not that this translator emits decodable
 pixels for arbitrary VA parameters.
 
-## DPB semantics audit against another backend (2026-11-10)
+## DPB semantics audit (2026-11-10)
 
-Re-reading that backend's AV1 translator (`free_slot()`, `remember()`,
+Re-reading a reference AV1 translator (`free_slot()`, `remember()`,
 `reference_slots()`, `av1_bitstream()`) against the prototype exposed a class of
 bugs the original `av1-dpb` test could not see: it set every `ref_frame_idx[i]`
 to 0, so no reference ever named a surface outside slot 0, and it never
@@ -285,7 +285,7 @@ What was wrong, and what changed in `src/codec/av1_dpb.cc`:
   `refresh_frame_flags` differ.
 - **Hidden key frames.** Forcing `frame_type = INTER_FRAME` on a pending key
   frame made the writer emit inter-frame syntax for intra tiles. A hidden key
-  is now written as `INTRA_ONLY_FRAME`, matching that backend's
+  is now written as `INTRA_ONLY_FRAME`, matching
   `frame(... show=false, reset=false)`.
 - **Reference state.** `remember()` was fed the *current* picture's
   `order_hint`, and `AV1ReferenceState` / `gm_params` were updated from the
@@ -295,8 +295,8 @@ What was wrong, and what changed in `src/codec/av1_dpb.cc`:
 - **Dead write.** `remapped.ref_frame_map[s] = slots_[s].surface` wrote surface
   IDs into a field `av1_obu.cc` never reads; the bitstream codes the eight DPB
   slot numbers directly. It is gone. `ref_frame_idx[]` is now the only field
-  remapped, resolved against `slots_[]` the same way that backend's
-  `reference_slots()` does.
+  remapped, resolved against `slots_[]` the same way `reference_slots()`
+  does.
 - **Sequence restart.** A new sequence now resets `references_`, `slots_[]`
   and the pending picture instead of translating the first frame against a DPB
   from the previous sequence.
