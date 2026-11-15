@@ -646,7 +646,10 @@ void test_reference_and_slice_shape()
     // HEVC picture types I = 1, P = 2, B = 3).
     VAEncSliceParameterBufferHEVC b_hevc = hevc_slice(true);
     b_hevc.slice_type = 0; // B
-    EncodePicture hb_input = hevc_input(hsequence, hevc_picture());
+    // EncodePicture keeps the picture parameters by pointer, so the struct
+    // has to outlive the translate call.
+    VAEncPictureParameterBufferHEVC hb_picture = hevc_picture();
+    EncodePicture hb_input = hevc_input(hsequence, hb_picture);
     hb_input.slices = { &b_hevc };
     check(status_of([&] { hevc->translate(hb_input); }) == VA_STATUS_ERROR_INVALID_PARAMETER,
         "an HEVC B slice with ip_period 1 is refused");
@@ -669,7 +672,8 @@ void test_reference_and_slice_shape()
 
     VAEncSliceParameterBufferHEVC partial_hevc = hevc_slice(true);
     partial_hevc.slice_segment_address = 1;
-    EncodePicture hpartial = hevc_input(hsequence, hevc_picture());
+    VAEncPictureParameterBufferHEVC partial_hevc_picture = hevc_picture();
+    EncodePicture hpartial = hevc_input(hsequence, partial_hevc_picture);
     hpartial.slices = { &partial_hevc };
     check(status_of([&] { hevc->translate(hpartial); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
         "an HEVC slice that starts past CTU zero is refused");
@@ -699,14 +703,16 @@ void test_unimplemented_features()
         "several reference indexes are refused");
 
     VAEncSliceParameterBufferH264 slice = h264_slice(sequence, true);
-    EncodePicture one = h264_input(sequence, h264_picture());
+    VAEncPictureParameterBufferH264 one_picture = h264_picture();
+    EncodePicture one = h264_input(sequence, one_picture);
     one.slices = { &slice };
     slice.cabac_init_idc = 1;
     check(status_of([&] { h264->translate(one); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
         "a CABAC initialisation index is refused");
 
     VAEncSliceParameterBufferH264 second = h264_slice(sequence, true);
-    EncodePicture many = h264_input(sequence, h264_picture());
+    VAEncPictureParameterBufferH264 many_picture = h264_picture();
+    EncodePicture many = h264_input(sequence, many_picture);
     many.slices = { &slice, &second };
     check(status_of([&] { h264->translate(many); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
         "two slices are refused");
