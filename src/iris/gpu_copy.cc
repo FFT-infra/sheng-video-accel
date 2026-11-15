@@ -287,6 +287,11 @@ private:
     {
         std::packaged_task<void(GpuBlitter*)> task(std::forward<F>(function));
         auto done = task.get_future();
+        // The worker holds one slot. A second producer (a surface being
+        // destroyed while the decode thread publishes) must not overwrite a
+        // task the worker has not taken yet: the overwritten task's future
+        // is answered with broken_promise.
+        std::lock_guard<std::mutex> serial(submit_mutex_);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             task_ = std::move(task);
@@ -295,6 +300,7 @@ private:
         done.get();
     }
 
+    std::mutex submit_mutex_;
     std::mutex mutex_;
     std::condition_variable wake_;
     std::packaged_task<void(GpuBlitter*)> task_;

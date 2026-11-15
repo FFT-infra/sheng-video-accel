@@ -117,6 +117,7 @@ public:
         return it == writes_.end() ? 0 : it->second;
     }
     bool wrote(uint32_t id) const { return written_.count(id) != 0; }
+    unsigned stops() const { return stops_; }
     int32_t value(uint32_t id) const
     {
         const auto it = written_.find(id);
@@ -295,8 +296,10 @@ public:
     {
         // The drain marker: the firmware hands back a bare LAST buffer and
         // the session stops waiting.
-        if (cmd == V4L2_ENC_CMD_STOP)
+        if (cmd == V4L2_ENC_CMD_STOP) {
+            ++stops_;
             staged_.push_back(iris::Dequeued { 0, V4L2_BUF_FLAG_LAST, 0, 0, 0 });
+        }
         return true;
     }
 
@@ -318,6 +321,7 @@ private:
     std::map<uint32_t, unsigned> writes_;
     std::vector<std::vector<uint8_t>> capture_;
     std::vector<iris::Dequeued> staged_;
+    unsigned stops_ = 0;
     // Returned input buffers, carrying the timestamp the firmware echoes.
     std::vector<iris::Dequeued> returned_;
     std::vector<uint64_t> timestamps_;
@@ -851,6 +855,36 @@ iris::StableBuffer& ensure_stable(DriverData&, Surface&)
 
 } // namespace va
 
+// vaSyncBuffer(..., 0) is a poll. With B pictures the tail-flush path used a
+// timeout to decide the stream was over and sent the one-shot STOP; a zero
+// timeout must not take that path.
+void test_zero_timeout_does_not_drain()
+{
+    auto node = std::make_unique<FakeEncoderNode>(true);
+    FakeEncoderNode* raw = node.get();
+    iris::EncodeConfig config;
+    config.codec = V4L2_PIX_FMT_H264;
+    config.width = 1920;
+    config.height = 1080;
+    iris::Options options;
+    options.b_frames = true;
+    iris::EncoderSession session(std::move(node), config, options, iris::Trace(false));
+
+    iris::EncodeParams picture = params(0, 0, 0);
+    picture.b_frames = 1;
+    check(status_of([&] { session.configure(picture, 1920, 1080); }) == -1, "configure with B pictures");
+    raw->hold_completions();
+    const int fd = dmabuf();
+    check(fd >= 0, "memfd for the raw frame");
+    const iris::EncodeTicket ticket = session.submit(fd, kCaptureSlot, picture);
+    check(status_of([&] { session.wait_timeout(ticket, 0); }) == VA_STATUS_ERROR_TIMEDOUT,
+        "a zero timeout reports the picture is not ready");
+    check(raw->stops() == 0, "a zero timeout does not send STOP");
+    raw->release(1);
+    check(session.wait(ticket).bytes.size() == kPayload, "the picture is still encodable afterwards");
+    session.finish();
+}
+
 int main()
 {
     test_default_without_controls();
@@ -860,6 +894,7 @@ int main()
     test_on_demand_idr();
     test_on_demand_idr_by_sync_frame();
     test_pipelined_pictures();
+    test_zero_timeout_does_not_drain();
     test_input_release_is_not_the_access_unit();
     test_drain_resolves_outstanding_pictures();
     test_coded_buffer_claim_contract();

@@ -182,7 +182,10 @@ VkDeviceMemory import_dmabuf(VkDevice device, uint32_t memory_type, VkDeviceSize
         close(owned);
         return VK_NULL_HANDLE;
     }
-    vkBindBufferMemory(device, buffer, memory, 0);
+    if (vkBindBufferMemory(device, buffer, memory, 0) != VK_SUCCESS) {
+        vkFreeMemory(device, memory, nullptr);
+        return VK_NULL_HANDLE;
+    }
     return memory;
 }
 
@@ -312,6 +315,14 @@ bool ensure_device(Shared& s)
     if (vkCreateInstance(&instance_info, nullptr, &s.instance) != VK_SUCCESS)
         return false;
 
+    // Every failure below has to hand the instance back: the next attempt
+    // creates a new one, and the leak is one per failed picture.
+    const auto fail = [&s]() {
+        vkDestroyInstance(s.instance, nullptr);
+        s.instance = VK_NULL_HANDLE;
+        return false;
+    };
+
     // The first call reports how many devices there are; the second writes
     // exactly that many handles. A one-element slot here let a second device
     // land on the next stack word, which happened to be the job's own buffer
@@ -319,17 +330,17 @@ bool ensure_device(Shared& s)
     uint32_t device_count = 0;
     vkEnumeratePhysicalDevices(s.instance, &device_count, nullptr);
     if (!device_count)
-        return false;
+        return fail();
     VkPhysicalDevice* devices = new VkPhysicalDevice[device_count];
     const VkResult enumerated = vkEnumeratePhysicalDevices(s.instance, &device_count, devices);
     if (enumerated == VK_SUCCESS && device_count)
         s.physical = devices[0];
     delete[] devices;
     if (enumerated != VK_SUCCESS || !device_count)
-        return false;
+        return fail();
 
     if (!compute_family(s.physical, &s.family))
-        return false;
+        return fail();
 
     const char* device_ext[] = { "VK_KHR_external_memory", "VK_KHR_external_memory_fd",
         "VK_KHR_dedicated_allocation" };
@@ -345,7 +356,9 @@ bool ensure_device(Shared& s)
     device_info.pQueueCreateInfos = &queue_info;
     device_info.enabledExtensionCount = 3;
     device_info.ppEnabledExtensionNames = device_ext;
-    return vkCreateDevice(s.physical, &device_info, nullptr, &s.device) == VK_SUCCESS;
+    if (vkCreateDevice(s.physical, &device_info, nullptr, &s.device) != VK_SUCCESS)
+        return fail();
+    return true;
 }
 
 // Shader and pipeline for one kernel and descriptor count, compiled once.

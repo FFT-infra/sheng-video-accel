@@ -747,9 +747,14 @@ bool EncoderSession::drain_locked(Clock::time_point limit)
         held_.reset();
     }
     if (!drain_sent_) {
-        drain_sent_ = true;
+        // The marker is one-shot and the firmware codes nothing after it, so
+        // the flag follows a STOP that the driver accepted. Marking it
+        // before the ioctl left a failed STOP (EBUSY while buffers were
+        // still queued) looking like a stream that had already drained, and
+        // every later wait sat on pictures that would never arrive.
         try {
             device_->encoder_command(V4L2_ENC_CMD_STOP);
+            drain_sent_ = true;
         } catch (const std::exception& error) {
             trace_("encode drain stop failed: %s", error.what());
         }
@@ -865,7 +870,9 @@ EncodeResult EncoderSession::wait_timeout(EncodeTicket ticket, uint64_t timeout_
             bool arrived = false;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (applied_.b_frames != 0 && !drain_sent_)
+                // A zero timeout is a poll, not a verdict. Draining here
+                // would end the stream on the first vaSyncBuffer(..., 0).
+                if (timeout_ns != 0 && applied_.b_frames != 0 && !drain_sent_)
                     arrived = drain_locked(Clock::now() + std::chrono::milliseconds(sync_timeout_ms()));
             }
             if (arrived)
