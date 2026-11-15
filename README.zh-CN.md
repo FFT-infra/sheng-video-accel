@@ -158,7 +158,7 @@ Debian 包请在 chroot（`sbuild`、`pbuilder`）里构建：`libgbm-dev` 绑�
 
 - **AV1 动态分辨率切换与浏览器选择**：驱动内部维护八槽 DPB，在 `vaEndPicture` 直接提交当前帧。同一 VA 上下文分辨率改变后，若客户端继续沿用旧 CAPTURE 几何导出表面，驱动检测到跨距不匹配时改用 GPU 拷贝发布，避免跨距错位。Chromium 152 播放本地文件默认走内置软件解码；Chrome 156 在线页面与 Firefox 158 已验证硬解。
 - **原版内核降级**：在缺少显示延迟控制或强制关键帧控制的内核上，解码降级为 GPU 拷贝，关键帧请求通过临时改动 intra period 实现。
-- **编码高级特性**：仅支持单图单切片结构。多切片、分块（Tiles）、B 帧及 ROI 配置直接返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。
+- **编码高级特性**：仅支持单图单切片结构。多切片、分块（Tiles）及 ROI 配置直接返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。B 帧需通过 `V4L2_VA_B_FRAMES` 显式开启，且仅限 H.264；客户端管线需至少保持三帧在途（FFmpeg：`-bf 1 -async_depth 3`）。
 - **封装头信息**：头信息声明为 `VA_ENC_PACKED_HEADER_NONE`，参数集随码流带内传输。
 
 ## 环境变量
@@ -172,6 +172,7 @@ Debian 包请在 chroot（`sbuild`、`pbuilder`）里构建：`libgbm-dev` 绑�
 | `V4L2_VA_COPY` | gpu | 拷贝引擎选择（`gpu` 或 `cpu`） |
 | `V4L2_VA_PUBLISH` | auto | 强制指定发布模式（`auto`、`direct`、`import`、`copy`） |
 | `V4L2_VA_VPP` | off | 启用 Vulkan 视频处理后端（`VAEntrypointVideoProc`：缩放、裁剪、旋转、镜像、位深转换、色调映射、多层合成） |
+| `V4L2_VA_B_FRAMES` | off | 启用 H.264 编码器的 B 帧；要求客户端管线保持三帧以上在途（FFmpeg：`-async_depth 3`） |
 | `V4L2_VA_DUMP` | off | 提交的码流单元转储目录路径 |
 
 > **提示（GStreamer）**：GStreamer 的 VA 插件（`libgstva`）默认按厂商白名单过滤驱动。若需注册本驱动的元素（如 `vaav1dec`），需设置环境变量 `GST_VA_ALL_DRIVERS=1`。驱动本身仍由 libva 自动通过 `msm_drv_video.so` 符号链接加载，无需配置 `LIBVA_*` 变量；`test/iris-gstreamer-gate.sh` 在目标机上验证这两种状态。

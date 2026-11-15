@@ -94,7 +94,13 @@ public:
             "10-bit encode is not supported", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
         require(sequence->seq_fields.bits.chroma_format_idc == 1, "4:2:0 encode is required",
             VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
-        require(sequence->ip_period <= 1, "B-frames are not supported", VA_STATUS_ERROR_INVALID_PARAMETER);
+        // VA counts ip_period as the distance between two references, so one
+        // B picture per P is ip_period 2. The encoder node takes at most one
+        // B picture (V4L2_CID_MPEG_VIDEO_B_FRAMES max), and it schedules the
+        // GOP itself from that single number.
+        const unsigned b_frames = sequence->ip_period > 1 ? sequence->ip_period - 1 : 0;
+        require(b_frames <= 1, "more than one B picture per P is not supported",
+            VA_STATUS_ERROR_UNIMPLEMENTED);
         require(sequence->pic_width_in_luma_samples > 0 && sequence->pic_height_in_luma_samples > 0,
             "HEVC coded size is not set", VA_STATUS_ERROR_INVALID_PARAMETER);
         // The firmware codes at the surface size rounded to 32. A client may
@@ -108,7 +114,12 @@ public:
 
         EncodeParams out;
         out.keyframe = params->pic_fields.bits.idr_pic_flag != 0;
+        out.b_frames = b_frames;
         out.reconstruction = params->decoded_curr_pic.picture_id;
+        // The firmware consumes pictures in display order; the client submits
+        // them in coding order. HEVC names the display position in the
+        // picture order count, which VA carries on the current picture.
+        out.display_order = params->decoded_curr_pic.pic_order_cnt;
         out.profile = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN;
         out.level = level_menu(sequence->general_level_idc);
         out.rate_mode = rate_mode_;
@@ -210,11 +221,16 @@ public:
             // parameters. Zero describes no slice at all, so it is refused.
             require(slice->slice_segment_address == 0 && slice->num_ctu_in_slice != 0,
                 "only one full-picture slice is supported", VA_STATUS_ERROR_UNIMPLEMENTED);
-            require(slice->slice_type == 2 || slice->slice_type == 1,
-                "only I and P slices are supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+            // HEVC slice types are B = 0, P = 1, I = 2.
+            const bool b_slice = slice->slice_type == 0;
+            require(slice->slice_type <= 2, "only I, P and B slices are supported",
+                VA_STATUS_ERROR_UNIMPLEMENTED);
+            require(!b_slice || b_frames != 0, "a B slice needs ip_period > 1",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
             require(!params->pic_fields.bits.idr_pic_flag || intra_slice(slice->slice_type),
                 "an IDR needs an I slice", VA_STATUS_ERROR_INVALID_PARAMETER);
             out.intra = intra_slice(slice->slice_type);
+            out.b_picture = b_slice;
             if (!out.intra) {
                 const VAPictureHEVC& ref = slice->ref_pic_list0[0];
                 const bool valid = ref.picture_id != VA_INVALID_SURFACE
@@ -222,6 +238,16 @@ public:
                 require(valid, "an inter picture needs a short-term reference",
                     VA_STATUS_ERROR_INVALID_PARAMETER);
                 out.reference = ref.picture_id;
+                if (b_slice) {
+                    const VAPictureHEVC& future = slice->ref_pic_list1[0];
+                    // No VA surface is 0, so a zero here is an entry the
+                    // client never filled in.
+                    require(future.picture_id != VA_INVALID_SURFACE && future.picture_id != 0
+                            && !(future.flags
+                                & (VA_PICTURE_HEVC_INVALID | VA_PICTURE_HEVC_LONG_TERM_REFERENCE)),
+                        "a B picture needs a future short-term reference",
+                        VA_STATUS_ERROR_INVALID_PARAMETER);
+                }
             }
             // A non-IDR intra picture (FFmpeg sends an HEVC CRA for its I
             // pictures) has no control behind it. Promote it to an IDR the
@@ -235,12 +261,18 @@ public:
             require(!params->pic_fields.bits.idr_pic_flag, "an IDR needs an I slice",
                 VA_STATUS_ERROR_INVALID_PARAMETER);
         }
-        require(params->pic_fields.bits.reference_pic_flag != 0,
+        // With one B per P nothing predicts from that B, so a client marks it
+        // non-reference. The firmware owns the structure and the flag does not
+        // reach it; a non-reference P picture would still promise a stream the
+        // firmware does not code, so only the B case is accepted.
+        require(params->pic_fields.bits.reference_pic_flag != 0 || out.b_picture,
             "non-reference pictures are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
         // The client's coding_type must agree with the slice it wrote: the
         // firmware derives the picture type from the slice, and a mismatch
-        // means the two buffers describe different pictures.
-        require(params->pic_fields.bits.coding_type == (out.intra ? 1u : 2u),
+        // means the two buffers describe different pictures. VA numbers the
+        // HEVC picture types I = 1, P = 2, B = 3.
+        require(params->pic_fields.bits.coding_type
+                == (out.intra ? 1u : (out.b_picture ? 3u : 2u)),
             "coding_type does not match the slice type", VA_STATUS_ERROR_INVALID_PARAMETER);
         // CBR names its target as the peak. VBR keeps the client's ceiling
         // when it gave one above the target; CQP has no rate control at all.

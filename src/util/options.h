@@ -32,6 +32,13 @@ struct Options {
     // VAEntrypointVideoProc). Off by default so a VPP-capable build does not
     // change the decode/encode surface any client already qualified against.
     bool vpp_enabled = false;
+    // Opt in to B pictures in the encoder (V4L2_CID_MPEG_VIDEO_B_FRAMES).
+    // Off by default: the firmware holds the newest queued picture until the
+    // picture after it is queued, so the client must keep three pictures in
+    // flight (FFmpeg: -async_depth 3) instead of its default two, or the
+    // session stalls at the first pair boundary. H.264 only; the firmware's
+    // HEVC path fails outright.
+    bool b_frames = false;
     // Directory to write each submitted access unit into; empty disables.
     std::string dump_dir;
 

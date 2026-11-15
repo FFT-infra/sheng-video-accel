@@ -28,11 +28,14 @@ second entrypoint, not a second product: it exists so FFmpeg's `h264_vaapi`
 and `hevc_vaapi` (and anything else that asks a VA display for an encode
 entrypoint) can use the VPU without a second display or a second driver.
 Scope: H.264 Constrained Baseline/Main/High and HEVC Main, CBR, VBR or CQP,
-NV12 input, Annex-B output, one picture in flight per context.
+NV12 input, Annex-B output, one reference picture in flight per context. B
+pictures are opt-in (`V4L2_VA_B_FRAMES`) and H.264 only; the session then
+queues pictures in display order and the client needs one more picture in
+flight than the default (invariant 10).
 
 Non-goals: being a generic backend for stateless request-API decoders (that
 is upstream `mxsrc/libva-v4l2`'s job and stays on `master`), VP9, AV1 and
-10-bit encode, ROI, multi-slice and tiles, `VAEntrypointEncSliceLP`,
+10-bit encode, HEVC B-frames, ROI, multi-slice and tiles, `VAEntrypointEncSliceLP`,
 and shipping a custom Chromium. (Video post-processing is supported via
 an opt-in Vulkan compute backend under `V4L2_VA_VPP`).
 
@@ -674,7 +677,7 @@ encode drain marker
 encode drain stop failed: <reason>
 encode drain failed: <reason>
 encode error completion index=<i> flags=<hex>
-encode completion timestamp=<n> expected=<n>
+encode completion timestamp=<n> matches no pending picture
 encode streamoff failed: <reason>
 encode release failed: <reason>
 encode control missing name=<control> id=<hex>        (optional control absent;
@@ -824,7 +827,14 @@ regenerated from the pinned modules and compared by `test/run-static-checks.sh`.
     serialised behind its own output wait. A payload larger than the
     buffer's capacity is `ENCODING_ERROR`, never a truncation. A submitted
     picture is never dropped: the drain resolves whatever is still
-    outstanding.
+    outstanding. With B pictures the session queues raw buffers in display
+    order, taken from the codec's picture order count, rather than in
+    submission order: VA clients submit in coding order and the firmware
+    codes the pictures it receives as a display sequence. A picture can
+    therefore be queued after a later-submitted one, and up to one picture
+    waits in the session for the display predecessor it has to follow. Its
+    ticket does not change, and a wait for a picture the session is still
+    holding queues it rather than waiting for a submit that will not come.
 11. An encode surface is input only. It never carries a decode target, and
     the session queues exactly one raw buffer per picture, so a picture
     cannot be encoded into a buffer that still holds the next one. The
@@ -856,7 +866,10 @@ regenerated from the pinned modules and compared by `test/run-static-checks.sh`.
     back before queueing it — restoring after the completion made the
     following picture an IDR as well. The lever is never skipped, because a
     driver-side guess at the firmware's own GOP schedule dropped requests.
-    `idr=1` in the trace is the request.
+    `idr=1` in the trace is the request. With B pictures the intra period is
+    first rounded down to a whole number of (P, B) groups (1 + n * (B + 1)):
+    the firmware's own IDR otherwise lands on a picture inside a pair, and
+    the stream is corrupt from that IDR on.
 15. An encode timestamp rises strictly: the session rate is fixed at
     configuration time and each picture advances by one frame duration. VA
     clients send the frame rate only with IDR pictures, and a timestamp

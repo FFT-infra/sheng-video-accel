@@ -238,7 +238,14 @@ void test_h264_rounding_and_rejections()
 
     sequence = h264_sequence();
     sequence.ip_period = 2;
-    check(throws([&] { encoder->translate(h264_input(sequence, picture)); }), "B-frames are rejected");
+    check(encoder->translate(h264_input(sequence, picture)).b_frames == 1,
+        "ip_period 2 asks the firmware for one B picture");
+
+    sequence = h264_sequence();
+    sequence.ip_period = 3;
+    check(status_of([&] { encoder->translate(h264_input(sequence, picture)); })
+            == VA_STATUS_ERROR_UNIMPLEMENTED,
+        "two B pictures per P are refused");
 
     sequence = h264_sequence();
     sequence.bit_depth_luma_minus8 = 2;
@@ -352,7 +359,13 @@ void test_hevc_translation()
 
     sequence = hevc_sequence();
     sequence.ip_period = 2;
-    check(throws([&] { encoder->translate(input); }), "HEVC B-frames are rejected");
+    check(encoder->translate(input).b_frames == 1,
+        "HEVC ip_period 2 asks the firmware for one B picture");
+
+    sequence = hevc_sequence();
+    sequence.ip_period = 3;
+    check(status_of([&] { encoder->translate(input); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
+        "HEVC two B pictures per P are refused");
 
     sequence = hevc_sequence();
     sequence.seq_fields.bits.bit_depth_luma_minus8 = 2;
@@ -565,13 +578,40 @@ void test_reference_and_slice_shape()
     check(status_of([&] { h264->translate(offset_picture); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
         "a slice that starts past macroblock zero is refused");
 
-    // A B slice is a picture the firmware cannot code here.
+    // A B slice in a sequence that asked for no B pictures is the client
+    // contradicting itself: the firmware would code the picture as the P its
+    // own GOP schedule says.
     VAEncSliceParameterBufferH264 b_slice = h264_slice(sequence, false);
     b_slice.slice_type = 6;
     EncodePicture b_picture = h264_input(sequence, picture);
     b_picture.slices = { &b_slice };
-    check(status_of([&] { h264->translate(b_picture); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
-        "a B slice is refused");
+    check(status_of([&] { h264->translate(b_picture); }) == VA_STATUS_ERROR_INVALID_PARAMETER,
+        "a B slice with ip_period 1 is refused");
+
+    // One B per P: the picture names a past and a future reference, is not a
+    // reference itself, and reports the count the firmware is given.
+    VAEncSequenceParameterBufferH264 b_sequence = h264_sequence();
+    b_sequence.ip_period = 2;
+    VAEncSliceParameterBufferH264 b_ok_slice = h264_slice(b_sequence, false, 0x4242);
+    b_ok_slice.slice_type = 6;
+    b_ok_slice.RefPicList1[0].picture_id = 0x5151;
+    b_ok_slice.RefPicList1[0].flags = VA_PICTURE_H264_SHORT_TERM_REFERENCE;
+    VAEncPictureParameterBufferH264 b_ok_picture = h264_picture();
+    b_ok_picture.pic_fields.bits.reference_pic_flag = 0;
+    EncodePicture b_ok = h264_input(b_sequence, b_ok_picture);
+    b_ok.slices = { &b_ok_slice };
+    const iris::EncodeParams b_ok_params = h264->translate(b_ok);
+    check(!b_ok_params.intra && b_ok_params.b_picture && b_ok_params.b_frames == 1
+            && b_ok_params.reference == 0x4242,
+        "a B picture reports its count, type and past reference");
+
+    // Without the future reference the picture is not a B picture at all.
+    VAEncSliceParameterBufferH264 b_no_future = h264_slice(b_sequence, false, 0x4242);
+    b_no_future.slice_type = 6;
+    EncodePicture b_missing = h264_input(b_sequence, b_ok_picture);
+    b_missing.slices = { &b_no_future };
+    check(status_of([&] { h264->translate(b_missing); }) == VA_STATUS_ERROR_INVALID_PARAMETER,
+        "a B picture without a future reference is refused");
 
     // An IDR flag with a P slice is the client contradicting itself.
     VAEncPictureParameterBufferH264 idr_p = h264_picture();
@@ -601,12 +641,31 @@ void test_reference_and_slice_shape()
     check(status_of([&] { hevc->translate(mismatch_input); }) == VA_STATUS_ERROR_INVALID_PARAMETER,
         "HEVC coding_type that disagrees with the slice is refused");
 
+    // A B slice with ip_period 1 contradicts the sequence, and a real B
+    // picture needs both reference lists and coding_type B (VA numbers the
+    // HEVC picture types I = 1, P = 2, B = 3).
     VAEncSliceParameterBufferHEVC b_hevc = hevc_slice(true);
     b_hevc.slice_type = 0; // B
     EncodePicture hb_input = hevc_input(hsequence, hevc_picture());
     hb_input.slices = { &b_hevc };
-    check(status_of([&] { hevc->translate(hb_input); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
-        "an HEVC B slice is refused");
+    check(status_of([&] { hevc->translate(hb_input); }) == VA_STATUS_ERROR_INVALID_PARAMETER,
+        "an HEVC B slice with ip_period 1 is refused");
+
+    VAEncSequenceParameterBufferHEVC hb_sequence = hevc_sequence();
+    hb_sequence.ip_period = 2;
+    VAEncSliceParameterBufferHEVC hb_ok_slice = hevc_slice(false, 0x4242);
+    hb_ok_slice.slice_type = 0; // B
+    hb_ok_slice.ref_pic_list1[0].picture_id = 0x5151;
+    hb_ok_slice.ref_pic_list1[0].flags = 0;
+    VAEncPictureParameterBufferHEVC hb_ok_picture = hevc_picture(false);
+    hb_ok_picture.pic_fields.bits.coding_type = 3; // B
+    hb_ok_picture.pic_fields.bits.reference_pic_flag = 0;
+    EncodePicture hb_ok = hevc_input(hb_sequence, hb_ok_picture, false);
+    hb_ok.slices = { &hb_ok_slice };
+    const iris::EncodeParams hb_ok_params = hevc->translate(hb_ok);
+    check(!hb_ok_params.intra && hb_ok_params.b_picture && hb_ok_params.b_frames == 1
+            && hb_ok_params.reference == 0x4242,
+        "an HEVC B picture reports its count, type and past reference");
 
     VAEncSliceParameterBufferHEVC partial_hevc = hevc_slice(true);
     partial_hevc.slice_segment_address = 1;

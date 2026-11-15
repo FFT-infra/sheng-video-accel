@@ -166,7 +166,7 @@ Imported DMA-BUF surfaces must match native CAPTURE layout (single linear object
 
 - **AV1 dynamic resolution change & browser selection**: The internal eight-slot DPB emits each picture at `vaEndPicture` without holding frames across access units. After an in-context resolution change, if a client continues exporting surfaces with the previous CAPTURE geometry, the driver falls back to GPU copy for those pictures to avoid pitch corruption. For local file playback, Chromium 152 chooses its built-in software AV1 decoder; hardware AV1 is verified on live Chrome 156 web pages and in Firefox 158.
 - **Stock kernel fallback**: On kernels without display-delay or sync-frame controls, decode degrades to GPU copy and requested IDRs are handled via intra-period repositioning.
-- **Encode features**: Single full-picture slice only. Multi-slice, tiles, B-frames, and ROI return `VA_STATUS_ERROR_UNIMPLEMENTED`.
+- **Encode features**: Single full-picture slice only. Multi-slice, tiles and ROI return `VA_STATUS_ERROR_UNIMPLEMENTED`. B pictures are opt-in with `V4L2_VA_B_FRAMES` and are H.264 only; they need a client pipeline of at least three pictures (FFmpeg: `-bf 1 -async_depth 3`).
 - **Packed headers**: Extradata emission reports `VA_ENC_PACKED_HEADER_NONE`. Parameter sets are carried in-band.
 
 ## Environment Variables
@@ -180,6 +180,7 @@ Imported DMA-BUF surfaces must match native CAPTURE layout (single linear object
 | `V4L2_VA_COPY` | gpu | Copy engine selection (`gpu` or `cpu`) |
 | `V4L2_VA_PUBLISH` | auto | Force publication mode (`auto`, `direct`, `import`, `copy`) |
 | `V4L2_VA_VPP` | off | Enable Vulkan video processing (`VAEntrypointVideoProc`: scale, crop, rotate, mirror, NV12/P010 conversion, tone map, overlay) |
+| `V4L2_VA_B_FRAMES` | off | Opt in to B pictures in the H.264 encoder; requires a client pipeline of three pictures or more (FFmpeg: `-async_depth 3`) |
 | `V4L2_VA_DUMP` | off | Directory path to dump submitted access units |
 
 > **Tip (GStreamer)**: The GStreamer VA plugin (`libgstva`) filters drivers by a vendor allowlist. To register elements with this driver (`vaav1dec`, etc.), set `GST_VA_ALL_DRIVERS=1`. Libva resolves the driver automatically via `msm_drv_video.so` without needing `LIBVA_*` variables; `test/iris-gstreamer-gate.sh` checks both states on the target.

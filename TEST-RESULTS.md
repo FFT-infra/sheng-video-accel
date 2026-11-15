@@ -8569,3 +8569,134 @@ performance section. The VP9 Import window is one 120-frame clip, not the
 published corpus. The soak was shortened to 120 s. The 4K lanes were run
 after the short soak had cooled the device; they are not thermal or power
 results.
+
+## B pictures in the H.264 encoder (2026-11-15)
+
+Target `sheng`, boot `fc7fda72-72c8-42eb-8503-3914dd2dd5aa`, kernel
+`7.2.6-sm8550-g42f3b40-iris1` (patches 0001-0004), decoder `/dev/video0` and
+encoder `/dev/video1` resolved by the QUERYCAP name `iris_driver`, FFmpeg
+8.1.3. Build-tree driver `946c527b…`, not the installed package. The clip is
+300 frames of 1280x720 `testsrc2` at 30 fps encoded to H.264 High at 4 Mbit/s
+VBR; every run uses the same command, `-bf 1 -g 60`, except where the table
+says otherwise.
+
+| run | setting | result |
+| --- | --- | --- |
+| gate | `V4L2_VA_B_FRAMES=1`, `-async_depth 3` | 300/300 pictures, `has_b_frames=1`, picture types `I B P B P B P B P B`, 45.057 dB mean PSNR against the source |
+| repeat of the gate | same | byte-identical stream |
+| client depth two | `V4L2_VA_B_FRAMES=1`, FFmpeg's default `-async_depth 2` | stops at the first pair: exit 251 after 62 issued pictures, the file holds 61 |
+| period not rounded | a build that passes `-g 60` to the control unchanged | stops the same way; the 61-picture file decodes with `co located POCs unavailable` at 23.01 dB |
+| gate off | `-bf 1` with `V4L2_VA_B_FRAMES` unset | 300/300 pictures, `has_b_frames=0`: the driver does not advertise `l1`, so FFmpeg clamps `-bf` away |
+| HEVC | `V4L2_VA_B_FRAMES=1`, `-c:v hevc_vaapi -bf 1 -async_depth 3` | 300/300 pictures, `has_b_frames=0`, the same clamp |
+
+The same clip without B pictures, same build and bitrate, measures 45.058 dB,
+so the B pictures cost no measurable quality here.
+
+Why the client depth matters: the firmware holds the newest queued picture
+until another picture arrives or the session drains, so the picture the client
+syncs is the one the firmware is still holding. With one B picture per P the
+default window of two leaves the session a picture short and the sync never
+completes; three pictures in flight is the smallest window that does.
+
+Why the period is rounded: the firmware's period with B pictures is an IDR
+plus a whole number of (P, B) groups, `1 + n * (b_frames + 1)`. With one B per
+P, a 60-picture period puts the firmware IDR between the two pictures of a
+client pair; the unrounded build stops at the first such boundary and what it
+had written decodes at 23 dB. `-g 60` is therefore programmed as 59.
+
+HEVC B pictures stay unadvertised. An experimental build that advertised
+`l1` for HEVC got nine pictures out of the firmware before an error completion
+(`flags=0x4041`); those nine decode at 22.7 dB. The shipped code advertises
+`l1` only for H.264, and `configure()` refuses B pictures as a backstop.
+
+What this does not prove: one clip, one rate-control mode and one firmware
+build. The quality bar is PSNR against the source, not a byte comparison; the
+encoder is lossy. Client behaviour beyond FFmpeg was not exercised.
+
+## H.264 720p decode throughput, this driver alone (2026-11-15)
+
+Same target and boot as above, driver `946c527b…` from the build tree. Clip:
+1800 frames of 1280x720 encoded by `libx264 -preset ultrafast -g 60 -bf 0`,
+decoded with `-hwaccel vaapi -hwaccel_output_format vaapi -f null`, no
+download. Every CPU policy pinned to its maximum (2016/2803/2956 MHz,
+`performance`) and `3d00000.gpu` pinned at 680 MHz for the duration, restored
+afterwards.
+
+| run | rate | client CPU |
+| --- | ---: | --- |
+| five rounds, shipped build | 930.2 / 939.5 / 936.0 / 935.6 / 935.1 fps | 0.34 s user, 0.23 s system per 1800 frames |
+| five rounds, `output_slots` 8 instead of 4 | 931.2 / 934.6 / 928.8 / 938.0 / 936.5 fps | 0.32-0.38 s user |
+
+The bitstream queue depth makes no difference within the run-to-run spread of
+about 1.3 %, so the default of four slots stays. A timing-instrumented build
+puts the median gap between access units at 0.98 ms and between completions at
+1.03 ms, against 1.07 ms of wall time per frame, so the session runs at the
+firmware's pace rather than on a userspace cost this measurement can separate
+from scheduling jitter. The figure above is the reference number for H.264
+720p decode on this target, alongside the HEVC sweep in `README.md`.
+
+## What B pictures buy in CQP and VBR (2026-11-15)
+
+Target `sheng`, kernel `7.2.6-sm8550-g42f3b40-iris1` (patches 0001-0004),
+FFmpeg 8.1.3, driver from the build tree in every run, not the installed
+package. Content: 300 frames of 1280x720 at 30 fps cut from a 25.7 Mbit/s
+intermediate of Big Buck Bunny, so the source is natural detail rather than
+synthetic noise. Each arm is one encode of that clip with `-g 60` (programmed
+as 59, see above) and `-async_depth 3`; the numbers are the bit rate over the
+300 pictures and PSNR/SSIM of the decoded pictures against the source.
+
+The before column is driver `946c527b…`, which advertised `l1` and left the B
+QP control alone. The after column is `dfb0f516…`, which sets it. The two
+bf=0 columns are identical in every arm, which is the point: the new control
+is inert when B pictures are off, and those arms also reproduced the earlier
+boot's figures bit-for-bit. The VBR bf=1 pairs are unchanged for the same kind
+of reason: the two drivers differ only in that control, and with rate control
+on the firmware does not consult per-picture QPs.
+
+| arm | before bf=0 | before bf=1 | after bf=0 | after bf=1 |
+| --- | --- | --- | --- | --- |
+| CQP 26, kbit/s | 4593.3 | 15511.0 | 4593.3 | 3652.6 |
+| CQP 26, PSNR / SSIM | 37.26 / 0.940753 | 38.87 / 0.957305 | 37.26 / 0.940753 | 37.25 / 0.942132 |
+| CQP 30, kbit/s | 2174.0 | 19245.3 | 2174.0 | 1911.6 |
+| CQP 30, PSNR / SSIM | 34.68 / 0.902505 | 36.91 / 0.938941 | 34.68 / 0.902505 | 34.78 / 0.905728 |
+| VBR 1500k, kbit/s | 1477.3 | 1622.7 | 1477.3 | 1622.7 |
+| VBR 1500k, PSNR / SSIM | 33.15 / 0.883485 | 33.69 / 0.896269 | 33.15 / 0.883485 | 33.69 / 0.896269 |
+| VBR 3000k, kbit/s | 2981.0 | 3156.1 | 2981.0 | 3156.1 |
+| VBR 3000k, PSNR / SSIM | 35.55 / 0.927111 | 36.17 / 0.936301 | 35.55 / 0.927111 | 36.17 / 0.936301 |
+
+libx264 at `-preset medium` on the same source, as the bound the content can
+reward at all:
+
+| arm | bf=0 | bf=1 |
+| --- | --- | --- |
+| CQP 26, kbit/s | 4491.3 | 3285.9 |
+| CQP 26, PSNR / SSIM | 38.50 / 0.955159 | 38.57 / 0.956735 |
+| CQP 30, kbit/s | 2086.7 | 1707.3 |
+| CQP 30, PSNR / SSIM | 35.84 / 0.923775 | 36.02 / 0.927561 |
+
+Read the CQP rows as the comparison that isolates the feature: with rate
+control holding QP, B pictures buy bitrate at the same quality. At QP 26 the
+encoder drops from 4593.3 to 3652.6 kbit/s at 37.26 against 37.25 dB and a
+higher SSIM, 20.5 % less data; at QP 30 it drops 12.1 % and gains 0.10 dB;
+libx264 saves 26.8 % and 18.2 % on the same arms. VBR instead spends the
+target it is given: at 1500k the output rises 9.8 % in rate for 0.54 dB, at
+3000k 5.9 % for 0.62 dB.
+
+The before column is the reason this measurement exists. The kernel's
+`V4L2_CID_MPEG_VIDEO_H264_B_FRAME_QP` has its own default, QP 20, and is not
+derived from the I and P controls. `set_frame_qp()` set only those two, so a
+CQP session with B pictures coded them at QP 20 whatever the client asked
+for, and the rate more than tripled at QP 26 and grew almost ninefold at QP
+30. The fix sets the B control too; the code comment records both rows.
+
+What this does not prove: one clip, one resolution, one firmware build, and
+PSNR/SSIM against a lossy source. The libx264 numbers are a reference for
+what this content offers, not a claim that the two encoders are compared
+under identical tuning; libx264 at both QPs also sits above the firmware on
+quality, which B pictures do not close.
+
+The gate above was run again on the shipped driver, `dfb0f516…`, boot
+`3d667b4c-60b4-4f8c-95bf-d70fefb966e2`, same kernel, encoder `/dev/video2`:
+300/300 pictures at 45.057333 dB with `I B P B P B P B P B`, the repeat
+byte-identical, the depth-two client still stops at 61 pictures with rc 251,
+and the gate-off and HEVC arms still report `has_b_frames=0`.

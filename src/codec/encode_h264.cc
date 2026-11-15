@@ -72,6 +72,11 @@ bool p_slice(uint8_t slice_type)
     return slice_type % 5 == 0;
 }
 
+bool b_slice(uint8_t slice_type)
+{
+    return slice_type % 5 == 1;
+}
+
 int profile_menu(VAProfile profile)
 {
     switch (profile) {
@@ -154,19 +159,28 @@ public:
             "10-bit encode is not supported", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
         require(sequence->seq_fields.bits.chroma_format_idc == 1, "4:2:0 encode is required",
             VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
-        // One picture in, one picture out: a delayed B picture would break
-        // the synchronous transaction and misorder presentation.
-        require(sequence->ip_period <= 1, "B-frames are not supported", VA_STATUS_ERROR_INVALID_PARAMETER);
+        // VA counts ip_period as the distance between two references, so one
+        // B picture per P is ip_period 2. The encoder node takes at most one
+        // B picture (V4L2_CID_MPEG_VIDEO_B_FRAMES max), and it schedules the
+        // GOP itself from that single number.
+        const unsigned b_frames = sequence->ip_period > 1 ? sequence->ip_period - 1 : 0;
+        require(b_frames <= 1, "more than one B picture per P is not supported",
+            VA_STATUS_ERROR_UNIMPLEMENTED);
 
         EncodeParams out;
         out.profile = profile_menu(profile_);
         out.level = level_menu(sequence->level_idc);
+        out.b_frames = b_frames;
         out.rate_mode = rate_mode_;
         out.bitrate = sequence->bits_per_second;
         out.gop_size = sequence->intra_period;
         out.cabac = params->pic_fields.bits.entropy_coding_mode_flag != 0;
         out.keyframe = params->pic_fields.bits.idr_pic_flag != 0;
         out.reconstruction = params->CurrPic.picture_id;
+        // The firmware consumes pictures in display order; the client submits
+        // them in coding order. H.264 names the display position in the
+        // picture order count, which VA carries on the current picture.
+        out.display_order = params->CurrPic.TopFieldOrderCnt;
 
         if (const auto* rate = static_cast<const VAEncMiscParameterRateControl*>(
                 find_misc(picture.misc, VAEncMiscParameterTypeRateControl))) {
@@ -249,13 +263,17 @@ public:
                     && slice->num_macroblocks
                         == unsigned(sequence->picture_width_in_mbs) * sequence->picture_height_in_mbs,
                 "only one full-picture slice is supported", VA_STATUS_ERROR_UNIMPLEMENTED);
-            require(intra_slice(slice->slice_type) || p_slice(slice->slice_type),
-                "only I and P slices are supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+            require(intra_slice(slice->slice_type) || p_slice(slice->slice_type)
+                    || b_slice(slice->slice_type),
+                "only I, P and B slices are supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+            require(!b_slice(slice->slice_type) || b_frames != 0,
+                "a B slice needs ip_period > 1", VA_STATUS_ERROR_INVALID_PARAMETER);
             require(!params->pic_fields.bits.idr_pic_flag || intra_slice(slice->slice_type),
                 "an IDR needs an I slice", VA_STATUS_ERROR_INVALID_PARAMETER);
             out.intra = intra_slice(slice->slice_type);
+            out.b_picture = b_slice(slice->slice_type);
             // An intra picture needs no reference; an inter picture must name
-            // the one the session knows about.
+            // its past reference, and a B picture also its future one.
             if (!out.intra) {
                 const VAPictureH264& ref = slice->RefPicList0[0];
                 const bool valid = ref.picture_id != VA_INVALID_SURFACE
@@ -263,6 +281,16 @@ public:
                 require(valid, "an inter picture needs a short-term reference",
                     VA_STATUS_ERROR_INVALID_PARAMETER);
                 out.reference = ref.picture_id;
+                if (out.b_picture) {
+                    const VAPictureH264& future = slice->RefPicList1[0];
+                    // No VA surface is 0, so a zero here is an entry the
+                    // client never filled in.
+                    require(future.picture_id != VA_INVALID_SURFACE && future.picture_id != 0
+                            && !(future.flags
+                                & (VA_PICTURE_H264_INVALID | VA_PICTURE_H264_LONG_TERM_REFERENCE)),
+                        "a B picture needs a future short-term reference",
+                        VA_STATUS_ERROR_INVALID_PARAMETER);
+                }
             }
             // A non-IDR intra picture is a request the firmware cannot take
             // literally: Iris has only FORCE_KEY_FRAME, which emits an IDR.
@@ -280,7 +308,11 @@ public:
             require(!params->pic_fields.bits.idr_pic_flag, "an IDR needs an I slice",
                 VA_STATUS_ERROR_INVALID_PARAMETER);
         }
-        require(params->pic_fields.bits.reference_pic_flag != 0,
+        // With one B per P nothing predicts from that B, so a client marks it
+        // non-reference. The firmware owns the structure and the flag does not
+        // reach it; a non-reference P picture would still promise a stream the
+        // firmware does not code, so only the B case is accepted.
+        require(params->pic_fields.bits.reference_pic_flag != 0 || out.b_picture,
             "non-reference pictures are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
         // CBR names its target as the peak. VBR keeps the client's ceiling
         // when it gave one above the target; CQP has no rate control at all.

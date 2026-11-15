@@ -109,13 +109,18 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
             attributes[i].value = encode ? (VA_RC_CBR | VA_RC_VBR | VA_RC_CQP) : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribEncMaxRefFrames:
-            // l0 in the low 16 bits, l1 in the high half. One L0 reference,
-            // none ahead of the current picture: the firmware keeps the
-            // previous reconstructed frame and nothing else, which is why
-            // the encoder refuses num_ref_idx_l0_active_minus1 != 0 and
-            // there are no B-frames. Advertising 2 here would promise a
-            // second reference the picture parameters cannot ask for.
-            attributes[i].value = encode ? 1 : VA_ATTRIB_NOT_SUPPORTED;
+            // l0 in the low 16 bits, l1 in the high half. One reference in
+            // the past; a future one only for an opted-in H.264 encode,
+            // where it is what makes a client offer ip_period 2. A client
+            // that sees l1 = 0 turns B pictures off, which is the shape this
+            // driver's default client can drive: the firmware holds each
+            // queued picture until the next one arrives, so B pictures need
+            // a client pipeline one picture deeper than FFmpeg's default.
+            // More than one reference per list stays refused; the picture
+            // parameters cannot ask for it.
+            attributes[i].value = encode
+                ? (1u | (d.options.b_frames && !hevc_encode ? (1u << 16) : 0u))
+                : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribEncPackedHeaders:
             // NONE, not NOT_SUPPORTED. The firmware writes SPS/PPS itself, so

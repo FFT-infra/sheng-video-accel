@@ -61,6 +61,22 @@ struct EncodeParams {
     // The picture's slice is intra-coded (H.264 I slice, HEVC I slice). The
     // session refuses to start a stream on anything else.
     bool intra = false;
+    // B pictures the client asked for between two references, from VA's
+    // ip_period (one B picture is ip_period 2). The encoder node takes 0 or
+    // 1. The firmware owns the GOP schedule once this is set, so it decides
+    // which pictures are B and in what order they are coded; the client's
+    // reference lists describe the same structure but nothing in the node
+    // carries them. The count is a per-context control, fixed at configure().
+    unsigned b_frames = 0;
+    // This picture's slice is B-coded. Only reachable when b_frames is set.
+    bool b_picture = false;
+    // Where this picture sits in display order, from the codec's picture
+    // order count (H.264 CurrPic's field order counts, HEVC pic_order_cnt).
+    // VA clients submit in coding order, the firmware consumes display
+    // order, so the session uses this to put each picture in its slot. A
+    // client that never fills it in sends 0 for every picture, which the
+    // session reads as submission order.
+    int32_t display_order = 0;
     // VA surface ids from the client's picture buffer: the reconstruction
     // surface this picture will occupy, and the picture it predicts from.
     // The session enforces the one-reference contract with them. 0 is the

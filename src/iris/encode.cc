@@ -50,6 +50,22 @@ int32_t gop_control(uint32_t intra_period)
     return static_cast<int32_t>(intra_period ? intra_period - 1 : 0);
 }
 
+// The firmware's period with B pictures is an IDR plus a whole number of
+// (P, B, ...) groups: 1 + n * (b_frames + 1). A period that leaves a partial
+// group puts the firmware's IDR on a picture the client placed inside a pair,
+// and the stream never recovers after it: with one B per P, an even period
+// broke at the first IDR (each decoded picture ~23 dB against the source)
+// while an odd one stayed at 45 dB across every boundary. Round the client's
+// request down to the nearest whole group; a client that asks for 60 gets a
+// 59-picture GOP.
+uint32_t aligned_intra_period(const EncodeParams& params)
+{
+    if (params.b_frames == 0 || params.gop_size == 0)
+        return params.gop_size;
+    const uint32_t group = params.b_frames + 1;
+    return 1 + ((params.gop_size - 1) / group) * group;
+}
+
 const char* rate_mode_name(RateMode mode)
 {
     switch (mode) {
@@ -111,6 +127,17 @@ void EncoderSession::configure(
     const bool h264 = config_.codec == V4L2_PIX_FMT_H264;
     const bool hevc = config_.codec == V4L2_PIX_FMT_HEVC;
     require(h264 || hevc, "encoder codec", VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
+    // B pictures are opt-in and H.264 only. The firmware holds the newest
+    // queued picture until another arrives, so a client that syncs the
+    // picture it just issued must keep one more picture in flight than the
+    // default; a client that does not stalls at the first pair boundary for
+    // its sync timeout. FFmpeg reaches that shape with -async_depth 3. Its
+    // HEVC path additionally fails in the firmware itself, so it is refused
+    // where it would otherwise produce a broken stream.
+    require(!params.b_frames || options_.b_frames, "B pictures are not enabled",
+        VA_STATUS_ERROR_UNIMPLEMENTED);
+    require(!params.b_frames || h264, "B pictures are not supported for HEVC",
+        VA_STATUS_ERROR_UNIMPLEMENTED);
     require(width && height, "encoder geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
     // The context is the client's upper bound. A larger surface would need a
     // reconfigure, and the encoder has no SOURCE_CHANGE.
@@ -157,7 +184,8 @@ void EncoderSession::configure(
     require(!cqp || params.qp >= 1, "CQP needs a picture QP", VA_STATUS_ERROR_INVALID_PARAMETER);
     set_control(V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE, cqp ? 0 : 1, "frame rc enable");
     if (cqp) {
-        // Rate control off: the I/P QP controls decide every picture.
+        // Rate control off: the per-picture-type QP controls decide every
+        // picture, including the B control the firmware does not derive.
         set_frame_qp(params.qp);
     } else {
         set_control(V4L2_CID_MPEG_VIDEO_BITRATE_MODE, bitrate_mode(params.rate_mode), "bitrate mode");
@@ -173,8 +201,12 @@ void EncoderSession::configure(
         if (peak)
             set_control(V4L2_CID_MPEG_VIDEO_BITRATE_PEAK, static_cast<int32_t>(peak), "peak bitrate");
     }
-    set_control(V4L2_CID_MPEG_VIDEO_B_FRAMES, 0, "b frames");
-    set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, gop_control(params.gop_size), "gop size");
+    // The firmware schedules the GOP from this one number: it decides which
+    // pictures are B and in what order they are coded. It has no per-buffer
+    // picture-type control, so the client's slice and reference lists are
+    // checked for consistency but do not reach the kernel.
+    set_control(V4L2_CID_MPEG_VIDEO_B_FRAMES, static_cast<int32_t>(params.b_frames), "b frames");
+    set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, gop_control(aligned_intra_period(params)), "gop size");
     if (params.min_qp >= 0)
         set_control(h264 ? V4L2_CID_MPEG_VIDEO_H264_MIN_QP : V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP, params.min_qp,
             "min qp");
@@ -202,6 +234,7 @@ void EncoderSession::configure(
     prepare_ = std::move(prepare);
     rate_num_ = params.frame_rate_num ? params.frame_rate_num : 30;
     rate_den_ = params.frame_rate_den ? params.frame_rate_den : 1;
+    frame_us_ = std::max<uint64_t>(1, 1000000ull * rate_den_ / rate_num_);
     device_->set_frame_rate(Queue::Capture, rate_num_, rate_den_);
     device_->set_frame_rate(Queue::Output, rate_num_, rate_den_);
 
@@ -278,6 +311,13 @@ void EncoderSession::set_frame_qp(int qp)
         "i-frame qp");
     set_control(h264 ? V4L2_CID_MPEG_VIDEO_H264_P_FRAME_QP : V4L2_CID_MPEG_VIDEO_HEVC_P_FRAME_QP, qp,
         "p-frame qp");
+    // The B control has a default of its own (QP 20 on this kernel) and is
+    // not derived from the other two. Left alone, a CQP session with B
+    // pictures codes them at that default whatever the client asked for: at
+    // QP 26 that measured 15.5 Mbit/s against 4.6, and at QP 30 19.2 against
+    // 2.2. Inert while B pictures are off.
+    if (h264)
+        set_control(V4L2_CID_MPEG_VIDEO_H264_B_FRAME_QP, qp, "b-frame qp");
 }
 
 void EncoderSession::configure_deblocking(const EncodeParams& params)
@@ -345,6 +385,11 @@ void EncoderSession::apply_dynamic(const EncodeParams& params)
     require(params.deblock_mode == applied_.deblock_mode && params.deblock_alpha == applied_.deblock_alpha
             && params.deblock_beta == applied_.deblock_beta,
         "changing deblocking requires a new context", VA_STATUS_ERROR_UNIMPLEMENTED);
+    // The B count is a per-context control too, and changing it mid-GOP
+    // would make the firmware's schedule disagree with the pictures already
+    // coded against the old one.
+    require(params.b_frames == applied_.b_frames,
+        "changing the B picture count requires a new context", VA_STATUS_ERROR_UNIMPLEMENTED);
     if (params.rate_mode == RateMode::Cqp && params.qp != applied_.qp) {
         set_frame_qp(params.qp);
         applied_.qp = params.qp;
@@ -361,7 +406,7 @@ void EncoderSession::apply_dynamic(const EncodeParams& params)
         applied_.peak_bitrate = peak;
     }
     if (params.gop_size != applied_.gop_size) {
-        set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, gop_control(params.gop_size), "gop size");
+        set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, gop_control(aligned_intra_period(params)), "gop size");
         applied_.gop_size = params.gop_size;
     }
 }
@@ -445,8 +490,8 @@ EncodeTicket EncoderSession::submit(int dmabuf_fd, unsigned dmabuf_length, const
 
     std::lock_guard<std::mutex> lock(mutex_);
     require(configured_ && !finished_, "encoder is not streaming", VA_STATUS_ERROR_OPERATION_FAILED);
+    require(!drain_sent_, "the encoder has been drained", VA_STATUS_ERROR_OPERATION_FAILED);
     require(healthy_, "encoder is in a failed state", VA_STATUS_ERROR_ENCODING_ERROR);
-    apply_dynamic(params);
 
     // The encoder node has no source-change and no way to code against a
     // reference it was not given, so the stream has to start on an intra
@@ -455,7 +500,13 @@ EncodeTicket EncoderSession::submit(int dmabuf_fd, unsigned dmabuf_length, const
     // only the session knows what it already submitted.
     require(params.intra || last_reconstruction_ != 0, "the encoder must start with an intra picture",
         VA_STATUS_ERROR_INVALID_PARAMETER);
-    if (!params.intra) {
+    // Without B pictures the driver is the only thing keeping the reference
+    // structure legal, and it holds the one reference it just coded. With
+    // them the firmware schedules the GOP, a B picture's past reference is
+    // two pictures back, and the client's lists describe a structure the
+    // node never receives; the codec layer still requires a valid past
+    // reference (and a future one for B), but not this identity.
+    if (!params.intra && params.b_frames == 0) {
         require(params.reference != 0 && params.reference == last_reconstruction_,
             "an inter picture must reference the previous picture", VA_STATUS_ERROR_UNIMPLEMENTED);
     }
@@ -481,14 +532,65 @@ EncodeTicket EncoderSession::submit(int dmabuf_fd, unsigned dmabuf_length, const
     // wedged the session right after each GOP boundary at every rate but the
     // 30 fps fallback. The session rate is fixed in configure(), so this sum
     // only ever rises.
-    const uint64_t frame_us = std::max<uint64_t>(1, 1000000ull * rate_den_ / rate_num_);
-    timestamp_us_ += frame_us;
+    timestamp_us_ += frame_us_;
     const uint64_t timestamp_us = timestamp_us_;
+    issued_us_ = timestamp_us;
 
+    // The client's order is relative to the newest IDR, so put it on a
+    // session-wide scale before comparing pictures with it. A keyframe is the
+    // next picture in display order after everything already submitted, which
+    // is exactly the anchor the client's count restarts from.
+    if (params.keyframe)
+        poc_base_ = last_display_ + 1 - params.display_order;
+    const int64_t display = params.display_order + poc_base_;
+    if (display > last_display_)
+        last_display_ = display;
+
+    Pending submitted;
+    submitted.ticket.timestamp_us = timestamp_us;
+    submitted.params = params;
+    submitted.params.display_order = static_cast<int32_t>(display);
+    submitted.force_idr = force_idr;
+    submitted.dmabuf_fd = dmabuf_fd;
+    submitted.dmabuf_length = dmabuf_length;
+
+    if (applied_.b_frames == 0) {
+        queue_pending(submitted);
+        pending_.push_back(std::move(submitted));
+    } else if (!held_) {
+        // Nothing older can follow the first picture of a session.
+        held_ = std::move(submitted);
+    } else if (submitted.params.display_order < held_->params.display_order) {
+        // A B picture for a frame the future reference skipped over: it is
+        // the older of the two and goes first.
+        queue_pending(submitted);
+        pending_.push_back(std::move(submitted));
+        queue_pending(*held_);
+        pending_.push_back(std::move(*held_));
+        held_.reset();
+    } else {
+        queue_pending(*held_);
+        pending_.push_back(std::move(*held_));
+        held_ = std::move(submitted);
+    }
+    // The next inter picture may predict from this one.
+    last_reconstruction_ = params.reconstruction;
+    return EncodeTicket { timestamp_us };
+}
+
+void EncoderSession::queue_pending(Pending& picture)
+{
+    // Called with mutex_ held, in queue order. Every per-picture control is
+    // written here rather than in submit(): with B pictures the queue order
+    // is not the submission order, and a QP or a rate written at submission
+    // time would land on the wrong picture.
+    apply_dynamic(picture.params);
     const Clock::time_point limit = deadline();
     take_output_slot(limit);
     const unsigned index = free_output_.front();
     free_output_.pop_front();
+    const bool force_idr = picture.force_idr;
+    const EncodeParams& params = picture.params;
     // Both intra-period writes happen after take_output_slot(), which can
     // throw when no input slot comes back: pulling the lever before it would
     // leave the session coding intra-only after a stall.
@@ -499,24 +601,18 @@ EncodeTicket EncoderSession::submit(int dmabuf_fd, unsigned dmabuf_length, const
     // boundary from the period it sees, so restoring afterwards made the
     // picture after a requested one an IDR as well.
     if (force_idr && !sync_frame_control_)
-        set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, gop_control(params.gop_size), "gop size");
+        set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, gop_control(aligned_intra_period(params)), "gop size");
     // The direct request. The kernel takes it as a one-shot on the next
     // picture, so it needs no restore.
     if (force_idr && sync_frame_control_)
         set_control(V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME, 0, "force key frame");
+    queue_us_ += frame_us_;
+    picture.queue_us = queue_us_;
+    queued_tickets_[picture.queue_us] = picture.ticket.timestamp_us;
     // bytesused must be non-zero: vb2 rejects a zero-length raw buffer and
     // poisons the instance.
-    device_->queue_buffer_dmabuf(Queue::Output, index, dmabuf_fd, dmabuf_length, dmabuf_length, timestamp_us, 0);
-
-    Pending submitted;
-    submitted.ticket.timestamp_us = timestamp_us;
-    submitted.params = params;
-    submitted.force_idr = force_idr;
-    issued_us_ = timestamp_us;
-    // The next inter picture may predict from this one.
-    last_reconstruction_ = params.reconstruction;
-    pending_.push_back(std::move(submitted));
-    return pending_.back().ticket;
+    device_->queue_buffer_dmabuf(Queue::Output, index, picture.dmabuf_fd, picture.dmabuf_length,
+        picture.dmabuf_length, picture.queue_us, 0);
 }
 
 bool EncoderSession::complete_one()
@@ -565,20 +661,27 @@ bool EncoderSession::complete_one()
         healthy_ = false;
         throw Error(VA_STATUS_ERROR_ENCODING_ERROR, "encoder completed a picture that was never submitted");
     }
-    // The firmware echoes the submitted timestamp into the access unit. A
-    // mismatch means this completion is not the oldest picture's, and storing
-    // it would shift every later ticket; a zero means the kernel did not echo
-    // one, and the submission order is all there is to go on.
-    if (done->timestamp_us != 0 && done->timestamp_us != pending_.front().ticket.timestamp_us) {
-        healthy_ = false;
-        trace_("encode completion timestamp=%llu expected=%llu",
-            static_cast<unsigned long long>(done->timestamp_us),
-            static_cast<unsigned long long>(pending_.front().ticket.timestamp_us));
-        throw Error(VA_STATUS_ERROR_ENCODING_ERROR, "encoder completed a picture out of order");
+    // The firmware echoes the submitted timestamp into the access unit.
+    // Without B pictures it answers in submission order, so the echo names
+    // the oldest pending picture. With them it answers in display order: the
+    // future reference was submitted ahead of its B picture, and the B comes
+    // back first. Match the echo rather than the queue position. A zero echo
+    // means the kernel carries no timestamp and submission order is all
+    // there is to go on, which is the in-order case.
+    auto picture_it = pending_.begin();
+    if (done->timestamp_us != 0) {
+        picture_it = std::find_if(pending_.begin(), pending_.end(),
+            [&](const Pending& p) { return p.queue_us == done->timestamp_us; });
+        if (picture_it == pending_.end()) {
+            healthy_ = false;
+            trace_("encode completion timestamp=%llu matches no pending picture",
+                static_cast<unsigned long long>(done->timestamp_us));
+            throw Error(VA_STATUS_ERROR_ENCODING_ERROR, "encoder completed a picture that was never queued");
+        }
     }
 
-    Pending picture = std::move(pending_.front());
-    pending_.pop_front();
+    Pending picture = std::move(*picture_it);
+    pending_.erase(picture_it);
     EncodeResult result;
     result.bytes.assign(slot.mapping + done->data_offset, slot.mapping + done->bytesused);
     // A requested IDR came from the intra period, not from the firmware's own
@@ -602,6 +705,80 @@ bool EncoderSession::complete_one()
     return true;
 }
 
+void EncoderSession::flush_successor(EncodeTicket ticket)
+{
+    // Called with mutex_ held. A wait never returns empty-handed, so a picture
+    // the session is holding back has to be queued in two cases. The client
+    // may be waiting for that picture itself: FFmpeg syncs the access unit of
+    // the picture it just issued, and a held picture would then wait for a
+    // submit that never comes. Or it may be waiting for the picture's
+    // display-order predecessor, which the firmware cannot code without the
+    // successor in its queue. With one B picture per P those two are the only
+    // pairings that occur.
+    if (!held_)
+        return;
+    if (held_->ticket.timestamp_us == ticket.timestamp_us) {
+        queue_pending(*held_);
+        pending_.push_back(std::move(*held_));
+        held_.reset();
+        return;
+    }
+    const auto it = std::find_if(pending_.begin(), pending_.end(),
+        [&](const Pending& picture) { return picture.ticket.timestamp_us == ticket.timestamp_us; });
+    if (it == pending_.end() || it->params.display_order + 1 != held_->params.display_order)
+        return;
+    queue_pending(*held_);
+    pending_.push_back(std::move(*held_));
+    held_.reset();
+}
+
+bool EncoderSession::drain_locked(Clock::time_point limit)
+{
+    // Called with mutex_ held. STOP puts the drain marker on the raw port and
+    // the firmware returns the pictures it still holds, the last one marked.
+    // It is not repeatable: after it the firmware codes nothing else.
+    //
+    // A picture still waiting in held_ has not been queued at all; it is the
+    // last one submitted, so it is also the last in display order. Queue it
+    // before the marker or the firmware never sees it.
+    if (held_) {
+        queue_pending(*held_);
+        pending_.push_back(std::move(*held_));
+        held_.reset();
+    }
+    if (!drain_sent_) {
+        drain_sent_ = true;
+        try {
+            device_->encoder_command(V4L2_ENC_CMD_STOP);
+        } catch (const std::exception& error) {
+            trace_("encode drain stop failed: %s", error.what());
+        }
+    }
+    bool arrived = false;
+    while (!pending_.empty()) {
+        if (complete_one()) {
+            arrived = true;
+            continue;
+        }
+        if (Clock::now() >= limit)
+            break;
+        // Complete outside the lock, the way wait() does: the firmware needs
+        // time, and holding mutex_ across poll() would block the thread that
+        // submitted.
+        mutex_.unlock();
+        try {
+            device_->poll(POLLIN | POLLPRI, kPollMs);
+        } catch (...) {
+            // The enclosing lock_guard still owns mutex_: re-lock before
+            // unwinding, or its destructor would unlock an unlocked mutex.
+            mutex_.lock();
+            throw;
+        }
+        mutex_.lock();
+    }
+    return arrived;
+}
+
 void EncoderSession::pump_output()
 {
     // Called with mutex_ held. A freed input slot is usable again even while
@@ -611,7 +788,20 @@ void EncoderSession::pump_output()
         free_output_.push_back(output->index);
         if (!output->timestamp_us)
             continue;
-        input_released_.insert(output->timestamp_us);
+        // The kernel echoes the queue stamp, which is not the ticket when B
+        // pictures reorder the queue. The picture is still in pending_ at
+        // this point: the output is released before its access unit exists.
+        uint64_t ticket = 0;
+        for (const Pending& picture : pending_)
+            if (picture.queue_us == output->timestamp_us)
+                ticket = picture.ticket.timestamp_us;
+        if (!ticket) {
+            const auto it = queued_tickets_.find(output->timestamp_us);
+            if (it != queued_tickets_.end())
+                ticket = it->second;
+        }
+        if (ticket)
+            input_released_.insert(ticket);
         // A client that never syncs its input surfaces never drains this
         // set. Keep it bounded; an answer dropped here is recovered from
         // completed_/claimed, or by waiting for the access unit.
@@ -659,8 +849,29 @@ EncodeResult EncoderSession::wait_timeout(EncodeTicket ticket, uint64_t timeout_
                 claim(ticket);
                 return result;
             }
+            // The firmware codes in display order and holds the newest queued
+            // picture until its successor arrives. When the client is waiting
+            // for the earlier half of a pair, that successor is the one
+            // sitting in held_: neither completes until it is queued.
+            flush_successor(ticket);
         }
-        require(Clock::now() < limit, "encoder produced no access unit", VA_STATUS_ERROR_TIMEDOUT);
+        if (Clock::now() >= limit) {
+            // With B pictures the firmware keeps the last picture until it is
+            // told there is no more input. VA has no end-of-stream call, and
+            // a VAAPI client waits for its tail before it destroys the
+            // context, so a wait that outlives the session bound is the only
+            // signal the driver gets. Drain and take what arrives; a session
+            // that drains this way refuses further pictures.
+            bool arrived = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (applied_.b_frames != 0 && !drain_sent_)
+                    arrived = drain_locked(Clock::now() + std::chrono::milliseconds(sync_timeout_ms()));
+            }
+            if (arrived)
+                continue;
+            throw Error(VA_STATUS_ERROR_TIMEDOUT, "encoder produced no access unit");
+        }
         device_->poll(POLLIN | POLLPRI, kPollMs);
     }
 }
@@ -689,6 +900,7 @@ void EncoderSession::wait_input(EncodeTicket ticket)
             // No input completion yet: one coded completion is the wait the
             // client would otherwise do through the coded buffer.
             complete_one();
+            flush_successor(ticket);
             if (settled())
                 return;
         }
@@ -699,20 +911,43 @@ void EncoderSession::wait_input(EncodeTicket ticket)
 
 void EncoderSession::claim(EncodeTicket ticket)
 {
-    claimed_us_ = std::max(claimed_us_, ticket.timestamp_us);
+    // A claim that leaves an older picture pending is a B picture that came
+    // back before its future reference; the watermark would then mark that
+    // reference answered and wait() would hand its holder an empty result.
+    const bool jumped = std::any_of(pending_.begin(), pending_.end(),
+        [&](const Pending& p) { return p.ticket.timestamp_us < ticket.timestamp_us; });
+    if (jumped) {
+        claimed_out_of_order_.insert(ticket.timestamp_us);
+        while (claimed_out_of_order_.size() > 64)
+            claimed_out_of_order_.erase(claimed_out_of_order_.begin());
+    } else {
+        claimed_us_ = std::max(claimed_us_, ticket.timestamp_us);
+    }
     // Nothing at or below the newest claimed ticket can still be asked about
     // by an input sync that has not already been answered.
     while (!input_released_.empty() && *input_released_.begin() <= claimed_us_)
         input_released_.erase(input_released_.begin());
+    // The queue stamp of a claimed picture is dead: its input release, if any,
+    // already landed in input_released_ before the claim.
+    for (auto it = queued_tickets_.begin(); it != queued_tickets_.end();) {
+        if (it->second <= claimed_us_ || claimed_out_of_order_.count(it->second))
+            it = queued_tickets_.erase(it);
+        else
+            ++it;
+    }
 }
 
 bool EncoderSession::claimed(EncodeTicket ticket) const
 {
-    return ticket.timestamp_us != 0 && ticket.timestamp_us <= claimed_us_;
+    return ticket.timestamp_us != 0
+        && (ticket.timestamp_us <= claimed_us_
+            || claimed_out_of_order_.count(ticket.timestamp_us) != 0);
 }
 
 bool EncoderSession::ticket_known(EncodeTicket ticket) const
 {
+    if (held_ && held_->ticket.timestamp_us == ticket.timestamp_us)
+        return true;
     for (const Pending& picture : pending_)
         if (picture.ticket.timestamp_us == ticket.timestamp_us)
             return true;
@@ -738,34 +973,10 @@ void EncoderSession::finish()
     // never waited gets its bytes, and one that waits after the context is
     // gone finds them in completed_ instead of a timeout.
     try {
-        device_->encoder_command(V4L2_ENC_CMD_STOP);
-    } catch (const std::exception& error) {
-        trace_("encode drain stop failed: %s", error.what());
-    }
-    try {
-        const Clock::time_point limit = deadline();
-        while (!pending_.empty()) {
-            if (complete_one())
-                continue;
-            if (Clock::now() >= limit) {
-                trace_("encode drain result=timeout outstanding=%zu", pending_.size());
-                break;
-            }
-            // Complete outside the lock, the way wait() does: the firmware
-            // needs time, and holding mutex_ across poll() would block the
-            // thread that submitted.
-            mutex_.unlock();
-            try {
-                device_->poll(POLLIN | POLLPRI, kPollMs);
-            } catch (...) {
-                // The enclosing lock_guard still owns mutex_: re-lock before
-                // unwinding, or its destructor would unlock an unlocked mutex.
-                mutex_.lock();
-                throw;
-            }
-            mutex_.lock();
-        }
-        if (pending_.empty() && !drained_)
+        drain_locked(deadline());
+        if (!pending_.empty())
+            trace_("encode drain result=timeout outstanding=%zu", pending_.size());
+        else if (!drained_)
             trace_("encode drain result=complete");
     } catch (const std::exception& error) {
         trace_("encode drain failed: %s", error.what());

@@ -111,11 +111,27 @@ private:
         EncodeTicket ticket;
         EncodeParams params;
         bool force_idr = false;
+        // The client's raw frame, queued later than it was submitted when a
+        // B picture arrives before the future reference it needs: VA clients
+        // submit in coding order and the firmware consumes display order, so
+        // one picture waits in held_ while its predecessor is queued. The
+        // client keeps the DMA-BUF alive until it waits for this ticket, and
+        // wait() does not return before the picture is queued and coded.
+        int dmabuf_fd = -1;
+        unsigned dmabuf_length = 0;
+        // The timestamp the picture was queued with. The firmware echoes it
+        // into the access unit, and it rises in queue order rather than in
+        // ticket order, which is what the firmware checks.
+        uint64_t queue_us = 0;
     };
 
     using Clock = std::chrono::steady_clock;
 
     void apply_dynamic(const EncodeParams& params);
+    // Take an input slot, apply this picture's dynamic parameters, pull the
+    // IDR lever and queue the raw frame. Called with mutex_ held, in queue
+    // order, which is display order when B pictures are in use.
+    void queue_pending(Pending& picture);
     void set_control(uint32_t id, int32_t value, const char* name);
     void set_frame_qp(int qp);
     void configure_deblocking(const EncodeParams& params);
@@ -127,6 +143,16 @@ private:
     // Move the oldest queued completion into `completed_`. Returns false when
     // the firmware produced nothing.
     bool complete_one();
+    // Ask the firmware for the pictures it still holds and collect them into
+    // `completed_` until `limit`. The STOP command is per session, so it is
+    // sent once; a drained session takes no further pictures. Returns true
+    // when at least one picture arrived.
+    bool drain_locked(Clock::time_point limit);
+    // Queue the picture held in held_ when the client is waiting for the
+    // display-order predecessor of it: the firmware cannot code that picture
+    // without the successor in its queue, and the client waits per picture,
+    // so the pair would otherwise stall until the drain.
+    void flush_successor(EncodeTicket ticket);
     bool ticket_known(EncodeTicket ticket) const;
     void claim(EncodeTicket ticket);
     bool claimed(EncodeTicket ticket) const;
@@ -149,6 +175,9 @@ private:
     bool sync_frame_control_ = false;
     // The firmware answered the drain marker (V4L2_ENC_CMD_STOP).
     bool drained_ = false;
+    // V4L2_ENC_CMD_STOP was sent. It ends the stream: the firmware returns
+    // what it holds and codes nothing after it.
+    bool drain_sent_ = false;
     EncodeParams applied_;
     // The reconstruction surface of the last submitted picture. The encoder
     // has no reference management of its own: it codes against the picture it
@@ -160,6 +189,24 @@ private:
     std::deque<unsigned> free_output_;
     // Submitted pictures whose access unit has not arrived, oldest first.
     std::deque<Pending> pending_;
+    // The one picture that is waiting for its display slot while B pictures
+    // are in use. Empty without them, and empty between submit() calls: a
+    // picture leaves here no later than the next submit(), the drain, or a
+    // wait for the picture that has to be coded before it (flush_successor).
+    std::optional<Pending> held_;
+    // The queue timestamp of the last queued picture. Separate from the
+    // ticket timestamps, which follow submission (coding) order.
+    uint64_t queue_us_ = 0;
+    // Queue timestamp to ticket, for the OUTPUT release that answers
+    // vaSyncSurface on the input surface.
+    std::map<uint64_t, uint64_t> queued_tickets_;
+    // The client's picture order count restarts at every IDR, so the session
+    // rebases it on the keyframe each picture is relative to. `last_display_`
+    // is the highest display position submitted so far. A client that sends
+    // no order at all leaves every picture equal, which reads as submission
+    // order.
+    int64_t poc_base_ = 0;
+    int64_t last_display_ = -1;
     // Tickets whose input buffer the firmware has returned. Pruned at each
     // claim: everything at or below the newest claimed ticket is dead.
     std::set<uint64_t> input_released_;
@@ -171,11 +218,20 @@ private:
     // reporting a ticket that no longer exists.
     uint64_t issued_us_ = 0;
     uint64_t claimed_us_ = 0;
+    // B pictures complete before the future reference submitted ahead of
+    // them, so a claim can jump past a ticket that is still pending. The
+    // watermark cannot describe that, and letting it advance would make an
+    // unanswered ticket look answered; these are kept here instead. Bounded
+    // like input_released_, because the ticket is only asked about soon
+    // after it is claimed.
+    std::set<uint64_t> claimed_out_of_order_;
     unsigned frames_ = 0;
     // Session frame rate, fixed in configure(), and the timestamp of the
-    // last submitted picture.
+    // last submitted picture. `frame_us_` is one frame at that rate: tickets
+    // advance by it per submission and queue stamps by it per queued picture.
     unsigned rate_num_ = 30;
     unsigned rate_den_ = 1;
+    uint64_t frame_us_ = 33333;
     uint64_t timestamp_us_ = 0;
     // Parameter sets carried by the last access unit, for a requested IDR the
     // firmware wrote without them.

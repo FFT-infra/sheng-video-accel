@@ -53,6 +53,7 @@ Options Options::from_environment()
             options.publish = PublishOverride::Import;
     }
     options.vpp_enabled = env("V4L2_VA_VPP") != nullptr;
+    options.b_frames = env("V4L2_VA_B_FRAMES") != nullptr;
     if (const char* dump = env("V4L2_VA_DUMP"))
         options.dump_dir = dump;
     return options;
