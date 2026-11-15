@@ -64,6 +64,7 @@ v4l2_drv_video = shared_module('v4l2_drv_video',
 	cpp_args: core_cpp_args + ['-DVA_DRIVER_INIT_FUNC=' + va_driver_init_func],
 	sources: [
 		'va/driver.cc',
+		'va/report.cc',
 		'va/config.cc',
 		'va/surface.cc',
 		'va/picture.cc',

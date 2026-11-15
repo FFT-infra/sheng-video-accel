@@ -20,17 +20,6 @@ extern "C" {
 
 namespace va {
 
-VAStatus report(VADriverContextP ctx, const char* where, const std::exception& error)
-{
-    VAStatus status = VA_STATUS_ERROR_OPERATION_FAILED;
-    if (const auto* iris_error = dynamic_cast<const iris::Error*>(&error))
-        status = iris_error->status;
-    if (ctx && ctx->error_callback)
-        ctx->error_callback(ctx, const_cast<char*>((std::string(where) + ": " + error.what() + "\n").c_str()));
-    data(ctx).trace("va error where=%s status=%d: %s", where, status, error.what());
-    return status;
-}
-
 std::shared_ptr<Surface> surface(DriverData& d, VASurfaceID id)
 {
     auto it = d.surfaces.find(id);

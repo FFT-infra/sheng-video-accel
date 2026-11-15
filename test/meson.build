@@ -216,7 +216,7 @@ test('encode-params', encode_params_test)
 # unit is claimed once when three VA entry points can ask for it.
 encode_session_test = executable(
   'encode-session-test',
-  ['unit/encode-session-test.cc', '../src/va/buffer.cc'],
+  ['unit/encode-session-test.cc', '../src/va/buffer.cc', '../src/va/report.cc'],
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('encode-session', encode_session_test)

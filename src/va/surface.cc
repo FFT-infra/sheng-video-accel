@@ -364,12 +364,22 @@ VAStatus destroySurfaces(VADriverContextP ctx, VASurfaceID* ids, int count)
         std::vector<std::shared_ptr<iris::Session>> sessions;
         {
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
+            // Validate the whole batch before touching the table. A busy
+            // surface half way through must leave every surface in place:
+            // erasing the earlier ones first would drop the only path that
+            // releases their targets, and the session would keep pointers
+            // into destroyed surfaces.
             for (int i = 0; i < count; ++i) {
                 auto it = d.surfaces.find(ids[i]);
                 if (it == d.surfaces.end())
                     continue;
                 iris::require(it->second->acquired_handles == 0, "surface has an acquired handle",
                     VA_STATUS_ERROR_SURFACE_BUSY);
+            }
+            for (int i = 0; i < count; ++i) {
+                auto it = d.surfaces.find(ids[i]);
+                if (it == d.surfaces.end())
+                    continue;
                 doomed.push_back(it->second);
                 sessions.push_back(session_of(d, *it->second));
                 // A synthesis belongs to the picture that is running it, and
