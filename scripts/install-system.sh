@@ -123,9 +123,9 @@ if [ -e "$alias_path" ] && [ ! -L "$alias_path" ]; then
     fail "$alias_path exists and is not a symlink; refusing to replace it"
 fi
 ln -sfn v4l2_drv_video.so "$alias_path"
-# Some client recipes and the sibling distribution name this driver qcom. The
-# second alias keeps LIBVA_DRIVER_NAME=qcom working, which is the only way a
-# client that hard-codes the name reaches the hardware instead of software.
+# Some client recipes name this driver qcom. The second alias keeps
+# LIBVA_DRIVER_NAME=qcom working, which is the only way a client that
+# hard-codes the name reaches the hardware instead of software.
 compat_alias_path=$destdir$driver_dir/qcom_drv_video.so
 if [ -e "$compat_alias_path" ] && [ ! -L "$compat_alias_path" ]; then
     fail "$compat_alias_path exists and is not a symlink; refusing to replace it"

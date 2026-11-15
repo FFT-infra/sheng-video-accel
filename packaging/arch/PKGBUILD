@@ -28,10 +28,10 @@ arch=('aarch64')
 url="https://github.com/phxinyang/qualcomm-iris-vaapi"
 # Driver source is MIT; COPYING.LGPL retains upstream provenance. See COPYING.
 license=('MIT' 'LGPL-2.1-or-later')
-# The upstream project and the sibling distribution package were named
-# libva-v4l2 before the qcom rename; keep old client recipes resolving.
+# The upstream project was named libva-v4l2 before the qcom rename; keep
+# old client recipes resolving.
 provides=('libva-v4l2')
-# Both packages install libva's msm alias, so they cannot coexist.
+# Both drivers install libva's msm alias, so they cannot coexist.
 conflicts=('libva-v4l2' 'qcom-va-driver')
 replaces=('libva-v4l2')
 # v4l-utils is not optional: the launcher resolves the decoder node by driver

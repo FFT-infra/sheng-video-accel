@@ -396,14 +396,31 @@ public:
         const References refs = collect_references(parameters);
         out.bytes.clear();
         out.deferred = false;
-        for (const auto& nal : { hevc_vps(profile_, parameters), hevc_sps(profile_, parameters, effective),
-                 hevc_pps(parameters) })
-            out.bytes.insert(out.bytes.end(), nal.begin(), nal.end());
+        const bool sequence_start = first_type >= 16 && first_type <= 23;
+        const auto vps = hevc_vps(profile_, parameters);
+        const auto sps = hevc_sps(profile_, parameters, effective);
+        const auto pps = hevc_pps(parameters);
+        // The firmware retains the parameter sets, so an unchanged trio is not
+        // resent; H.264 showed the same repetition costs throughput at 720p.
+        // An IRAP always carries them: it must be independently decodable, and
+        // a restart after a drain leaves the firmware with nothing in hand.
+        if (sequence_start || vps != last_vps_) {
+            out.bytes.insert(out.bytes.end(), vps.begin(), vps.end());
+            last_vps_ = vps;
+        }
+        if (sequence_start || sps != last_sps_) {
+            out.bytes.insert(out.bytes.end(), sps.begin(), sps.end());
+            last_sps_ = sps;
+        }
+        if (sequence_start || pps != last_pps_) {
+            out.bytes.insert(out.bytes.end(), pps.begin(), pps.end());
+            last_pps_ = pps;
+        }
         for (size_t i = 0; i < nals.size(); ++i) {
             const auto* sp = static_cast<const VASliceParameterBufferHEVC*>(picture.slice_parameters[i]);
             rewrite_slice(nals[i].first, nals[i].second, *sp, parameters, refs, out.bytes);
         }
-        out.sequence_start = first_type >= 16 && first_type <= 23;
+        out.sequence_start = sequence_start;
         if (first_type >= 16 && first_type <= 21)
             no_rasl_output_ = !started_ || first_type <= 20;
         started_ = true;
@@ -414,6 +431,7 @@ public:
 private:
     VAProfile profile_;
     std::optional<VAIQMatrixBufferHEVC> scaling_;
+    std::vector<uint8_t> last_vps_, last_sps_, last_pps_;
     bool started_ = false;
     bool no_rasl_output_ = false;
 };

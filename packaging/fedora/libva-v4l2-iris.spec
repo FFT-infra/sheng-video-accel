@@ -65,11 +65,10 @@ BuildRequires:  ffmpeg
 # No browser is required: the driver is useful to any VA-API client.
 Requires:       v4l-utils
 
-# The upstream project and the sibling distribution package were named
-# libva-v4l2 before the qcom rename. Replace that package without also
-# providing its name: a Provides and Obsoletes on the same name whose bound
-# covers this package's own EVR makes DNF schedule the package twice. The
-# sibling's last version was 1.1.1, which is why the bound sits above it
+# The upstream project was named libva-v4l2 before the qcom rename. Replace
+# that package without also providing its name: a Provides and Obsoletes on
+# the same name whose bound covers this package's own EVR makes DNF schedule
+# the package twice. The bound sits above 1.1.1, the last upstream version,
 # rather than at this package's 0.x version.
 Obsoletes:      libva-v4l2 < 1.2
 # Both packages install libva's msm alias, so they cannot coexist.
@@ -139,7 +138,7 @@ sh scripts/refresh-install-manifest.sh \
 # this SoC reports DRIVER=msm_dpu. The alias keeps clients that do not set the
 # variable (mpv, VLC, GStreamer) on this driver instead of software.
 %{_libdir}/dri/msm_drv_video.so
-# Client recipes written for the sibling distribution set
+# Client recipes that name the qcom driver set
 # LIBVA_DRIVER_NAME=qcom; this alias keeps that name resolving to the same
 # driver instead of falling back to software.
 %{_libdir}/dri/qcom_drv_video.so

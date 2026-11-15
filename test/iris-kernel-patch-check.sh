@@ -30,7 +30,7 @@
 #     pointing at nothing
 #
 # With the downstream checkout present (IRIS_DOWNSTREAM_SPEC or the usual
-# sibling path), it also asserts:
+# companion path), it also asserts:
 #   * each IRIS_PATCHn_SHA256 in the spec equals the recorded hash
 #   * each Source6-9 URL pins the commit `iris-kernel-patches-v1` resolves to
 

@@ -5,7 +5,7 @@
 #   IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh -- sh test/vulkan-vpp/p010_scale_gate.sh
 #
 # nv12_scale_gate.sh proves the 8-bit kernel. This one proves the 10-bit
-# sibling: p010_scale.spv over two imported DMA-BUFs laid out like the Iris
+# companion: p010_scale.spv over two imported DMA-BUFs laid out like the Iris
 # CAPTURE P010 buffers (256-byte pitch, one 16-bit word per sample, chroma
 # behind the luma plane). The oracle decodes the same 16-bit words, so the
 # comparison covers the whole sample, not just the top eight bits. It runs the

@@ -180,7 +180,7 @@ public:
         // sequence headers, owns the reference structure and chooses the
         // quantisation offsets. Returning a stream that ignored the request
         // is worse than failing, which is also what the reference driver
-        // (radxa libva-v4l2) does.
+        // (an upstream libva-v4l2 backend) does.
         require(!params->pic_fields.bits.tiles_enabled_flag && !params->num_tile_columns_minus1
                 && !params->num_tile_rows_minus1 && !params->pic_fields.bits.entropy_coding_sync_enabled_flag,
             "tiles and wavefront coding are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);

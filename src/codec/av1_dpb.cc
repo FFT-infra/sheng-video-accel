@@ -106,7 +106,7 @@ public:
             hidden.pic_info_fields.bits.show_frame = 0;
             hidden.pic_info_fields.bits.showable_frame = 0;
             // A hidden key frame must not take the implicit all-slot refresh
-            // of a shown key frame. Radxa writes it as INTRA_ONLY for the same
+            // of a shown key frame. Another backend writes it as INTRA_ONLY for the same
             // reason; an INTER_FRAME pending picture keeps its own type and
             // its own references.
             if (hidden.pic_info_fields.bits.frame_type == 0) // KEY_FRAME

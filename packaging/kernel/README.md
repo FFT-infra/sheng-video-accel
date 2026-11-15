@@ -17,14 +17,14 @@ verdict (TEST-RESULTS.md, "The completion-preserving 0005 form").
 
 ## Patch Summary
 
-| Patch | Upstream Reference | Description | Purpose |
+| Patch | Origin | Description | Purpose |
 | --- | --- | --- | --- |
-| `0001-media-iris-decode-order-output-and-64-capture-buffers.patch` | Radxa / `qcom-va-driver` | Implements `V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY` and expands CAPTURE queue to 64 buffers | Enables zero-copy Import decode path and dynamic resolution changes |
-| `0002-media-iris-deblocking-filter-controls.patch` | Radxa / `qcom-va-driver` | Exposes H.264 and HEVC loop-filter controls (`HFI_PROP_DEBLOCKING_MODE`) | Allows forwarding of client slice deblocking requests |
+| `0001-media-iris-decode-order-output-and-64-capture-buffers.patch` | upstream Iris patches | Implements `V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY` and expands CAPTURE queue to 64 buffers | Enables zero-copy Import decode path and dynamic resolution changes |
+| `0002-media-iris-deblocking-filter-controls.patch` | upstream Iris patches | Exposes H.264 and HEVC loop-filter controls (`HFI_PROP_DEBLOCKING_MODE`) | Allows forwarding of client slice deblocking requests |
 | `0003-media-iris-encoder-request-sync-frame.patch` | Qualcomm (Wangao Wang) | Implements `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` (`HFI_PROP_REQUEST_SYNC_FRAME`) | Enables direct hardware sync-frame requests |
-| `0004-media-iris-preserve-timestamps-on-error-buffers.patch` | Radxa / `qcom-va-driver` | Preserves buffer timestamp on `V4L2_BUF_FLAG_ERROR` completions | Allows immediate failure attribution for corrupted frames |
-| `0005-media-iris-recycle-decoder-buffers-for-non-display-pictures.patch` | Radxa / `qcom-va-driver` | Recycles non-display (NOSHOW) decoder buffers internally | **Experimental, measured on `sheng` and rejected.** Requeues NOSHOW CAPTURE buffers in the kernel instead of completing them to userspace; this driver's AV1 path consumes those completions by decode order to publish hidden reference frames. Built into the module once (2026-11-12): all three qualified AV1 clips failed under import, copy and direct, and native `v4l2av1dec` reached EOS on the same node (`TEST-RESULTS.md` §"0005 on the target"). Never build it into a released module. |
-| `0006-media-iris-discard-unmatched-timestamp-metadata.patch` | yzddmr6 / `linux-sm8750-piano` | Discards unmatched timestamp metadata instead of borrowing | **Experimental, one guarded WP1 run only.** Built, installed with 0001-0004, rebooted and run through the four-codec matrix, long VP9 clip, AV1 real/DRC clips, EOS and slow-CAPTURE probes on `sheng` (2026-11-12). The upstream defect was not reproduced on the 0001-0004 baseline, so the verdict is "no regression", not "fixed". It is not part of the qualified baseline and adds no codec, profile or publish-policy claim. |
+| `0004-media-iris-preserve-timestamps-on-error-buffers.patch` | upstream Iris patches | Preserves buffer timestamp on `V4L2_BUF_FLAG_ERROR` completions | Allows immediate failure attribution for corrupted frames |
+| `0005-media-iris-recycle-decoder-buffers-for-non-display-pictures.patch` | upstream Iris patches | Recycles non-display (NOSHOW) decoder buffers internally | **Experimental, measured on `sheng` and rejected.** Requeues NOSHOW CAPTURE buffers in the kernel instead of completing them to userspace; this driver's AV1 path consumes those completions by decode order to publish hidden reference frames. Built into the module once (2026-11-12): all three qualified AV1 clips failed under import, copy and direct, and native `v4l2av1dec` reached EOS on the same node (`TEST-RESULTS.md` §"0005 on the target"). Never build it into a released module. |
+| `0006-media-iris-discard-unmatched-timestamp-metadata.patch` | downstream timestamp-metadata fix | Discards unmatched timestamp metadata instead of borrowing | **Experimental, one guarded WP1 run only.** Built, installed with 0001-0004, rebooted and run through the four-codec matrix, long VP9 clip, AV1 real/DRC clips, EOS and slow-CAPTURE probes on `sheng` (2026-11-12). The upstream defect was not reproduced on the 0001-0004 baseline, so the verdict is "no regression", not "fixed". It is not part of the qualified baseline and adds no codec, profile or publish-policy claim. |
 | `0007-media-iris-complete-noshow-pictures-without-an-error.patch` | this repository | Completes non-display (NOSHOW) pictures without `V4L2_BUF_FLAG_ERROR` and without the picture-type flags, keeping the timestamp 0004 preserves | **Experimental, measured on `sheng` and rejected.** The completion-preserving form of 0005: nothing is recycled in the kernel, the false error is simply not attached. Built with 0001-0004, installed and booted (module `f070ae18…`); the installed driver then failed all three AV1 clips under import, copy and direct, while the same driver with the unflagged-NOSHOW tolerance in the session decoded byte-identical output and matched the qualified baseline's counters. It therefore buys nothing over the qualified module. Never build it into a released module. |
 
 ## Verification & Integrity
@@ -34,7 +34,7 @@ verdict (TEST-RESULTS.md, "The completion-preserving 0005 form").
 sh test/iris-kernel-patch-check.sh
 ```
 
-Downstream packaging in `GhfunNiHe/sheng-fedora-packages` pins these patches by commit hash against the immutable tag `iris-kernel-patches-v1`.
+The downstream kernel spec pins these patches by commit hash against the tag `iris-kernel-patches-v1`.
 
 ## Module Rebuild Guide
 

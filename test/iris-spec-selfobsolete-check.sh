@@ -2,7 +2,7 @@
 
 # A package that both Provides and Obsoletes the same name, with an Obsoletes
 # bound covering its own EVR, makes DNF schedule the package twice. That shape
-# was measured in the sibling piano-fedora repo (sm8750-video-accel.spec).
+# was measured in a downstream package spec.
 # This spec replaces libva-v4l2 without providing that name. Guard that choice
 # instead of relying on rpmspec -P, which parses macros but cannot see the
 # solver behaviour, or on an aarch64 buildroot CI does not run.

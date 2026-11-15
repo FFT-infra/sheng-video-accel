@@ -2,7 +2,7 @@
 
 # Verify that one AV1 temporal unit with two OBU_FRAMEs is legal and decodes
 # to two frames with an independent software decoder. This is the container
-# shape Radxa's hidden reference-installation frame needs; the C++ half of the
+# shape another backend's hidden reference frame needs; the C++ half of the
 # test checks the rebuilt unit's structure, this half checks the shape against
 # libdav1d on a real aomenc fixture.
 #

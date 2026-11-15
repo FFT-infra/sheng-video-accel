@@ -60,16 +60,14 @@ Video processing runs via pinned Vulkan compute kernels on surface DMA-BUFs. It 
 
 ## Performance
 
-HEVC Main 8-bit throughput on the SM8550 tablet, FFmpeg 8.1.3, five interleaved runs per cell with CPU policies at max (`performance`, 2016/2803/2956 MHz) and GPU at 680 MHz (`userspace`). Synthetic I/P clips at GOP 60, `-async_depth 4`. Decode excludes download/display; encode includes CPU NV12 upload. Compared against `radxa-pkg/qcom-va-driver` on the same node and clips:
+HEVC Main 8-bit throughput on the SM8550 tablet, FFmpeg 8.1.3, five interleaved runs per cell with CPU policies at max (`performance`, 2016/2803/2956 MHz) and GPU at 680 MHz (`userspace`). Synthetic I/P clips at GOP 60, `-async_depth 4`. Decode excludes download/display; encode includes CPU NV12 upload.
 
 | Operation | 720p | 1080p | 4K |
 | --- | ---: | ---: | ---: |
-| Decode, this driver | 759 fps | 581 fps | 359 fps |
-| Decode, sibling | 759 fps | 579 fps | 358 fps |
-| Encode, this driver | 644 fps | 591 fps | 167 fps |
-| Encode, sibling | 631 fps | 575 fps | 163 fps |
+| Decode | 759 fps | 581 fps | 359 fps |
+| Encode | 644 fps | 591 fps | 167 fps |
 
-Decode throughput sits at parity (within 0.4%), while client CPU time is 16–19% lower (0.27/0.42/0.40 s vs 0.33/0.50/0.50 s per 900 frames) due to deferred copy-engine initialization. Encode throughput is 2.1–2.8% ahead across all resolutions with equal client CPU time (1.01/1.94/4.82 s vs 1.08/1.91/4.80 s). The sibling's published table is SC8280XP and is not comparable with these SM8550 numbers. Detailed multi-codec sweeps (including AV1 8/10-bit), concurrency, transcode, power, and VPP benchmarks are documented in [TEST-RESULTS.md](TEST-RESULTS.md#cross-driver-benchmarks).
+Decode client CPU time is 0.27/0.42/0.40 s per 900 frames at the three sizes; the deferred copy-engine initialization keeps the GPU copy backend idle on a pipeline that never asks for a copy. Encode client CPU time is 1.01/1.94/4.82 s. Detailed multi-codec sweeps (including AV1 8/10-bit), concurrency, transcode, power, and VPP benchmarks are documented in [TEST-RESULTS.md](TEST-RESULTS.md).
 
 ## Requirements
 
@@ -110,7 +108,7 @@ Build the Debian package in a chroot (`sbuild`, `pbuilder`) rather than on a
 device: `libgbm-dev` is pinned to the distribution's Mesa and can downgrade a
 vendor-patched graphics stack.
 
-The package installs the driver binary along with the `msm_drv_video.so` and `qcom_drv_video.so` symlinks, allowing libva to resolve the driver automatically for clients such as mpv, VLC, and GStreamer without requiring `LIBVA_DRIVER_NAME`, and for client recipes that set `LIBVA_DRIVER_NAME=qcom`, the name the sibling distribution uses.
+The package installs the driver binary along with the `msm_drv_video.so` and `qcom_drv_video.so` symlinks, allowing libva to resolve the driver automatically for clients such as mpv, VLC, and GStreamer without requiring `LIBVA_DRIVER_NAME`, and for client recipes that set `LIBVA_DRIVER_NAME=qcom`.
 
 ### Diagnostic Tools
 

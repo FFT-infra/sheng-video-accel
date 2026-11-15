@@ -54,6 +54,10 @@ is not an installation.
   push unless the user asked for that action in this turn.
 - Keep traces, media and build trees out of the repository; large lab
   artifacts belong on the target, not in git.
+- Cross-driver comparison data and the other backend's repository name are
+  local notes under `notes/` (gitignored), not tracked documentation.
+  Functional package conflicts, patch authorship and `SHA256SUMS` stay as
+  they are.
 - Experiments that can reset firmware follow the guard procedure in
   docs/build-and-deploy.md. A reset or a thermal breach is a failed
   experiment, not evidence of codec support.

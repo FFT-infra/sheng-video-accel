@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //
 // P010 scale (optionally from a crop, optionally rotated) for the VA video
-// processor: the 10-bit sibling of nv12_scale.comp. Same sample map, same
+// processor: the 10-bit companion of nv12_scale.comp. Same sample map, same
 // interpolation methods, same crop semantics, same rotation, same rule that
 // one invocation owns one 32-bit destination word so no two invocations race.
 //

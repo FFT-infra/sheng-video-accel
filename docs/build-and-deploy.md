@@ -132,7 +132,7 @@ the recorded artifact hash and size equal to the installed package payload.
 The node rule lives in one file, `scripts/lib/iris-node.sh`, installed as
 `<prefix>/lib/iris-vaapi/iris-node.sh`. It resolves `/dev/video*` on every
 call, requires an exact `iris_driver` match, and tells the decoder from the
-encoder by the card type, so the sibling Iris encoder cannot be selected
+encoder by the card type, so the companion Iris encoder cannot be selected
 merely because its number happens to sort first. An explicit
 `LIBVA_V4L2_VIDEO_PATH` remains available for a checked diagnostic override.
 `v4l2-ctl` from v4l-utils is therefore a runtime dependency of the
@@ -152,8 +152,8 @@ the invoking user's home only.
 
 Check the installed driver with nothing set at all. This is the property the
 package ships: libva resolves the driver through the `msm_drv_video.so` alias
-(`qcom_drv_video.so` is installed beside it for recipes that name the sibling
-driver), and the driver resolves its own node.
+(`qcom_drv_video.so` is installed beside it for recipes naming the qcom driver),
+and the driver resolves its own node.
 
 ```sh
 env -u LIBVA_DRIVERS_PATH -u LIBVA_DRIVER_NAME -u LIBVA_V4L2_VIDEO_PATH vainfo

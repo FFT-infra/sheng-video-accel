@@ -147,7 +147,7 @@ void wait_for_pixels(const std::shared_ptr<Surface>& s, const std::shared_ptr<ir
 // How many blending passes one picture may carry. VA puts no limit on the
 // count and neither does the kernel — each pass is one more dispatch — so this
 // is a bound on the work a single vaEndPicture can be asked for, not a
-// capability. Sixteen is the sibling driver's figure.
+// capability. Sixteen is the figure another driver uses.
 constexpr size_t kMaxOverlays = 16;
 
 // Copy the client's pipeline parameters and refuse every operation the
@@ -1206,8 +1206,14 @@ VAStatus endPicture(VADriverContextP ctx, VAContextID id)
                 coded_width = sequence_width;
                 coded_height = sequence_height;
             }
-            iris::require(coded_width <= s->width && coded_height <= s->height,
-                "encode surface is smaller than the picture", VA_STATUS_ERROR_INVALID_SURFACE);
+            // Either side may be the larger one: FFmpeg's HEVC context is
+            // rounded up (320x184 over a 320x180 surface), and its transcode
+            // creates an exact context over aligned decode surfaces. The
+            // picture is the smaller of the two; the layout below decides
+            // what the encoder can read, and falls back to the surface when
+            // the requested geometry would move the chroma plane.
+            coded_width = std::min(coded_width, s->width);
+            coded_height = std::min(coded_height, s->height);
             const iris::Layout expected = iris::stable_layout(s->fourcc, coded_width, coded_height);
             if (expected.fourcc != pixels.layout.fourcc || expected.stride != pixels.layout.stride
                 || expected.storage_height != pixels.layout.storage_height) {

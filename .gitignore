@@ -79,3 +79,5 @@ __pycache__/
 
 # Local research notes are retained outside the public source-of-truth.
 /docs/github-community-assets.md
+# Local comparison/benchmark notes are not published.
+/notes/

@@ -25,7 +25,7 @@ accounting.
 
 Firefox 158 syncs each surface from its decoder thread. Our AV1 translator holds
 one picture until the next access unit names the DPB slots it refreshed, so the
-next access unit cannot arrive while Firefox waits. Radxa `qcom-va-driver`
+next access unit cannot arrive while Firefox waits. Another Iris backend
 `src/av1.cpp` allocates its own eight internal DPB slots, emits one complete
 temporal unit per VA picture, and when all eight slots are live replays the
 previous uncommitted picture as a hidden NOSHOW frame inside the *same* temporal
@@ -60,7 +60,7 @@ numbers, and drives nine pictures (one key frame, eight inter frames).
    updated with the *remapped* picture, not the original.
 
 2. A full DPB is real and needs the hidden replay. `free_slot()` returns
-   `1, 2, 3, 4, 5, 6, 7` for frames 2-8 and `-1` for frame 9. Radxa resolves
+   `1, 2, 3, 4, 5, 6, 7` for frames 2-8 and `-1` for frame 9. That backend resolves
    this only when the *current* picture's reference map stops naming a slot,
    which frees exactly one slot for the hidden install frame. The spike
    confirms that condition: dropping one reference on frame 9 makes
@@ -69,7 +69,7 @@ numbers, and drives nine pictures (one key frame, eight inter frames).
 
 3. **The existing writer cannot produce the required temporal unit.**
    `av1_obu.cc:914-920` emits a temporal delimiter, an optional sequence
-   header, and exactly one `OBU_FRAME` per call. Radxa instead emits one TD,
+   header, and exactly one `OBU_FRAME` per call. That backend instead emits one TD,
    an optional sequence header, and *two* `OBU_FRAME`s (hidden install +
    current picture) inside one OUTPUT buffer. Concatenating two calls produces
    two temporal units, not one; the spike's stream was rejected by libdav1d
@@ -102,14 +102,14 @@ numbers, and drives nine pictures (one key frame, eight inter frames).
 6. **One temporal unit with two `OBU_FRAME`s is legal AV1.** A 20-frame
    lookahead stream (`-lag-in-frames 8 -arnr-max-frames 0`) produced TU 9 with
    OBU types `[2, 6, 6]`: one temporal delimiter followed by two frame OBUs.
-   libdav1d decoded all 20 frames from that stream. Radxa's container shape is
+   libdav1d decoded all 20 frames from that stream. That backend's container shape is
    therefore sound; our earlier failure was not the TU layout but the hand-
    edited frame header. Clearing the `show_frame` bit in an existing key-frame
    header is invalid: `show_frame=0` inserts a `showable_frame` bit and changes
    the key-frame error-resilient syntax, so every following header field shifts.
    ffmpeg's `av1_frame_merge` rejected it with `zero_bit out of range: 1`. A
    hidden install frame must be *built* from the parsed parameters with
-   `show=0` (Radxa `frame(... bool show ...)`), not patched into a shown frame.
+   `show=0` (another backend's `frame(... bool show ...)`), not patched into a shown frame.
    The earlier `slot-remap.cc` stream was rejected by libdav1d for the same
    reason: concatenated per-call temporal units plus fake tile payloads, not a
    single valid multi-frame TU.
@@ -259,9 +259,9 @@ means the DPB translator itself still lacks a pixel-level oracle; the test
 proves the container shape is real AV1, not that this translator emits decodable
 pixels for arbitrary VA parameters.
 
-## DPB semantics audit against Radxa (2026-11-10)
+## DPB semantics audit against another backend (2026-11-10)
 
-Re-reading Radxa `qcom-va-driver/src/av1.cpp` (`free_slot()`, `remember()`,
+Re-reading that backend's AV1 translator (`free_slot()`, `remember()`,
 `reference_slots()`, `av1_bitstream()`) against the prototype exposed a class of
 bugs the original `av1-dpb` test could not see: it set every `ref_frame_idx[i]`
 to 0, so no reference ever named a surface outside slot 0, and it never
@@ -273,7 +273,7 @@ What was wrong, and what changed in `src/codec/av1_dpb.cc`:
 
 - **Install order.** The hidden install frame has to be registered in the DPB
   before the shown frame's `ref_frame_idx[]` is resolved, otherwise a successor
-  that names the pending surface has no slot to point at. Radxa does
+  that names the pending surface has no slot to point at. That backend does
   `frame(pending, ...)` → `remember(pending)` → `frame(current, ...)`. The
   prototype resolved all references first and called `remember()` only after
   the whole temporal unit was built.
@@ -285,7 +285,7 @@ What was wrong, and what changed in `src/codec/av1_dpb.cc`:
   `refresh_frame_flags` differ.
 - **Hidden key frames.** Forcing `frame_type = INTER_FRAME` on a pending key
   frame made the writer emit inter-frame syntax for intra tiles. A hidden key
-  is now written as `INTRA_ONLY_FRAME`, matching Radxa's
+  is now written as `INTRA_ONLY_FRAME`, matching that backend's
   `frame(... show=false, reset=false)`.
 - **Reference state.** `remember()` was fed the *current* picture's
   `order_hint`, and `AV1ReferenceState` / `gm_params` were updated from the
@@ -295,7 +295,7 @@ What was wrong, and what changed in `src/codec/av1_dpb.cc`:
 - **Dead write.** `remapped.ref_frame_map[s] = slots_[s].surface` wrote surface
   IDs into a field `av1_obu.cc` never reads; the bitstream codes the eight DPB
   slot numbers directly. It is gone. `ref_frame_idx[]` is now the only field
-  remapped, resolved against `slots_[]` the same way Radxa's
+  remapped, resolved against `slots_[]` the same way that backend's
   `reference_slots()` does.
 - **Sequence restart.** A new sequence now resets `references_`, `slots_[]`
   and the pending picture instead of translating the first frame against a DPB

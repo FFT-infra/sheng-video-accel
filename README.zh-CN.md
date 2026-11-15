@@ -54,16 +54,14 @@ AV1 film grain 合成已支持。客户端给出独立的 `current_display_pictu
 
 ## 性能
 
-SM8550 平板上的 HEVC Main 8-bit 吞吐，FFmpeg 8.1.3。每个格五轮交错运行，三个 CPU policy 都锁在 performance governor 的最高频（2016/2803/2956 MHz），`3d00000.gpu` 锁在 680 MHz。片源为 GOP 60 的 x265 合成 I/P 帧，`-async_depth 4`；编码计入 CPU 端 NV12 上传，解码不下载、不显示。对照组为同一节点与片源下的 `radxa-pkg/qcom-va-driver`：
+SM8550 平板上的 HEVC Main 8-bit 吞吐，FFmpeg 8.1.3。每个格五轮交错运行，三个 CPU policy 都锁在 performance governor 的最高频（2016/2803/2956 MHz），`3d00000.gpu` 锁在 680 MHz。片源为 GOP 60 的 x265 合成 I/P 帧，`-async_depth 4`；编码计入 CPU 端 NV12 上传，解码不下载、不显示。
 
 | 操作 | 720p | 1080p | 4K |
 | --- | ---: | ---: | ---: |
-| 解码，本驱动 | 759 fps | 581 fps | 359 fps |
-| 解码，对照组 | 759 fps | 579 fps | 358 fps |
-| 编码，本驱动 | 644 fps | 591 fps | 167 fps |
-| 编码，对照组 | 631 fps | 575 fps | 163 fps |
+| 解码 | 759 fps | 581 fps | 359 fps |
+| 编码 | 644 fps | 591 fps | 167 fps |
 
-解码吞吐持平（各分辨率差距均在 0.4% 以内），得益于按需延迟启动拷贝引擎，解码端客户端 CPU 开销降低 16%–19%（900 帧耗时 0.27/0.42/0.40 s 对 0.33/0.50/0.50 s）。编码吞吐在各分辨率下领先 2.1%–2.8%，客户端 CPU 耗时持平（1.01/1.94/4.82 s 对 1.08/1.91/4.80 s）。对照组在其文档中公布的数据测自 SC8280XP，不能与此处的 SM8550 实测数据直接对比。更多编解码器对比（含 AV1 8/10 位）、并发、转码、功耗及 VPP 跑分详见 [TEST-RESULTS.md](TEST-RESULTS.md#cross-driver-benchmarks)。
+900 帧的解码客户端 CPU 耗时在三档分辨率下为 0.27/0.42/0.40 s；按需延迟启动拷贝引擎，让不申请拷贝的流水线不启动 GPU 拷贝后端。编码客户端 CPU 耗时为 1.01/1.94/4.82 s。更多编解码器（含 AV1 8/10 位）、并发、转码、功耗及 VPP 跑分详见 [TEST-RESULTS.md](TEST-RESULTS.md)。
 
 ## 运行环境
 
@@ -102,7 +100,7 @@ sudo apt install ../libva-v4l2-iris_0.1.0_arm64.deb
 
 Debian 包请在 chroot（`sbuild`、`pbuilder`）里构建：`libgbm-dev` 绑定发行版的 Mesa，直接在设备上安装构建依赖可能降级厂商魔改的图形栈。
 
-安装包会自动放置驱动本体与 `msm_drv_video.so`、`qcom_drv_video.so` 两个符号链接：mpv、VLC 与 GStreamer 等客户端可在未指定 `LIBVA_DRIVER_NAME` 的情况下直接加载该驱动，按兄弟发行版写法显式设置 `LIBVA_DRIVER_NAME=qcom` 的客户端也能落到同一个驱动。
+安装包会自动放置驱动本体与 `msm_drv_video.so`、`qcom_drv_video.so` 两个符号链接：mpv、VLC 与 GStreamer 等客户端可在未指定 `LIBVA_DRIVER_NAME` 的情况下直接加载该驱动，显式设置 `LIBVA_DRIVER_NAME=qcom` 的客户端也能落到同一个驱动。
 
 ### 诊断脚本
 
