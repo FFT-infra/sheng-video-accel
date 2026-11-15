@@ -521,49 +521,41 @@ vocabulary and its consumers, invariant 17, the capability table `sync_note`
 and both READMEs. Re-run the four-codec matrix, 120-frame AV1 clip, DRC,
 10-bit probe and the Chrome/Firefox browser matrix.
 
-### WP4 CDSP VPP — not merged; the Vulkan VPP shipped behind `V4L2_VA_VPP`
+### WP4 CDSP VPP — available on the target, not implemented; the Vulkan VPP shipped behind `V4L2_VA_VPP`
 
-The 2026-11-12 read-only survey concluded "no proven viable backend" because
-`vulkaninfo` and `glslangValidator` are absent on the tablet and no CDSP
-session was opened. Those two tools are diagnostics and a host shader
-compiler, not the runtime contract.
+CDSP works on `sheng`. The signed PD executes DSP modules: with the device's
+own payload from the Android `dsp_a` partition (`fastrpc_shell_3`,
+`fastrpc_shell_unsigned_3`, `libc++.so.1`, `libc++abi.so.1` and the rest of
+`dsp_a/cdsp/`) at the path the library resolves,
+`/usr/share/qcom/sm8550/Xiaomi/sheng/cdsp/`, `fastrpc_test -d 3 -U 0 -a v75`
+passes 3 of 3. A member of the `fastrpc` group reaches it without root. The
+path comes from `DSP_LIBRARY_PATH` in `/usr/share/qcom/conf.d/sheng.yaml`;
+the environment variable of the same name does not override it, and a shell
+in the working directory is found only by the library's fallback search.
 
-The earlier record that "`sheng` cannot open a FastRPC session at all" was
-wrong, and measuring it replaced three guesses with three facts
-(2026-11-13). The session opens: `remote_handle_open` reaches the
-kernel, and `DSPRPC_GET_DSP_INFO` reports `DOMAIN_SUPPORT=1`,
-`UNSIGNED_PD_SUPPORT=1`, `HVX_SUPPORT_128B=4`, `ARCH_VER=0x1008c73` (v73) and
-`VTCM_PAGE=8 MiB` for the CDSP domain, with no shell binary present at all.
-The session was previously thought to be blocked because the only probe had
-been `remote_handle_open` on a nonexistent module, whose `EBADFD` reads as a
-session failure and is not one.
+The unsigned PD still fails every attempt with `AEE_ERESOURCENOTFOUND`
+(`0x80000416`). `remote_session_control(DSPRPC_CONTROL_UNSIGNED_MODULE)`
+returns 0, so the request is accepted and the DSP answers not-found; the
+library opens `/dev/fastrpc-cdsp-secure` either way, and binding the
+non-secure node over that path changes nothing. The signed PD covers what a
+driver needs.
 
-What does block it is the PD create, and the shell binary is not the reason
-either. A v73 `fastrpc_shell_unsigned_3` taken from Fedora's
-`hexagon-dsp-binaries-qualcomm-hamoa-iot-evk` package, placed at the path the
-library resolves (`/usr/share/qcom/sm8550/Xiaomi/sheng/cdsp/`, from
-`/usr/share/qcom/conf.d/sheng.yaml`), still fails `FASTRPC_IOCTL_INIT_CREATE`
-with `0x80000416`. An empty file of the same name fails identically, so the
-failure is upstream of the shell's contents: the kernel hands the create to
-the CDSP and the firmware refuses it. The device node the library opens is
-`/dev/fastrpc-cdsp-secure` — the DT node is `qcom,non-secure-domain` with no
-`qcom,nsessions` and no `memory-region`, and the library selects the secure
-node. Nothing in this repository can change that; it needs a device-tree
-change and a firmware that accepts the unsigned PD.
+What a CDSP backend would still need:
 
-The toolchain half of the old claim is also wrong. Fedora's clang 22 compiles
-`--target=hexagon -mv73` to a `QUALCOMM DSP6` object with no Qualcomm
-toolchain installed, and clang ships `hexagon_types.h`, `hexagon_protos.h` and
-`hexagon_circ_brev_intrinsics.h`. What is missing is the linker: `ld.lld`
-has no `elf32hexagon` emulation and clang looks for a `hexagon-ld` that is not
-installed, so a shared object cannot be produced. The pinned Open Access
-archive would supply both, and it answers 403 to an unauthenticated download
-from this host.
+- A DSP-side skel for v73. Host clang compiles `--target=hexagon -mv73` to a
+  `QUALCOMM DSP6` object, but `ld.lld` has no `elf32hexagon` emulation and
+  clang looks for a `hexagon-ld` that is not installed, so producing the
+  shared object needs the Open Access toolchain
+  (`Hexagon_open_access.Core.19.0.02`, Linux ARM64). It downloads from
+  `softwarecenter.qualcomm.com`; no complete copy has been checksum-verified
+  here yet.
+- A second VPP backend behind `VAEntrypointVideoProc` and its own client,
+  kept in step with the Vulkan path that already passes every gate.
 
-A DSP backend would therefore need a device-tree change, a firmware that
-accepts the PD, and a working Hexagon linker before it could be measured,
-against a Vulkan backend that already passes every gate. The CDSP/FastRPC
-path is not needed for this backend and was not probed further.
+That is a scope decision rather than a platform limit. No CDSP VPP
+measurement exists on this device: every comparison run used a build with
+CDSP compiled out, so the gain is unquantified here. Reopen it only if the
+Vulkan VPP shows a concrete deficit on this device.
 
 A userspace probe settles the
 question on `sheng`: `test/vulkan-vpp/prereq.sh` builds a SPIR-V compute
@@ -699,8 +691,9 @@ and makes no support claim for another SoC.
 ### Order and decision gates
 
 1. WP0 -> WP1 -> WP2, then decide WP3 from WP2's verdict.
-2. WP4 may run alongside WP1/WP2 as read-only feasibility research; WP5 waits
-   for WP4; WP6 and WP7 are independent.
+2. WP4's feasibility question is answered — CDSP runs on this target — and the
+   remaining work is a scope decision, not research. WP5 still waits for it;
+   WP6 and WP7 are independent.
 3. Stop after each package and wait for confirmation before opening the next.
 
 ### Known state that does not match earlier drafts
