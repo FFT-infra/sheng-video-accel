@@ -2,6 +2,7 @@
 // remains available as a one-line rollback path and has its own tests.
 #include "../src/codec/av1_dpb.h"
 #include "../src/codec/translator.h"
+#include "../src/util/error.h"
 
 #include <cstring>
 #include <iostream>
@@ -19,6 +20,16 @@ void check(bool ok, const char* what)
         std::cerr << "FAIL: " << what << '\n';
         ++failures;
     }
+}
+
+template <typename F> VAStatus status_of(F&& f)
+{
+    try {
+        f();
+    } catch (const iris::Error& error) {
+        return error.status;
+    }
+    return VA_STATUS_SUCCESS;
 }
 
 VADecPictureParameterBufferAV1 params(unsigned surface, bool key, unsigned hint)
@@ -454,6 +465,67 @@ void test_flush_has_no_tail()
 
 } // namespace
 
+// The client owns the tile offsets and sizes in VASliceParameterBufferAV1.
+// An entry that does not address the concatenated slice data must be refused
+// before the OBU writer walks past the buffer, and the four-byte size prefix
+// makes a zero-length tile unrepresentable.
+void test_rejects_tiles_outside_the_data()
+{
+    const uint8_t tile[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    const auto rejects = [&](uint32_t offset, uint32_t size, const char* what) {
+        auto t = iris::codec::make_av1_dpb(VAProfileAV1Profile0);
+        iris::codec::AccessUnit out;
+        auto key = params(10, true, 0);
+        for (unsigned i = 0; i < kSlots; ++i)
+            key.ref_frame_map[i] = VA_INVALID_SURFACE;
+        key.frame_width_minus1 = 255; // two 64x64 superblock columns
+        key.tile_cols = 2;
+        key.tile_rows = 1;
+
+        VASliceParameterBufferAV1 first = {};
+        first.slice_data_size = 4;
+        VASliceParameterBufferAV1 second = {};
+        second.slice_data_offset = offset;
+        second.slice_data_size = size;
+        iris::codec::Picture picture;
+        picture.parameters = &key;
+        picture.slice_parameters = { &first, &second };
+        picture.slice_data = { { tile, sizeof(tile) } };
+        picture.surface_id = key.current_frame;
+        check(status_of([&] { t->translate(picture, out); }) == VA_STATUS_ERROR_INVALID_BUFFER, what);
+    };
+    rejects(4, 8, "a tile that runs past the slice data is refused");
+    rejects(100, 4, "a tile offset past the slice data is refused");
+    rejects(4, 0, "an empty tile payload is refused");
+}
+
+// ref_frame_idx[] is a client uint8_t indexing an eight-entry map.
+void test_rejects_reference_index_outside_the_map()
+{
+    auto t = iris::codec::make_av1_dpb(VAProfileAV1Profile0);
+    iris::codec::AccessUnit out;
+    auto key = params(100, true, 0);
+    for (unsigned i = 0; i < kSlots; ++i)
+        key.ref_frame_map[i] = VA_INVALID_SURFACE;
+    translate(key, *t, out);
+
+    auto bad = params(101, false, 1);
+    for (unsigned i = 0; i < kSlots; ++i)
+        bad.ref_frame_map[i] = i == 0 ? 100 : VA_INVALID_SURFACE;
+    bad.ref_frame_idx[0] = 200;
+
+    const uint8_t tile[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    VASliceParameterBufferAV1 slice = {};
+    slice.slice_data_size = sizeof(tile);
+    iris::codec::Picture picture;
+    picture.parameters = &bad;
+    picture.slice_parameters = { &slice };
+    picture.slice_data = { { tile, sizeof(tile) } };
+    picture.surface_id = bad.current_frame;
+    check(status_of([&] { t->translate(picture, out); }) == VA_STATUS_ERROR_INVALID_PARAMETER,
+        "ref_frame_idx outside the reference map is refused");
+}
+
 int main()
 {
     try {
@@ -465,6 +537,8 @@ int main()
         test_hidden_install_target_stays_hidden();
         test_sequence_restart_clears_slots();
         test_flush_has_no_tail();
+        test_rejects_tiles_outside_the_data();
+        test_rejects_reference_index_outside_the_map();
     } catch (const std::exception& e) {
         std::cerr << "FAIL: " << e.what() << '\n';
         return 1;

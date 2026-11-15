@@ -16,6 +16,14 @@
 namespace va {
 
 namespace {
+VAStatus guarded(VADriverContextP ctx, const char* where, auto&& body)
+{
+    try {
+        return body();
+    } catch (const std::exception& error) {
+        return report(ctx, where, error);
+    }
+}
 
 // Advertised on both ends. FFmpeg 8.x looks for Explicit first and then
 // carries the frame's own colour properties instead of mapping them, so the
@@ -40,10 +48,8 @@ constexpr unsigned kHdrFilters = 1;
 
 } // namespace
 
-VAStatus queryVideoProcFilters(VADriverContextP ctx, VAContextID id, VAProcFilterType* filters, unsigned* count)
+VAStatus query_vpp_filters(DriverData& d, VAContextID id, VAProcFilterType* filters, unsigned* count)
 {
-    auto& d = data(ctx);
-    std::lock_guard<std::recursive_mutex> lock(d.mutex);
     (void)context(d, id); // invalid contexts are an error even for an empty answer
     iris::require(count != nullptr, "null filter count", VA_STATUS_ERROR_INVALID_PARAMETER);
     // One filter: the HDR10 tone mapper.
@@ -62,11 +68,17 @@ VAStatus queryVideoProcFilters(VADriverContextP ctx, VAContextID id, VAProcFilte
     return VA_STATUS_SUCCESS;
 }
 
-VAStatus queryVideoProcFilterCaps(VADriverContextP ctx, VAContextID id, VAProcFilterType type, void* caps,
-    unsigned* count)
+VAStatus queryVideoProcFilters(VADriverContextP ctx, VAContextID id, VAProcFilterType* filters, unsigned* count)
 {
-    auto& d = data(ctx);
-    std::lock_guard<std::recursive_mutex> lock(d.mutex);
+    return guarded(ctx, "queryVideoProcFilters", [&] {
+        auto& d = data(ctx);
+        std::lock_guard<std::recursive_mutex> lock(d.mutex);
+        return query_vpp_filters(d, id, filters, count);
+    });
+}
+
+VAStatus query_vpp_filter_caps(DriverData& d, VAContextID id, VAProcFilterType type, void* caps, unsigned* count)
+{
     (void)context(d, id);
     iris::require(count != nullptr, "null filter caps count", VA_STATUS_ERROR_INVALID_PARAMETER);
     // Only HDR10 to SDR: the kernel's curve is the BT.2390 EETF toward a
@@ -91,12 +103,20 @@ VAStatus queryVideoProcFilterCaps(VADriverContextP ctx, VAContextID id, VAProcFi
     return VA_STATUS_SUCCESS;
 }
 
-VAStatus queryVideoProcPipelineCaps(VADriverContextP ctx, VAContextID id, VABufferID* filters, unsigned count,
+VAStatus queryVideoProcFilterCaps(VADriverContextP ctx, VAContextID id, VAProcFilterType type, void* caps,
+    unsigned* count)
+{
+    return guarded(ctx, "queryVideoProcFilterCaps", [&] {
+        auto& d = data(ctx);
+        std::lock_guard<std::recursive_mutex> lock(d.mutex);
+        return query_vpp_filter_caps(d, id, type, caps, count);
+    });
+}
+
+VAStatus query_vpp_pipeline_caps(DriverData& d, VAContextID id, VABufferID* filters, unsigned count,
     VAProcPipelineCaps* caps)
 {
     (void)filters;
-    auto& d = data(ctx);
-    std::lock_guard<std::recursive_mutex> lock(d.mutex);
     auto c = context(d, id);
     iris::require(c->video_proc(), "pipeline caps on a non-VideoProc context",
         VA_STATUS_ERROR_INVALID_CONTEXT);
@@ -167,6 +187,16 @@ VAStatus queryVideoProcPipelineCaps(VADriverContextP ctx, VAContextID id, VABuff
     caps->max_output_width = d.capabilities.max_width;
     caps->max_output_height = d.capabilities.max_height;
     return VA_STATUS_SUCCESS;
+}
+
+VAStatus queryVideoProcPipelineCaps(VADriverContextP ctx, VAContextID id, VABufferID* filters, unsigned count,
+    VAProcPipelineCaps* caps)
+{
+    return guarded(ctx, "queryVideoProcPipelineCaps", [&] {
+        auto& d = data(ctx);
+        std::lock_guard<std::recursive_mutex> lock(d.mutex);
+        return query_vpp_pipeline_caps(d, id, filters, count, caps);
+    });
 }
 
 } // namespace va

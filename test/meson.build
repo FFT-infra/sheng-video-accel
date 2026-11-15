@@ -216,10 +216,20 @@ test('encode-params', encode_params_test)
 # unit is claimed once when three VA entry points can ask for it.
 encode_session_test = executable(
   'encode-session-test',
-  ['unit/encode-session-test.cc', '../src/va/buffer.cc'],
+  ['unit/encode-session-test.cc', '../src/va/buffer.cc', '../src/va/report.cc'],
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('encode-session', encode_session_test)
+
+# The VideoProc query answers are ABI-free functions over DriverData
+# (src/va/vpp.cc); the entry points only resolve the context, lock and
+# translate a throw. This drives the answers with a constructed table.
+va_vpp_query_test = executable(
+  'va-vpp-query-test',
+  ['unit/va-vpp-query-test.cc', '../src/va/vpp.cc', '../src/va/tables.cc', '../src/va/report.cc'],
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+test('va-vpp-query', va_vpp_query_test)
 
 # Hardware-independent regression guards for the browser-facing queue and
 # stable-export invariants. The integration probe above remains opt-in because

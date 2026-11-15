@@ -150,10 +150,10 @@ void copy_pixels(DriverData& d, Surface& s, const VAImage& image, uint8_t* desti
     const uint8_t* source = nullptr;
     iris::Layout layout;
     int fd = -1;
-    if (s.target.frame) {
-        source = s.target.frame->map();
-        layout = s.target.frame->layout();
-        fd = s.target.frame->fd();
+    if (s.target->frame) {
+        source = s.target->frame->map();
+        layout = s.target->frame->layout();
+        fd = s.target->frame->fd();
     } else {
         source = s.stable->map();
         layout = s.stable->layout();
@@ -302,10 +302,10 @@ VAStatus deriveImage(VADriverContextP ctx, VASurfaceID id, VAImage* image)
         iris::Layout layout;
         int fd = -1;
         void* mapping = nullptr;
-        if (s->target.frame) {
-            layout = s->target.frame->layout();
-            fd = s->target.frame->fd();
-            mapping = s->target.frame->map();
+        if (s->target->frame) {
+            layout = s->target->frame->layout();
+            fd = s->target->frame->fd();
+            mapping = s->target->frame->map();
         } else {
             iris::StableBuffer* stable = nullptr;
             {
@@ -328,7 +328,7 @@ VAStatus deriveImage(VADriverContextP ctx, VASurfaceID id, VAImage* image)
         b->alias_surface = id;
         b->alias_fd = fd;
         b->alias_owner = s;
-        b->alias_frame = s->target.frame;
+        b->alias_frame = s->target->frame;
         b->derived_surface = id;
         {
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
@@ -341,7 +341,7 @@ VAStatus deriveImage(VADriverContextP ctx, VASurfaceID id, VAImage* image)
             // client's own memory: an upload maps this view and writes the
             // frame into it. Reading it back must not demand a decode
             // completion that will never arrive.
-            if (!s->target.frame)
+            if (!s->target->frame)
                 s->client_pixels = true;
         }
         *image = view;
@@ -426,10 +426,10 @@ VAStatus putImage(VADriverContextP ctx, VASurfaceID id, VAImageID image_id, int 
         int fd = -1;
         {
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
-            if (s->target.frame) {
-                destination = static_cast<uint8_t*>(s->target.frame->map());
-                layout = s->target.frame->layout();
-                fd = s->target.frame->fd();
+            if (s->target->frame) {
+                destination = static_cast<uint8_t*>(s->target->frame->map());
+                layout = s->target->frame->layout();
+                fd = s->target->frame->fd();
             } else {
                 iris::StableBuffer& stable = ensure_stable(d, *s);
                 destination = static_cast<uint8_t*>(stable.map());

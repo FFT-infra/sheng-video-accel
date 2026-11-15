@@ -1,6 +1,7 @@
 // Exercise the emitted bitstream, not the order of source-code tokens.
 #include "../src/codec/bitwriter.h"
 #include "../src/codec/translator.h"
+#include "../src/util/error.h"
 
 using iris::codec::hevc_sps;
 
@@ -245,6 +246,37 @@ void check_bitreader_copy()
     std::cout << "PASS BitReader::copy: " << cases << " aligned and unaligned spans\n";
 }
 
+// The PPS writes one explicit size per tile from 19- and 21-entry arrays.
+// A larger count would announce syntax the loop never writes.
+void check_pps_tile_bounds()
+{
+    VAPictureParameterBufferHEVC picture {};
+    picture.pic_width_in_luma_samples = 1920;
+    picture.pic_height_in_luma_samples = 1080;
+    picture.pic_fields.bits.chroma_format_idc = 1;
+    picture.pic_fields.bits.tiles_enabled_flag = 1;
+    picture.num_tile_columns_minus1 = 20;
+    bool refused = false;
+    try {
+        iris::codec::hevc_pps(picture);
+    } catch (const iris::Error& error) {
+        refused = error.status == VA_STATUS_ERROR_INVALID_PARAMETER;
+    }
+    if (!refused)
+        throw std::runtime_error("an HEVC tile column count past the VA array is not refused");
+
+    picture.num_tile_columns_minus1 = 19;
+    picture.num_tile_rows_minus1 = 22;
+    refused = false;
+    try {
+        iris::codec::hevc_pps(picture);
+    } catch (const iris::Error& error) {
+        refused = error.status == VA_STATUS_ERROR_INVALID_PARAMETER;
+    }
+    if (!refused)
+        throw std::runtime_error("an HEVC tile row count past the VA array is not refused");
+}
+
 } // namespace
 
 int main()
@@ -279,6 +311,8 @@ int main()
         check_scaling_lists();
         std::cout << "PASS HEVC scaling lists: 20 matrices, 992 coefficients and 8 DC values\n";
         check_bitreader_copy();
+        check_pps_tile_bounds();
+        std::cout << "PASS HEVC PPS tile counts bounded by the VA arrays\n";
     } catch (const std::exception& error) {
         std::cerr << "FAIL " << error.what() << '\n';
         return 1;

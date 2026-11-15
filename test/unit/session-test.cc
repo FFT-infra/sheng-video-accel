@@ -52,6 +52,8 @@ int failures = 0;
         }                                                                                                      \
     } while (0)
 
+TargetPtr make_target() { return std::make_shared<Target>(); }
+
 Options fast_options()
 {
     Options options;
@@ -88,7 +90,7 @@ struct Harness {
         copier = make_cpu_copy();
         session = std::make_unique<Session>(std::move(device), sc, options, copier.get(), Trace(options.trace));
     }
-    void submit(Target& target) { session->submit(au.data(), au.size(), target); }
+    void submit(const TargetPtr& target) { session->submit(au.data(), au.size(), target); }
 };
 
 bool log_has(const FakeDevice& fake, const char* needle)
@@ -119,7 +121,7 @@ void test_open_sequence()
     CHECK(h.session->mode() == SessionMode::DecodeOrder);
     CHECK(h.session->state() == SessionState::Configured);
 
-    Target t;
+    auto t = make_target();
     h.submit(t);
     CHECK(log_index(fake, "QBUF OUTPUT 0") < log_index(fake, "EVENT SOURCE_CHANGE"));
     CHECK(log_index(fake, "EVENT SOURCE_CHANGE") < log_index(fake, "G_FMT CAPTURE"));
@@ -150,7 +152,7 @@ void test_pool_sizing_respects_kernel_max()
     FakeConfig fc;
     fc.capture_max = 32;
     Harness h(fc, fast_options(), config(40)); // wants 44
-    Target t;
+    auto t = make_target();
     h.submit(t);
     CHECK(h.fake->capture_allocated() == 32);
     CHECK(h.session->state() == SessionState::Streaming);
@@ -161,11 +163,11 @@ void test_pool_sizing_respects_kernel_max()
 void test_direct_publish_holds_slot_until_release()
 {
     Harness h;
-    Target t;
+    auto t = make_target();
     h.submit(t);
     h.session->wait(t);
-    CHECK(t.completed && !t.error && !t.pending);
-    CHECK(t.frame != nullptr);
+    CHECK(t->completed && !t->error && !t->pending);
+    CHECK(t->frame != nullptr);
     // Invariant 2: a held slot is never queued. 32 slots, one held.
     CHECK(h.session->capture_held() == 1);
     CHECK(h.session->capture_queued() == 31);
@@ -183,12 +185,12 @@ void test_copy_publish_releases_slot_immediately()
     const int fd = memfd_create("stable", 0);
     CHECK(fd >= 0 && ftruncate(fd, layout.size) == 0);
     StableBuffer stable(fd, layout.size, MemoryOrigin::DmaHeap, layout);
-    Target t;
-    t.publish = Publish::Copy;
-    t.destination = &stable;
+    auto t = make_target();
+    t->publish = Publish::Copy;
+    t->destination = &stable;
     h.submit(t);
     h.session->wait(t);
-    CHECK(t.completed && !t.frame);
+    CHECK(t->completed && !t->frame);
     CHECK(h.session->capture_held() == 0);
     h.session->service();
     CHECK(h.session->capture_queued() == 32);
@@ -199,7 +201,7 @@ void test_late_completion_after_release_is_dropped()
     // Invariant 1: a released target's token must never be published.
     Harness h;
     h.fake->set_auto_tick(false);
-    Target a, b;
+    auto a = make_target(), b = make_target();
     h.submit(a);
     // Bring-up consumed the first AU; b is queued and not yet completed.
     h.fake->tick(1); // completes a
@@ -208,7 +210,7 @@ void test_late_completion_after_release_is_dropped()
     h.session->release(b); // client moved on before completion
     h.fake->tick(1); // firmware still completes b's token
     h.session->service();
-    CHECK(!b.completed && !b.pending && b.frame == nullptr);
+    CHECK(!b->completed && !b->pending && b->frame == nullptr);
     CHECK(h.session->stats().drops == 1);
     CHECK(h.session->capture_held() == 1); // only a
 }
@@ -217,17 +219,17 @@ void test_reuse_pending_target_invalidates_old_token()
 {
     Harness h;
     h.fake->set_auto_tick(false);
-    Target a;
+    auto a = make_target();
     h.submit(a);
     h.fake->tick(1);
     h.session->service();
-    Target t;
+    auto t = make_target();
     h.submit(t); // token 2, pending
     h.submit(t); // reused before completion: token 3
-    CHECK(t.pending && t.token == 3);
+    CHECK(t->pending && t->token == 3);
     h.fake->tick(2);
     h.session->service();
-    CHECK(t.completed && t.frame != nullptr);
+    CHECK(t->completed && t->frame != nullptr);
     CHECK(h.session->stats().drops == 1); // token 2 dropped
 }
 
@@ -238,16 +240,16 @@ void test_firmware_error_marker_is_never_published()
     // Invariant 8.
     Harness h;
     h.fake->set_auto_tick(false);
-    Target a;
+    auto a = make_target();
     h.submit(a);
     h.fake->tick(1);
     h.session->service();
     h.fake->inject_error_markers(1);
-    Target b;
+    auto b = make_target();
     h.submit(b);
     h.fake->tick(1);
     h.session->service();
-    CHECK(b.completed && !b.error);
+    CHECK(b->completed && !b->error);
     CHECK(h.session->stats().errors == 1);
     CHECK(h.session->stats().completed == 2);
     h.session->service();
@@ -259,16 +261,16 @@ void test_output_error_fails_target()
 {
     Harness h;
     h.fake->set_auto_tick(false);
-    Target a;
+    auto a = make_target();
     h.submit(a);
     h.fake->tick(1);
     h.session->service();
     h.fake->inject_output_errors(1);
-    Target b;
+    auto b = make_target();
     h.submit(b);
     h.fake->tick(1);
     h.session->service();
-    CHECK(!b.pending && b.error);
+    CHECK(!b->pending && b->error);
     CHECK_THROWS(h.session->wait(b), VA_STATUS_ERROR_DECODING_ERROR);
 }
 
@@ -283,17 +285,17 @@ void test_timestamped_corrupt_completion_fails_target_at_once()
     // the invisible half of a VP9 alt-ref superframe.
     Harness h;
     h.fake->set_auto_tick(false);
-    Target a;
+    auto a = make_target();
     h.submit(a);
     h.fake->tick(1);
     h.session->service();
-    CHECK(a.completed && !a.error);
+    CHECK(a->completed && !a->error);
     h.fake->inject_timestamped_errors(1, V4L2_BUF_FLAG_KEYFRAME);
-    Target b;
+    auto b = make_target();
     h.submit(b);
     h.fake->tick(1);
     h.session->service();
-    CHECK(!b.pending && b.error);
+    CHECK(!b->pending && b->error);
     CHECK(h.session->stats().errors == 1);
     // Invariant 18, the other direction: a corrupt shown picture is failed,
     // never published as a hidden one, so `completed` does not move.
@@ -312,17 +314,17 @@ void test_timestamped_hidden_picture_is_published_not_failed()
     // rather than failed.
     Harness h;
     h.fake->set_auto_tick(false);
-    Target a;
+    auto a = make_target();
     h.submit(a);
     h.fake->tick(1);
     h.session->service();
     h.fake->inject_timestamped_errors(1);
-    Target b;
-    b.hidden = true;
+    auto b = make_target();
+    b->hidden = true;
     h.submit(b);
     h.fake->tick(1);
     h.session->service();
-    CHECK(b.completed && !b.error);
+    CHECK(b->completed && !b->error);
     CHECK(h.session->stats().errors == 0);
 }
 
@@ -337,17 +339,17 @@ void test_noshow_completion_never_lands_on_a_shown_surface()
     // the surface the client asked to display.
     Harness h;
     h.fake->set_auto_tick(false);
-    Target a;
+    auto a = make_target();
     h.submit(a);
     h.fake->tick(1);
     h.session->service();
-    CHECK(a.completed && !a.error);
+    CHECK(a->completed && !a->error);
     h.fake->inject_timestamped_errors(1);
-    Target b;
+    auto b = make_target();
     h.submit(b);
     h.fake->tick(1);
     h.session->service();
-    CHECK(!b.completed && b.error);
+    CHECK(!b->completed && b->error);
     CHECK(h.session->stats().errors == 1);
     CHECK(h.session->stats().completed == 1);
     CHECK_THROWS(h.session->wait(b), VA_STATUS_ERROR_DECODING_ERROR);
@@ -365,18 +367,18 @@ void test_vp9_altref_superframe_is_one_picture()
     // into a misplaced drop.
     Harness h;
     h.fake->set_auto_tick(false);
-    Target a;
+    auto a = make_target();
     h.submit(a);
     h.fake->tick(1);
     h.session->service();
-    CHECK(a.completed && !a.error);
+    CHECK(a->completed && !a->error);
     h.fake->inject_altref_superframe();
-    Target b;
-    b.completions = 2;
+    auto b = make_target();
+    b->completions = 2;
     h.submit(b);
     h.fake->tick(1);
     h.session->service();
-    CHECK(b.completed && !b.error);
+    CHECK(b->completed && !b->error);
     CHECK(h.session->stats().errors == 0);
     CHECK(h.session->stats().drops == 0);
 }
@@ -393,19 +395,19 @@ void test_install_hidden_frame_needs_no_extra_target()
     // may remove the need for kernel 0005.
     Harness h;
     h.fake->set_auto_tick(false);
-    Target a;
+    auto a = make_target();
     h.submit(a);
     h.fake->tick(1);
     h.session->service();
-    CHECK(a.completed && !a.error);
+    CHECK(a->completed && !a->error);
 
     h.fake->inject_altref_superframe(); // same two-completion shape
-    Target b;
-    b.completions = 2;
+    auto b = make_target();
+    b->completions = 2;
     h.submit(b);
     h.fake->tick(1);
     h.session->service();
-    CHECK(b.completed && !b.error);
+    CHECK(b->completed && !b->error);
     CHECK(h.session->stats().errors == 0);
     CHECK(h.session->stats().drops == 0);
     CHECK(h.session->stats().misplaced == 0);
@@ -421,22 +423,22 @@ void test_hidden_install_unit_publishes_its_client_half()
     // both halves invisible (the 5ad34a9 DRC regression).
     Harness h;
     h.fake->set_auto_tick(false);
-    Target a;
+    auto a = make_target();
     h.submit(a);
     h.fake->tick(1);
     h.session->service();
-    CHECK(a.completed && !a.error);
+    CHECK(a->completed && !a->error);
 
     // The observed target shape: a hidden install unit whose client shown
     // half is itself show_frame=0, so both completions are NOSHOW.
     h.fake->inject_hidden_install_unit();
-    Target b;
-    b.completions = 2;
-    b.hidden = true;
+    auto b = make_target();
+    b->completions = 2;
+    b->hidden = true;
     h.submit(b);
     h.fake->tick(1);
     h.session->service();
-    CHECK(b.completed && !b.error);
+    CHECK(b->completed && !b->error);
     CHECK(h.session->stats().errors == 0);
     CHECK(h.session->stats().drops == 0);
     CHECK(h.session->stats().misplaced == 0);
@@ -445,12 +447,12 @@ void test_hidden_install_unit_publishes_its_client_half()
     // second half normally; the counter must not turn that into a hidden
     // publication.
     h.fake->inject_altref_superframe();
-    Target c;
-    c.completions = 2;
+    auto c = make_target();
+    c->completions = 2;
     h.submit(c);
     h.fake->tick(1);
     h.session->service();
-    CHECK(c.completed && !c.error);
+    CHECK(c->completed && !c->error);
     CHECK(h.session->stats().errors == 0);
 }
 
@@ -465,13 +467,13 @@ void test_released_install_completions_are_not_errors()
     {
         Harness h;
         h.fake->set_auto_tick(false);
-        Target a;
+        auto a = make_target();
         h.submit(a);
         h.fake->tick(1);
         h.session->service();
         h.fake->inject_altref_superframe();
-        Target b;
-        b.completions = 2;
+        auto b = make_target();
+        b->completions = 2;
         h.submit(b);
         h.session->release(b);
         h.fake->tick(1);
@@ -482,17 +484,17 @@ void test_released_install_completions_are_not_errors()
     {
         Harness h;
         h.fake->set_auto_tick(false);
-        Target a;
+        auto a = make_target();
         h.submit(a);
         h.fake->tick(1);
         h.session->service();
         h.fake->inject_altref_superframe();
-        Target b;
-        b.completions = 2;
+        auto b = make_target();
+        b->completions = 2;
         h.submit(b);
         h.fake->tick(1);
         h.session->wait(b);
-        CHECK(b.completed && !b.error);
+        CHECK(b->completed && !b->error);
         h.session->release(b);
         CHECK(h.session->stats().errors == 0);
         CHECK(h.session->stats().drops == 0);
@@ -508,24 +510,24 @@ void test_released_hidden_install_unit_is_not_an_error()
     // both without an error, a misplacement or a wait on a target that is gone.
     Harness h;
     h.fake->set_auto_tick(false);
-    Target a;
+    auto a = make_target();
     h.submit(a);
     h.fake->tick(1);
     h.session->service();
-    CHECK(a.completed && !a.error);
+    CHECK(a->completed && !a->error);
 
     h.fake->inject_hidden_install_unit();
-    Target b;
-    b.completions = 2;
-    b.hidden = true;
+    auto b = make_target();
+    b->completions = 2;
+    b->hidden = true;
     h.submit(b);
     h.session->release(b);
     h.fake->tick(1);
     h.session->service();
     CHECK(h.session->stats().errors == 0);
     CHECK(h.session->stats().misplaced == 0);
-    CHECK(!b.completed);
-    CHECK(!b.error);
+    CHECK(!b->completed);
+    CHECK(!b->error);
     // Both halves have the NOSHOW shape, so both take the invisible branch
     // and stats().drops stays 0. A visible payload completion would report
     // the one drop in the branch below; with two NOSHOW halves there are no
@@ -538,18 +540,18 @@ void test_eio_fails_session_and_all_pending()
 {
     Harness h;
     h.fake->set_auto_tick(false);
-    Target a;
+    auto a = make_target();
     h.submit(a);
     h.fake->tick(1);
     h.session->service();
-    Target b, c;
+    auto b = make_target(), c = make_target();
     h.submit(b);
     h.submit(c);
     h.fake->inject_capture_eio();
     CHECK_THROWS(h.session->wait(b), VA_STATUS_ERROR_DECODING_ERROR);
     CHECK(h.session->state() == SessionState::Failed);
-    CHECK(b.error && c.error && !b.pending && !c.pending);
-    Target d;
+    CHECK(b->error && c->error && !b->pending && !c->pending);
+    auto d = make_target();
     CHECK_THROWS(h.submit(d), VA_STATUS_ERROR_DECODING_ERROR);
 }
 
@@ -558,15 +560,15 @@ void test_eio_fails_session_and_all_pending()
 void test_decode_order_timeout_is_terminal()
 {
     Harness h;
-    Target a;
+    auto a = make_target();
     h.submit(a);
     h.session->wait(a);
     h.fake->stall(true);
-    Target b;
+    auto b = make_target();
     h.submit(b);
     CHECK_THROWS(h.session->wait(b), VA_STATUS_ERROR_TIMEDOUT);
     CHECK(!log_has(*h.fake, "DECODER_CMD STOP")); // no drain in decode order
-    CHECK(b.error && !b.pending);
+    CHECK(b->error && !b->pending);
     // The token was invalidated: a late completion is dropped.
     h.fake->stall(false);
     h.fake->tick(1);
@@ -582,22 +584,22 @@ void test_display_order_timeout_drains_then_recovers()
     fc.display_order_reorder = true;
     fc.reorder_depth = 2;
     Harness h(fc);
-    Target a;
+    auto a = make_target();
     h.submit(a);
     // With a reorder depth of 2 and no further input, a is withheld; the
     // sync timeout must STOP, see LAST, START, and a completes.
     h.session->wait(a);
-    CHECK(a.completed && !a.error);
+    CHECK(a->completed && !a->error);
     CHECK(h.session->stats().drains == 1);
     CHECK(log_index(*h.fake, "DECODER_CMD STOP") < log_index(*h.fake, "DECODER_CMD START"));
     CHECK(h.session->state() == SessionState::Streaming);
     // Decoding continues after the restart.
-    Target b, c, d;
+    auto b = make_target(), c = make_target(), d = make_target();
     h.submit(b);
     h.submit(c);
     h.submit(d);
     h.session->wait(b);
-    CHECK(b.completed);
+    CHECK(b->completed);
 }
 
 void test_start_ebusy_is_retried()
@@ -607,10 +609,10 @@ void test_start_ebusy_is_retried()
     fc.display_order_reorder = true;
     Harness h(fc);
     h.fake->inject_start_busy(3);
-    Target a;
+    auto a = make_target();
     h.submit(a);
     h.session->wait(a);
-    CHECK(a.completed);
+    CHECK(a->completed);
     CHECK(h.session->state() == SessionState::Streaming);
     int busy = 0;
     for (const auto& line : h.fake->log())
@@ -622,14 +624,14 @@ void test_start_ebusy_is_retried()
 void test_finish_drains_and_refuses_submit()
 {
     Harness h;
-    Target a, b;
+    auto a = make_target(), b = make_target();
     h.submit(a);
     h.submit(b);
     h.session->finish();
     CHECK(h.session->state() == SessionState::Finished);
     CHECK(log_has(*h.fake, "DECODER_CMD STOP"));
-    CHECK(!b.pending);
-    Target c;
+    CHECK(!b->pending);
+    auto c = make_target();
     CHECK_THROWS(h.submit(c), VA_STATUS_ERROR_OPERATION_FAILED);
 }
 
@@ -638,15 +640,15 @@ void test_finish_drains_and_refuses_submit()
 void test_resolution_change_rebuilds_capture()
 {
     Harness h;
-    Target a;
+    auto a = make_target();
     h.submit(a);
     h.session->wait(a);
     h.session->release(a); // nothing held across the change
     h.fake->inject_resolution_change(1280, 720);
-    Target b;
+    auto b = make_target();
     h.submit(b);
     h.session->wait(b);
-    CHECK(b.completed);
+    CHECK(b->completed);
     CHECK(h.session->stats().reconfigures == 1);
     CHECK(h.session->width() == 1280 && h.session->height() == 720);
     const auto& fake = *h.fake;
@@ -673,19 +675,19 @@ void test_resolution_change_keeps_held_frames()
     // picture, so waiting for a release would wait on the caller. vb2 orphans
     // the old buffer, so the pool is rebuilt under the holder.
     Harness h;
-    Target a;
+    auto a = make_target();
     h.submit(a);
     h.session->wait(a); // a holds a slot
     h.fake->inject_resolution_change(1280, 720);
-    Target b;
+    auto b = make_target();
     h.submit(b);
     h.fake->tick(1); // firmware parses the new-resolution AU
     h.session->service(); // and the session sees SOURCE_CHANGE
     CHECK(h.session->state() == SessionState::Streaming);
-    CHECK(b.pending); // its OUTPUT is still queued: not lost
-    CHECK(a.frame != nullptr); // the held frame survived untouched
+    CHECK(b->pending); // its OUTPUT is still queued: not lost
+    CHECK(a->frame != nullptr); // the held frame survived untouched
     h.session->wait(b);
-    CHECK(b.completed && !b.error);
+    CHECK(b->completed && !b->error);
     CHECK(h.session->width() == 1280);
     h.session->release(a);
     CHECK(h.session->state() == SessionState::Streaming);
@@ -697,7 +699,7 @@ void test_au_larger_than_slot_is_rejected()
 {
     Harness h;
     std::vector<uint8_t> huge(3u << 20, 0);
-    Target t;
+    auto t = make_target();
     CHECK_THROWS(h.session->submit(huge.data(), huge.size(), t), VA_STATUS_ERROR_NOT_ENOUGH_BUFFER);
 }
 
@@ -710,7 +712,7 @@ void test_visible_rectangle_prefers_kernel_compose_when_sane()
     fc.coded_height = 1088;
     fc.visible_height = 1080;
     Harness h(fc);
-    Target t;
+    auto t = make_target();
     h.submit(t);
     CHECK(h.session->visible().height == 1080);
     CHECK(h.session->capture_layout().height == 1088);
@@ -720,7 +722,7 @@ void test_visible_rectangle_prefers_kernel_compose_when_sane()
     bad.coded_height = 1088;
     bad.visible_height = 4000; // corrupt compose: exceeds coded size
     Harness g(bad, fast_options(), config());
-    Target u;
+    auto u = make_target();
     g.submit(u);
     CHECK(g.session->visible().height == 1080); // falls back to the client's geometry
 }
@@ -775,10 +777,10 @@ void test_import_queues_client_buffer_per_picture()
     Harness h;
     const Layout layout = capture_layout_of({});
     ClientBuffer a(layout), b(layout);
-    Target ta, tb;
-    ta.publish = tb.publish = Publish::Import;
-    ta.destination = a.stable.get();
-    tb.destination = b.stable.get();
+    auto ta = make_target(), tb = make_target();
+    ta->publish = tb->publish = Publish::Import;
+    ta->destination = a.stable.get();
+    tb->destination = b.stable.get();
     h.submit(ta);
     CHECK(h.session->capture_memory() == CaptureMemory::Import);
     CHECK(log_has(*h.fake, "REQBUFS CAPTURE 32 DMABUF"));
@@ -789,11 +791,11 @@ void test_import_queues_client_buffer_per_picture()
     // instead of being handed to the firmware.
     CHECK(h.fake->joined_log().find("STREAMON CAPTURE") < h.fake->joined_log().find("QBUF CAPTURE DMABUF 0 fd="));
     h.session->wait(ta);
-    CHECK(ta.completed && !ta.error && ta.frame == nullptr);
+    CHECK(ta->completed && !ta->error && ta->frame == nullptr);
     CHECK(same_buffer(h.fake->capture_fd(0), a.fd));
     h.submit(tb);
     h.session->wait(tb);
-    CHECK(tb.completed && !tb.error);
+    CHECK(tb->completed && !tb->error);
     CHECK(h.session->capture_held() == 0);
     // Only the picture in flight ever occupies a slot: nothing is
     // pre-queued and the firmware never has two buffers to choose from.
@@ -819,11 +821,11 @@ void test_import_released_target_completes_instead_of_dropping()
     Harness h;
     h.fake->set_auto_tick(false);
     const Layout layout = capture_layout_of({});
-    Target t;
-    t.publish = Publish::Import;
+    auto t = make_target();
+    t->publish = Publish::Import;
     {
         ClientBuffer a(layout);
-        t.destination = a.stable.get();
+        t->destination = a.stable.get();
         h.submit(t);
         CHECK(h.session->capture_queued() == 1);
         CHECK(same_buffer(h.fake->capture_fd(0), a.fd));
@@ -831,7 +833,7 @@ void test_import_released_target_completes_instead_of_dropping()
         // read that memory after this point: `destination` is a dangling
         // pointer from here on and the Import path must not touch it.
         h.session->release(t);
-        CHECK(!t.pending);
+        CHECK(!t->pending);
     }
     h.fake->tick(1);
     h.session->service();
@@ -857,13 +859,13 @@ void test_import_released_superframe_completes_its_halves()
     Harness h;
     h.fake->set_auto_tick(false);
     const Layout layout = capture_layout_of({});
-    Target t;
-    t.publish = Publish::Import;
-    t.completions = 2;
+    auto t = make_target();
+    t->publish = Publish::Import;
+    t->completions = 2;
     h.fake->inject_altref_superframe();
     {
         ClientBuffer a(layout);
-        t.destination = a.stable.get();
+        t->destination = a.stable.get();
         h.submit(t);
         CHECK(h.session->capture_queued() == 2);
         CHECK(same_buffer(h.fake->capture_fd(0), a.fd));
@@ -871,7 +873,7 @@ void test_import_released_superframe_completes_its_halves()
         // The surface, and with it the buffer, is gone before either half
         // returns.
         h.session->release(t);
-        CHECK(!t.pending);
+        CHECK(!t->pending);
     }
     h.fake->tick(1);
     h.session->service();
@@ -891,10 +893,10 @@ void test_import_misplaced_completion_is_an_error()
     h.fake->set_auto_tick(false);
     const Layout layout = capture_layout_of({});
     ClientBuffer a(layout), b(layout);
-    Target ta, tb;
-    ta.publish = tb.publish = Publish::Import;
-    ta.destination = a.stable.get();
-    tb.destination = b.stable.get();
+    auto ta = make_target(), tb = make_target();
+    ta->publish = tb->publish = Publish::Import;
+    ta->destination = a.stable.get();
+    tb->destination = b.stable.get();
     h.submit(ta);
     h.submit(tb);
     // Lockstep: only the first picture's buffer is with the firmware.
@@ -905,10 +907,10 @@ void test_import_misplaced_completion_is_an_error()
     h.fake->inject_token_skew(1);
     h.fake->tick(1);
     CHECK_THROWS(h.session->wait(tb), VA_STATUS_ERROR_DECODING_ERROR);
-    CHECK(tb.error && !tb.pending);
+    CHECK(tb->error && !tb->pending);
     // The buffer's owner is compromised too: it holds foreign pixels.
     CHECK_THROWS(h.session->wait(ta), VA_STATUS_ERROR_DECODING_ERROR);
-    CHECK(ta.error && !ta.pending);
+    CHECK(ta->error && !ta->pending);
     CHECK(h.session->stats().misplaced == 1);
     CHECK(h.session->stats().errors == 2);
     CHECK(h.session->stats().completed == 0);
@@ -922,16 +924,16 @@ void test_import_rejected_on_display_order_kernel()
     Harness h(fc);
     const Layout layout = capture_layout_of(fc);
     ClientBuffer a(layout);
-    Target ta;
-    ta.publish = Publish::Import;
-    ta.destination = a.stable.get();
+    auto ta = make_target();
+    ta->publish = Publish::Import;
+    ta->destination = a.stable.get();
     CHECK(!h.session->supports_import());
     h.submit(ta);
     CHECK(h.session->capture_memory() == CaptureMemory::Mmap);
     CHECK(log_has(*h.fake, "REQBUFS CAPTURE 32") && !log_has(*h.fake, "DMABUF"));
     h.session->wait(ta);
     // Degraded to Copy: the pixels reached the client buffer anyway.
-    CHECK(ta.completed && !ta.error && ta.publish == Publish::Copy && ta.frame == nullptr);
+    CHECK(ta->completed && !ta->error && ta->publish == Publish::Copy && ta->frame == nullptr);
 }
 
 void test_import_rejected_for_an_unqualified_codec()
@@ -940,14 +942,14 @@ void test_import_rejected_for_an_unqualified_codec()
     h.session->set_import_allowed_for_test(false);
     const Layout layout = capture_layout_of({});
     ClientBuffer a(layout);
-    Target ta;
-    ta.publish = Publish::Import;
-    ta.destination = a.stable.get();
+    auto ta = make_target();
+    ta->publish = Publish::Import;
+    ta->destination = a.stable.get();
     CHECK(!h.session->supports_import());
     h.submit(ta);
     CHECK(h.session->capture_memory() == CaptureMemory::Mmap);
     h.session->wait(ta);
-    CHECK(ta.completed && ta.publish == Publish::Copy);
+    CHECK(ta->completed && ta->publish == Publish::Copy);
 }
 
 void test_import_rejected_on_layout_mismatch()
@@ -957,14 +959,14 @@ void test_import_rejected_on_layout_mismatch()
     wrong.stride += 128; // a client whose pitch the firmware cannot write
     wrong.size = wrong.stride * (wrong.storage_height + wrong.storage_height / 2);
     ClientBuffer a(wrong);
-    Target ta;
-    ta.publish = Publish::Import;
-    ta.destination = a.stable.get();
+    auto ta = make_target();
+    ta->publish = Publish::Import;
+    ta->destination = a.stable.get();
     h.submit(ta);
     CHECK(h.session->capture_memory() == CaptureMemory::Mmap);
     CHECK(!h.session->supports_import());
     h.session->wait(ta);
-    CHECK(ta.completed && ta.publish == Publish::Copy);
+    CHECK(ta->completed && ta->publish == Publish::Copy);
 }
 
 void test_import_drain_lends_scratch_for_last()
@@ -972,9 +974,9 @@ void test_import_drain_lends_scratch_for_last()
     Harness h;
     const Layout layout = capture_layout_of({});
     ClientBuffer a(layout);
-    Target ta;
-    ta.publish = Publish::Import;
-    ta.destination = a.stable.get();
+    auto ta = make_target();
+    ta->publish = Publish::Import;
+    ta->destination = a.stable.get();
     h.submit(ta);
     h.session->wait(ta);
     h.session->finish();
@@ -990,9 +992,9 @@ void test_import_resolution_change_rebuilds_import_pool()
     Harness h;
     const Layout layout = capture_layout_of({});
     ClientBuffer a(layout);
-    Target ta;
-    ta.publish = Publish::Import;
-    ta.destination = a.stable.get();
+    auto ta = make_target();
+    ta->publish = Publish::Import;
+    ta->destination = a.stable.get();
     h.submit(ta);
     h.session->wait(ta);
     h.fake->inject_resolution_change(1280, 720);
@@ -1000,12 +1002,12 @@ void test_import_resolution_change_rebuilds_import_pool()
     small.coded_width = 1280;
     small.coded_height = 720;
     ClientBuffer b(capture_layout_of(small));
-    Target tb;
-    tb.publish = Publish::Import;
-    tb.destination = b.stable.get();
+    auto tb = make_target();
+    tb->publish = Publish::Import;
+    tb->destination = b.stable.get();
     h.submit(tb);
     h.session->wait(tb);
-    CHECK(tb.completed && !tb.error);
+    CHECK(tb->completed && !tb->error);
     CHECK(h.session->stats().reconfigures == 1);
     CHECK(h.session->capture_memory() == CaptureMemory::Import);
     CHECK(log_has(*h.fake, "REQBUFS CAPTURE 0 DMABUF"));
@@ -1019,19 +1021,19 @@ void test_noshow_drc_last_does_not_fail_a_picture()
     // that target turns a normal DRC into a decode error and stops FFmpeg.
     Harness h;
     h.fake->set_auto_tick(false);
-    Target a;
+    auto a = make_target();
     h.submit(a);
     h.fake->tick(1);
     h.session->service();
-    CHECK(a.completed && !a.error);
+    CHECK(a->completed && !a->error);
 
     h.fake->inject_resolution_change(1280, 720);
     h.fake->inject_noshow_drc_last();
-    Target b;
+    auto b = make_target();
     h.submit(b);
     h.fake->tick(1);
     h.session->service();
-    CHECK(!b.error);
+    CHECK(!b->error);
     CHECK(h.session->stats().errors == 0);
 }
 
@@ -1048,15 +1050,15 @@ void test_import_altref_gets_a_buffer_per_completion()
     h.fake->set_auto_tick(false);
     const Layout layout = capture_layout_of({});
     ClientBuffer a(layout), b(layout);
-    Target ta, tb;
-    ta.publish = tb.publish = Publish::Import;
-    ta.destination = a.stable.get();
-    tb.destination = b.stable.get();
+    auto ta = make_target(), tb = make_target();
+    ta->publish = tb->publish = Publish::Import;
+    ta->destination = a.stable.get();
+    tb->destination = b.stable.get();
     h.submit(ta);
     h.fake->tick(1);
     h.session->wait(ta);
     h.fake->inject_altref_superframe();
-    tb.completions = 2;
+    tb->completions = 2;
     h.submit(tb);
     // Two slots, both carrying the same client buffer, and nothing of the
     // next picture.
@@ -1065,7 +1067,7 @@ void test_import_altref_gets_a_buffer_per_completion()
     CHECK(same_buffer(h.fake->capture_fd(1), b.fd));
     h.fake->tick(1);
     h.session->service();
-    CHECK(tb.completed && !tb.error);
+    CHECK(tb->completed && !tb->error);
     CHECK(h.session->stats().errors == 0);
     CHECK(h.session->stats().misplaced == 0);
     CHECK(h.session->capture_queued() == 0);
@@ -1081,23 +1083,23 @@ void test_import_install_hidden_frame_lends_one_buffer_twice()
     h.fake->set_auto_tick(false);
     const Layout layout = capture_layout_of({});
     ClientBuffer a(layout), b(layout);
-    Target ta, tb;
-    ta.publish = tb.publish = Publish::Import;
-    ta.destination = a.stable.get();
-    tb.destination = b.stable.get();
+    auto ta = make_target(), tb = make_target();
+    ta->publish = tb->publish = Publish::Import;
+    ta->destination = a.stable.get();
+    tb->destination = b.stable.get();
     h.submit(ta);
     h.fake->tick(1);
     h.session->wait(ta);
 
     h.fake->inject_altref_superframe();
-    tb.completions = 2;
+    tb->completions = 2;
     h.submit(tb);
     CHECK(h.session->capture_queued() == 2);
     CHECK(same_buffer(h.fake->capture_fd(0), b.fd));
     CHECK(same_buffer(h.fake->capture_fd(1), b.fd));
     h.fake->tick(1);
     h.session->service();
-    CHECK(tb.completed && !tb.error);
+    CHECK(tb->completed && !tb->error);
     CHECK(h.session->stats().errors == 0);
     CHECK(h.session->stats().drops == 0);
     CHECK(h.session->stats().misplaced == 0);
@@ -1115,16 +1117,16 @@ void test_import_altref_does_not_stall_the_next_picture()
     h.fake->set_auto_tick(false);
     const Layout layout = capture_layout_of({});
     ClientBuffer a(layout), b(layout), c(layout);
-    Target ta, tb, tc;
-    ta.publish = tb.publish = tc.publish = Publish::Import;
-    ta.destination = a.stable.get();
-    tb.destination = b.stable.get();
-    tc.destination = c.stable.get();
+    auto ta = make_target(), tb = make_target(), tc = make_target();
+    ta->publish = tb->publish = tc->publish = Publish::Import;
+    ta->destination = a.stable.get();
+    tb->destination = b.stable.get();
+    tc->destination = c.stable.get();
     h.submit(tc);
     h.fake->tick(1);
     h.session->wait(tc);
     h.fake->inject_altref_superframe();
-    ta.completions = 2;
+    ta->completions = 2;
     h.submit(ta);
     h.submit(tb);
     // Still only the alt-ref's two buffers: the next picture waits its turn.
@@ -1133,13 +1135,13 @@ void test_import_altref_does_not_stall_the_next_picture()
     CHECK(same_buffer(h.fake->capture_fd(1), a.fd));
     h.fake->tick(1);
     h.session->service();
-    CHECK(ta.completed && !ta.error);
+    CHECK(ta->completed && !ta->error);
     // Its buffers came back, so the next picture's may go in.
     CHECK(h.session->capture_queued() == 1);
     CHECK(same_buffer(h.fake->capture_fd(0), b.fd) || same_buffer(h.fake->capture_fd(1), b.fd));
     h.fake->tick(1);
     h.session->service();
-    CHECK(tb.completed && !tb.error);
+    CHECK(tb->completed && !tb->error);
     CHECK(h.session->stats().misplaced == 0);
 }
 
