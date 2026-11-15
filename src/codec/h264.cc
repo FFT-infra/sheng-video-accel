@@ -1,9 +1,16 @@
 // SPDX-License-Identifier: MIT
 //
 // H.264: VA long-format parameters carry no SPS/PPS bytes, so both are
-// synthesised from the picture parameters and repeated on every access unit
-// (Iris treats each OUTPUT buffer as independent and fails later AUs that
-// arrive without their parameter sets).
+// synthesised from the picture parameters. They go out when they change and
+// at every sequence start; an unchanged parameter set is not repeated.
+//
+// The firmware keeps the parameter sets it has been given, so repeating them
+// is redundant work: at 720p it cost 4.7 % of decode throughput (906-921
+// against 950-964 fps over five interleaved rounds at pinned clocks) and
+// bought nothing. The earlier comment here claimed Iris "fails later AUs that
+// arrive without their parameter sets"; the matrix, a 1800-frame
+// byte-identical framemd5 and 100 resolution switches all pass without the
+// repetition.
 
 #include "translator.h"
 
@@ -105,10 +112,8 @@ public:
 
         out.bytes.clear();
         out.deferred = false;
-        const auto sps = h264_sps(profile_idc_, picture.surface_width, picture.surface_height, parameters);
-        const auto pps = h264_pps(profile_idc_, parameters, first_slice);
-        out.bytes.insert(out.bytes.end(), sps.begin(), sps.end());
-        out.bytes.insert(out.bytes.end(), pps.begin(), pps.end());
+        // Slices first: whether this is a sequence start depends on the
+        // assembled access unit, and the parameter sets go in front of it.
         for (const auto& [data, size] : picture.slice_data) {
             if (size == 0)
                 continue;
@@ -119,14 +124,36 @@ public:
         // Sequence start: an IDR NAL, or VA metadata that only a random
         // access point produces (I slice, frame_num 0, POC 0).
         const unsigned slice_type = first_slice.slice_type % 5;
-        out.sequence_start = contains_idr(out.bytes)
+        const bool sequence_start = contains_idr(out.bytes)
             || (slice_type == 2 && parameters.frame_num == 0 && parameters.CurrPic.TopFieldOrderCnt == 0);
+
+        const auto sps = h264_sps(profile_idc_, picture.surface_width, picture.surface_height, parameters);
+        const auto pps = h264_pps(profile_idc_, parameters, first_slice);
+        // The firmware retains the parameter sets, so an unchanged pair is not
+        // resent. A sequence start always carries them: an IDR must be
+        // independently decodable, and a restart after a drain leaves the
+        // firmware with nothing in hand.
+        std::vector<uint8_t> prefix;
+        if (sequence_start || sps != last_sps_) {
+            prefix.insert(prefix.end(), sps.begin(), sps.end());
+            last_sps_ = sps;
+        }
+        if (sequence_start || pps != last_pps_) {
+            prefix.insert(prefix.end(), pps.begin(), pps.end());
+            last_pps_ = pps;
+        }
+        out.bytes.insert(out.bytes.begin(), prefix.begin(), prefix.end());
+        out.sequence_start = sequence_start;
     }
 
     bool flush(AccessUnit&) override { return false; }
 
 private:
     uint8_t profile_idc_;
+    // The pair last written to the firmware, so an unchanged one is not
+    // repeated. Per translator, which is per VA context.
+    std::vector<uint8_t> last_sps_;
+    std::vector<uint8_t> last_pps_;
 };
 
 } // namespace

@@ -8176,6 +8176,343 @@ What this does not prove: one vector and one kernel build. A different
 firmware or a kernel change could move the boundary. The probe hardcodes `/dev/video0` and lives in scratch space, not
 in the repository.
 
+## H.264 720p decode: the repeated parameter sets cost 4.7 % (`49b9ce5c`)
+
+The H.264 translator synthesised SPS and PPS from the VA picture parameters
+and wrote both ahead of every access unit. The comment justified it as "Iris
+treats each OUTPUT buffer as independent and fails later AUs that arrive
+without their parameter sets". The repetition was the whole of a persistent
+720p decode deficit.
+
+`h264-720-long.mp4` (1800 frames of 1280x720 at 30 fps), `-f null`, pinned
+clocks, five interleaved rounds. "before" is `build-rel` of the parent
+commit, "after" is this commit built the same way:
+
+| round | before | after |
+| --- | ---: | ---: |
+| 1 | 905.9 | 962.1 |
+| 2 | 917.0 | 949.9 |
+| 3 | 920.7 | 958.5 |
+| 4 | 914.6 | 958.5 |
+| 5 | 920.2 | 964.1 |
+
+915.7 against 958.6 fps by mean, 4.7 %, and the ranges do not overlap.
+
+The parameter sets are still written at every sequence start and whenever the
+bytes change, so a resolution change and an IDR both carry them.
+
+### How the cause was found
+
+The gap survived every other hypothesis, each excluded by measurement on the
+target rather than by reading code:
+
+| hypothesis | measurement | result |
+| --- | --- | --- |
+| client buffer depth | `-extra_hw_frames 0/8/16` | gap constant |
+| build type | this driver at `-O3` vs `-O2` | release build no faster (906-928) |
+| CAPTURE pool size | negotiated geometry via `strace`: 4/32 buffers, 1280x736 NV12, same sizeimage | identical |
+| CAPTURE starvation | in-driver counter at each submit | 28 of 32 queued, never starved |
+| syscall shape | `strace -c`: per-type counts | identical (12752 against 12736 total in the traced run) |
+| per-call syscall cost | `strace -T`: DQBUF p50 23 us, QBUF p50 34 us | identical |
+| poll wakeup latency | rebuild with a 0 ms sync poll | no change |
+| client CPU | `-benchmark` utime | lower on this driver, not higher |
+
+An `LD_PRELOAD` shim on `vaEndPicture` and `vaSyncSurface` localised the
+remaining time: `vaSyncSurface` was never called (the client polls
+`vaQuerySurfaceStatus`), and the whole difference was inside `vaEndPicture`,
+uniformly ~25 us per submit rather than a tail. That pointed at per-frame work
+on the submit path, not at the wait. The submitted access unit was then the
+only difference left.
+
+### Correctness
+
+The change alters the bytes sent to the firmware, so each surface was
+re-checked on the target with the built driver (`49b9ce5c`):
+
+| check | result |
+| --- | --- |
+| `iris-matrix.sh` | H.264, VP9, HEVC, AV1 all `frame-md5` exact, `drops=0` |
+| 1800-frame `framemd5`, `hwdownload,format=nv12` | byte-identical to the parent commit's decode |
+| `iris-dynamic-resolution.sh` | 100 resolution switches, 101 contexts, PASS |
+| Chrome 156, `browser-1080p.mp4`, 20 s | `VaapiVideoDecoder`, `platform=True`, 598 frames, 8 dropped |
+
+`sh test/run-static-checks.sh` and `meson test -C build-gap --print-errorlogs`
+(29/29) pass on the branch.
+
+What this does not prove: one clip shape. The 480p and HEVC arms showed a
+0.5-1.5 % gap rather than 4.7 %, so the saving is proportionally smaller where
+parameter sets are a smaller fraction of the access unit. No measurement of
+VP9 or AV1 parameter-set repetition was made; neither translator repeats them
+per frame.
+
+## The Debian package at `a55ad18`, built in the chroot and run on the target (2026-11-15)
+
+The earlier Debian record (`9dccdeb`) built the package and ran it against the
+overlay gate and the matrix. This run rebuilds it from the current head of
+`docs/comprehensive-overhaul` and repeats the runtime evidence, so the package
+is not one commit behind the tree.
+
+Built in the bookworm arm64 chroot (`debroot`), `dpkg-buildpackage -b -us -uc`
+with the source identity passed in. The chroot's own test stage ran
+`meson test`: **29/29 OK**, which is the full current suite rather than the
+26 the earlier chroot build ran.
+
+`libva-v4l2-iris_0.1.0_arm64.deb`, sha256
+`34d78887b31c8c35820f36c4ab3fabebc2ea18b97abea43a9b9d898f84047ef2`,
+187,944 bytes, Installed-Size 580. The manifest inside it records
+`source_commit=a55ad1826f1e637fa3d730159c8b37f1420042bd` and
+`artifact_sha256=2db472bee24700b527c18a7d602dc1d99cee1cdf0a6e3fb5e953eb3fde5d73d9`;
+the payload's own sha256, read after `dpkg-deb -x` **on the target**, is the
+same `2db472be…`, so the hash in the manifest names the bytes that shipped.
+
+The payload is the driver, both aliases (`msm_drv_video.so`, `qcom_drv_video.so`),
+`iris-node.sh`, the three diagnostic commands, both READMEs, `copyright` and
+the install manifest, under `/usr/lib/aarch64-linux-gnu/dri`.
+
+| check | run | result |
+| --- | --- | --- |
+| `vainfo` through libva with `LIBVA_DRIVERS_PATH` on the extracted tree | — | `va_openDriver() returns 0`, H.264/HEVC/VP9/AV1 profiles listed |
+| `iris-matrix.sh` | `~/Lab/Bridge/tmp/pkg-gap/matrix` | H.264, VP9, HEVC, AV1 `frame-md5` exact; `drops=0` each |
+
+`dpkg-shlibdeps` produced the same dependency list as before (`libc6 >= 2.34`,
+`libdrm2 >= 2.4.38`, `libegl1`, `libgbm1 >= 7.11~1`, `libgcc-s1 >= 3.0`,
+`libgles2`, `libstdc++6 >= 12`, `libvulkan1 >= 1.2.131.2`, `v4l-utils`).
+
+What this does not prove: still no Debian runtime. The package was built on
+bookworm and run on the Fedora 44 target, which proves the artifact, its
+dependency metadata and its provenance, not that Debian's own libva, libdrm or
+Mesa are compatible. The `msm` alias was carried by the package but exercised
+from the extracted tree via `LIBVA_DRIVERS_PATH`, not by a system install.
+
+## HEVC Main10 at 1080p: the 2.4 % does not reproduce (2026-11-15)
+
+An earlier record carried HEVC Main10 as "the one cell behind", with ten and
+then 26 interleaved rounds all slower. Re-measured on the current builds it
+does not reproduce. Eight interleaved rounds, pinned clocks, the same
+1920x1080 Main10 clip, 300 frames each: 452.5, 466.6, 468.8, 478.5, 485.4,
+487.8, 488.6, 496.7 fps, median 481.9, range 452.5-496.7.
+
+The earlier runs that found a consistent deficit used a different build tree
+and, on the first pass, a `debugoptimized` build against a `release` one; that
+comparison was not like for like.
+
+The verdict changes from "2.4 % behind, cause unknown" to "no reproducible
+deficit". No code change was made for this cell, because there is nothing to
+fix: the earlier probes had already shown identical request-level work
+(DQBUF 1204, DQEVENT 303, poll entered four times in 300 frames), and a gap
+that does not survive a like-for-like build is measurement, not behaviour.
+
+What this does not prove: 1080p Main10 only, one clip, one kernel module. A
+different profile or a 4K Main10 stream could still differ; neither was
+measured here.
+
+Re-measured on 2026-11-15 after `0219dda`, 24 interleaved rounds with release
+builds on both sides: 487.4 against 489.8 fps, 8 of 24 rounds ahead, a paired
+median of -1.2 %. The verdict stands — inside 1 %, and no reason to reshape
+the sync path for it — but the earlier eight-round run was underpowered
+rather than decisive.
+
+## A CDSP module must be Qualcomm-signed, and the unsigned PD is refused (`e2c7a26`, 2026-11-15)
+
+The CDSP VPP stopped at a wall that is outside this repository: the signed
+domain will not load a module whose loadable segments are not covered by a
+Qualcomm hash-and-signature block, and the unsigned domain — the one place an
+unsigned module belongs — is refused at create by the production firmware.
+Measured on `sheng`, boot `3d667b4c…`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`. Everything below is a throwaway program under
+the lab scratch tree; nothing of it is in the repository, because nothing of it
+gates a capability.
+
+The earlier record said the remaining CDSP work was "only QAIC". That is now
+wrong in both directions, and the toolchain half is the easy part:
+
+| claim | measurement | verdict |
+| --- | --- | --- |
+| no QAIC, so no skeleton | QAIC builds against system GHC + `ghc-syb-devel`; it turns `iris_vpp.idl` into `_stub.c`/`_skel.c`, and the skel links three ways — host `ld.lld`, Qualcomm `ld.qcld`, and Qualcomm `hexagon-clang` 19.0.02 with its own `v73/G0/pic` sysroot | the skeleton exists and is correct enough to export `iris_vpp_skel_handle_invoke`, `_qaic_version`, `_uri` and `iris_vpp_slim` |
+| no Hexagon linker | the Open Access 19.0.02 archive (896,567,081 bytes) does contain `hexagon-clang` and `elf32` target libs; `ld.qcld` needs no Open Access archive at all | the toolchain is not the blocker |
+| the shell image blocks the create | copying `fastrpc_shell_3` over `fastrpc_shell_unsigned_3` leaves `FASTRPC_IOCTL_INIT_CREATE` at `0xFFFFFFFF80000416` | the refusal is upstream of the shell's contents, again |
+
+All three link recipes produce a module the CDSP rejects with
+`AEE_EUNABLETOLOAD` (`0x80000406`); `fastrpc_test -d 3 -U 0` on the same boot
+passes 3/3, so the signed domain, the shell and the calculator skeleton all
+work. What separates a module that loads from one that does not is the file's
+contents, not its name, its directory, its soname, its architecture or its
+linker:
+
+- the calculator skel copied to `libiris_vpp_skel.so` in the same directory and
+  opened through the same URI form loads (`0x0`);
+- one byte changed inside its RX `PT_LOAD` (file offset `0x5380`) makes
+  `remote_handle_open` return `0x80000406`;
+- one byte changed in the unmapped gap between its two `PT_LOAD`s (offset
+  `0x5800`) still loads (`0x0`);
+- zeroing the 0x19e8-byte block at file offset `0x1000` makes it fail with
+  `0x80000406`.
+
+That block is a signed hash segment — `Qualcomm Technologies, Inc`,
+`Qualcomm Cryptographic Operations`, `QDSR Sub-CA 1`, SHA-256 digests, and
+`SW_ID`/`HW_ID`/`OEM_ID`/`DEBUG` attributes — carried in a `PT_NULL` program
+header whose `p_vaddr` sits above the image. The loader compares the loadable
+segments against it; a module without a valid block is not loadable from a file.
+
+The one module that loads without a block is the exception that proves the
+rule: `libQ6MSFR_manager_skel.so` is listed in the firmware's own
+`map_SHARED_LIBS_kailua.cdsp.prodQ.txt`, is therefore already inside the
+image, and resolves by name — a copy under any other name returns
+`0x80000406`, while its own name returns `0x80000442`
+(`AEE_ENOSUCHSYMBOL`), which is `dlsym` failing after a successful `dlopen`.
+
+The escape hatch is closed on this firmware. With
+`DSPRPC_CONTROL_UNSIGNED_MODULE` set, `strace` shows
+`FASTRPC_IOCTL_INIT_CREATE` returning `0xFFFFFFFF80000416`
+(`AEE_ERESOURCENOTFOUND`) before any module is named; the signed path on the
+same open returns 0. The firmware is the `kailua.cdsp.prod` build, and its
+production variant does not create unsigned domains at all.
+
+What this does not prove: that no Qualcomm-signed module could ever work — the
+calculator does — and that a different firmware build would refuse the
+unsigned PD. What would unblock a CDSP backend is one of two things this
+repository cannot supply: a signing key accepted by `kailua.cdsp.prod`, or a
+CDSP firmware that creates unsigned domains. Neither is a code change, so no
+CDSP backend was written and `data/iris-codec-capabilities.json` is
+unchanged.
+
+## HEVC parameter sets, encode geometry, and the cells that were open (`0b3f0ad`, 2026-11-15)
+
+Measuring the comparison cells earlier sweeps left open found two defects on
+this side of the VA API, fixed by `0219dda` (decode) and `0b3f0ad` (encode).
+
+Setup for every number below: `sheng`, boot
+`3d667b4c-60b4-4f8c-95bf-d70fefb966e2`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, decoder node resolved by its `iris_driver`
+QUERYCAP name (`/dev/video1`; the encoder is `/dev/video2`), driver loaded as
+a build-tree override through `LIBVA_DRIVERS_PATH`, CPU governor
+`performance`, GPU `userspace` at 680 MHz, the two drivers alternating round
+by round. Decode is `-hwaccel vaapi -hwaccel_output_format vaapi -f null -`.
+"release" is a `-Dbuildtype=release` build of `0b3f0ad`
+(`7ee853c7ebd4…`); the cells marked "debugopt" were measured before that
+build existed, on the same tree at Meson's default `debugoptimized`
+(`9acfc7f7c18d…`, and `14289d6b722a…` for the HEVC before/after pair).
+
+### HEVC repeated VPS, SPS and PPS on every access unit
+
+`src/codec/hevc.cc` wrote the three parameter sets in front of every picture.
+The SPS it synthesises carries no reference picture set, so each access unit
+was treated as independent — the assumption `e2c7a26` had already removed
+from H.264 after the firmware was shown to retain what it is given.
+
+The translator now keeps the last VPS/SPS/PPS it sent and resends only what
+changed. An IRAP always carries them: it has to be independently decodable,
+and a restart after a drain leaves the firmware with nothing in hand.
+
+300-frame HEVC Main10 1080p clip, 30 interleaved rounds against the parent
+commit built the same way (debugoptimized on both sides):
+
+| | throughput |
+| --- | ---: |
+| parameter sets repeated | 482.7 fps |
+| parameter sets cached | 489.8 fps |
+
+The output did not change: 300 of 300 frames are byte-identical to a software
+decode (`framemd5`, `hwdownload` to `p010le` and normalised to `yuv420p10le`).
+On the release build the same clip runs 487.4 fps over 24 interleaved rounds.
+
+What this does not prove: a stream that changes its parameter sets without a
+resolution change (an RPS update, for example) is resent because the bytes
+differ, but no clip in the matrix exercised that path end to end.
+
+### An aligned encode context over an exact surface was refused
+
+FFmpeg's HEVC encoder rounds a 320x180 picture up to a 320x184 context and
+hands the encoder a 320x180 surface. `endPicture` compared the context against
+the surface and returned `VA_STATUS_ERROR_INVALID_SURFACE` ("encode surface is
+smaller than the picture"), so every sub-720p HEVC encode failed. The mirror
+case — an exact H.264 context over an aligned decode surface, which is what
+transcoding produces — was already documented when the geometry check was
+introduced; only one direction had been allowed.
+
+The picture is now the smaller of the two, and the layout check below it still
+falls back to the surface when the requested geometry would move the chroma
+plane.
+
+| source size | stream width x height | coded |
+| --- | --- | --- |
+| 320x180 | 320x180 | 320x192 |
+| 480x272 | 480x272 | 480x288 |
+| 640x360 | 640x360 | 640x384 |
+| 1280x720 | 1280x720 | 1280x736 |
+| 1920x1080 | 1920x1080 | 1920x1088 |
+
+The 320x180 output decodes at 49.63 dB PSNR against the source. H.264 below
+720p still fails, but in FFmpeg rather than in the driver: the client aborts
+in `ff_hw_base_encode_receive_packet` after "Error sending frames to
+consumers", and no picture reaches `vaEndPicture` — the trace ends after
+`vaCreateContext`.
+
+### Cells that had never been measured
+
+| cell | frames | result | build |
+| --- | ---: | --- | --- |
+| H.264 720p decode | 1800 | 971.9 fps | release |
+| VP9 Profile 0 4K decode | 300 | 229.8 fps | release |
+| VP9 Profile 2 720p decode | 300 | 375.2 fps | debugopt |
+| AV1 Main 4K decode | 300 | 274.9 fps | debugopt |
+| HEVC encode 320x180 | 300 | 1316 fps | debugopt |
+| HEVC encode 480x272 | 300 | 1304 fps | debugopt |
+| HEVC encode 640x360 | 300 | 1288 fps | debugopt |
+| VPP scale 3840x2160 to 1920x1080 | 300 | 1.024 s wall | debugopt |
+
+The 4K VPP row is the wall time for decode plus scale; the same clip decoded
+without the scale takes 0.886 s. The three decode cells that were measured
+with this driver (VP9 Profile 2, VP9 4K and AV1 4K) are byte-identical to a
+software decode, 300 of 300 frames each.
+
+### 4K playback in the browser across a loop boundary
+
+Chrome 156 on the GNOME Wayland session, a 10-second 4K HEVC clip encoded on
+the target, six interleaved rounds of a 15-second window so every window
+crosses the loop point: 448-450 frames presented and zero dropped in all six
+rounds. An earlier signal of two to four drops per round did not reproduce;
+that measurement used a 16-second clip, so the loop cadence differs.
+
+What this does not prove: one clip, one browser build, one boot.
+
+### Encode at FFmpeg's default async depth (found while measuring encode power)
+
+`-async_depth` decides how many pictures the client keeps in flight; FFmpeg
+defaults to 2. 3000 frames of `testsrc2` at 1920x1080 through
+`format=nv12,hwupload`, `-c:v hevc_vaapi -f hevc`, release build, two rounds
+per cell, pinned CPU and GPU clocks:
+
+| `-async_depth` | `-b:v 10M` | `-b:v 1M` |
+| --- | ---: | ---: |
+| 1 | 264.0-265.5 | 360.1-362.0 |
+| 2 | 530.5-532.4 | 598.0-599.0 |
+| 3 | 599.6-602.5 | 600.7-602.3 |
+| 4 | 601.6-603.1 | 601.1-602.5 |
+
+Both requests converge on the same ~601 fps ceiling from depth 3 up, so the
+depth-2 cell is not a lost picture: it is a picture that cannot overlap the
+work a larger access unit adds. A 10 Mbit/s request costs 12 % at depth 2, a
+1 Mbit/s request costs nothing there. Transcoding instead of uploading shows
+the same coupling (720p, 300 frames, depth 2: 0.465-0.497 s at 5 Mbit/s
+against 0.437-0.456 s at 1 Mbit/s), so the uploaded-input path is not
+involved.
+
+An earlier reading of this cell blamed the DMA-BUF write-fence wait in
+`submit`. A diagnostic build that skipped the wait measured 516 fps at depth
+2 against 518 with it, 1000 frames per arm, and 5 of 3000 frames showed a
+wait of 100 µs or more, 199 µs on average. The wait is not the cost and it
+stays: the kernel attaches no fence, so vb2 would otherwise queue a surface
+the client is still writing.
+
+No change was made for this. What remains is the firmware's per-picture cost
+growing with the access unit while two pictures are in flight, which no
+userspace change reaches.
+
+The same run measured encode power: 5.66-6.97 mJ/frame for the full encoder
+lifetime, with the idle baseline drifting between arms — too noisy at three
+rounds to support a verdict, so none is claimed.
+
 ## B pictures in the H.264 encoder (2026-11-15)
 
 Target `sheng`, boot `fc7fda72-72c8-42eb-8503-3914dd2dd5aa`, kernel

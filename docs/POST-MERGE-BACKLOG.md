@@ -106,8 +106,8 @@ that breaks one is not a candidate for merge.
 
 **Goal.** Firefox 158 syncs each surface on its decoder thread; the former
 translator held a picture until the next access unit named the DPB slots it
-refreshed, so the next AU could not arrive while Firefox waited. Another
-backend instead emits a complete temporal unit per VA
+refreshed, so the next AU could not arrive while Firefox waited. Radxa's
+`qcom-va-driver` `src/av1.cpp` instead emits a complete temporal unit per VA
 picture immediately: it picks a free DPB slot, and when all eight are live it
 replays the uncommitted prior picture as a hidden reference before decoding the
 new one (`AV1 install reference`).
@@ -233,13 +233,13 @@ to one of the items above.
 | --- | --- | --- | --- |
 | F1 | `sheng-7.2.6` pin `42f3b40c702a` | unchanged; our 0001-0004 are rebased onto it | keep until a specific gain is demonstrated |
 | F2 | `sheng-7.3.0` | Iris changes there are Milos VPU v2 platform data, Gen2 firmware autodetect/fallback, UBWC config guard, VBR time-delta RC change, request-key-frame, PM resume and OPP fixes; none targets a recorded SM8550 defect. Re-checked 2026-11-12 on `ianchb/sm8550-mainline`: the branch's Iris history ends at the `media/v7.3-1` merge (`f4cdf7ca9`, 2026-08-19), so the recorded list is still complete | rebase only if a named defect is fixed; a rebase invalidates §0 and requires A12-equivalent re-verification |
-| F3 | an upstream Iris backend at v1.1.1 (2026-10-28) | 0004 and 0005 blobs identical to ours; 0001-0003 differ only because ours merges 0001+0002, rebases to `sheng-7.2.6`, and adds two domain/firmware guards; added-code comparison shows functional equivalence; its own backend, built from this head and run on `sheng` on 2026-11-13, is exact on AV1 and VP9 10-bit only with kernel 0005 and wrong after frame 32 without it | do not replace our patches; record the diff result in `TEST-RESULTS.md` (H2) |
+| F3 | `radxa-pkg/qcom-va-driver` v1.1.1 (2026-10-28) | 0004 and 0005 blobs identical to ours; 0001-0003 differ only because ours merges 0001+0002, rebases to `sheng-7.2.6`, and adds two domain/firmware guards; added-code comparison shows functional equivalence; its own backend, built from this head and run on `sheng` on 2026-11-13, is exact on AV1 and VP9 10-bit only with kernel 0005 and wrong after frame 32 without it | do not replace our patches; record the diff result in `TEST-RESULTS.md` (H2) |
 | F4 | Upstream activity watch | 14 commits in 2026-09, 37 in 2026-10, last commit 2026-10-28; open PRs/issues #7 packed sequence headers, #5 Venus stateful, #2 rate control, #6 HEVC extradata — none maps to Firefox AV1, Chrome VP9 Import or SM8550 evidence. Re-checked 2026-11-12: `media: iris: add support for multi_slice in iris encoder` (`5f21cd9a4`, 2026-09-29), its `iris_set_slice_count` 64-bit division fix (`89a3d2a22`, 2026-10-02) and a treewide `devm_kmalloc` conversion (`4dd10fbbe`, 2026-11-06). The multi-slice one maps to a recorded rejection, but none of them is in `sheng-7.2.6` and the loaded encoder node lists no multi-slice control, so H3's interface-level reason stands | monthly re-check; only open a branch for a mapped change |
 | F5 | `mxsrc/libva-v4l2` `74b336a42` (unset `destination_buffer` in `exportSurfaceHandle`) | our `src/va/surface.cc:429` already rejects a null descriptor and uses `shared_ptr<StableBuffer>`, no `std::optional` | no action |
 | F6 | FFmpeg `7432fed62` (stop setting deprecated AV1 VA fields) | our `src/codec/av1_obu.cc:145` writes `chroma_sample_position: UNKNOWN`; we never read `tg_start`/`tg_end` | no action; confirm with a matrix run if the target's FFmpeg is upgraded |
 | F7 | `intel/libva`, Firefox `FFmpegVideoDecoder.cpp` | `va_dec_av1.h` last changed 2021; recent Firefox changes in that file are Vulkan Video / Android, the "send one frame, immediately receive" loop is unchanged. Re-checked 2026-11-12: `FFmpegVideoDecoder.cpp` has not been touched since 2025-07-08 | re-check before starting B work |
-| F8 | the timestamp-metadata tree v1.2.0 (2026-11-10) | camera, serial, audio; no new Iris commits; 0006's origin commit unchanged | no action |
-| F9 | the downstream package tree | last push 2026-10-25; pins patches against `iris-kernel-patches-v1` | re-check packaging pin only if a patch hash changes |
+| F8 | `yzddmr6/linux-sm8750-piano` v1.2.0 (2026-11-10) | camera, serial, audio; no new Iris commits; 0006's origin commit unchanged | no action |
+| F9 | `GhfunNiHe/sheng-fedora-packages` | last push 2026-10-25; pins patches against `iris-kernel-patches-v1` | re-check packaging pin only if a patch hash changes |
 | F10 | 0005/0006 experiment branch | no such branch exists; only `feat/vpu-zerocopy-ubwc` and its fork remote; 0006's WP1 build, 0005's WP2 build and target run, and 0007's six-stage run are all recorded on `chore/post-merge-hygiene`, and the userspace tolerance lives on `exp/0005-keep-tolerance` | keep all three patches out of the qualified module and out of any released build |
 
 ## 9. Workstream G — documentation, consistency and hygiene debt
@@ -249,7 +249,7 @@ runtime behaviour.
 
 | ID | Item | Exact location | Fix |
 | --- | --- | --- | --- |
-| G1 | Stale claim about patch diffs | `TEST-RESULTS.md` §"Backend patch review" said "patch bodies were not diffed" | **done**: the section now records the F3 result (0004/0005 byte-identical, 0001-0003 rebase-only) and why upstream's required 0005 stays experimental here |
+| G1 | Stale claim about patch diffs | `TEST-RESULTS.md` §"Sibling backends" said "patch bodies were not diffed" | **done**: the section now records the F3 result (0004/0005 byte-identical, 0001-0003 rebase-only) and why upstream's required 0005 stays experimental here |
 | G2 | Stale claim about Chrome 153 | `TEST-RESULTS.md` said "Both READMEs now say 153 needs the flag or 152, 156+ needs neither"; neither README mentions 153 or `ExtendedVideoBitstreamValidation` | **done**: corrected the sentence to the browser versions the READMEs actually record (152 local software, 156 live, Firefox 158) |
 | G3 | Browser window wording | `README.md:20` and `README.zh-CN.md:20` previously specified a rigid 30-second zero-drop window | **done**: aligned with the AGENTS.md rule requiring media-surface decoder identification and frame/drop counts over the test window |
 | G4 | Stale source paths | local, gitignored `docs/github-community-assets.md:38-41` names `src/h264.cc`, `src/vp9_stateful.cc`, `src/context.cc`, `src/surface.cc`; none exists | **closed**: the file is not tracked in any ref and is a local scratch note, not a shipped doc |
@@ -307,7 +307,7 @@ Lower priority than decode. Ground each item in the capability table's
 
 ## 13. Explicit non-goals
 
-- Do not rebase the whole `src/` tree onto another Iris backend; the two
+- Do not rebase the whole `src/` tree onto `radxa-pkg/qcom-va-driver`; the two
   backends have different memory models and different target SoCs.
 - Do not load 0005 against the current userspace outside a guarded experiment
   branch. Do not treat 0006's single guarded WP1 run as qualification; the
@@ -344,7 +344,7 @@ node, or a running GPU process is not a capability or browser-hardware claim.
 | §5 Chrome VP9 Import | C1-C5 | **done 2026-11-12**: the retained-target model ships (retained `Target`, backlog-owned duplicate fd, client layout copied at submit), VP9 `publish_import` is `qualified` in the table and the driver. Gates on driver `0ef0f34c…`, boot `5feea1b5…`, `/dev/video17`: 48/48 four-codec matrix under Import, FFmpeg 1280x720 alt-ref clip 515/515 with framemd5 equal to software, Chrome 1705/1705 and 1588/1588 with `drops=0 misplaced=0`, Copy baseline 1702/1705 with 3 drops. The host regressions are the two retention unit cases plus a red check with the detach condition disabled. TEST-RESULTS.md §"VP9 Import qualified (2026-11-12)" |
 | §6 AV1 feature completeness | D1-D6 | D1 done for exact framemd5: 1920x1080 60-frame 10-bit clip `EXACT`, 60 Import, 0 errors/drops/misplaced on 2026-11-11. D2 shipped as the user-space two-surface path it was: grain synthesised onto `current_display_picture` inside `endPicture`, exact against libdav1d at 8 and 10 bits (2026-11-14). D4 covered by the A11 corpus (tiles, lookahead, still-picture, lossless exact; superres and global motion excluded with a recorded encoder reason) plus 3840x2160 10-bit Import, 30/30 exact against libdav1d on 2026-11-12. 12-bit is answered negatively at the node (no 12-bit CAPTURE format, refusal proven on the native decoder as well as the VA profile path); D3's GStreamer half is settled on the installed package by `test/iris-gstreamer-gate.sh` (vendor allowlist, 120/120 frame hashes). The browser pixel comparison is settled as not a gate (D1); D5's large-scale tile and D6's two negative directions are covered |
 | §7 Long-window, power, cost | E1-E5 | E1 done (both 7200 s windows, clean ledgers), E3 and E4 done (20-minute continuous 4K inside the guard; 3.07 ms per frame with the clocks pinned and the clock state recorded), E5 and L3 done (the guard records pack state); E2 closed on the relaxed ceiling with the A/B measured (about -4.4 W device-side, peaks 91-92 C) |
-| §8 Kernel and upstream sync | F1-F10 | open / decision recorded as "do not rebase"; 0005 was built and loaded once on `sheng` (2026-11-12) and failed all three qualified AV1 clips, so it is unloaded again; 0006 was built, installed with 0001-0004, rebooted and run through one guarded WP1 gate with a "no regression" verdict; 0007 (the completion-preserving form of 0005) was built, installed, booted and run through nine AV1/VP9 gates before the qualified module was restored, with a "do not ship" verdict. On 2026-11-13 a comparison backend at v1.1.1 was run against the same two modules on the same node: AV1 exact with 0005, wrong from frame 33 without it, VP9 10-bit exact either way, while this driver is exact only without 0005 (`TEST-RESULTS.md` §"A comparison backend goes exact on AV1 only with a kernel contract this driver cannot use"). All three stay experimental and outside the qualified baseline. The monthly watch was run again on 2026-11-12: `sheng-7.3.0` has no Iris commit after its `media/v7.3-1` merge, the comparison backend still ends at `0980a1dec` (2026-10-28), the timestamp-metadata tree at `7f8d6bedd` (2026-11-10) and the downstream package tree at `756362f81` (2026-10-25). Mainline added multi-slice encoder support after this base, which maps to a recorded rejection but is absent from `sheng-7.2.6` and from the loaded node's controls, so "do not rebase" holds |
+| §8 Kernel and upstream sync | F1-F10 | open / decision recorded as "do not rebase"; 0005 was built and loaded once on `sheng` (2026-11-12) and failed all three qualified AV1 clips, so it is unloaded again; 0006 was built, installed with 0001-0004, rebooted and run through one guarded WP1 gate with a "no regression" verdict; 0007 (the completion-preserving form of 0005) was built, installed, booted and run through nine AV1/VP9 gates before the qualified module was restored, with a "do not ship" verdict. On 2026-11-13 the sibling backend from `radxa-pkg/qcom-va-driver` v1.1.1 was run against the same two modules on the same node: AV1 exact with 0005, wrong from frame 33 without it, VP9 10-bit exact either way, while this driver is exact only without 0005 (`TEST-RESULTS.md` §"The sibling backend goes exact on AV1 only with a kernel contract this driver cannot use"). All three stay experimental and outside the qualified baseline. The monthly watch was run again on 2026-11-12: `sheng-7.3.0` has no Iris commit after its `media/v7.3-1` merge, `radxa-pkg/qcom-va-driver` still ends at `0980a1dec` (2026-10-28), `linux-sm8750-piano` at `7f8d6bedd` (2026-11-10) and `sheng-fedora-packages` at `756362f81` (2026-10-25). Mainline added multi-slice encoder support after this base, which maps to a recorded rejection but is absent from `sheng-7.2.6` and from the loaded node's controls, so "do not rebase" holds |
 | §9 Docs, consistency, hygiene | G1-G16 | all closed: G1, G2, G3, G7, G8, G12, G13, G14, G15 and G16 done; G4, G5, G6, G9, G10 and G11 closed with explicit reasons (untracked scratch notes, intentional scratch default, kernel SPDX provenance, release-note identity fact, no new trace marker). G15 is the one entry that changed a capability line: the HEVC long-term rejection was stale and is now the narrower boundary the code enforces. G16 removes a stale package claim: the VA plugin was always installed, and libgstva's vendor allowlist is what hid it |
 | §10 Encode | H1-H4 | H1 closed with a code fix: both translators now take `target_percentage` into the target, carry the client's maximum as `BITRATE_PEAK` for VBR, and keep the last configured target when a picture omits rate control; `vbr4` measured 8000 -> 3992 kbit/s. H2 is settled as out of scope, H3 has a host-side audit plus a 2026-11-12 inventory of the encoder node's formats and controls that gives every rejected entry its reason, H4's double-claim half is covered by `encode-session-test` and its GStreamer half by `test/iris-gstreamer-gate.sh` (`vah264enc` and `vah265enc`, 60 frames each, both decoded back to 60). No capability entry or profile changed |
 | §11 CI, tests, release plumbing | I1-I8 | host tests 26/26 and static checks green on every commit of PR #6; the guarded installed-package gates and the repo-owned 17-case AV1 browser matrix are in PR #5; I5 verifies the synced tree on the target; I8 gives the target gates one runner and one run record (`test/remote/gate.sh`, schema `qualcomm-iris-vaapi/target-run-v1`), so the identity behind a gate claim is a file rather than a transcription. Target gates stay out of CI, which has no device; what CI gains is that a reported run names its source commit and the exact driver the target held |
@@ -521,49 +521,51 @@ vocabulary and its consumers, invariant 17, the capability table `sync_note`
 and both READMEs. Re-run the four-codec matrix, 120-frame AV1 clip, DRC,
 10-bit probe and the Chrome/Firefox browser matrix.
 
-### WP4 CDSP VPP — not merged; the Vulkan VPP shipped behind `V4L2_VA_VPP`
+### WP4 CDSP VPP — blocked by module signing; the Vulkan VPP shipped behind `V4L2_VA_VPP`
 
-The 2026-11-12 read-only survey concluded "no proven viable backend" because
-`vulkaninfo` and `glslangValidator` are absent on the tablet and no CDSP
-session was opened. Those two tools are diagnostics and a host shader
-compiler, not the runtime contract.
+CDSP runs on `sheng`, but only Qualcomm-signed modules load. The signed PD
+executes the DSP's own modules: with the device's own payload from the
+Android `dsp_a` partition (`fastrpc_shell_3`, `fastrpc_shell_unsigned_3`,
+`libc++.so.1`, `libc++abi.so.1` and the rest of `dsp_a/cdsp/`) at the path
+the library resolves,
+`/usr/share/qcom/sm8550/Xiaomi/sheng/cdsp/`, `fastrpc_test -d 3 -U 0 -a v75`
+passes 3 of 3. A member of the `fastrpc` group reaches it without root. The
+path comes from `DSP_LIBRARY_PATH` in `/usr/share/qcom/conf.d/sheng.yaml`;
+the environment variable of the same name does not override it, and a shell
+in the working directory is found only by the library's fallback search.
 
-The earlier record that "`sheng` cannot open a FastRPC session at all" was
-wrong, and measuring it replaced three guesses with three facts
-(2026-11-13). The session opens: `remote_handle_open` reaches the
-kernel, and `DSPRPC_GET_DSP_INFO` reports `DOMAIN_SUPPORT=1`,
-`UNSIGNED_PD_SUPPORT=1`, `HVX_SUPPORT_128B=4`, `ARCH_VER=0x1008c73` (v73) and
-`VTCM_PAGE=8 MiB` for the CDSP domain, with no shell binary present at all.
-The session was previously thought to be blocked because the only probe had
-been `remote_handle_open` on a nonexistent module, whose `EBADFD` reads as a
-session failure and is not one.
+What separates a module that loads from one that does not is the file's
+contents. The signed domain compares every loadable segment against a
+Qualcomm hash-and-signature block — 0x19e8 bytes at file offset 0x1000,
+`QDSR Sub-CA 1`, SHA-256 digests and SW_ID/HW_ID/OEM_ID attributes, carried
+in a `PT_NULL` program header whose address sits above the image. The control
+matrix: the calculator skel loads unmodified and under another name; one
+flipped byte inside its RX `PT_LOAD` fails with `AEE_EUNABLETOLOAD`
+(`0x80000406`); a flip in the unmapped gap between its two segments still
+loads; zeroing the signature block fails.
 
-What does block it is the PD create, and the shell binary is not the reason
-either. A v73 `fastrpc_shell_unsigned_3` taken from Fedora's
-`hexagon-dsp-binaries-qualcomm-hamoa-iot-evk` package, placed at the path the
-library resolves (`/usr/share/qcom/sm8550/Xiaomi/sheng/cdsp/`, from
-`/usr/share/qcom/conf.d/sheng.yaml`), still fails `FASTRPC_IOCTL_INIT_CREATE`
-with `0x80000416`. An empty file of the same name fails identically, so the
-failure is upstream of the shell's contents: the kernel hands the create to
-the CDSP and the firmware refuses it. The device node the library opens is
-`/dev/fastrpc-cdsp-secure` — the DT node is `qcom,non-secure-domain` with no
-`qcom,nsessions` and no `memory-region`, and the library selects the secure
-node. Nothing in this repository can change that; it needs a device-tree
-change and a firmware that accepts the unsigned PD.
+The unsigned domain is closed on this firmware. The unsigned PD still fails
+every attempt with `AEE_ERESOURCENOTFOUND` (`0x80000416`).
+`remote_session_control(DSPRPC_CONTROL_UNSIGNED_MODULE)` returns 0, and
+`strace` shows `FASTRPC_IOCTL_INIT_CREATE` returning
+`0xFFFFFFFF80000416` before any module is named; binding the non-secure node
+over `/dev/fastrpc-cdsp-secure` changes nothing. The firmware is the
+`kailua.cdsp.prod` build, and its production variant does not create
+unsigned domains at all.
 
-The toolchain half of the old claim is also wrong. Fedora's clang 22 compiles
-`--target=hexagon -mv73` to a `QUALCOMM DSP6` object with no Qualcomm
-toolchain installed, and clang ships `hexagon_types.h`, `hexagon_protos.h` and
-`hexagon_circ_brev_intrinsics.h`. What is missing is the linker: `ld.lld`
-has no `elf32hexagon` emulation and clang looks for a `hexagon-ld` that is not
-installed, so a shared object cannot be produced. The pinned Open Access
-archive would supply both, and it answers 403 to an unauthenticated download
-from this host.
+The toolchain is not the blocker. QAIC builds against system GHC and
+`ghc-syb-devel` and generates the skeleton wrapper from the IDL; the Open
+Access 19.0.02 archive supplies `hexagon-clang`; and `ld.lld`, `ld.qcld` and
+`hexagon-clang` each link the same objects into a valid shared object. Every
+module produced that way still returns `0x80000406`.
 
-A DSP backend would therefore need a device-tree change, a firmware that
-accepts the PD, and a working Hexagon linker before it could be measured,
-against a Vulkan backend that already passes every gate. The CDSP/FastRPC
-path is not needed for this backend and was not probed further.
+A CDSP backend is therefore neither a scope decision nor a toolchain problem:
+it needs a signing key `kailua.cdsp.prod` accepts, or a CDSP firmware that
+creates unsigned domains. Neither is a code change, so no CDSP backend was
+written and `data/iris-codec-capabilities.json` is unchanged. No CDSP VPP
+measurement exists on this device — every comparison run used a build with
+CDSP compiled out — so no gain is claimed for it either. Reopen it only if
+the Vulkan VPP shows a concrete deficit on this device.
 
 A userspace probe settles the
 question on `sheng`: `test/vulkan-vpp/prereq.sh` builds a SPIR-V compute
@@ -699,16 +701,18 @@ and makes no support claim for another SoC.
 ### Order and decision gates
 
 1. WP0 -> WP1 -> WP2, then decide WP3 from WP2's verdict.
-2. WP4 may run alongside WP1/WP2 as read-only feasibility research; WP5 waits
-   for WP4; WP6 and WP7 are independent.
+2. WP4's feasibility question is answered — a module built here cannot load on
+   this firmware — so WP4 is closed until a signing key the firmware accepts
+   or a different CDSP firmware exists. WP5 still waits on it; WP6 and WP7 are
+   independent.
 3. Stop after each package and wait for confirmation before opening the next.
 
 ### Known state that does not match earlier drafts
 
 PR #4 is `MERGED` (not open, not closable) and its head `a7e6d26` is contained
 in PR #5's merge commit. No PR comment is needed unless one is explicitly
-authorised. The comparison backend at v1.1.1 has no 0006; 0006 comes from
-a separate timestamp-metadata tree (F8). Upstream marks 0005 "required for AV1"
+authorised. `radxa-pkg/qcom-va-driver` v1.1.1 has no 0006; 0006 comes from
+`yzddmr6/linux-sm8750-piano` (F8). Upstream marks 0005 "required for AV1"
 because its AV1 path replays a whole hidden picture; our internal DPB consumes
 the NOSHOW completion instead, so the two designs are not interchangeable.
 That is now measured rather than inferred from the patch text: on `sheng` with
