@@ -1,8 +1,8 @@
 # Architecture
 
-This document is the contract for the rebuild started on 2026-09-20 (tag
-`pre-rebuild-20260920`, branch `main`). Every later phase, every
-review and every task handed to a worker agent is scoped against it. When
+This document is the contract for the rebuild (tag `pre-rebuild-20260920`,
+branch `main`). Every later phase, every review and every task handed to a
+worker agent is scoped against it. When
 code and this document disagree, one of them is wrong and the disagreement
 is a bug to file, not a detail to paper over.
 
@@ -160,7 +160,7 @@ When a CAPTURE completion arrives with a token that has a pending Surface:
   client buffer queued once per completion before the first one returns, so
   the firmware still chooses only between the same picture's memory and
   never stalls waiting for somewhere to put the second half. Measured scope
-  and failures: TEST-RESULTS.md, 2026-09-22.
+  and failures: TEST-RESULTS.md.
 
 `persistent_export` is set by `vaExportSurfaceHandle`, `vaAcquireBufferHandle`
 or a `DRM_PRIME_2` import when the surface has no token yet. It is never set
@@ -214,7 +214,7 @@ the EOS watchdog thread; `retired_contexts` reaping (a surface holds a
 per-thread current-surface maps; `reference_wrapper` into device vectors.
 
 Client-owned CAPTURE buffers (true zero-copy for Chrome) left the research
-track on 2026-09-22 and became the Import publish policy above. The §9
+track and became the Import publish policy above. The §9
 acceptance program found that the firmware does *not* fill CAPTURE buffers
 in QBUF order (`test/iris-import-probe.cc`, results in TEST-RESULTS.md);
 the policy exists because the session queues exactly one client picture at a
@@ -465,7 +465,7 @@ mapper against the pipeline `tonemap.comp` documents, and
 `test/vulkan-vpp/overlay_gate.sh` checks the composite against the mix
 `overlay.comp` documents plus both of its endpoint frames byte for byte.
 
-### Verified bounds and refusals
+### Bounds and refusals
 
 The video processor implements strict bounds and explicit refusals (returning a
 VA error status instead of dropping operations silently):
@@ -489,7 +489,7 @@ VA error status instead of dropping operations silently):
   BT.2020/PQ to NV12 BT.709 via the BT.2390 EETF, within 1 code of the
   documented pipeline. The mapper converts the surface at native size first;
   subsequent passes in the same picture (crop, scale, transpose, or compositing)
-  operate on the converted frame and are verified within 1 code.
+  operate on the converted frame and match within 1 code.
 - **Compositing**: Stacks up to sixteen blending layers in submission order.
   Alpha 0 and alpha 1 endpoints match main and overlay surfaces byte-exact.
   Constant overlay uploads via packed BGRA produce exact BT.709 codes.
@@ -710,16 +710,16 @@ ends with a tag. Gates are commands, not opinions.
 | — | Kernel track: encoder loop-filter controls (`packaging/kernel/0002-*`), the encoder `REQUEST_SYNC_FRAME` control (`packaging/kernel/0003-*`) and error-completion timestamps (`packaging/kernel/0004-*`), all rebased onto `sheng-7.2.6` | 0002/0003: the six DEBLOCK and one `REQUEST_SYNC_FRAME` capability appear once in `inst_fw_cap_sm8550_enc`, `force_key_frame` is listed by `--list-ctrls` on the loaded module, `encode idr lever=sync-frame`, and the IDR/segment/pipelining runs in `TEST-RESULTS.md` match the GOP record. 0004: a truncated HEVC stream fails its surface at dequeue (`publish=error`) instead of at the drain, a mid-stream corrupt picture does not stop the pictures after it, and the decode matrix (AV1 `noshow=23` included) is unchanged | (not tagged) |
 | 2 | `src/iris/` core with the FakeDevice unit suite | `meson test` green on host | (in `phase-3-core-rewired`) |
 | 3 | VA glue on the core for H.264 + HEVC, GPU blit engine, old tree deleted | host units; matrix 48/48 both codecs; structure matrix; DRC; 120 s soak; Chrome both codecs; FFmpeg `publish=direct` | `phase-3-core-rewired` |
-| 5 | VP9 qualified and advertised; AV1 rebuilt OBU and decode contract (matrix, FFmpeg over alt-ref and no-alt-ref, Chrome) | VP9: matrix, 100 context recreations, 100 DRC switches, Chrome with alt-ref, all guarded. AV1: matrix with `--hidden-pictures`, native-vs-VA frame MD5, Chrome 152 acceptance; qualified 2026-10-22, see §9 and `TEST-RESULTS.md` | `phase-5-vp9-qualified` |
+| 5 | VP9 qualified and advertised; AV1 rebuilt OBU and decode contract (matrix, FFmpeg over alt-ref and no-alt-ref, Chrome) | VP9: matrix, 100 context recreations, 100 DRC switches, Chrome with alt-ref, all guarded. AV1: matrix with `--hidden-pictures`, native-vs-VA frame MD5, Chrome acceptance; see §9 and `TEST-RESULTS.md` | `phase-5-vp9-qualified` |
 | 6 | Harness/packaging/docs trimmed to the shipped tree | static checks; RPM built and installed; acceptance from the installed package for H.264/HEVC/VP9 | `phase-6-packaged` |
 | 7 | 10-bit (HEVC Main10, VP9 Profile 2) qualified; Fluster conformance on the new driver; module identity in provenance | 10-bit framemd5 both codecs; Chrome Main10; Fluster H.264/HEVC driver-path counts recorded against the old tree's | `phase-7-conformance` |
 | 8 | `VAEntrypointEncSlice` on the second Iris node: H.264 Constrained Baseline/Main/High and HEVC Main, CBR/VBR/CQP, NV12 in, Annex-B out | `vainfo` lists `VAEntrypointEncSlice`; FFmpeg's 300-frame GOP-60 acceptance for both codecs (CQP, no bitrate) with keyframes at 0/60/120/180/240, software-identical decode and an IRQ delta, and the decode matrix re-run unchanged; `encode-session` for the deblocking refusal a kernel without loop-filter controls must produce; `encode-params` for the translation and the request rejections, `annexb` for what a requested IDR carries; on the target, one-second segments cut at `-force_key_frames` in both codecs and a 24 fps run past every GOP boundary | (in `feat/encode-entrypoints`) |
-| 9 | AV1 Profile 0 qualified at both bit depths: P010 advertised and the capture format taken from the stream | native-vs-VA frame MD5 over a 10-bit stream, Chrome 152 on the same stream selecting `VaapiVideoDecoder` with P010 surfaces, and the 8-bit/HEVC Main10/VP9 rows unchanged; see §9 and `TEST-RESULTS.md` | (not tagged) |
+| 9 | AV1 Profile 0 qualified at both bit depths: P010 advertised and the capture format taken from the stream | native-vs-VA frame MD5 over a 10-bit stream, Chrome on the same stream selecting `VaapiVideoDecoder` with P010 surfaces, and the 8-bit/HEVC Main10/VP9 rows unchanged; see §9 and `TEST-RESULTS.md` | (not tagged) |
 
 Phase 4 (GPU copy engine) was delivered inside Phase 3; the numbering above
 is the one the tags carry.
 
-Research track, resolved 2026-09-22: client-owned CAPTURE buffers.
+Research track, resolved: client-owned CAPTURE buffers.
 `test/iris-import-probe.cc` is the acceptance program; it proved that the
 firmware does not honour QBUF order when it has several buffers to choose
 from (246/360 wrong under the doc's original model), and the Import policy

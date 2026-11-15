@@ -16,7 +16,7 @@ SoC until its own hardware gate passes and `TEST-RESULTS.md` records the run.
    `inst_fw_cap_sm8550_enc`; 0004 changes `iris_vb2_buffer_done()`; 0005, 0006
    and 0007 are experimental and must stay out of a port baseline. 0006 has one
    guarded WP1 run on SM8550 with a "no regression" verdict; 0005 and 0007 were
-   measured on hardware and rejected. None of these adds a fix claim or
+   run on hardware and rejected. None of these adds a fix claim or
    portability evidence. A new SoC has its own platform tables and firmware
    capability enum, so every hunk needs re-review and rebase, not a blind `git am`.
    `test/iris-kernel-patch-check.sh` pins the current hashes and paths; refresh
@@ -35,8 +35,8 @@ SoC until its own hardware gate passes and `TEST-RESULTS.md` records the run.
    decoder and an encoder; verify with `scripts/lib/iris-node.sh` and
    `iris-device-check`.
 4. **Capability table.** `data/iris-codec-capabilities.json` records the VA
-   profiles, capture formats, Import qualification and rejected features
-   measured on this firmware. `src/va/driver.cc` and
+   profiles, capture formats, Import qualification and rejected features for
+   this firmware. `src/va/driver.cc` and
    `test/iris-codec-matrix-check.sh` read it. A new SoC may expose a different
    set of compressed formats or bit depths; re-probe and re-record every entry
    before changing the table. Keep `production: supported` only for codecs

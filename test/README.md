@@ -1,6 +1,8 @@
 # Testing Qualcomm Iris VA-API
 
-This directory provides the test suite and verification gates for the Qualcomm Iris VA-API driver. Tests are divided into host-side unit tests (runnable in CI without V4L2 hardware), diagnostic utilities for installed systems, target hardware verification gates, and external conformance corpora.
+Test suite and verification gates for the Qualcomm Iris VA-API driver: host-side
+unit tests (runnable in CI without V4L2 hardware), diagnostics for installed
+systems, target hardware gates, and external conformance corpora.
 
 ---
 
@@ -40,7 +42,8 @@ User-facing diagnostic scripts verify hardware acceleration on an active system 
 | `iris-verify` | Functional verification: generates a sample clip, runs decode and encode, and verifies that hardware Iris interrupt counters advance. |
 | `iris-configure-clients` | Helper script to configure user-level hardware acceleration in mpv (`hwdec=vaapi`) and Firefox. |
 
-Neither command replaces the formal hardware gates below; both serve as first-line diagnostics when investigating hardware decode issues.
+Neither replaces the hardware gates below; both are first-line diagnostics
+when a decode does not reach the hardware.
 
 ---
 
@@ -58,11 +61,15 @@ IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh \
     -- sh test/iris-gstreamer-gate.sh --clip <clip-path>
 ```
 
-`gate.sh` records `summary.json` (schema `qualcomm-iris-vaapi/target-run-v1`), module/driver hashes, boot ID, thermal and battery states, and execution output.
+`gate.sh` records `summary.json` (schema `qualcomm-iris-vaapi/target-run-v1`),
+module and driver hashes, boot ID, thermal and battery state, and the command's
+output.
 
 ### Browser Acceptance Gate
 
-Verifies that Google Chrome / Chromium uses `VaapiVideoDecoder` with platform acceleration:
+Verifies that Google Chrome uses `VaapiVideoDecoder` with platform acceleration.
+Fedora's Chromium decodes through its own native V4L2 stack, so a Chromium run
+says nothing about this driver:
 
 ```sh
 test/iris-browser-acceptance.sh --clip <sample-path>

@@ -162,7 +162,7 @@ env -u LIBVA_DRIVERS_PATH -u LIBVA_DRIVER_NAME -u LIBVA_V4L2_VIDEO_PATH vainfo
 Unset the variable; an empty `LIBVA_DRIVERS_PATH=` is not the same thing. libva
 takes the empty string as "search no directory" and `vaInitialize` fails with
 `unknown libva error` even though the installed driver is fine, which is how a
-2026-11-12 probe lost its first run.
+probe lost its first run.
 
 There is no launcher and no desktop entry. An earlier revision shipped both,
 and the launcher exported `LIBVA_DRIVER_NAME`, both node paths, and an isolated
@@ -186,12 +186,12 @@ kVideoDecoderName = VaapiVideoDecoder
 kIsPlatformVideoDecoder = true
 ```
 
-The qualified Chrome 151 run on August 30, 2026 reached this gate with the
-project driver mapped in the GPU process and a dynamically resolved Iris node,
-`VaapiVideoDecoder`, and `kIsPlatformVideoDecoder=true`; its VA trace then
-showed repeated `vaBeginPicture`/`vaEndPicture` and `stateful capture complete`
-events. The Fedora Chromium 151 run is a separate native-V4L2 baseline and
-reported `V4L2VideoDecoder`; that result does not prove the project's VA driver.
+The qualified run reached this gate with the project driver mapped in the GPU
+process and a dynamically resolved Iris node, `VaapiVideoDecoder` and
+`kIsPlatformVideoDecoder=true`; its VA trace showed repeated
+`vaBeginPicture`/`vaEndPicture` and `stateful capture complete` events. A Fedora
+Chromium run is a separate native-V4L2 baseline and reports `V4L2VideoDecoder`;
+that result does not prove this driver.
 
 Also record decoded/dropped frame counts, confirm the Iris V4L2 context and
 OUTPUT/CAPTURE activity in a trace-enabled diagnostic run, and compare the

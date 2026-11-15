@@ -34,7 +34,7 @@ only after its hardware gate passed.
 ## Kernel patches
 
 `packaging/kernel/README.md` describes all seven patches and their evidence.
-0001-0004 are the qualified module. 0005 was measured on the target and
+0001-0004 are the qualified module. 0005 was run on the target and
 rejected; 0006 is one guarded run with a no-regression verdict; 0007 was
 built and run with a no-reason-to-ship verdict. None of 0005-0007 belongs in
 a released module. `SHA256SUMS` and `test/iris-kernel-patch-check.sh` pin the
