@@ -156,6 +156,11 @@ public:
     // Erases a token from `pending_` together with any retained copy.
     void forget(std::map<uint64_t, Target*>::iterator it);
     void forget_token(uint64_t token);
+    // A cancelled completion still has to read and write the target, and
+    // forget() destroys the retained copy that an Import target lives in.
+    // Returns that copy so the caller keeps it alive past the erase; null
+    // when the target belongs to its surface and forget() leaves it alone.
+    std::unique_ptr<Target> retain_for_completion(std::map<uint64_t, Target*>::iterator it);
 
     // Finish the stream: flush, STOP, wait LAST. After this no submit is
     // accepted. Called from destroyContext.

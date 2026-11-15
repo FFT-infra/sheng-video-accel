@@ -603,7 +603,8 @@ bool Session::handle_capture_returns()
                 }
             }
             if (hidden != pending_.end()) {
-                Target& target = *hidden->second;
+                auto held = retain_for_completion(hidden);
+                Target& target = held ? *held : *hidden->second;
                 forget(hidden);
                 frame->layout().data_offset = returned->data_offset;
                 // A hidden picture carries no output plane in the firmware's
@@ -651,7 +652,8 @@ bool Session::handle_capture_returns()
                 }
                 continue;
             }
-            Target& target = *it->second;
+            auto held = retain_for_completion(it);
+            Target& target = held ? *held : *it->second;
             if (noshow_shape && returned->last()) {
                 // A resolution-change boundary marks the end of the old
                 // segment with an empty LAST buffer. On this firmware the
@@ -738,7 +740,8 @@ bool Session::handle_capture_returns()
                 static_cast<unsigned long long>(returned->timestamp_us), returned->index, returned->flags);
             continue;
         }
-        Target& target = *it->second;
+        auto held = retain_for_completion(it);
+        Target& target = held ? *held : *it->second;
         forget(it);
         if (pool_.capture_memory() == CaptureMemory::Import && slot_token != returned->timestamp_us) {
             // The firmware wrote this picture into a buffer queued for a
@@ -871,6 +874,16 @@ void Session::forget(std::map<uint64_t, Target*>::iterator it)
 {
     retained_.erase(it->first);
     pending_.erase(it);
+}
+
+std::unique_ptr<Target> Session::retain_for_completion(std::map<uint64_t, Target*>::iterator it)
+{
+    // Only the retained map owns its target. A surface-owned target survives
+    // the erase and must stay the object the completion writes to, because
+    // vaSyncSurface polls its `pending` flag.
+    if (retained_.find(it->first) == retained_.end())
+        return nullptr;
+    return std::make_unique<Target>(*it->second);
 }
 
 void Session::forget_token(uint64_t token)
