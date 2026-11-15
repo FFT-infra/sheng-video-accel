@@ -551,19 +551,26 @@ the CDSP and the firmware refuses it. The device node the library opens is
 node. Nothing in this repository can change that; it needs a device-tree
 change and a firmware that accepts the unsigned PD.
 
-The toolchain half of the old claim is also wrong. Fedora's clang 22 compiles
-`--target=hexagon -mv73` to a `QUALCOMM DSP6` object with no Qualcomm
-toolchain installed, and clang ships `hexagon_types.h`, `hexagon_protos.h` and
-`hexagon_circ_brev_intrinsics.h`. What is missing is the linker: `ld.lld`
-has no `elf32hexagon` emulation and clang looks for a `hexagon-ld` that is not
-installed, so a shared object cannot be produced. The pinned Open Access
-archive would supply both, and it answers 403 to an unauthenticated download
-from this host.
+The toolchain half of the old claim is wrong too, and more completely than
+the earlier note allowed. `ld.lld` does link Hexagon: it has no
+`-m elf32hexagon` *emulation name*, but it selects the target from the input
+object, so `ld.lld -shared -soname libiris_vpp_skel.so dsp.o` produces an
+`ELF 32-bit LSB shared object, QUALCOMM DSP6` with the exported symbols and
+soname intact. No `hexagon-ld` and no Open Access archive are involved.
 
-A DSP backend would therefore need a device-tree change, a firmware that
-accepts the PD, and a working Hexagon linker before it could be measured,
-against a Vulkan backend that already passes every gate. The CDSP/FastRPC
-path is not needed for this backend and was not probed further.
+That was checked against a real kernel, not a toy object. A 1,552-line HVX
+VPP kernel compiles with host clang 22 — `--target=hexagon -mv73 -mhvx=v73
+-mhvx-length=128B`, the intrinsic headers clang ships, the FastRPC `inc/`
+tree for `AEEStdDef.h`/`AEEStdErr.h`, and three freestanding stand-ins for
+`math.h`, `string.h` and `stdlib.h` — and links to a 53,944-byte
+`libiris_vpp_skel.so` whose disassembly is 1,490 HVX vector instructions.
+What is still missing is only QAIC, which turns `iris_vpp.idl` into the
+skeleton wrapper; its declarations were stubbed by hand for the compile, so
+the generated glue itself is unproven.
+
+A DSP backend is therefore a scope decision, not a toolchain wall: the
+remaining work is the QAIC-generated skeleton, the host-side FastRPC client,
+and a second backend behind `VAEntrypointVideoProc`.
 
 A userspace probe settles the
 question on `sheng`: `test/vulkan-vpp/prereq.sh` builds a SPIR-V compute
@@ -687,6 +694,13 @@ of surface this work package existed to keep honest.
 target" carries the dependency list `dh_shlibdeps` produced, the manifest hash,
 the two reproducible builds and the two guarded runs. What remains unproven is
 a Debian runtime: the package was built on bookworm and exercised on Fedora 44.
+
+The package was rebuilt from `a55ad18` and re-run on the target
+(`TEST-RESULTS.md` §"The Debian package at `a55ad18`"): 29/29 in the chroot's
+test stage, and the extracted payload decodes all four codecs `frame-md5`
+exact with `drops=0`. The manifest's `artifact_sha256` equals the payload's
+sha256 read on the target, so the shipped bytes are the verified ones. Still
+no Debian runtime.
 
 ### WP7 SoC portability audit — done, docs only
 

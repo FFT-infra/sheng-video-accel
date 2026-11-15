@@ -8175,3 +8175,133 @@ for a stream shape that carries no key frame at all.
 What this does not prove: one vector and one kernel build. A different
 firmware or a kernel change could move the boundary. The probe hardcodes `/dev/video0` and lives in scratch space, not
 in the repository.
+
+## H.264 720p decode: the repeated parameter sets cost 4.7 % (`49b9ce5c`)
+
+The H.264 translator synthesised SPS and PPS from the VA picture parameters
+and wrote both ahead of every access unit. The comment justified it as "Iris
+treats each OUTPUT buffer as independent and fails later AUs that arrive
+without their parameter sets". The repetition was the whole of a persistent
+720p decode deficit.
+
+`h264-720-long.mp4` (1800 frames of 1280x720 at 30 fps), `-f null`, pinned
+clocks, five interleaved rounds. "before" is `build-rel` of the parent
+commit, "after" is this commit built the same way:
+
+| round | before | after |
+| --- | ---: | ---: |
+| 1 | 905.9 | 962.1 |
+| 2 | 917.0 | 949.9 |
+| 3 | 920.7 | 958.5 |
+| 4 | 914.6 | 958.5 |
+| 5 | 920.2 | 964.1 |
+
+915.7 against 958.6 fps by mean, 4.7 %, and the ranges do not overlap.
+
+The parameter sets are still written at every sequence start and whenever the
+bytes change, so a resolution change and an IDR both carry them.
+
+### How the cause was found
+
+The gap survived every other hypothesis, each excluded by measurement on the
+target rather than by reading code:
+
+| hypothesis | measurement | result |
+| --- | --- | --- |
+| client buffer depth | `-extra_hw_frames 0/8/16` | gap constant |
+| build type | this driver at `-O3` vs `-O2` | release build no faster (906-928) |
+| CAPTURE pool size | negotiated geometry via `strace`: 4/32 buffers, 1280x736 NV12, same sizeimage | identical |
+| CAPTURE starvation | in-driver counter at each submit | 28 of 32 queued, never starved |
+| syscall shape | `strace -c`: per-type counts | identical (12752 against 12736 total in the traced run) |
+| per-call syscall cost | `strace -T`: DQBUF p50 23 us, QBUF p50 34 us | identical |
+| poll wakeup latency | rebuild with a 0 ms sync poll | no change |
+| client CPU | `-benchmark` utime | lower on this driver, not higher |
+
+An `LD_PRELOAD` shim on `vaEndPicture` and `vaSyncSurface` localised the
+remaining time: `vaSyncSurface` was never called (the client polls
+`vaQuerySurfaceStatus`), and the whole difference was inside `vaEndPicture`,
+uniformly ~25 us per submit rather than a tail. That pointed at per-frame work
+on the submit path, not at the wait. The submitted access unit was then the
+only difference left.
+
+### Correctness
+
+The change alters the bytes sent to the firmware, so each surface was
+re-checked on the target with the built driver (`49b9ce5c`):
+
+| check | result |
+| --- | --- |
+| `iris-matrix.sh` | H.264, VP9, HEVC, AV1 all `frame-md5` exact, `drops=0` |
+| 1800-frame `framemd5`, `hwdownload,format=nv12` | byte-identical to the parent commit's decode |
+| `iris-dynamic-resolution.sh` | 100 resolution switches, 101 contexts, PASS |
+| Chrome 156, `browser-1080p.mp4`, 20 s | `VaapiVideoDecoder`, `platform=True`, 598 frames, 8 dropped |
+
+`sh test/run-static-checks.sh` and `meson test -C build-gap --print-errorlogs`
+(29/29) pass on the branch.
+
+What this does not prove: one clip shape. The 480p and HEVC arms showed a
+0.5-1.5 % gap rather than 4.7 %, so the saving is proportionally smaller where
+parameter sets are a smaller fraction of the access unit. No measurement of
+VP9 or AV1 parameter-set repetition was made; neither translator repeats them
+per frame.
+
+## The Debian package at `a55ad18`, built in the chroot and run on the target (2026-11-15)
+
+The earlier Debian record (`9dccdeb`) built the package and ran it against the
+overlay gate and the matrix. This run rebuilds it from the current head of
+`docs/comprehensive-overhaul` and repeats the runtime evidence, so the package
+is not one commit behind the tree.
+
+Built in the bookworm arm64 chroot (`debroot`), `dpkg-buildpackage -b -us -uc`
+with the source identity passed in. The chroot's own test stage ran
+`meson test`: **29/29 OK**, which is the full current suite rather than the
+26 the earlier chroot build ran.
+
+`libva-v4l2-iris_0.1.0_arm64.deb`, sha256
+`34d78887b31c8c35820f36c4ab3fabebc2ea18b97abea43a9b9d898f84047ef2`,
+187,944 bytes, Installed-Size 580. The manifest inside it records
+`source_commit=a55ad1826f1e637fa3d730159c8b37f1420042bd` and
+`artifact_sha256=2db472bee24700b527c18a7d602dc1d99cee1cdf0a6e3fb5e953eb3fde5d73d9`;
+the payload's own sha256, read after `dpkg-deb -x` **on the target**, is the
+same `2db472be…`, so the hash in the manifest names the bytes that shipped.
+
+The payload is the driver, both aliases (`msm_drv_video.so`, `qcom_drv_video.so`),
+`iris-node.sh`, the three diagnostic commands, both READMEs, `copyright` and
+the install manifest, under `/usr/lib/aarch64-linux-gnu/dri`.
+
+| check | run | result |
+| --- | --- | --- |
+| `vainfo` through libva with `LIBVA_DRIVERS_PATH` on the extracted tree | — | `va_openDriver() returns 0`, H.264/HEVC/VP9/AV1 profiles listed |
+| `iris-matrix.sh` | `~/Lab/Bridge/tmp/pkg-gap/matrix` | H.264, VP9, HEVC, AV1 `frame-md5` exact; `drops=0` each |
+
+`dpkg-shlibdeps` produced the same dependency list as before (`libc6 >= 2.34`,
+`libdrm2 >= 2.4.38`, `libegl1`, `libgbm1 >= 7.11~1`, `libgcc-s1 >= 3.0`,
+`libgles2`, `libstdc++6 >= 12`, `libvulkan1 >= 1.2.131.2`, `v4l-utils`).
+
+What this does not prove: still no Debian runtime. The package was built on
+bookworm and run on the Fedora 44 target, which proves the artifact, its
+dependency metadata and its provenance, not that Debian's own libva, libdrm or
+Mesa are compatible. The `msm` alias was carried by the package but exercised
+from the extracted tree via `LIBVA_DRIVERS_PATH`, not by a system install.
+
+## HEVC Main10 at 1080p: the 2.4 % does not reproduce (2026-11-15)
+
+An earlier record carried HEVC Main10 as "the one cell behind", with ten and
+then 26 interleaved rounds all slower. Re-measured on the current builds it
+does not reproduce. Eight interleaved rounds, pinned clocks, the same
+1920x1080 Main10 clip, 300 frames each: 452.5, 466.6, 468.8, 478.5, 485.4,
+487.8, 488.6, 496.7 fps, median 481.9, range 452.5-496.7.
+
+The earlier runs that found a consistent deficit used a different build tree
+and, on the first pass, a `debugoptimized` build against a `release` one; that
+comparison was not like for like.
+
+The verdict changes from "2.4 % behind, cause unknown" to "no reproducible
+deficit". No code change was made for this cell, because there is nothing to
+fix: the earlier probes had already shown identical request-level work
+(DQBUF 1204, DQEVENT 303, poll entered four times in 300 frames), and a gap
+that does not survive a like-for-like build is measurement, not behaviour.
+
+What this does not prove: 1080p Main10 only, one clip, one kernel module. A
+different profile or a 4K Main10 stream could still differ; neither was
+measured here.
