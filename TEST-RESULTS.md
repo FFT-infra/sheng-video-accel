@@ -8306,6 +8306,12 @@ What this does not prove: 1080p Main10 only, one clip, one kernel module. A
 different profile or a 4K Main10 stream could still differ; neither was
 measured here.
 
+Re-measured on 2026-11-15 after `0219dda`, 24 interleaved rounds with release
+builds on both sides: 487.4 against 489.8 fps, 8 of 24 rounds ahead, a paired
+median of -1.2 %. The verdict stands — inside 1 %, and no reason to reshape
+the sync path for it — but the earlier eight-round run was underpowered
+rather than decisive.
+
 ## A CDSP module must be Qualcomm-signed, and the unsigned PD is refused (`e2c7a26`, 2026-11-15)
 
 The CDSP VPP stopped at a wall that is outside this repository: the signed
@@ -8369,3 +8375,102 @@ repository cannot supply: a signing key accepted by `kailua.cdsp.prod`, or a
 CDSP firmware that creates unsigned domains. Neither is a code change, so no
 CDSP backend was written and `data/iris-codec-capabilities.json` is
 unchanged.
+
+## HEVC parameter sets, encode geometry, and the cells that were open (`0b3f0ad`, 2026-11-15)
+
+Measuring the comparison cells earlier sweeps left open found two defects on
+this side of the VA API, fixed by `0219dda` (decode) and `0b3f0ad` (encode).
+
+Setup for every number below: `sheng`, boot
+`3d667b4c-60b4-4f8c-95bf-d70fefb966e2`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, decoder node resolved by its `iris_driver`
+QUERYCAP name (`/dev/video1`; the encoder is `/dev/video2`), driver loaded as
+a build-tree override through `LIBVA_DRIVERS_PATH`, CPU governor
+`performance`, GPU `userspace` at 680 MHz, the two drivers alternating round
+by round. Decode is `-hwaccel vaapi -hwaccel_output_format vaapi -f null -`.
+"release" is a `-Dbuildtype=release` build of `0b3f0ad`; the cells marked
+"debugopt" were measured before that build existed, on the same tree at
+Meson's default `debugoptimized`.
+
+### HEVC repeated VPS, SPS and PPS on every access unit
+
+`src/codec/hevc.cc` wrote the three parameter sets in front of every picture.
+The SPS it synthesises carries no reference picture set, so each access unit
+was treated as independent — the assumption `e2c7a26` had already removed
+from H.264 after the firmware was shown to retain what it is given.
+
+The translator now keeps the last VPS/SPS/PPS it sent and resends only what
+changed. An IRAP always carries them: it has to be independently decodable,
+and a restart after a drain leaves the firmware with nothing in hand.
+
+300-frame HEVC Main10 1080p clip, 30 interleaved rounds against the parent
+commit built the same way (debugoptimized on both sides):
+
+| | throughput |
+| --- | ---: |
+| parameter sets repeated | 482.7 fps |
+| parameter sets cached | 489.8 fps |
+
+The output did not change: 300 of 300 frames are byte-identical to a software
+decode (`framemd5`, `hwdownload` to `p010le` and normalised to `yuv420p10le`).
+On the release build the same clip runs 487.4 fps over 24 interleaved rounds.
+
+What this does not prove: a stream that changes its parameter sets without a
+resolution change (an RPS update, for example) is resent because the bytes
+differ, but no clip in the matrix exercised that path end to end.
+
+### An aligned encode context over an exact surface was refused
+
+FFmpeg's HEVC encoder rounds a 320x180 picture up to a 320x184 context and
+hands the encoder a 320x180 surface. `endPicture` compared the context against
+the surface and returned `VA_STATUS_ERROR_INVALID_SURFACE` ("encode surface is
+smaller than the picture"), so every sub-720p HEVC encode failed. The mirror
+case — an exact H.264 context over an aligned decode surface, which is what
+transcoding produces — was already documented when the geometry check was
+introduced; only one direction had been allowed.
+
+The picture is now the smaller of the two, and the layout check below it still
+falls back to the surface when the requested geometry would move the chroma
+plane.
+
+| source size | stream width x height | coded |
+| --- | --- | --- |
+| 320x180 | 320x180 | 320x192 |
+| 480x272 | 480x272 | 480x288 |
+| 640x360 | 640x360 | 640x384 |
+| 1280x720 | 1280x720 | 1280x736 |
+| 1920x1080 | 1920x1080 | 1920x1088 |
+
+The 320x180 output decodes at 49.63 dB PSNR against the source. H.264 below
+720p still fails, but in FFmpeg rather than in the driver: the client aborts
+in `ff_hw_base_encode_receive_packet` after "Error sending frames to
+consumers", and no picture reaches `vaEndPicture` — the trace ends after
+`vaCreateContext`.
+
+### Cells that had never been measured
+
+| cell | frames | result | build |
+| --- | ---: | --- | --- |
+| H.264 720p decode | 1800 | 971.9 fps | release |
+| VP9 Profile 0 4K decode | 300 | 229.8 fps | release |
+| VP9 Profile 2 720p decode | 300 | 375.2 fps | debugopt |
+| AV1 Main 4K decode | 300 | 274.9 fps | debugopt |
+| HEVC encode 320x180 | 300 | 1316 fps | debugopt |
+| HEVC encode 480x272 | 300 | 1304 fps | debugopt |
+| HEVC encode 640x360 | 300 | 1288 fps | debugopt |
+| VPP scale 3840x2160 to 1920x1080 | 300 | 1.024 s wall | debugopt |
+
+The 4K VPP row is the wall time for decode plus scale; the same clip decoded
+without the scale takes 0.886 s. The three decode cells that were measured
+with this driver (VP9 Profile 2, VP9 4K and AV1 4K) are byte-identical to a
+software decode, 300 of 300 frames each.
+
+### 4K playback in the browser across a loop boundary
+
+Chrome 156 on the GNOME Wayland session, a 10-second 4K HEVC clip encoded on
+the target, six interleaved rounds of a 15-second window so every window
+crosses the loop point: 448-450 frames presented and zero dropped in all six
+rounds. An earlier signal of two to four drops per round did not reproduce;
+that measurement used a 16-second clip, so the loop cadence differs.
+
+What this does not prove: one clip, one browser build, one boot.
