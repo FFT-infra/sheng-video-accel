@@ -213,7 +213,7 @@ status, the guard state and the source commit next to the command's output:
 
 ```sh
 IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh \
-    --out ~/Lab/Bridge/tmp/run-$$ \
+    --out /tmp/iris-run-$$ \
     -- sh test/iris-gstreamer-gate.sh --clip CLIP
 ```
 

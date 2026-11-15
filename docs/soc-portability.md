@@ -9,18 +9,18 @@ SoC until its own hardware gate passes and `TEST-RESULTS.md` records the run.
 
 ## What is SM8550-specific
 
-1. **Kernel patches.** The six files in `packaging/kernel/` are rebased onto
+1. **Kernel patches.** The seven files in `packaging/kernel/` are rebased onto
    `ianchb/sm8550-mainline` `sheng-7.2.6` (`42f3b40c702a`). 0001 adds
    `DISPLAY_DELAY_ENABLE`/`DISPLAY_DELAY` to `inst_fw_cap_sm8550_dec` and the
    `sm8550_vdec_input_config_param_*` arrays; 0002 and 0003 add controls to
-   `inst_fw_cap_sm8550_enc`; 0004 changes `iris_vb2_buffer_done()`; 0005 and
-   0006 are experimental and must stay out of a port baseline. 0006 has one
-   guarded WP1 run on SM8550 with a "no regression" verdict, which is not a
-   fix claim or portability evidence. A new SoC has
-   its own platform tables and firmware capability enum, so every hunk needs
-   re-review and rebase, not a blind `git am`. `test/iris-kernel-patch-check.sh`
-   pins the current hashes and paths; refresh `SHA256SUMS` in the same commit
-   as any patch change.
+   `inst_fw_cap_sm8550_enc`; 0004 changes `iris_vb2_buffer_done()`; 0005, 0006
+   and 0007 are experimental and must stay out of a port baseline. 0006 has one
+   guarded WP1 run on SM8550 with a "no regression" verdict; 0005 and 0007 were
+   measured on hardware and rejected. None of these adds a fix claim or
+   portability evidence. A new SoC has its own platform tables and firmware
+   capability enum, so every hunk needs re-review and rebase, not a blind `git am`.
+   `test/iris-kernel-patch-check.sh` pins the current hashes and paths; refresh
+   `SHA256SUMS` in the same commit as any patch change.
 2. **Kernel build identity.** The target config has BTI/PAC enabled
    (`CONFIG_ARM64_BTI=y`, `CONFIG_ARM64_PTR_AUTH=y`,
    `CONFIG_ARM64_PTR_AUTH_KERNEL=y`). A module-only build must use the running

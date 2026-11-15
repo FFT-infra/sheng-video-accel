@@ -115,6 +115,43 @@ The package installs the driver binary along with the `msm_drv_video.so` and `qc
 - `iris-device-check`: Inspects device nodes, firmware version, bound driver, and exposed capabilities.
 - `iris-verify`: Validates hardware decode and encode pipelines via Iris interrupt counter verification.
 
+## Client Configuration
+
+Most applications require no special environment variables: libva resolves the driver automatically via `msm_drv_video.so`. Recommended setup for common clients:
+
+### Media Players & Streaming
+
+- **mpv**: Run with hardware decoding enabled:
+  ```sh
+  mpv --hwdec=vaapi <video-file>
+  ```
+  To enable permanently, add `hwdec=vaapi` to `~/.config/mpv/mpv.conf` (or run `scripts/iris-configure-clients.sh`).
+- **VLC**: Select **VA-API video decoder via DRM** in Preferences -> Input / Codecs -> Hardware-accelerated decoding.
+- **Sunshine / Moonlight**: Select `h264_vaapi` or `hevc_vaapi` in Sunshine configuration for low-latency hardware game streaming.
+
+### Web Browsers
+
+- **Google Chrome / Chromium**: Hardware decode activates automatically on supported media. Verify active decoding via `chrome://media-internals`:
+  - `kVideoDecoderName`: `VaapiVideoDecoder`
+  - `kIsPlatformVideoDecoder`: `true`
+- **Firefox**: Enable VA-API by setting `media.hardware-video-decoding.force-enabled` to `true` in `about:config` (or run `scripts/iris-configure-clients.sh`).
+
+### FFmpeg & GStreamer
+
+- **FFmpeg Decode**:
+  ```sh
+  ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -i input.mp4 -f null -
+  ```
+- **FFmpeg Encode (H.264 / HEVC)**:
+  ```sh
+  ffmpeg -vaapi_device /dev/dri/renderD128 -i input.yuv -vf 'format=nv12,hwupload' -c:v h264_vaapi -b:v 4M out.mp4
+  ffmpeg -vaapi_device /dev/dri/renderD128 -i input.yuv -vf 'format=nv12,hwupload' -c:v hevc_vaapi -b:v 4M out.mp4
+  ```
+- **GStreamer**: GStreamer filters VA drivers by vendor allowlist. To register elements (`vaav1dec`, `vah264enc`, `vah265enc`), set:
+  ```sh
+  export GST_VA_ALL_DRIVERS=1
+  ```
+
 ## Memory Models
 
 The driver selects buffer publishing policies dynamically:
