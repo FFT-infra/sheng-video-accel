@@ -107,6 +107,43 @@ Debian 包请在 chroot（`sbuild`、`pbuilder`）里构建：`libgbm-dev` 绑�
 - `iris-device-check`：只读检测设备节点、固件版本、内核驱动绑定状态及支持格式。
 - `iris-verify`：执行轻量级软硬件闭环测试，通过 Iris 中断计数验证编解码通路。
 
+## 常用客户端配置指南
+
+大多数应用程序无需配置特殊环境变量：libva 会通过 `msm_drv_video.so` 符号链接自动加载本驱动。以下是常见客户端的最佳实践：
+
+### 播放器与串流
+
+- **mpv**：指定硬解参数启动：
+  ```sh
+  mpv --hwdec=vaapi <视频文件>
+  ```
+  亦可在 `~/.config/mpv/mpv.conf` 中追加 `hwdec=vaapi` 实现开箱即用（或直接运行 `scripts/iris-configure-clients.sh` 自动配置）。
+- **VLC**：在「首选项 -> 输入 / 编解码器 -> 硬件加速解码」中选择 **VA-API video decoder via DRM**。
+- **Sunshine / Moonlight**：在 Sunshine 配置页面中将编码器选为 `h264_vaapi` 或 `hevc_vaapi`，即可启用低延迟硬件串流。
+
+### 网页浏览器
+
+- **Google Chrome / Chromium**：在线播放支持格式时会自动启用硬解。在 `chrome://media-internals` 中查看对应播放器实例进行确认：
+  - `kVideoDecoderName`: `VaapiVideoDecoder`
+  - `kIsPlatformVideoDecoder`: `true`
+- **Firefox**：在 `about:config` 中将 `media.hardware-video-decoding.force-enabled` 设为 `true` 开启硬件加速（或直接运行 `scripts/iris-configure-clients.sh` 自动配置）。
+
+### FFmpeg 与 GStreamer
+
+- **FFmpeg 硬件解码**：
+  ```sh
+  ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -i input.mp4 -f null -
+  ```
+- **FFmpeg 硬件编码（H.264 / HEVC）**：
+  ```sh
+  ffmpeg -vaapi_device /dev/dri/renderD128 -i input.yuv -vf 'format=nv12,hwupload' -c:v h264_vaapi -b:v 4M out.mp4
+  ffmpeg -vaapi_device /dev/dri/renderD128 -i input.yuv -vf 'format=nv12,hwupload' -c:v hevc_vaapi -b:v 4M out.mp4
+  ```
+- **GStreamer**：GStreamer 默认按厂商白名单过滤 VA 插件。设置以下环境变量即可完整注册 `vaav1dec`、`vah264enc` 与 `vah265enc` 元素：
+  ```sh
+  export GST_VA_ALL_DRIVERS=1
+  ```
+
 ## 缓冲与发布模型
 
 驱动根据客户端内存生命周期动态选择发布策略：

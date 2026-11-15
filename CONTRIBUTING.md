@@ -1,12 +1,14 @@
 # Contributing
 
-Contributions should preserve the project's explicit hardware-decoder contract:
-real media playback, selected decoder evidence, frame/drop counters, and safe
-fallbacks matter more than a video that merely plays.
+Contributions should preserve the project's explicit hardware-decoder contract: real media playback, selected decoder evidence, frame/drop counters, and safe fallbacks matter more than a video that merely plays.
 
-## Development loop
+---
 
-Configure and build with Meson, then run the same gates used by CI:
+## Development Loop
+
+### 1. Build and Host Verification
+
+Configure and build with Meson, then run the host-side gates used by CI:
 
 ```sh
 meson setup build-local
@@ -16,18 +18,52 @@ meson test -C build-local --print-errorlogs
 git diff --check
 ```
 
-Hardware suites need a target with Qualcomm Iris. Set `IRIS_REMOTE_HOST`
-explicitly before using `test/remote/deploy.sh` or `test/remote/setup.sh`;
-remote scripts intentionally have no private-host default. Keep downloaded
-corpora, traces, screenshots, and media outside the repository.
+All five commands must pass cleanly before submitting changes.
 
-When changing codec support, queue ownership, or browser launch behavior, add a
-regression check and update the relevant capability or compatibility document.
-Never hardcode a boot-specific `/dev/videoN` node.
+### 2. Code Style
 
-## Commits and pull requests
+The codebase follows the style defined in `.clang-format`:
 
-Use a short imperative commit subject and describe the validation performed.
-Pull requests should state the target/runtime, decoder name, frame/drop counts,
-and any unqualified or hardware-dependent results. Do not attach private logs,
-device addresses, credentials, or generated binaries.
+```sh
+clang-format -i src/**/*.cc src/**/*.h
+```
+
+### 3. Hardware Gates
+
+Hardware verification requires an ARM64 Linux target running on Qualcomm Snapdragon SM8550 with the Iris VPU.
+
+Set `IRIS_REMOTE_HOST` explicitly before running remote deployment or gates:
+
+```sh
+IRIS_REMOTE_HOST=your-tablet-host ./test/remote/deploy.sh
+```
+
+Remote scripts intentionally have no private-host default. Keep downloaded media corpora, traces, screenshots, and build artifacts outside the git repository.
+
+---
+
+## Core Development Rules
+
+Before modifying code, review the automated agent contract in [AGENTS.md](AGENTS.md):
+
+- **Dynamic Node Resolution**: Never hardcode boot-specific `/dev/videoN` nodes in code, scripts, launchers, or packaging. Always resolve nodes dynamically at runtime via the `iris_driver` QUERYCAP name.
+- **Single Source of Truth**: Update documentation, capabilities, and code in the same commit:
+  - Codec capability and publish policies: `data/iris-codec-capabilities.json`
+  - Environment switches: `README.md` and `README.zh-CN.md`
+  - Trace vocabulary: `docs/architecture.md` §8
+  - Kernel patch hashes: `packaging/kernel/SHA256SUMS`
+- **Evidence Before Capability**: Codecs, profiles, and publish policies are advertised only after the hardware gate passes and `TEST-RESULTS.md` records the run.
+- **Vendored Headers**: Do not edit vendored UAPI headers in `include/linux/`.
+
+---
+
+## Commits and Pull Requests
+
+- **Commit Messages**: Use short, imperative subjects (e.g., `feat: ...`, `fix: ...`, `docs: ...`, `test: ...`).
+- **Validation Record**: Pull request descriptions should state:
+  - Target SoC and kernel version.
+  - Resolved decoder/encoder names.
+  - Driver hash and boot ID.
+  - Decoded and dropped frame counts.
+  - Any hardware limitations or caveats.
+- **Privacy & Cleanliness**: Do not commit private operator paths, device IP addresses, credentials, or generated lab binaries.
