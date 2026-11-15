@@ -8699,3 +8699,58 @@ The gate above was run again on the shipped driver, `dfb0f516…`, boot
 300/300 pictures at 45.057333 dB with `I B P B P B P B P B`, the repeat
 byte-identical, the depth-two client still stops at 61 pictures with rc 251,
 and the gate-off and HEVC arms still report `has_b_frames=0`.
+
+## 8K decode and two 1080p players on the CAPTURE memory budget (2026-11-16)
+
+The node advertises `96x96 - 8192x8192` on both queues, but the CAPTURE pool
+was clamped to a fixed 32..64 frames. At 7680x4320 an NV12 frame is 47.5 MiB,
+so 32 frames ask the device for 1.5 GiB of contiguous memory and `STREAMON`
+fails with `ENOMEM`. The native `v4l2h264dec` decodes the same 8K clips, so the
+limit was this driver's allocation, not the firmware's geometry. `e82630c`
+caps the pool by a 384 MiB budget with the firmware's minimum as a floor: 8K
+gets eight slots, 1080p keeps 32.
+
+Identity: source commit `e82630cb7158d5299f7e6a773d4028114f09b78b`, build-tree
+driver SHA-256 `679a339e631e3935e1f0c697612a5341afc09ed1c97ff8281788e3ac38a56aa8`
+(build-tree override, not the installed package; the installed driver is still
+`3c9a857d73f9a36ac0445ec1319b0223d206777c9e34ff579ec2cdf956af7b8a`), module
+`b90bd823fdab98957739ad2196eb4016f5a264f2280d22735963e40c8488c715`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot
+`581953b0-89df-4712-9fba-0e2d77682af7` throughout both runs, decoder
+`/dev/video17` and encoder `/dev/video18` resolved by `iris_driver` QUERYCAP
+name. Both runs were wrapped by `test/remote/gate.sh`; guard `status=complete`
+for each, boot ID unchanged, battery 49 % discharging and the hottest zone
+below 43 C. The run records are
+`~/iris-vaapi-lab/artifacts/run-20261115T223928Z/` and
+`~/iris-vaapi-lab/artifacts/run-20261115T224032Z/`.
+
+An earlier unguarded pool-size sweep reached `pool=24` and the tablet reset
+(boot changed from `a65a6f76-fd07` to `581953b0-89df-4712-9fba-0e2d77682af7`).
+Per the guard procedure that is a failed experiment, not evidence; the two
+runs below are the qualified ones. The 8K gate's first attempt also failed
+because it did not pass `LIBVA_DRIVER_NAME=v4l2` to ffmpeg and libva could not
+initialise the build-tree driver; `run-20261115T223718Z` records that failure.
+
+`test/iris-8k-gate.sh`, one finite 7680x4320 clip per qualified codec,
+software framemd5 oracle, `publish=auto`:
+
+| Codec | Geometry | Granted CAPTURE pool | Firmware minimum | Frames | Frame hashes | Errors / drops / misplaced | LAST / drain |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| H.264 | 7680x4320 | 8 (size=49766400) | 7 | 4/4 | exact | 0 | 1 / 1 |
+| HEVC | 7680x4320 | 8 | 7 | 4/4 | exact | 0 | 1 / 1 |
+| VP9 | 7680x4320 | 8 | 4 | 4/4 | exact | 0 | 1 / 1 |
+| AV1 | 7680x4320 | 8 | 4 | 4/4 | exact | 0 | 1 / 1 |
+
+`test/iris-two-player-gate.sh`, two independent 1920x1080 H.264 ffmpeg
+processes started together, each with its own VA display and driver trace,
+real-time pacing, `publish=auto`:
+
+| Lane | Frames | Driver ledger | Frame hashes | LAST |
+| --- | --- | --- | --- | --- |
+| a | 90/90 | `submitted=90 completed=90 errors=0 drops=0 timeouts=0 misplaced=0 drains=1` | exact | 1 |
+| b | 90/90 | `submitted=90 completed=90 errors=0 drops=0 timeouts=0 misplaced=0 drains=1` | exact | 1 |
+
+The two `session open` records are 1 ms apart (`t=11` and `t=12` within their
+own processes) and both finish at about 2.5 s, so the sessions overlapped.
+This is a short exact-pixel gate, not a throughput or thermal soak; the
+two-hour `iris-concurrency-soak.sh` at 640x360 remains the long-window record.
