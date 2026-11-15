@@ -2492,7 +2492,7 @@ submitting more input waits out the sync bound and gets `TIMEDOUT`, not
 ### Fix and its coverage
 
 `packaging/kernel/0004-media-iris-preserve-timestamps-on-error-buffers.patch`
-(strongtz, Xilin Wu) copies `buf->timestamp` onto the error completion, and
+(from `strongtz/libva-v4l2`) copies `buf->timestamp` onto the error completion, and
 `Session::handle_capture_returns` now fails the matching target as soon as
 the completion is dequeued. `meson test` covers both shapes: a timestamped
 corrupt completion fails its surface without a drain, and a timestamped
@@ -5193,7 +5193,7 @@ WP1 module build prerequisites: `/boot/config-7.2.6-sm8550-g42f3b40` and
 enabled in the running config (`CONFIG_ARM64_BTI=y`,
 `CONFIG_ARM64_PTR_AUTH=y`, `CONFIG_ARM64_PTR_AUTH_KERNEL=y`), so the module
 must be built with the same toolchain and config as the running kernel. No
-complete kernel source tree or `Module.symvers` was found under `~/Lab`, and
+complete kernel source tree or `Module.symvers` was found on the target, and
 no rollback copy of `qcom-iris.ko.zst` was found. The module-install step is
 therefore blocked until a source tree, symbol versions and a rollback copy
 are staged on the target.
@@ -8272,7 +8272,7 @@ the install manifest, under `/usr/lib/aarch64-linux-gnu/dri`.
 | check | run | result |
 | --- | --- | --- |
 | `vainfo` through libva with `LIBVA_DRIVERS_PATH` on the extracted tree | — | `va_openDriver() returns 0`, H.264/HEVC/VP9/AV1 profiles listed |
-| `iris-matrix.sh` | `~/Lab/Bridge/tmp/pkg-gap/matrix` | H.264, VP9, HEVC, AV1 `frame-md5` exact; `drops=0` each |
+| `iris-matrix.sh` | `<scratch>/pkg-gap/matrix` | H.264, VP9, HEVC, AV1 `frame-md5` exact; `drops=0` each |
 
 `dpkg-shlibdeps` produced the same dependency list as before (`libc6 >= 2.34`,
 `libdrm2 >= 2.4.38`, `libegl1`, `libgbm1 >= 7.11~1`, `libgcc-s1 >= 3.0`,
