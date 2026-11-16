@@ -679,6 +679,10 @@ encode input fence fd=<n> waited=<ms>                 (only when the input's
                                                        write fence was pending
                                                        20 ms or longer)
 encode deblocking mode=<0|1|2> alpha=<n> beta=<n> via=default|V4L2
+encode intra-refresh period=<n>                        (pictures one rolling
+                                                       sweep takes; the
+                                                       firmware honours it
+                                                       under CBR only)
 encode idr lever=sync-frame|intra-period               (which requested-IDR
                                                        lever this kernel has)
 encode drain result=complete

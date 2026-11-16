@@ -70,6 +70,13 @@ struct EncodeParams {
     unsigned b_frames = 0;
     // This picture's slice is B-coded. Only reachable when b_frames is set.
     bool b_picture = false;
+    // Rolling intra refresh: refresh the whole picture over this many
+    // pictures. 0 leaves it off. The firmware sweeps one band of rows per
+    // picture on its own, so a client's per-picture location is not what it
+    // acts on; the codec layer turns VA's insert size into this period.
+    // Honoured only under CBR: measured byte-identical to no refresh under
+    // VBR and CQP (TEST-RESULTS.md, "Encoder capabilities").
+    unsigned intra_refresh_period = 0;
     // Where this picture sits in display order, from the codec's picture
     // order count (H.264 CurrPic's field order counts, HEVC pic_order_cnt).
     // VA clients submit in coding order, the firmware consumes display

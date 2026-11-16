@@ -53,6 +53,19 @@ if va_drm_dep.found()
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
 
+# Hardware probe, built but not registered as a meson test: a VA client's
+# rolling intra refresh. The unit tests cover the controls the session writes
+# and the mapping from VA's window to a period; only the firmware can say
+# whether the request changes the stream, and this drives it through the
+# public API so the answer comes from the path a client uses.
+if va_drm_dep.found()
+  executable(
+    'iris-encode-ir-probe',
+    'iris-encode-ir-probe.cc',
+    dependencies: [va_drm_dep],
+    cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+endif
+
 # Hardware probe, built but not registered as a meson test: the upload half of
 # the image API. vaPutImage and the derived-image write path are what put
 # client pixels into a surface; vaGetImage reads them back. No decode is

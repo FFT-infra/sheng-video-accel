@@ -129,6 +129,7 @@ mpv、VLC、Sunshine、Firefox、GStreamer 的逐项配置，以及 FFmpeg 的�
 - **AV1 动态分辨率切换**：驱动内部维护八槽 DPB，在 `vaEndPicture` 直接提交当前帧。同一 VA 上下文分辨率改变后，若客户端继续沿用旧 CAPTURE 几何导出表面，驱动检测到跨距不匹配时改用 GPU 拷贝发布，避免跨距错位。Chromium 播放本地文件时会自行选择 AV1 解码器，可能落到内置软件解码；会话是否走硬件以 [docs/build-and-deploy.md](docs/build-and-deploy.md#browser-acceptance-gate) 的浏览器验收门禁为准。
 - **原版内核降级**：在缺少显示延迟控制或强制关键帧控制的内核上，解码降级为 GPU 拷贝，关键帧请求通过临时改动 intra period 实现。
 - **编码高级特性**：仅支持单图单切片结构。多切片、分块（Tiles）及 ROI 配置直接返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。B 帧需通过 `V4L2_VA_B_FRAMES` 显式开启，且仅限 H.264；客户端管线需至少保持三帧在途（FFmpeg：`-bf 1 -async_depth 3`）。
+- **intra refresh**：滚动行刷新请求（`VAEncMiscParameterRIR`）能到达编码器并改变码流，但只在 CBR 下生效；VBR 和 CQP 下固件忽略周期，驱动在这两种模式下直接拒绝。目前没有客户端请求它：FFmpeg 的 `h264_vaapi`/`hevc_vaapi` 和 GStreamer 的 `vah264enc` 都没有对应选项。VA 接口没有编码侧长期参考字段，`ltr_count`/`frame_ltr_index`/`use_ltr_frames` 任何 VA 客户端都表达不了，驱动也不声明。
 - **封装头信息**：头信息声明为 `VA_ENC_PACKED_HEADER_NONE`，参数集随码流带内传输。
 
 ## 环境变量

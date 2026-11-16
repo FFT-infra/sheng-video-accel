@@ -137,6 +137,15 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
             // NOT_SUPPORTED answer makes it compute -1.
             attributes[i].value = encode ? 1 : VA_ATTRIB_NOT_SUPPORTED;
             break;
+        case VAConfigAttribEncIntraRefresh:
+            // The firmware sweeps one band of rows per picture, so the
+            // rolling-row form is the one it can express; the column form,
+            // the adaptive form and a per-picture insertion location are
+            // not. Honoured under CBR only (TEST-RESULTS.md, "Encoder
+            // capabilities"), which is the rate control this driver offers a
+            // client that wants it.
+            attributes[i].value = encode ? VA_ENC_INTRA_REFRESH_ROLLING_ROW : VA_ATTRIB_NOT_SUPPORTED;
+            break;
 #if VA_CHECK_VERSION(1, 13, 0)
         case VAConfigAttribEncHEVCFeatures: {
             // The firmware writes the parameter sets, so the answer is what a

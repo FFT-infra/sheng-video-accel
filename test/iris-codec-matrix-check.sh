@@ -39,6 +39,12 @@ for codec, item in entries.items():
     assert isinstance(enc["rate_control"], list), codec
     assert isinstance(enc["rejected"], list) and enc["rejected"], codec
     assert ("NV12" in enc["raw_formats"]) == (enc["production"] == "supported"), codec
+    # Intra refresh is a supported capability on both encoders, and the
+    # driver answers VAConfigAttribEncIntraRefresh from that claim. The
+    # attribute and this entry have to move together.
+    assert ("intra_refresh" in enc) == (enc["production"] == "supported"), codec
+    if enc["production"] == "supported":
+        assert "CBR" in enc["intra_refresh"], codec
 assert entries["vp9"]["encode"]["production"] == "absent"
 assert entries["av1"]["encode"]["production"] == "absent"
 # The driver decides the publish policy from its own import table; it must

@@ -9078,3 +9078,92 @@ move the software numbers. The power half is written
 (`iris-power-sampler.sh --workload encode`) but not yet measured: it needs
 the screen off and the tablet on battery, and this session ran with the
 display at brightness 901 of 2047.
+
+## Encoder capabilities: what the firmware acts on (2026-11-16)
+
+Kernel `7.3.4-sm8550-00104-g87ac0f2347eb`, boot
+`fd0b90f4-d968-4340-94f9-f2fd7bc6c52a`, encoder node `/dev/video18`
+(`iris_driver`, NV12 OUTPUT / H.264-HEVC CAPTURE), driver
+`db5517eb…e647` built from `91e0f14`.
+
+The encoder node lists three capability groups this driver never wrote:
+rolling intra refresh, long-term references, and hierarchical (temporal)
+layers. Before implementing any of them the question was whether the firmware
+acts on the controls at all. Two probes answer it: `v4l2-ctl
+--stream-mmap --stream-out-mmap` sets a control directly on the node and
+bypasses libva, and `test/iris-encode-ir-probe.cc` drives the same request
+through the public VA API.
+
+### Intra refresh: real, under CBR only
+
+Direct on the node, 640x480, 60 frames of a static source (so any intra
+macroblock beyond the first picture can only come from a refresh), measured
+with `-debug mb_type`:
+
+| Arm | Intra macroblocks |
+| --- | ---: |
+| CBR, no refresh | 4.8 % |
+| CBR, cyclic period 10 | 12.2 % |
+| CBR, cyclic period 1 | 86.8 % |
+| VBR, cyclic period 10 | 4.3 % (identical to VBR without it) |
+| VBR with a peak set, period 10 | 4.3 % (identical) |
+
+The refresh rolls: at period 10 on a 30-row picture, pictures 2 through 7
+carry one three-row band each (rows 0-2, 3-5, 6-8, …) and the next IDR at
+picture 8 resets the sweep. Period 1 refreshes 97 % of the picture every
+picture. Under VBR and CQP the stream is byte-identical with and without the
+control, at period 1, 2 and 30, in both codecs — the firmware accepts the
+property and does nothing with it.
+
+Through the VA path (`test/iris-encode-ir-probe.cc`, 60 pictures, CBR,
+`VAEncMiscParameterRIR` with a 4-MB-row window). The probe renders the RIR
+buffer once, with the first picture, which is how a client renders the
+rate-control buffer; the period is a per-context control, so the driver keeps
+it for every later picture instead of reading their absent buffer as a
+mid-context change:
+
+| Codec | Plain | With refresh |
+| --- | ---: | ---: |
+| H.264 | 275888 bytes, hash `7b9b835341a6ff64` | 344587 bytes, hash `439856f290fa0318` |
+| HEVC | 559630 bytes, hash `7234aae46dbb9d74` | 559630 bytes, hash `256ac353497e90f4` |
+
+The driver advertises `VAConfigAttribEncIntraRefresh = 0x2`
+(`VA_ENC_INTRA_REFRESH_ROLLING_ROW`) for both encode profiles and refuses the
+request under VBR and CQP rather than writing a control that does nothing.
+No VA client asks for it: FFmpeg 8.1.3's `h264_vaapi` and `hevc_vaapi` list
+no intra-refresh option, `libavcodec.so.62` has zero references to
+`VAConfigAttribEncIntraRefresh` or `VAEncMiscParameterTypeRIR`, and
+GStreamer's `vah264enc` has none either. Its `extra-controls` property also
+cannot reach these CIDs: GStreamer's control table does not know them and
+skips them without an error, which is why the direct-node probe used
+`v4l2-ctl` instead.
+
+### Hierarchical coding: real
+
+Enabling `enable_h264_hierarchical_coding` with `h264_number_of_hc_layers`
+changes the reference structure, visible in the NAL headers: 45 of 90 slices
+come out with `nal_ref_idc = 0` (non-reference, droppable) against 0 of 90
+without it. Layer counts 1, 2, 3 and 4 give four distinct streams, and the
+decoded output stays correct (SSIM 0.9965 at two layers and 0.9957 at three
+against the plain stream). HEVC's `hevc_hierarchical_coding_layer` behaves the
+same way.
+
+Not implemented. VA expresses temporal layers through
+`VAConfigAttribEncRateControlExt` plus a
+`VAEncMiscParameterTemporalLayerStructure` schedule, and no client sends
+either: `libavcodec.so.62` has zero references to the structure and no
+encoder option that would fill it in. Implementing a client-less capability
+would be a claim with nothing behind it, and the schedule VA describes (a
+`layer_id[]` array of up to 32 pictures) is not what the firmware produces
+(it assigns layers itself from the layer count). The capability stays
+unadvertised and this record is the reason.
+
+### Long-term references: not expressible
+
+The node takes `ltr_count`, `frame_ltr_index` and `use_ltr_frames`, and the
+kernel maps all three. VA has no encode-side long-term-reference field at
+all: `va_enc_h264.h` and `va_enc_hevc.h` contain no `long_term` member,
+`VA_PICTURE_H264_LONG_TERM_REFERENCE` is a decode-side flag, and
+`src/codec/encode_h264.cc` rejects an LTR reference in a picture's reference
+list. No VA client can ask for one, so this is an interface limit rather than
+a driver gap, and the controls stay unwritten.

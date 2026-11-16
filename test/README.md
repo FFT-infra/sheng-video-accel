@@ -127,6 +127,7 @@ Target-compiled diagnostic probe binaries:
 - **`test/iris-alloc-chain.sh`**: Walks the stable buffer fallback hierarchy (MSM GEM coherent -> MSM GEM write-combined -> system DMA heap) using `test/alloc-fault.so`.
 - **`test/iris-encode-quality.sh`**: Verifies hardware encode fidelity (SSIM floors and IRQ counter increments), including a 7680x4320 lane per codec (`IRIS_ENCODE_8K=0` skips it).
 - **`test/iris-encode-baseline.sh`**: Same source and bitrate through `h264_vaapi`/`hevc_vaapi` and libx264/libx265. Reports fps, client CPU seconds per frame and the round-to-round spread; `--power` also runs the encode workload through `iris-power-sampler.sh`.
+- **`test/iris-encode-ir-probe.cc`**: Encodes one multi-picture CBR stream through the public VA API twice, with and without a rolling intra refresh, and requires the bitstream to differ. The unit tests cover the controls and the mapping; only the firmware can say whether the request changes what it codes. `test/iris-encode-control-probe.cc` is the same idea for the deblocking controls.
 - **`test/iris-power-sampler.sh`**: Battery-side power of a decode (`--clip`) or an encode (`--workload encode --codec h264|hevc`) against software, as an increment over a pre/post baseline.
 
 ---

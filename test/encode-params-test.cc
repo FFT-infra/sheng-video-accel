@@ -515,6 +515,83 @@ void test_deblocking()
 }
 
 
+// VA expresses a rolling refresh as a window of MB rows plus a per-picture
+// location; the firmware takes one period and sweeps the picture itself. The
+// window size survives as the number of pictures one full sweep takes, which
+// is what the session writes. A request the mapping cannot carry is refused.
+void test_intra_refresh()
+{
+    auto h264 = iris::codec::make_h264_encoder(VAProfileH264High, RateMode::Cbr);
+    VAEncSequenceParameterBufferH264 sequence = h264_sequence();
+    VAEncPictureParameterBufferH264 picture = h264_picture();
+
+    VAEncMiscParameterRIR rir = {};
+    rir.rir_flags.bits.enable_rir_row = 1;
+    // 68 MB rows over a 4-row window: 17 pictures per sweep.
+    rir.intra_insert_size = 4;
+    rir.intra_insertion_location = 8;
+    std::vector<uint32_t> storage = misc(VAEncMiscParameterTypeRIR, rir);
+    const iris::EncodeParams refresh = h264->translate(
+        h264_input(sequence, picture, { storage.data() }));
+    check(refresh.intra_refresh_period == 17, "a 4-row window over 68 rows is a 17-picture sweep");
+
+    // The period is a per-context control, so a client that renders the RIR
+    // buffer with the first picture only must not lose it on picture 2: the
+    // session would read the drop to 0 as a mid-context change and refuse.
+    check(h264->translate(h264_input(sequence, picture)).intra_refresh_period == 17,
+        "the period survives a picture that carries no RIR buffer");
+
+    // A window wider than the picture refreshes it in one picture.
+    rir.intra_insert_size = 68;
+    storage = misc(VAEncMiscParameterTypeRIR, rir);
+    check(h264->translate(h264_input(sequence, picture, { storage.data() })).intra_refresh_period == 1,
+        "a full-height window refreshes in one picture");
+
+    // No RIR request ever means no refresh.
+    auto plain = iris::codec::make_h264_encoder(VAProfileH264High, RateMode::Cbr);
+    check(plain->translate(h264_input(sequence, picture)).intra_refresh_period == 0,
+        "no RIR request means no refresh");
+
+    // The column form and the adaptive form are not what the firmware does.
+    rir.rir_flags.bits.enable_rir_row = 0;
+    rir.rir_flags.bits.enable_rir_column = 1;
+    storage = misc(VAEncMiscParameterTypeRIR, rir);
+    check(status_of([&] { h264->translate(h264_input(sequence, picture, { storage.data() })); })
+            == VA_STATUS_ERROR_UNIMPLEMENTED,
+        "a column refresh is refused");
+
+    // A window of zero rows cannot be turned into a period.
+    rir.rir_flags.bits.enable_rir_column = 0;
+    rir.rir_flags.bits.enable_rir_row = 1;
+    rir.intra_insert_size = 0;
+    storage = misc(VAEncMiscParameterTypeRIR, rir);
+    check(status_of([&] { h264->translate(h264_input(sequence, picture, { storage.data() })); })
+            == VA_STATUS_ERROR_INVALID_PARAMETER,
+        "an unsized window is refused");
+
+    // HEVC reads the same request against its own geometry.
+    auto hevc = iris::codec::make_hevc_encoder(VAProfileHEVCMain, RateMode::Cbr);
+    VAEncSequenceParameterBufferHEVC hsequence = hevc_sequence();
+    VAEncPictureParameterBufferHEVC hpicture = {};
+    hpicture.pic_fields.bits.reference_pic_flag = 1;
+    hpicture.pic_fields.bits.coding_type = 1;
+    VAEncSliceParameterBufferHEVC hslice = {};
+    hslice.slice_type = 2;
+    hslice.num_ctu_in_slice = 1;
+    EncodePicture hinput;
+    hinput.sequence = &hsequence;
+    hinput.picture = &hpicture;
+    hinput.surface_width = 1920;
+    hinput.surface_height = 1080;
+    hinput.slices = { &hslice };
+    rir.intra_insert_size = 4;
+    storage = misc(VAEncMiscParameterTypeRIR, rir);
+    hinput.misc = { storage.data() };
+    // 1088 lines over a 4-MB (64-line) window is 17 pictures per sweep.
+    check(hevc->translate(hinput).intra_refresh_period == 17,
+        "HEVC maps the window against its own height");
+}
+
 // The reference contract. The encoder node has no reference management of its
 // own: it codes against the picture it just produced. A picture that names a
 // different reference, or a partial slice, cannot be coded as asked, and
@@ -778,6 +855,7 @@ int main()
     test_hevc_translation();
     test_keyframe_request();
     test_deblocking();
+    test_intra_refresh();
     test_reference_and_slice_shape();
     test_unimplemented_features();
     if (failures) {

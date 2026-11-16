@@ -94,9 +94,12 @@ public:
                  V4L2_CID_MPEG_VIDEO_BITRATE_PEAK, V4L2_CID_MPEG_VIDEO_B_FRAMES,
                  V4L2_CID_MPEG_VIDEO_GOP_SIZE, V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR,
                  V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP, V4L2_CID_MPEG_VIDEO_H264_P_FRAME_QP,
+                 V4L2_CID_MPEG_VIDEO_H264_B_FRAME_QP,
                  V4L2_CID_MPEG_VIDEO_HEVC_I_FRAME_QP, V4L2_CID_MPEG_VIDEO_HEVC_P_FRAME_QP,
                  V4L2_CID_MPEG_VIDEO_H264_MIN_QP, V4L2_CID_MPEG_VIDEO_H264_MAX_QP,
-                 V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP, V4L2_CID_MPEG_VIDEO_HEVC_MAX_QP }) {
+                 V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP, V4L2_CID_MPEG_VIDEO_HEVC_MAX_QP,
+                 V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD,
+                 V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE }) {
             known_.insert(id);
         }
         if (loop_filter_controls) {
@@ -855,6 +858,57 @@ iris::StableBuffer& ensure_stable(DriverData&, Surface&)
 
 } // namespace va
 
+// A rolling intra refresh reaches the node as two controls: the cyclic period
+// type and the picture count of one sweep. The firmware acts on them only
+// under CBR, so a VBR or CQP request is refused instead of being written and
+// ignored; that refusal is the whole point of the second half of this test.
+void test_intra_refresh()
+{
+    auto node = std::make_unique<FakeEncoderNode>(true);
+    FakeEncoderNode* raw = node.get();
+    iris::EncodeConfig config;
+    config.codec = V4L2_PIX_FMT_H264;
+    config.width = 1920;
+    config.height = 1080;
+    iris::EncoderSession session(std::move(node), config, iris::Options {}, iris::Trace(false));
+
+    iris::EncodeParams want = params(0, 0, 0);
+    want.rate_mode = iris::RateMode::Cbr;
+    want.intra_refresh_period = 9;
+    check(status_of([&] { session.configure(want, 1920, 1080); }) == -1, "CBR with a refresh configures");
+    check(raw->value(V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD) == 9, "the period reaches the node");
+    check(raw->value(V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE)
+            == V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE_CYCLIC,
+        "the node gets the cyclic period type");
+
+    // A period that changes mid-context needs a new context: the kernel marks
+    // the cyclic period static, and a write it refuses would leave the
+    // firmware sweeping at the old rate.
+    const int fd = dmabuf();
+    check(fd >= 0, "memfd for the raw frame");
+    iris::EncodeParams next = want;
+    next.intra_refresh_period = 12;
+    check(status_of([&] { session.encode(fd, kCaptureSlot, next); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
+        "changing the refresh period mid-context is refused");
+    session.finish();
+
+    // VBR and CQP: the firmware ignores the control in both, so the request
+    // fails rather than producing a stream that does not refresh.
+    for (iris::RateMode mode : { iris::RateMode::Vbr, iris::RateMode::Cqp }) {
+        auto node2 = std::make_unique<FakeEncoderNode>(true);
+        FakeEncoderNode* raw2 = node2.get();
+        iris::EncoderSession other(std::move(node2), config, iris::Options {}, iris::Trace(false));
+        iris::EncodeParams vbr = params(0, 0, 0);
+        vbr.rate_mode = mode;
+        vbr.qp = mode == iris::RateMode::Cqp ? 26 : -1;
+        vbr.intra_refresh_period = 9;
+        check(status_of([&] { other.configure(vbr, 1920, 1080); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
+            mode == iris::RateMode::Cqp ? "CQP intra refresh is refused" : "VBR intra refresh is refused");
+        check(!raw2->wrote(V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD),
+            "a refused refresh writes no period");
+    }
+}
+
 // vaSyncBuffer(..., 0) is a poll. With B pictures the tail-flush path used a
 // timeout to decide the stream was over and sent the one-shot STOP; a zero
 // timeout must not take that path.
@@ -894,6 +948,7 @@ int main()
     test_on_demand_idr();
     test_on_demand_idr_by_sync_frame();
     test_pipelined_pictures();
+    test_intra_refresh();
     test_zero_timeout_does_not_drain();
     test_input_release_is_not_the_access_unit();
     test_drain_resolves_outstanding_pictures();

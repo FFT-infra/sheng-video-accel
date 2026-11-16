@@ -320,6 +320,29 @@ public:
             out.peak_bitrate = out.bitrate;
         else if (out.rate_mode == RateMode::Cqp)
             out.peak_bitrate = 0;
+        if (const auto* rir = static_cast<const VAEncMiscParameterRIR*>(
+                find_misc(picture.misc, VAEncMiscParameterTypeRIR))) {
+            // VA names a rolling refresh as a window of MB rows or columns
+            // and a per-picture insertion location; the firmware takes one
+            // period and sweeps the picture itself. Only the window size
+            // survives that mapping, as the number of pictures one full
+            // sweep takes. A request the firmware cannot act on (adaptive,
+            // or a window the client did not size) is refused rather than
+            // silently dropped: the client asked for a stream property the
+            // output would not have.
+            require(rir->rir_flags.bits.enable_rir_row && !rir->rir_flags.bits.enable_rir_column,
+                "only a rolling row intra refresh is supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+            const unsigned rows = rir->intra_insert_size;
+            require(rows > 0, "intra refresh needs an insertion size",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
+            const unsigned mb_rows = sequence->picture_height_in_mbs;
+            intra_refresh_period_ = mb_rows > rows ? (mb_rows + rows - 1) / rows : 1;
+        }
+        // The period is a per-context control and the client may render the
+        // refresh buffer with one picture only, so every picture carries the
+        // value the client last configured. Reading a later picture as "no
+        // refresh" would fail the change check in apply_dynamic().
+        out.intra_refresh_period = intra_refresh_period_;
         require(out.rate_mode != RateMode::Cbr || out.bitrate > 0, "CBR needs a bitrate",
             VA_STATUS_ERROR_INVALID_PARAMETER);
         // CQP has no bitrate: the picture QP is what the bitstream carries,
@@ -345,6 +368,9 @@ private:
     // rate rather than the client's target.
     uint32_t bitrate_ = 0;
     uint32_t peak_bitrate_ = 0;
+    // The sweep period the client configured most recently, for the same
+    // reason as the two rates above.
+    unsigned intra_refresh_period_ = 0;
 };
 
 } // namespace
