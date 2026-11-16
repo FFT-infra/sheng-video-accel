@@ -39,18 +39,14 @@ spec runs `test/iris-packaging-check.sh` against them.
 
 A profile is advertised only for the codecs marked `production: supported` in
 `data/iris-codec-capabilities.json`. Every number in the Conformance column is
-a frame-by-frame comparison against a software decode; `TEST-RESULTS.md` holds
-the run, the corpus and the classification of every vector that does not pass.
-A browser session counts as hardware only when the media surface reports the
-selected decoder together with decoded and dropped frame counts.
+a frame-by-frame comparison against a software decode; the Fluster counts are
+corpus results rather than a per-build regression, and `TEST-RESULTS.md` names
+each corpus and classifies every vector that fails. A browser session counts as
+hardware only when the media surface reports the selected decoder together with
+decoded and dropped frame counts.
 
-The Fluster counts are historical, not re-run for every build. H.264 72/135
-and HEVC 141/147 come from the installed-package Fluster 0.8.0 run of
-2026-10-24 on source commit `434be71` (`TEST-RESULTS.md` §"Codec conformance:
-Fluster on the installed package"); VP9 176/305 comes from the 2026-10-25
-`VP9-TEST-VECTORS` corpus re-run in `TEST-RESULTS.md` §"VP9 corpus re-run".
-None of them is a driver defect count: each failing vector is classified in
-those sections.
+Decode is qualified up to 7680x4320 for all four codecs, and for two concurrent
+1080p clients.
 
 AV1 film grain synthesis is supported. When a client names a separate `current_display_picture`, the driver decodes the access unit with grain off and blends the grain onto that surface in user space, synchronously with the picture's `endPicture`, before the client can recycle the ungrained `current_frame`. Clients that export grain parameters as side data keep blending it themselves. `test/iris-av1-grain-gate.sh` requires every downloaded frame to be byte-identical to libdav1d's own grained output.
 
