@@ -32,12 +32,10 @@ entries marked `production: supported`, and a publish policy is advertised
 only after its hardware gate passed.
 
 Decode is qualified up to the node's maximum geometry, 7680x4320, for all four
-codecs: the CAPTURE pool is sized against a 384 MiB budget, so 8K gets eight
-slots instead of the fixed 32 that asked for 1.5 GiB and failed `STREAMON` with
-`ENOMEM`. `test/iris-8k-gate.sh` records the exact-pixel runs. Two independent
-1920x1080 clients decoding at once are qualified by
-`test/iris-two-player-gate.sh`; the two-hour 640x360 soak remains the
-long-window record.
+codecs, and for two independent 1920x1080 clients decoding at once. The gates
+are `test/iris-8k-gate.sh` and `test/iris-two-player-gate.sh`; the two-hour
+640x360 soak remains the long-window record. Both gates are short exact-pixel
+checks, not throughput or thermal results.
 
 ## Kernel patches
 

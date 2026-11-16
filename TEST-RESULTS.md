@@ -8700,46 +8700,34 @@ The gate above was run again on the shipped driver, `dfb0f516…`, boot
 byte-identical, the depth-two client still stops at 61 pictures with rc 251,
 and the gate-off and HEVC arms still report `has_b_frames=0`.
 
-## 8K decode and two 1080p players on the CAPTURE memory budget (2026-11-16)
+## 8K decode and two 1080p players (2026-11-16)
 
-The node advertises `96x96 - 8192x8192` on both queues, but the CAPTURE pool
-was clamped to a fixed 32..64 frames. At 7680x4320 an NV12 frame is 47.5 MiB,
-so 32 frames ask the device for 1.5 GiB of contiguous memory and `STREAMON`
-fails with `ENOMEM`. The native `v4l2h264dec` decodes the same 8K clips, so the
-limit was this driver's allocation, not the firmware's geometry. `e82630c`
-caps the pool by a 384 MiB budget with the firmware's minimum as a floor: 8K
-gets eight slots, 1080p keeps 32.
+The decoder node advertises `96x96 - 8192x8192` on both queues, but the CAPTURE
+pool was a fixed 32..64 frames. At 7680x4320 an NV12 frame is 47.5 MiB, so 32
+frames ask for 1.5 GiB of contiguous memory and `STREAMON` fails with `ENOMEM`.
+The native `v4l2h264dec` decodes the same clips, so the ceiling was this
+driver's allocation, not the firmware's geometry. The pool is now sized against
+a 384 MiB budget with the firmware minimum as a floor: 8K gets eight slots,
+1080p keeps 32.
 
-Identity: source commit `e82630cb7158d5299f7e6a773d4028114f09b78b`, build-tree
-driver SHA-256 `679a339e631e3935e1f0c697612a5341afc09ed1c97ff8281788e3ac38a56aa8`
-(build-tree override, not the installed package; the installed driver is still
-`3c9a857d73f9a36ac0445ec1319b0223d206777c9e34ff579ec2cdf956af7b8a`), module
-`b90bd823fdab98957739ad2196eb4016f5a264f2280d22735963e40c8488c715`, kernel
-`7.2.6-sm8550-g42f3b40-iris1`, boot
-`581953b0-89df-4712-9fba-0e2d77682af7` throughout both runs, decoder
-`/dev/video17` and encoder `/dev/video18` resolved by `iris_driver` QUERYCAP
-name. Both runs were wrapped by `test/remote/gate.sh`; guard `status=complete`
-for each, boot ID unchanged, battery 49 % discharging and the hottest zone
-below 43 C. The run records are
-`~/iris-vaapi-lab/artifacts/run-20261115T223928Z/` and
-`~/iris-vaapi-lab/artifacts/run-20261115T224032Z/`.
+Source `aa62e0a7ffc198e95d5a59f90d4cee2f49ca6980`, `source_dirty=0`, tracked
+source digest `ee3c7246f881c2b9b61fa75291fb7079ddcaddddeab28ca6f6632265603e1ada`.
+Target `sheng`, boot `581953b0-89df-4712-9fba-0e2d77682af7` unchanged through
+every run, kernel `7.2.6-sm8550-g42f3b40-iris1` (`qcom_iris` `b90bd823fdab9895`,
+patches 0001-0004 and 0006), decoder `/dev/video17` and encoder `/dev/video18`
+resolved by `iris_driver`. Every run was wrapped by `test/remote/gate.sh` with
+guard `status=complete`; battery 41-49 % discharging, hottest zone below 43 C,
+no reset and no thermal breach.
 
-An earlier unguarded pool-size sweep reached `pool=24` and the tablet reset
-(boot changed from `a65a6f76-fd07` to `581953b0-89df-4712-9fba-0e2d77682af7`).
-Per the guard procedure that is a failed experiment, not evidence; the two
-runs below are the qualified ones. The 8K gate's first attempt also failed
-because it did not pass `LIBVA_DRIVER_NAME=v4l2` to ffmpeg and libva could not
-initialise the build-tree driver; `run-20261115T223718Z` records that failure.
+`test/iris-8k-gate.sh`, one finite 7680x4320 clip per qualified codec, software
+framemd5 oracle, `publish=auto`:
 
-`test/iris-8k-gate.sh`, one finite 7680x4320 clip per qualified codec,
-software framemd5 oracle, `publish=auto`:
-
-| Codec | Geometry | Granted CAPTURE pool | Firmware minimum | Frames | Frame hashes | Errors / drops / misplaced | LAST / drain |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| H.264 | 7680x4320 | 8 (size=49766400) | 7 | 4/4 | exact | 0 | 1 / 1 |
-| HEVC | 7680x4320 | 8 | 7 | 4/4 | exact | 0 | 1 / 1 |
-| VP9 | 7680x4320 | 8 | 4 | 4/4 | exact | 0 | 1 / 1 |
-| AV1 | 7680x4320 | 8 | 4 | 4/4 | exact | 0 | 1 / 1 |
+| Codec | Granted CAPTURE pool | Firmware minimum | Frames | Frame hashes | Errors / drops / misplaced | LAST / drain |
+| --- | --- | --- | --- | --- | --- | --- |
+| H.264 | 8 (size=49766400) | 7 | 4/4 | exact | 0 | 1 / 1 |
+| HEVC | 8 | 7 | 4/4 | exact | 0 | 1 / 1 |
+| VP9 | 8 | 4 | 4/4 | exact | 0 | 1 / 1 |
+| AV1 | 8 | 4 | 4/4 | exact | 0 | 1 / 1 |
 
 `test/iris-two-player-gate.sh`, two independent 1920x1080 H.264 ffmpeg
 processes started together, each with its own VA display and driver trace,
@@ -8750,80 +8738,32 @@ real-time pacing, `publish=auto`:
 | a | 90/90 | `submitted=90 completed=90 errors=0 drops=0 timeouts=0 misplaced=0 drains=1` | exact | 1 |
 | b | 90/90 | `submitted=90 completed=90 errors=0 drops=0 timeouts=0 misplaced=0 drains=1` | exact | 1 |
 
-The two `session open` records are 1 ms apart (`t=11` and `t=12` within their
-own processes) and both finish at about 2.5 s, so the sessions overlapped.
-This is a short exact-pixel gate, not a throughput or thermal soak; the
-two-hour `iris-concurrency-soak.sh` at 640x360 remains the long-window record.
+The two `session open` records are 1 ms apart and both processes finish at
+about 2.5 s, so the sessions overlapped.
 
-## Installed-package re-run of the 8K, two-player and codec gates (2026-11-16)
-
-The two runs above used a build-tree driver through `LIBVA_DRIVERS_PATH`.
-`docs/POST-MERGE-BACKLOG.md` §0 requires an installed-package gate after any
-`src/` change, so the current driver was installed with
-`scripts/install-system.sh build` (no `DESTDIR`, no build-tree override) and
-re-run. Source commit `aa62e0a7ffc198e95d5a59f90d4cee2f49ca6980`,
-`source_dirty=0`, tracked source digest
-`ee3c7246f881c2b9b61fa75291fb7079ddcaddddeab28ca6f6632265603e1ada`. Installed
-driver and both aliases SHA-256
-`679a339e631e3935e1f0c697612a5341afc09ed1c97ff8281788e3ac38a56aa8`, module
-`b90bd823fdab98957739ad2196eb4016f5a264f2280d22735963e40c8488c715`, kernel
-`7.2.6-sm8550-g42f3b40-iris1`, boot
-`581953b0-89df-4712-9fba-0e2d77682af7` unchanged through all four runs,
-decoder `/dev/video17` and encoder `/dev/video18` resolved by `iris_driver`
-QUERYCAP name. This is the installed package: `vainfo` with no `LIBVA_*`
-override opens `/usr/lib64/dri/msm_drv_video.so`, and ffmpeg's verbose log
-shows libva trying the `dri-nonfree`/`dri-freeworld` paths before finding the
-installed `dri/msm_drv_video.so` with `__vaDriverInit_1_23`.
-
-`test/remote/gate.sh` now records both `identity.driver` (the driver the
-command resolves) and `identity.installed_driver`. For the two gates run with
-no `LIBVA_*` override, both fields are `679a339e…` and
-`driver_path=/usr/lib64/dri/v4l2_drv_video.so`. The matrix and encode-quality
-gates name `LIBVA_DRIVERS_PATH=/usr/lib64/dri` because those two scripts need
-an explicit driver directory; that path is the installed directory, not a
-build tree, so both fields still agree. Every run was wrapped by the guard:
-`status=complete`, boot ID unchanged, battery 41 % discharging, hottest zone
-37 C (from the guard's thermal inventory), no reset and no thermal breach.
+Both gates were then run from the installed package, which is what
+`docs/POST-MERGE-BACKLOG.md` §0 requires after a `src/` change. Driver and both
+aliases are `679a339e631e3935e1f0c697612a5341afc09ed1c97ff8281788e3ac38a56aa8`,
+installed with `scripts/install-system.sh build` and recorded in
+`/usr/local/share/iris-vaapi/install-manifest.txt`; the previous driver
+`3c9a857d73f9a36ac0445ec1319b0223d206777c9e34ff579ec2cdf956af7b8a` is in that
+manifest's backup path. `vainfo` with no `LIBVA_*` override opens
+`/usr/lib64/dri/msm_drv_video.so`, so this is a live install and not a
+`DESTDIR` staging run.
 
 | Gate | Command shape | Result |
 | --- | --- | --- |
-| `test/iris-8k-gate.sh` | no `LIBVA_*` override | H.264/HEVC/VP9/AV1 4/4 frames each, pool=8, firmware-min 7/7/4/4, framemd5 exact, errors=0, LAST/drain=1; run `run-installed-8k` |
-| `test/iris-two-player-gate.sh` | no `LIBVA_*` override | a/b 90/90 frames, framemd5 exact, errors=0, LAST=1, both `session open` on `/dev/video17` at `t=12`; run `run-installed-two-player` |
-| `test/iris-matrix.sh` | `LIBVA_DRIVERS_PATH=/usr/lib64/dri` | H.264/VP9/HEVC/AV1 48/48 exact frame MD5, `submitted=48 capture=48 drops=0 timeouts=0`, AV1 `noshow=23`; run `run-installed-matrix` |
-| `test/iris-encode-quality.sh` | `LIBVA_DRIVERS_PATH=/usr/lib64/dri` | H.264 SSIM 0.9986 / 0.9977, HEVC 0.9968 / 0.9951 (encode / decode-to-encode), 120/120 frames each, blank-stream control below the floor, per-codec scratch released; run `run-installed-encode-quality` |
+| `iris-8k-gate.sh` | no `LIBVA_*` override | four codecs 4/4 frames, pool=8, firmware-min 7/7/4/4, framemd5 exact, errors=0, LAST/drain=1 |
+| `iris-two-player-gate.sh` | no `LIBVA_*` override | a/b 90/90 frames, framemd5 exact, errors=0, LAST=1, both sessions on `/dev/video17` |
+| `iris-matrix.sh` | `LIBVA_DRIVERS_PATH=/usr/lib64/dri` | four codecs 48/48 exact frame MD5, `submitted=48 capture=48 drops=0 timeouts=0`, AV1 `noshow=23` |
+| `iris-encode-quality.sh` | `LIBVA_DRIVERS_PATH=/usr/lib64/dri` | H.264 SSIM 0.9986 / 0.9977, HEVC 0.9968 / 0.9951 (encode / decode-to-encode), 120/120 frames each, blank control below the floor |
 
-The four run records are
-`~/iris-vaapi-lab/artifacts/run-installed-{8k,two-player,matrix,encode-quality}/`.
-The two-player gate no longer injects `LIBVA_DRIVERS_PATH` when the caller
-leaves it unset, so an installed-package run cannot silently load a build
-tree. Before this fix its comment promised the installed package but its
-`run_player` always exported `LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH=…/build/src`.
+The matrix and encode-quality scripts need an explicit driver directory; the
+path given is the installed directory, not a build tree, so the run record's
+`identity.driver` and `identity.installed_driver` agree.
 
-### Install audit and rollback
-
-The install replaced the 2026-11-14 driver (`3c9a857d73f9a36ac0445ec1319b0223d206777c9e34ff579ec2cdf956af7b8a`,
-RPM `libva-v4l2-iris-0.1.0-4.fc44.aarch64`) with the rebuilt `679a339e…`.
-`install-system.sh` backed the old driver up to
-`/usr/local/share/iris-vaapi/backup/v4l2_drv_video.so` and wrote
-`previous_driver_sha256` into
-`/usr/local/share/iris-vaapi/install-manifest.txt`. A second install to refresh
-the recorded source commit replaced that backup with the same `679a339e…`
-bytes, so the original `3c9a857…` was also copied to
-`~/Lab/Bridge/tmp/install-audit-92bd8c8/rollback-anchor.so` on the target;
-`pre.txt` and `post.txt` in that directory record the before/after hashes,
-boot, kernel, RPM NEVRA and libva driverdir.
-
-Rollback path: `sudo sh scripts/uninstall-system.sh` restores the manifest's
-`previous_driver_backup` and removes the installed files. To restore the exact
-pre-experiment bytes, copy `rollback-anchor.so` over
-`/usr/lib64/dri/v4l2_drv_video.so` (the aliases are symlinks to it) and rewrite
-or remove the manifest; verify with `sha256sum` and `vainfo` afterwards. The
-RPM database still names `0.1.0-4.fc44`, so an `rpm --verify` after a file-level
-rollback reports a hash mismatch for the driver; a full package rollback needs
-a reinstall of that RPM. No `git clean`, reset or destructive action was used;
-untracked target files under `~/Lab/Bridge/tmp` were preserved.
-
-The spec `Release` was `3%{?dist}` while the installed RPM reported `4.fc44`;
-`packaging/fedora/libva-v4l2-iris.spec`, its `%changelog`, `docs/STATE.md` and
-`test/iris-packaging-check.sh` now pin one version fact, so the installed
-NEVRA and the source tree agree.
+What this does not prove: both gates are short exact-pixel checks, not
+throughput or thermal results, and the two-hour `iris-concurrency-soak.sh` at
+640x360 remains the long-window record. An earlier unguarded pool-size sweep
+reached `pool=24` and reset the tablet, changing the boot ID; per the guard
+procedure that is a failed experiment and none of its output is evidence.

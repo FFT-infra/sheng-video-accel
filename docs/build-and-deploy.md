@@ -444,8 +444,9 @@ sets `IRIS_SOAK_ALLOW_STALE_GUARD=1`.
 ## 8K geometry and two-client gates
 
 The soak above uses 640x360 lanes. Two more target-only gates cover the
-geometry and resolution edges. Both need a guard wrapper, because a failed
-allocation at 8K can reset the firmware.
+geometry and client-count edges. Run both through `test/remote/gate.sh`: a
+failed allocation at 8K can reset the firmware, and only the guard records
+that a run survived.
 
 Generate the 8K clips and their software baselines once, on the target, in a
 scratch directory (never in the repository). The gate reads `h264.mkv` and
@@ -476,27 +477,30 @@ done
 ```
 
 The software baselines must come from a software decoder, never from this
-driver: a broken driver must not bless its own output.
+driver: a broken driver must not bless its own output. Every clip must be
+7680x4320; the gate reads the geometry from `ffprobe` and fails otherwise.
 
-Run the 8K gate under the experiment guard. It checks the pool sizing, exact
-pixels, terminal LAST and zero completion errors for all four codecs:
-
-```sh
-IRIS_8K_DIR=/path/to/8k-clips sh test/iris-8k-gate.sh
-```
-
-For the two-player gate, generate two finite 1920x1080 H.264 clips and a
-`<clip>.sw.md5` software baseline beside each. Both processes decode under
-real-time pacing with their own VA display and driver trace:
+`iris-8k-gate.sh` checks the granted pool against the memory budget, exact
+pixels, terminal LAST and zero completion errors for all four codecs. The
+two-player gate needs two finite 1920x1080 H.264 clips and a `<clip>.sw.md5`
+baseline beside each; both processes decode under real-time pacing with their
+own VA display and driver trace:
 
 ```sh
-IRIS_TWO_PLAYER_CLIP_A=/path/to/a.mp4 \
-IRIS_TWO_PLAYER_CLIP_B=/path/to/b.mp4 \
-    sh test/iris-two-player-gate.sh
+IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh \
+    --out ~/iris-vaapi-lab/artifacts/run-8k \
+    -- env IRIS_8K_DIR=/path/to/8k-clips sh test/iris-8k-gate.sh
+
+IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh \
+    --out ~/iris-vaapi-lab/artifacts/run-two-player \
+    -- env IRIS_TWO_PLAYER_CLIP_A=/path/to/a.mp4 \
+        IRIS_TWO_PLAYER_CLIP_B=/path/to/b.mp4 sh test/iris-two-player-gate.sh
 ```
 
-Neither gate is a Meson test: both need the Iris decoder node. A run whose
-boot ID changes, or that trips the thermal ceiling, is a failed experiment.
+Leave `LIBVA_DRIVERS_PATH` unset to gate the installed package; set it to an
+absolute build-tree path to gate a build instead. Neither gate is a Meson
+test: both need the Iris decoder node. A run whose boot ID changes, or that
+trips the thermal ceiling, is a failed experiment.
 
 ## Host-side release gate
 

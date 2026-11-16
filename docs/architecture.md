@@ -740,17 +740,15 @@ them). The allocation chain behind those surfaces is gated on the target by
 `test/iris-alloc-chain.sh` (§3.4); it is not a Meson test because every rung
 below the first needs an MSM render node.
 
-Two target-only gates cover the geometry and concurrency edges.
+The geometry and concurrency edges are gated on the target.
 `test/iris-8k-gate.sh` decodes one finite 7680x4320 clip per qualified codec,
 compares every frame with a software framemd5 baseline, and requires the
-granted CAPTURE pool to stay within the 384 MiB budget: 32 8K NV12 frames are
-1.5 GiB, which the device's contiguous carve-out cannot allocate, so
-`STREAMON` fails with ENOMEM. `test/iris-two-player-gate.sh` runs two
-independent ffmpeg processes at 1920x1080, each with its own VA display and
-driver trace, and requires both to finish with exact pixels, no completion
-errors and a terminal LAST. The two-hour `iris-concurrency-soak.sh` covers
-640x360; these two gates fill the 8K geometry and 1080p two-client gaps. Both
-are target-only: no host has an Iris node.
+granted CAPTURE pool to respect the 384 MiB budget: 32 8K NV12 frames are
+1.5 GiB, more than the device's contiguous carve-out holds, so `STREAMON`
+fails with ENOMEM. `test/iris-two-player-gate.sh` runs two independent ffmpeg
+processes at 1920x1080, each with its own VA display and driver trace, and
+requires both to finish with exact pixels, no completion errors and a terminal
+LAST. Neither is a Meson test: both need an Iris node.
 
 The video processor is gated at two levels. `test/vulkan-vpp/nv12_scale_gate.sh`
 checks the 8-bit nearest kernel byte for byte against a CPU oracle over both
