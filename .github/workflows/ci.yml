@@ -56,6 +56,8 @@ jobs:
           test -s build/meson-tests.txt
           for required in \
             session \
+            deferred-copy \
+            va-vpp-query \
             annexb \
             hevc-parameter-sets \
             av1-obu \

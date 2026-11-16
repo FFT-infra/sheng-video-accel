@@ -8699,3 +8699,71 @@ The gate above was run again on the shipped driver, `dfb0f516…`, boot
 300/300 pictures at 45.057333 dB with `I B P B P B P B P B`, the repeat
 byte-identical, the depth-two client still stops at 61 pictures with rc 251,
 and the gate-off and HEVC arms still report `has_b_frames=0`.
+
+## 8K decode and two 1080p players (2026-11-16)
+
+The decoder node advertises `96x96 - 8192x8192` on both queues, but the CAPTURE
+pool was a fixed 32..64 frames. At 7680x4320 an NV12 frame is 47.5 MiB, so 32
+frames ask for 1.5 GiB of contiguous memory and `STREAMON` fails with `ENOMEM`.
+The native `v4l2h264dec` decodes the same clips, so the ceiling was this
+driver's allocation, not the firmware's geometry. The pool is now sized against
+a 384 MiB budget with the firmware minimum as a floor: 8K gets eight slots,
+1080p keeps 32.
+
+Source `aa62e0a7ffc198e95d5a59f90d4cee2f49ca6980`, `source_dirty=0`, tracked
+source digest `ee3c7246f881c2b9b61fa75291fb7079ddcaddddeab28ca6f6632265603e1ada`.
+Target `sheng`, boot `581953b0-89df-4712-9fba-0e2d77682af7` unchanged through
+every run, kernel `7.2.6-sm8550-g42f3b40-iris1` (`qcom_iris` `b90bd823fdab9895`,
+patches 0001-0004 and 0006), decoder `/dev/video17` and encoder `/dev/video18`
+resolved by `iris_driver`. Every run was wrapped by `test/remote/gate.sh` with
+guard `status=complete`; battery 41-49 % discharging, hottest zone below 43 C,
+no reset and no thermal breach.
+
+`test/iris-8k-gate.sh`, one finite 7680x4320 clip per qualified codec, software
+framemd5 oracle, `publish=auto`:
+
+| Codec | Granted CAPTURE pool | Firmware minimum | Frames | Frame hashes | Errors / drops / misplaced | LAST / drain |
+| --- | --- | --- | --- | --- | --- | --- |
+| H.264 | 8 (size=49766400) | 7 | 4/4 | exact | 0 | 1 / 1 |
+| HEVC | 8 | 7 | 4/4 | exact | 0 | 1 / 1 |
+| VP9 | 8 | 4 | 4/4 | exact | 0 | 1 / 1 |
+| AV1 | 8 | 4 | 4/4 | exact | 0 | 1 / 1 |
+
+`test/iris-two-player-gate.sh`, two independent 1920x1080 H.264 ffmpeg
+processes started together, each with its own VA display and driver trace,
+real-time pacing, `publish=auto`:
+
+| Lane | Frames | Driver ledger | Frame hashes | LAST |
+| --- | --- | --- | --- | --- |
+| a | 90/90 | `submitted=90 completed=90 errors=0 drops=0 timeouts=0 misplaced=0 drains=1` | exact | 1 |
+| b | 90/90 | `submitted=90 completed=90 errors=0 drops=0 timeouts=0 misplaced=0 drains=1` | exact | 1 |
+
+The two `session open` records are 1 ms apart and both processes finish at
+about 2.5 s, so the sessions overlapped.
+
+Both gates were then run from the installed package, which is what
+`docs/POST-MERGE-BACKLOG.md` §0 requires after a `src/` change. Driver and both
+aliases are `679a339e631e3935e1f0c697612a5341afc09ed1c97ff8281788e3ac38a56aa8`,
+installed with `scripts/install-system.sh build` and recorded in
+`/usr/local/share/iris-vaapi/install-manifest.txt`; the previous driver
+`3c9a857d73f9a36ac0445ec1319b0223d206777c9e34ff579ec2cdf956af7b8a` is in that
+manifest's backup path. `vainfo` with no `LIBVA_*` override opens
+`/usr/lib64/dri/msm_drv_video.so`, so this is a live install and not a
+`DESTDIR` staging run.
+
+| Gate | Command shape | Result |
+| --- | --- | --- |
+| `iris-8k-gate.sh` | no `LIBVA_*` override | four codecs 4/4 frames, pool=8, firmware-min 7/7/4/4, framemd5 exact, errors=0, LAST/drain=1 |
+| `iris-two-player-gate.sh` | no `LIBVA_*` override | a/b 90/90 frames, framemd5 exact, errors=0, LAST=1, both sessions on `/dev/video17` |
+| `iris-matrix.sh` | `LIBVA_DRIVERS_PATH=/usr/lib64/dri` | four codecs 48/48 exact frame MD5, `submitted=48 capture=48 drops=0 timeouts=0`, AV1 `noshow=23` |
+| `iris-encode-quality.sh` | `LIBVA_DRIVERS_PATH=/usr/lib64/dri` | H.264 SSIM 0.9986 / 0.9977, HEVC 0.9968 / 0.9951 (encode / decode-to-encode), 120/120 frames each, blank control below the floor |
+
+The matrix and encode-quality scripts need an explicit driver directory; the
+path given is the installed directory, not a build tree, so the run record's
+`identity.driver` and `identity.installed_driver` agree.
+
+What this does not prove: both gates are short exact-pixel checks, not
+throughput or thermal results, and the two-hour `iris-concurrency-soak.sh` at
+640x360 remains the long-window record. An earlier unguarded pool-size sweep
+reached `pool=24` and reset the tablet, changing the boot ID; per the guard
+procedure that is a failed experiment and none of its output is evidence.

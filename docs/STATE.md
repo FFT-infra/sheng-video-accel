@@ -14,7 +14,7 @@ boundary. If this page and either of those disagree, those two win.
 | Distribution baseline | Fedora 44, aarch64 |
 | Kernel | `ianchb/sm8550-mainline`, branch `sheng-7.2.6`, commit `42f3b40c702a`, with patches 0001-0004 |
 | VA driver runtime | `v4l2_drv_video.so`, resolved by `iris_driver` QUERYCAP name |
-| Package | `libva-v4l2-iris`, `Version: 0.1.0`, `Release: 3%{?dist}` |
+| Package | `libva-v4l2-iris`, `Version: 0.1.0`, `Release: 4%{?dist}` |
 
 Stock kernels without the four patches still build and install. The driver
 falls back to display-order decoding with GPU copy, and requested IDRs are
@@ -30,6 +30,12 @@ on the combination above; H.264 and HEVC Main encode are qualified. The table
 also lists what is rejected on each codec. VA profiles are exposed only for
 entries marked `production: supported`, and a publish policy is advertised
 only after its hardware gate passed.
+
+Decode is qualified up to the node's maximum geometry, 7680x4320, for all four
+codecs, and for two independent 1920x1080 clients decoding at once. The gates
+are `test/iris-8k-gate.sh` and `test/iris-two-player-gate.sh`; the two-hour
+640x360 soak remains the long-window record. Both gates are short exact-pixel
+checks, not throughput or thermal results.
 
 ## Kernel patches
 

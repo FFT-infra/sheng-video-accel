@@ -158,6 +158,36 @@ void test_pool_sizing_respects_kernel_max()
     CHECK(h.session->state() == SessionState::Streaming);
 }
 
+void test_pool_sizing_respects_memory_budget()
+{
+    // 7680x4320 NV12: 49766400 bytes per CAPTURE frame. A fixed 32-frame pool
+    // would ask the device for 1.5 GiB and STREAMON fails with ENOMEM; the
+    // 384 MiB budget grants eight frames, which is what the target decodes.
+    FakeConfig fc;
+    fc.coded_width = 7680;
+    fc.coded_height = 4320;
+    fc.visible_width = 7680;
+    fc.visible_height = 4320;
+    fc.stride = 7680;
+    fc.firmware_min_capture = 7;
+    Harness h(fc, fast_options(), config(16)); // wants 32
+    auto t = make_target();
+    h.submit(t);
+    CHECK(h.fake->capture_allocated() == 8);
+    CHECK(h.session->state() == SessionState::Streaming);
+}
+
+void test_pool_sizing_keeps_small_geometry_at_the_full_pool()
+{
+    // 1920x1088 NV12 is 3 MiB per frame; the whole 32-frame pool is 96 MiB,
+    // well inside the budget, so the old sizing is unchanged at 1080p.
+    Harness h({}, fast_options(), config(16));
+    auto t = make_target();
+    h.submit(t);
+    CHECK(h.fake->capture_allocated() == 32);
+    CHECK(h.session->state() == SessionState::Streaming);
+}
+
 // --- ownership -----------------------------------------------------------
 
 void test_direct_publish_holds_slot_until_release()
@@ -1158,6 +1188,8 @@ int main()
         { "open sequence", test_open_sequence },
         { "display-order fallback", test_display_order_fallback },
         { "pool sizing respects kernel max", test_pool_sizing_respects_kernel_max },
+        { "pool sizing respects memory budget", test_pool_sizing_respects_memory_budget },
+        { "pool sizing keeps small geometry at the full pool", test_pool_sizing_keeps_small_geometry_at_the_full_pool },
         { "direct publish holds slot until release", test_direct_publish_holds_slot_until_release },
         { "copy publish releases slot immediately", test_copy_publish_releases_slot_immediately },
         { "late completion after release is dropped", test_late_completion_after_release_is_dropped },

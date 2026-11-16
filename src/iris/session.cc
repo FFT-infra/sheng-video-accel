@@ -29,6 +29,14 @@ constexpr unsigned kMaxCapturePool = 64;
 constexpr int kLastWaitMs = 2000;
 constexpr int kOutputDrainMs = 500;
 
+// The device's contiguous capture memory is a fixed carve-out on SM8550, and
+// it holds the CAPTURE pool alongside the firmware's DPB and scratch buffers.
+// A 7680x4320 NV12 frame is 47.5 MiB, so a 32-frame pool asks for 1.5 GiB and
+// STREAMON fails with ENOMEM; the same node allocates 8 frames and decodes the
+// four codecs byte-exactly. Cap the pool by that budget instead of letting a
+// large geometry turn a fixed count into an unbounded allocation.
+constexpr uint64_t kCaptureMemoryBudget = 384ull << 20;
+
 // Compressed AU capacity when the caller has no better estimate: Chromium
 // and GStreamer both size the OUTPUT plane from the coded area with a floor.
 unsigned default_au_capacity(unsigned width, unsigned height)
@@ -38,6 +46,17 @@ unsigned default_au_capacity(unsigned width, unsigned height)
     if (area > 1920u * 1088u)
         return static_cast<unsigned>(std::min<uint64_t>(8u << 20, std::max<uint64_t>(2u << 20, area)));
     return 2u << 20;
+}
+
+unsigned capture_pool_count(unsigned wanted, uint64_t frame_size, int firmware_min)
+{
+    if (frame_size == 0)
+        return wanted;
+    // The firmware's minimum is not negotiable: it needs that many slots to
+    // run at all, even when the budget would prefer fewer.
+    const unsigned floor = firmware_min > 0 ? static_cast<unsigned>(firmware_min) : 1u;
+    const uint64_t affordable = std::max<uint64_t>(floor, kCaptureMemoryBudget / frame_size);
+    return std::min(wanted, static_cast<unsigned>(std::min<uint64_t>(affordable, kMaxCapturePool)));
 }
 
 } // namespace
@@ -247,11 +266,14 @@ void Session::configure_capture()
 
     // Pool sizing: the client's surface count plus in-flight headroom, never
     // below the firmware's minimum, never below 32 (the old vb2 ceiling that
-    // every hardware pass ran with), capped by the kernel's maximum.
+    // every hardware pass ran with), capped by the kernel's maximum. At large
+    // geometries the memory budget wins over the fixed count: 32 8K frames
+    // exceed the device's contiguous carve-out and STREAMON fails outright.
     const auto minimum = device_->get_control(V4L2_CID_MIN_BUFFERS_FOR_CAPTURE);
     unsigned wanted = std::clamp(config_.surface_count + 4, kMinCapturePool, kMaxCapturePool);
     if (minimum && *minimum > 0)
         wanted = std::max(wanted, static_cast<unsigned>(*minimum));
+    wanted = capture_pool_count(wanted, layout.size, minimum ? *minimum : 0);
     pool_.allocate_capture(wanted, layout, memory);
     trace_("capture configure %ux%u stride=%u size=%u visible=%ux%u pool=%u memory=%s firmware-min=%d",
         granted.width, granted.height, granted.bytesperline, granted.sizeimage, visible_.width, visible_.height,

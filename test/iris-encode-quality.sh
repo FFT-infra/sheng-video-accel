@@ -218,6 +218,13 @@ check_codec() {
     awk -v s="$trans_ssim" -v m="$ssim_min" 'BEGIN { exit !(s >= m) }' \
         || fail "$codec: the decode-to-encode output scores $trans_ssim, below the $ssim_min floor"
     echo "PASS $codec: decode-to-encode frames=$trans_frames ssim=$trans_ssim"
+
+    # The raw frames are ~3 MiB each at 1080p and the target often has only a
+    # couple of GiB free. Nothing after this point needs this codec's pixels,
+    # so release them before the next codec allocates its own set. The shared
+    # source, the streams and the measured logs stay until the run ends.
+    rm -f "$stream" "$decoded" "$ref" "$blank" \
+        "$work/$codec.ssim" "$transcoded" "$work/$codec.transcoded.nv12"
 }
 
 for codec in $codecs; do
