@@ -123,6 +123,15 @@ int main()
     check(va::createConfig(p, VAProfileH264High, enc, bad, 1, &id) == VA_STATUS_ERROR_ATTR_NOT_SUPPORTED,
         "an unadvertised rate-control bit is refused at createConfig");
 
+    // An RT-format outside the advertised mask is a format refusal, not a
+    // generic attribute one. The comparison backend answers the same status
+    // for an 8-bit RT-format on VP9 Profile 2.
+    VAConfigAttrib bad_rt[] = { { VAConfigAttribRTFormat,
+        VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10 } };
+    check(va::createConfig(p, VAProfileVP9Profile2, dec, bad_rt, 1, &id)
+            == VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT,
+        "an unadvertised VP9 Profile 2 RT-format is a format refusal");
+
     // An unknown type stays accepted: a newer client must still be able to
     // open a config, which a strict whitelist would break.
     VAConfigAttrib unknown[] = { { static_cast<VAConfigAttribType>(60), 1 } };

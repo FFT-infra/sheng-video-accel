@@ -276,9 +276,15 @@ VAStatus createConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entr
             // renderPicture.
             VAConfigAttrib query = { attributes[i].type, 0 };
             getConfigAttributes(ctx, profile, entrypoint, &query, 1);
-            if (query.value != VA_ATTRIB_NOT_SUPPORTED)
+            if (query.value != VA_ATTRIB_NOT_SUPPORTED) {
+                // An RT-format the driver cannot honour is a format refusal,
+                // not a generic attribute one: clients key off this status to
+                // pick another surface format.
+                const VAStatus status = attributes[i].type == VAConfigAttribRTFormat
+                    ? VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT : VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
                 iris::require((attributes[i].value & ~query.value) == 0,
-                    "unsupported config attribute value", VA_STATUS_ERROR_ATTR_NOT_SUPPORTED);
+                    "unsupported config attribute value", status);
+            }
             if (attributes[i].type == VAConfigAttribRTFormat)
                 rt_format = attributes[i].value;
             if (attributes[i].type == VAConfigAttribRateControl)

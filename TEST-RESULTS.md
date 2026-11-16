@@ -9471,3 +9471,30 @@ kernel `7.3.4-sm8550-00104-g87ac0f2347eb`, module `8f771ada…dc75`, decoder
 `test/run-static-checks.sh` PASS, `meson test -C build-local` 33/33,
 `meson test -C build-asan` 33/33, `git diff --check` clean on the committed
 tree.
+
+## Final capability-surface comparison (2026-11-17)
+
+A fresh two-driver probe (`vaQueryConfigProfiles`, every listed entrypoint's
+14 config attributes, and `vaQuerySurfaceAttributes` for decode and VPP) was
+run on the installed driver and on the comparison driver's own build tree,
+both resolved by `LIBVA_DRIVER_NAME=v4l2` on the same boot. The profile sets
+are identical (9 profiles including `VAProfileNone`), and 200 of 206 lines
+match; the six differing lines are the comparison driver listing profiles in
+a different order (no client-visible effect) and our three encode values
+being ahead on four encode profiles: `EncIntraRefresh` answers
+`VA_ENC_INTRA_REFRESH_ROLLING_ROW` (2) instead of NOT_SUPPORTED, and
+`MaxPictureWidth`/`MaxPictureHeight` answer 8192 instead of 3840x2160. There
+is no cell where this driver answers less than the comparison driver.
+
+One refusal code was aligned in the same pass: a client that passes an
+RT-format outside the advertised mask to `createConfig` now gets
+`VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT` (14) rather than the generic
+`VA_STATUS_ERROR_ATTR_NOT_SUPPORTED` (10), matching the comparison driver for
+an 8-bit RT-format on VP9 Profile 2. Other attribute values outside their
+mask still get `ATTR_NOT_SUPPORTED`. `test/unit/va-config-attributes-test.cc`
+pins both statuses. The comparison numbers are kept in the local, gitignored
+`notes/comparison.md`; they are not published in this repository.
+
+Two performance cells remain open in those local notes and were not chased
+here: HEVC Main10 1080p decode at roughly 1 % and 4K encode at -4.7 % on the
+7.3.4 pinned-clock table. Neither is a capability difference.
