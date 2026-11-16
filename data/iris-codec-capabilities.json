@@ -56,7 +56,8 @@
           "weighted prediction, scaling lists and chroma QP offsets",
           "more than one reference index",
           "10-bit or non-4:2:0",
-          "intra refresh forms other than rolling-row, and a per-picture insertion location: the firmware takes one period and decides the sweep itself. Long-term references (ltr_count/frame_ltr_index/use_ltr_frames): VA has no encode-side long-term-reference field at all, so no VA client can ask for one and the driver advertises none."
+          "intra refresh forms other than rolling-row, and a per-picture insertion location: the firmware takes one period and decides the sweep itself. Long-term references (ltr_count/frame_ltr_index/use_ltr_frames): VA has no encode-side long-term-reference field at all, so no VA client can ask for one and the driver advertises none.",
+          "UBWC-compressed encode input (Q08C): the encoder node accepts Q08C on its raw OUTPUT queue, but nothing on this stack compresses a frame into it. Turnip decompresses UBWC and can render into a QCOM_COMPRESSED image, yet no VA client supplies compressed input and the driver has no compressor to fill the format itself. NV12 stays the only raw format. TEST-RESULTS.md, \"UBWC (Q08C/Q10C)\"."
         ],
         "intra_refresh": "rolling-row intra refresh: a VAEncMiscParameterRIR with enable_rir_row maps to V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD, and the firmware sweeps one band of rows per picture. Honoured under CBR only: measured byte-identical to a stream without it under VBR and CQP, so the driver refuses the request there. test/iris-encode-ir-probe.cc drives it through the public VA API and requires the bitstream to change. No VA client requests it today: FFmpeg 8.1.3's h264_vaapi and hevc_vaapi have no such option and libavcodec.so.62 has zero references to VAConfigAttribEncIntraRefresh or VAEncMiscParameterTypeRIR, so this is a driver capability with no client gate behind it."
       },
@@ -110,7 +111,8 @@
           "multi-slice",
           "tiles and wavefront coding",
           "weighted prediction, scaling lists, chroma QP offsets and CTU bit limits",
-          "intra refresh forms other than rolling-row, and a per-picture insertion location: the firmware takes one period and decides the sweep itself. Long-term references (ltr_count/frame_ltr_index/use_ltr_frames): VA has no encode-side long-term-reference field at all, so no VA client can ask for one and the driver advertises none."
+          "intra refresh forms other than rolling-row, and a per-picture insertion location: the firmware takes one period and decides the sweep itself. Long-term references (ltr_count/frame_ltr_index/use_ltr_frames): VA has no encode-side long-term-reference field at all, so no VA client can ask for one and the driver advertises none.",
+          "UBWC-compressed encode input (Q08C): the encoder node accepts Q08C on its raw OUTPUT queue, but nothing on this stack compresses a frame into it. Turnip decompresses UBWC and can render into a QCOM_COMPRESSED image, yet no VA client supplies compressed input and the driver has no compressor to fill the format itself. NV12 stays the only raw format. TEST-RESULTS.md, \"UBWC (Q08C/Q10C)\"."
         ],
         "intra_refresh": "rolling-row intra refresh: a VAEncMiscParameterRIR with enable_rir_row maps to V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD, and the firmware sweeps one band of rows per picture. Honoured under CBR only: measured byte-identical to a stream without it under VBR and CQP, so the driver refuses the request there. test/iris-encode-ir-probe.cc drives it through the public VA API and requires the bitstream to change. No VA client requests it today: FFmpeg 8.1.3's h264_vaapi and hevc_vaapi have no such option and libavcodec.so.62 has zero references to VAConfigAttribEncIntraRefresh or VAEncMiscParameterTypeRIR, so this is a driver capability with no client gate behind it."
       },

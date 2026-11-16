@@ -9219,10 +9219,17 @@ do not, and neither does anything else this driver runs. So a compressed
 surface format would be reachable only by a client that does not exist, and it
 would break the Copy path for the clients that do.
 
+**Encode has the mirror problem.** The encoder node accepts `Q08C` on its raw
+OUTPUT queue (`S_FMT` grants it, size image 479232 at 640x480), and Turnip can
+both decompress and render into a `QCOM_COMPRESSED` image. What is missing is a
+compressor: a client would have to hand the driver an already-compressed frame,
+and no VA client does that, while the driver has no path that compresses NV12
+itself. `NV12` stays the only encode input format.
+
 The formats therefore stay unadvertised: `querySurfaceAttributes` lists
 `NV12`/`P010`, and `src/util/prime.cc` and `src/va/surface.cc` keep requiring
 `DRM_FORMAT_MOD_LINEAR` for import. The one thing that would reopen this is a
 copy path that goes through Vulkan instead of EGL — the VPP backend already is
 Vulkan, so a UBWC surface could be sampled there today, but decode still has to
-hand pixels to a client. The capability table's decode entries record the
-measurement.
+hand pixels to a client. The capability table's decode and encode entries
+record the measurement.
