@@ -63,7 +63,9 @@ IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh \
 
 `gate.sh` records `summary.json` (schema `qualcomm-iris-vaapi/target-run-v1`),
 module and driver hashes, boot ID, thermal and battery state, and the command's
-output.
+output. `identity.driver` is the driver the command resolves: a
+`LIBVA_DRIVERS_PATH` override hashes that build tree, while
+`identity.installed_driver` keeps the system package hash for comparison.
 
 ### Browser Acceptance Gate
 
@@ -91,6 +93,8 @@ Acceptance requires inspecting `chrome://media-internals` during playback:
   ./test/iris-concurrency-soak.sh dual-h264
   ./test/iris-concurrency-soak.sh mixed
   ```
+- **`test/iris-8k-gate.sh`**: 7680x4320 decode for all four qualified codecs. Asserts the granted CAPTURE pool is the memory-budgeted one (not the old fixed 32), exact framemd5 against a software baseline, terminal LAST and zero completion errors. See [docs/build-and-deploy.md](../docs/build-and-deploy.md#8k-geometry-and-two-client-gates) for the clip generation.
+- **`test/iris-two-player-gate.sh`**: Two independent 1920x1080 ffmpeg processes with their own VA display and driver trace, both required to finish with exact pixels and no completion errors. Leaves `LIBVA_DRIVERS_PATH` unset to test the installed package.
 
 ---
 

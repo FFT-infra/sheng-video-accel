@@ -256,10 +256,12 @@ IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh \
 
 The record is `summary.json` with schema `qualcomm-iris-vaapi/target-run-v1`,
 plus `identity.txt`, `command.stdout`, `command.stderr` and the guard
-directory copied back from the target. The runner does not deploy: it reports
-the driver and module hashes the target holds, so a run against a stale
-install is visible in the record instead of being remembered. A guard that
-stopped the run exits 3, and its state says why.
+directory copied back from the target. The runner does not deploy: `identity`
+names both the installed package (`installed_driver`) and the driver the
+command actually resolves (`driver`/`driver_path`). When the command sets
+`LIBVA_DRIVERS_PATH`, `driver` is that build tree, so a run that used a build
+tree is visible in the record instead of being remembered as an installed
+package. A guard that stopped the run exits 3, and its state says why.
 
 ## Distribution packaging
 
@@ -438,6 +440,67 @@ failure.
 guard file records a running test; a later invocation refuses to hide an
 interrupted or rebooted soak until the operator inspects it and deliberately
 sets `IRIS_SOAK_ALLOW_STALE_GUARD=1`.
+
+## 8K geometry and two-client gates
+
+The soak above uses 640x360 lanes. Two more target-only gates cover the
+geometry and client-count edges. Run both through `test/remote/gate.sh`: a
+failed allocation at 8K can reset the firmware, and only the guard records
+that a run survived.
+
+Generate the 8K clips and their software baselines once, on the target, in a
+scratch directory (never in the repository). The gate reads `h264.mkv` and
+`hevc.mkv` but `vp9.webm` and `av1.webm`, and every baseline is named
+`<name>-sw.md5`:
+
+```sh
+cd /path/to/8k-clips
+ffmpeg -y -hide_banner -loglevel error -f lavfi \
+    -i testsrc2=size=7680x4320:rate=24 -frames:v 4 \
+    -c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p -g 4 \
+    h264.mkv
+ffmpeg -y -hide_banner -loglevel error -f lavfi \
+    -i testsrc2=size=7680x4320:rate=24 -frames:v 4 \
+    -c:v libx265 -preset ultrafast -x265-params keyint=4:min-keyint=4:scenecut=0 \
+    -pix_fmt yuv420p hevc.mkv
+ffmpeg -y -hide_banner -loglevel error -f lavfi \
+    -i testsrc2=size=7680x4320:rate=24 -frames:v 4 \
+    -c:v libvpx-vp9 -b:v 8M -deadline realtime -cpu-used 8 -pix_fmt yuv420p \
+    -g 4 vp9.webm
+ffmpeg -y -hide_banner -loglevel error -f lavfi \
+    -i testsrc2=size=7680x4320:rate=24 -frames:v 4 \
+    -c:v libsvtav1 -preset 12 -pix_fmt yuv420p -g 4 av1.webm
+for clip in h264.mkv hevc.mkv vp9.webm av1.webm; do
+    ffmpeg -y -hide_banner -loglevel error -i "$clip" -pix_fmt yuv420p \
+        -f framemd5 "${clip%.*}-sw.md5"
+done
+```
+
+The software baselines must come from a software decoder, never from this
+driver: a broken driver must not bless its own output. Every clip must be
+7680x4320; the gate reads the geometry from `ffprobe` and fails otherwise.
+
+`iris-8k-gate.sh` checks the granted pool against the memory budget, exact
+pixels, terminal LAST and zero completion errors for all four codecs. The
+two-player gate needs two finite 1920x1080 H.264 clips and a `<clip>.sw.md5`
+baseline beside each; both processes decode under real-time pacing with their
+own VA display and driver trace:
+
+```sh
+IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh \
+    --out ~/iris-vaapi-lab/artifacts/run-8k \
+    -- env IRIS_8K_DIR=/path/to/8k-clips sh test/iris-8k-gate.sh
+
+IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh \
+    --out ~/iris-vaapi-lab/artifacts/run-two-player \
+    -- env IRIS_TWO_PLAYER_CLIP_A=/path/to/a.mp4 \
+        IRIS_TWO_PLAYER_CLIP_B=/path/to/b.mp4 sh test/iris-two-player-gate.sh
+```
+
+Leave `LIBVA_DRIVERS_PATH` unset to gate the installed package; set it to an
+absolute build-tree path to gate a build instead. Neither gate is a Meson
+test: both need the Iris decoder node. A run whose boot ID changes, or that
+trips the thermal ceiling, is a failed experiment.
 
 ## Host-side release gate
 

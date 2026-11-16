@@ -96,7 +96,8 @@ chosen per surface from observed client behaviour.
 ```
 Session (one per VA context, one fd)
   owns  OUTPUT pool   : 4 MMAP slots, one access unit each
-  owns  CAPTURE pool  : N slots, N = clamp(surfaces + 4, 32, kernel max).
+  owns  CAPTURE pool  : N slots, N = min(clamp(surfaces + 4, 32, kernel max),
+                        max(firmware min, 384 MiB / frame size)).
                         MMAP (default): every slot EXPBUF'd once -> Frame.
                         DMABUF (Import): slot i carries the client buffer
                         queued for one picture; nothing is pre-queued and
@@ -738,6 +739,16 @@ Client memory entering through `vaCreateSurfaces2` (DRM_PRIME_2 or PRIME_1,
 them). The allocation chain behind those surfaces is gated on the target by
 `test/iris-alloc-chain.sh` (§3.4); it is not a Meson test because every rung
 below the first needs an MSM render node.
+
+The geometry and concurrency edges are gated on the target.
+`test/iris-8k-gate.sh` decodes one finite 7680x4320 clip per qualified codec,
+compares every frame with a software framemd5 baseline, and requires the
+granted CAPTURE pool to respect the 384 MiB budget: 32 8K NV12 frames are
+1.5 GiB, more than the device's contiguous carve-out holds, so `STREAMON`
+fails with ENOMEM. `test/iris-two-player-gate.sh` runs two independent ffmpeg
+processes at 1920x1080, each with its own VA display and driver trace, and
+requires both to finish with exact pixels, no completion errors and a terminal
+LAST. Neither is a Meson test: both need an Iris node.
 
 The video processor is gated at two levels. `test/vulkan-vpp/nv12_scale_gate.sh`
 checks the 8-bit nearest kernel byte for byte against a CPU oracle over both
