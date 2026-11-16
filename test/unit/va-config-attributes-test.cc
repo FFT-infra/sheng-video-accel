@@ -49,7 +49,8 @@ int main()
 {
     va::DriverData d;
     d.capabilities.encode_profiles = { VAProfileH264High, VAProfileHEVCMain };
-    d.capabilities.profiles = { VAProfileAV1Profile0, VAProfileH264High };
+    d.capabilities.profiles = { VAProfileAV1Profile0, VAProfileH264High,
+        VAProfileHEVCMain10, VAProfileVP9Profile0, VAProfileVP9Profile2 };
     d.capabilities.p010 = true;
     VADriverContext ctx;
     VADriverContextP p = context(d, ctx);
@@ -78,6 +79,31 @@ int main()
         "AV1 features do not answer on H.264 decode");
     check(query(p, VAProfileH264High, dec, VAConfigAttribEncQualityRange).value == VA_ATTRIB_NOT_SUPPORTED,
         "encode attributes do not answer on decode");
+
+    // VP9 Profile 2 has no legal 8-bit stream; answer 10-bit only. HEVC
+    // Main10 and AV1 Profile0 decode both depths and keep both bits.
+    check(query(p, VAProfileVP9Profile2, dec, VAConfigAttribRTFormat).value == VA_RT_FORMAT_YUV420_10,
+        "VP9 Profile 2 answers 10-bit only");
+    check(query(p, VAProfileHEVCMain10, dec, VAConfigAttribRTFormat).value
+            == (VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10),
+        "HEVC Main10 keeps both bit depths");
+    check(query(p, VAProfileAV1Profile0, dec, VAConfigAttribRTFormat).value
+            == (VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10),
+        "AV1 Profile 0 keeps both bit depths");
+    check(query(p, VAProfileVP9Profile0, dec, VAConfigAttribRTFormat).value == VA_RT_FORMAT_YUV420,
+        "VP9 Profile 0 stays 8-bit only");
+
+    // A client (FFmpeg on a VP9 P2 clip) opens the config without an
+    // RT-format attribute; the default must match what was advertised, or
+    // the surface and the CAPTURE format disagree.
+    VAConfigID p2_id = 0;
+    check(va::createConfig(p, VAProfileVP9Profile2, dec, nullptr, 0, &p2_id) == VA_STATUS_SUCCESS,
+        "VP9 Profile 2 opens a config with no attributes");
+    VAConfigAttrib p2_query = { VAConfigAttribRTFormat, 0 };
+    int p2_count = 1;
+    va::queryConfigAttributes(p, p2_id, nullptr, nullptr, &p2_query, &p2_count);
+    check(p2_query.value == VA_RT_FORMAT_YUV420_10,
+        "VP9 Profile 2 config default is 10-bit only");
 
     // createConfig rejects a value outside getConfigAttributes' mask, but
     // still opens a config for the attributes a real client sends.

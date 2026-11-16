@@ -9006,11 +9006,12 @@ CAPTURE buffer, and sat in `Waiting for decoder stop` until the guard
 expired. Two different components, one symptom in the old record.
 
 AV1 large-scale tile is refused in `src/codec/av1_obu.cc` when the picture's
-`large_scale_tile` bit is set. `VAConfigAttribDecAV1Features` is not answered
-by this driver at all, which leaves it at `VA_ATTRIB_NOT_SUPPORTED`; the
-target's `libavcodec.so.62` contains no reference to that attribute, so no
-client asks. The entry now says both halves instead of "(10-bit only)", which
-was never the reason.
+`large_scale_tile` bit is set. `VAConfigAttribDecAV1Features` is a known
+attribute on AV1 VLD now: `src/va/config.cc` answers 0 (no supported feature
+flags) so a client can query it rather than treat the driver as one that does
+not understand the profile. The target's `libavcodec.so.62` contains no
+reference to that attribute, so no client asks today. The entry now says both
+halves instead of "(10-bit only)", which was never the reason.
 
 No code changed. `test/iris-codec-matrix-check.sh` still passes, and the
 driver's advertised profile set is unchanged.
@@ -9316,3 +9317,81 @@ Fluster vector ran from the installed driver in this pass. Those were
 qualified on the build tree and on 7.2.6's installed package; this pass moves
 the 7.3.4 branch-head decode and encode paths onto the system driver, not the
 whole 2026-11-15 matrix.
+
+## VP9 Profile 2 RT format, and the client-facing attribute answers (2026-11-17)
+
+Three build-tree changes answer what a real client asks before it opens a
+context, and one removes an RT-format bit that had no evidence behind it.
+All four were measured on the 7.3.4 module with the driver resolved by
+`iris_driver`; a `LIBVA_DRIVERS_PATH` build-tree override is named below.
+
+**Encode attributes and createConfig (`599f07c`).** A target-side attribute
+trace showed FFmpeg reading `VAConfigAttribEncQualityRange` and GStreamer
+reading `VAConfigAttribEncSliceStructure` / `PredictionDirection` /
+`EncInterlaced` / `DecAV1Features`. Answering `VA_ATTRIB_NOT_SUPPORTED` made
+FFmpeg drop `-quality` and GStreamer clamp `target-usage` to zero.
+`src/va/config.cc` now answers the six values a sibling backend exposes
+(quality range 1, equal-rows slice structure 4, progressive-only interlace 0,
+previous-picture prediction 1, rolling-row intra refresh 2, and AV1 features
+0 on AV1 VLD). `createConfig` checks each *known* attribute against that
+answer and refuses a value outside the mask (`VA_STATUS_ERROR_ATTR_NOT_SUPPORTED`)
+instead of silently ignoring it until `renderPicture`; an unknown attribute
+type still opens a config, because a strict whitelist broke the clients on the
+target. `test/unit/va-config-attributes-test.cc` links the real `config.cc`
+and pins all of this: it fails the host build if an answer or the value check
+drifts.
+
+**Encode misc parameters (`033c3ce`).** A `vaCreateBuffer` trace on the same
+FFmpeg run showed rate control, HRD, frame rate and quality level buffers
+being queued and ignored. `src/va/picture.cc` now validates them: a quality
+level above the single advertised level and an unknown misc type are refused,
+while rate control, frame rate, HRD and RIR pass through to the encoder.
+FFmpeg `-quality 1` no longer prints "Quality attribute is not supported", and
+the 1080p encode baseline still passes.
+
+**Video processor on by default (`2ebf404`).** `src/util/options.cc` now makes
+`VAProfileNone` / `VAEntrypointVideoProc` available whenever the build found
+Vulkan; only `V4L2_VA_VPP=0` turns it off. The five `test/vulkan-vpp/*_gate.sh`
+negative cases were changed to require `V4L2_VA_VPP=0` to refuse the same
+client, and all six VPP gates plus the real-clip and encode-quality regressions
+reported `guard=complete` on the build tree. README.md, README.zh-CN.md,
+docs/architecture.md and `test/README.md` carry the same default.
+
+**VP9 Profile 2 RT format (this change).** `getConfigAttributes` had answered
+`VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10` (0x101) for
+`VAProfileVP9Profile2`, but Profile 2 has no legal 8-bit stream: libvpx
+refuses to encode one ("Codec bit-depth 8 not supported in profile > 1") and
+`src/codec/vp9.cc` requires `bit_depth == 10`. The 8-bit bit was an
+unqualified claim. `src/va/config.cc` now answers 0x100 on that profile, and
+`createConfig` defaults to the same mask when the client passes no RT-format
+attribute — FFmpeg does exactly that on a P2 clip (`vaCreateConfig ...
+count=0`). A shared `decode_rt_format()` keeps the advertised answer and the
+default from drifting apart. HEVC Main10 and AV1 Profile0 still answer 0x101
+because both genuinely decode 8- and 10-bit streams; VP9 Profile0 stays 0x1.
+The host unit test asserts all four answers and that the default config reports
+0x100.
+
+Evidence for the decode path, `test/iris-vp9-p2-gate.sh` under
+`test/remote/gate.sh` with `guard=complete exit=0`: the gate generates its own
+640x360 `yuv420p10le` Profile 2 clip (30 frames), decodes it through VA-API
+with `V4L2_VA_PUBLISH=import`, requires `iris-clip-trace-check.sh` to accept
+30/30 exact framemd5 against the target's software decode, and requires P010
+surfaces with zero NV12 surfaces, i.e. the `count=0` config default really is
+10-bit. `PASS clip-check frames=30 submitted=30 completed=30 import=30
+copy=0 invisible=0` and `PASS VP9 Profile 2 gate frames=30 p010_surfaces=12
+publish=import`. Source commit `2ebf40402cc4672fed76c8c17447ee1adaa2f325`
+(working tree dirty with the four changes above), driver
+`aeab4f7f954d08b261393d81dcfdaec28d17b7b8692a6a500143b578840f51f6` from the
+build tree (`LIBVA_DRIVERS_PATH=/home/xinyang/iris-vaapi-lab/src/build/src`);
+installed driver during the run was `1cc41d8c…a221`. Boot
+`fd0b90f4-d968-4340-94f9-f2fd7bc6c52a`, kernel
+`7.3.4-sm8550-00104-g87ac0f2347eb`, module `8f771ada…dc75`, decoder
+`/dev/video17` (`Iris Decoder`), encoder `/dev/video18` (`Iris Encoder`). A
+second probe over every decode profile confirmed the new answers: VP9 P2
+0x100, HEVC Main10 and AV1 Profile0 0x101, VP9 Profile0 0x1, H.264 0x1.
+
+`test/run-static-checks.sh` PASS, `meson test -C build-local` 33/33,
+`meson test -C build-asan` 33/33 (the VA glue touched `config.cc`), and
+`git diff --check` clean. No installed-package run was taken for these four
+changes; the live install on this boot is still `1cc41d8c…a221`, so the
+build-tree gate is the evidence, not a claim about the system driver.

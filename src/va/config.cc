@@ -18,6 +18,22 @@ VAStatus guarded(VADriverContextP ctx, const char* where, auto&& body)
     }
 }
 
+// The RT-format mask a VLD config answers, and the default when a client
+// opens one without an RT-format attribute (FFmpeg does this for VP9 P2).
+// Both surfaces must agree, so one function computes them.
+uint32_t decode_rt_format(const DriverData& d, VAProfile profile)
+{
+    // VP9 Profile 2 has no legal 8-bit stream: libvpx refuses to encode one
+    // and src/codec/vp9.cc requires bit_depth == 10. HEVC Main10 and AV1
+    // Profile0 also decode 8-bit streams, so they keep both bits.
+    if (profile == VAProfileVP9Profile2 && d.capabilities.p010)
+        return VA_RT_FORMAT_YUV420_10;
+    uint32_t value = VA_RT_FORMAT_YUV420;
+    if (p010_decode_profile(profile) && d.capabilities.p010)
+        value |= VA_RT_FORMAT_YUV420_10;
+    return value;
+}
+
 } // namespace
 
 VAStatus queryConfigProfiles(VADriverContextP ctx, VAProfile* profiles, int* count)
@@ -75,9 +91,7 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
         switch (attributes[i].type) {
         case VAConfigAttribRTFormat:
             if (decode) {
-                attributes[i].value = VA_RT_FORMAT_YUV420;
-                if (p010_decode_profile(profile) && d.capabilities.p010)
-                    attributes[i].value |= VA_RT_FORMAT_YUV420_10;
+                attributes[i].value = decode_rt_format(d, profile);
             } else if (encode) {
                 // The encoder's raw port is NV12 only.
                 attributes[i].value = VA_RT_FORMAT_YUV420;
@@ -247,8 +261,8 @@ VAStatus createConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entr
                 VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
         }
         uint32_t rt_format = VA_RT_FORMAT_YUV420;
-        if (entrypoint == VAEntrypointVLD && d.capabilities.p010 && p010_decode_profile(profile))
-            rt_format |= VA_RT_FORMAT_YUV420_10;
+        if (entrypoint == VAEntrypointVLD)
+            rt_format = decode_rt_format(d, profile);
         if (entrypoint == VAEntrypointVideoProc && d.capabilities.p010)
             rt_format |= VA_RT_FORMAT_YUV420_10;
         uint32_t rate_control = VA_RC_VBR;
