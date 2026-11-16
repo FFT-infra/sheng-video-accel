@@ -58,6 +58,8 @@ jobs:
             session \
             deferred-copy \
             va-vpp-query \
+            va-vtable \
+            iris-va-vtable-surface \
             annexb \
             hevc-parameter-sets \
             av1-obu \

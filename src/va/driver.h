@@ -352,6 +352,13 @@ iris::StableBuffer& ensure_stable(DriverData& d, Surface& surface);
 // Probe the node once at init.
 Capabilities probe_capabilities(const iris::Options& options);
 
+// Fill everything a VA context needs except the probed capabilities: the
+// version and table-size fields, the vendor string, the 50 entry points and,
+// when the client offers the VPP sub-table and this build has the backend,
+// the three VideoProc entry points. No ioctl and no driver state is touched,
+// so a host test can drive it with a zeroed VADriverContext.
+void fill_context(VADriverContextP ctx, DriverData& d);
+
 // Entry points (one per VA vtable slot we implement).
 VAStatus terminate(VADriverContextP ctx);
 VAStatus queryConfigProfiles(VADriverContextP ctx, VAProfile* profiles, int* count);

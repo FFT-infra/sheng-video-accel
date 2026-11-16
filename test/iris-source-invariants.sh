@@ -109,13 +109,4 @@ if ! grep -Fq 'rm -f "$stream" "$decoded" "$ref" "$blank"' "$encode_quality"; th
     exit 1
 fi
 
-# vaQuerySurfaceError is the one vtable slot libva calls without a null check
-# (va/va.c). An empty slot is not an unimplemented feature: the client
-# dereferences NULL and dies. Every slot we leave empty must be one libva
-# guards, so keep this one assigned.
-if ! grep -q 'vtable->vaQuerySurfaceError = ' "$root/src/va/driver.cc"; then
-    echo "FAIL driver leaves vaQuerySurfaceError empty; libva calls it without a null check" >&2
-    exit 1
-fi
-
 echo "PASS source invariants"

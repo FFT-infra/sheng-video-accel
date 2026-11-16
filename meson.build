@@ -68,6 +68,22 @@ va_api_minor_version = va_api_version_array[1]
 
 va_driver_init_func = '__vaDriverInit_@0@_@1@'.format(va_api_major_version, va_api_minor_version)
 
+# The VA glue is one translation unit per entry-point group. It is listed here
+# rather than in src/meson.build because test/meson.build builds a second
+# target from the same set: the vtable-completeness unit test links the real
+# driver so its assertions run against the real assignments.
+va_driver_sources = files(
+  'src/va/driver.cc',
+  'src/va/report.cc',
+  'src/va/tables.cc',
+  'src/va/config.cc',
+  'src/va/surface.cc',
+  'src/va/picture.cc',
+  'src/va/buffer.cc',
+  'src/va/image.cc',
+  'src/va/vpp.cc',
+)
+
 subdir('src')
 subdir('test')
 

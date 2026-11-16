@@ -231,6 +231,19 @@ va_vpp_query_test = executable(
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('va-vpp-query', va_vpp_query_test)
 
+# The vtable a VA client receives. fill_context is the whole of the init
+# function except the capability probe, so this links the real driver and
+# asserts the 50 required slots are filled and the 10 libva guards stay empty.
+# The -D is the same one the module gets: VA_DRIVER_INIT_FUNC is defined only
+# by that build, not by the installed libva headers.
+va_vtable_test = executable(
+  'va-vtable-test',
+  files('unit/va-vtable-test.cc') + va_driver_sources,
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20',
+             '-DVA_DRIVER_INIT_FUNC=' + va_driver_init_func])
+test('va-vtable', va_vtable_test)
+
 # Hardware-independent regression guards for the browser-facing queue and
 # stable-export invariants. The integration probe above remains opt-in because
 # hosts without /dev/video nodes cannot execute it.
@@ -248,6 +261,8 @@ test('iris-codec-matrix-check', find_program('iris-codec-matrix-check.sh'),
      args: [meson.project_source_root()])
 test('iris-trace-vocab-check', find_program('python3'),
      args: ['-I', files('iris-trace-vocab-check.py'), meson.project_source_root()])
+test('iris-va-vtable-surface', find_program('python3'),
+     args: ['-I', files('iris-va-vtable-surface-check.py'), meson.project_source_root()])
 test('iris-experiment-guard-self-test', find_program('iris-experiment-guard-self-test.sh'),
      args: [meson.project_source_root()])
 test('iris-eos-check-self-test', find_program('iris-eos-check-self-test.sh'),

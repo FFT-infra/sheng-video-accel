@@ -160,50 +160,8 @@ int render_fd_of(VADriverContextP ctx)
 
 } // namespace
 
-VAStatus terminate(VADriverContextP ctx)
+void fill_context(VADriverContextP ctx, DriverData& d)
 {
-    auto* d = static_cast<DriverData*>(ctx->pDriverData);
-    if (!d)
-        return VA_STATUS_SUCCESS;
-    // Contexts first: their sessions drain and close before surfaces drop
-    // the frames they hold.
-    while (!d->contexts.empty())
-        destroyContext(ctx, d->contexts.begin()->first);
-    d->configs.clear();
-    d->images.clear();
-    d->buffers.clear();
-    d->surfaces.clear();
-    d->copier.reset();
-    delete d;
-    ctx->pDriverData = nullptr;
-    return VA_STATUS_SUCCESS;
-}
-
-} // namespace va
-
-using namespace va;
-
-extern "C" VAStatus __attribute__((visibility("default"))) VA_DRIVER_INIT_FUNC(VADriverContextP ctx)
-{
-    auto* d = new DriverData;
-    d->options = iris::Options::from_environment();
-    d->trace = iris::Trace(d->options.trace);
-    try {
-        d->capabilities = probe_capabilities(d->options);
-    } catch (const std::exception& error) {
-        if (ctx->error_callback)
-            ctx->error_callback(ctx, const_cast<char*>((std::string("iris: ") + error.what() + "\n").c_str()));
-        delete d;
-        return VA_STATUS_ERROR_OPERATION_FAILED;
-    }
-    d->render_fd = render_fd_of(ctx);
-    // Defer copy-engine creation until context creation so capability probing
-    // stays thread-free for Chromium GPU sandbox initialization.
-    d->trace("va init node=%s encoder=%s render_fd=%d copy=deferred profiles=%zu encode_profiles=%zu",
-        d->capabilities.node.c_str(),
-        d->capabilities.encoder_node.empty() ? "-" : d->capabilities.encoder_node.c_str(), d->render_fd,
-        d->capabilities.profiles.size(), d->capabilities.encode_profiles.size());
-
     ctx->version_major = VA_MAJOR_VERSION;
     ctx->version_minor = VA_MINOR_VERSION;
     ctx->max_profiles = kMaxProfiles;
@@ -269,12 +227,59 @@ extern "C" VAStatus __attribute__((visibility("default"))) VA_DRIVER_INIT_FUNC(V
     // The VPP vtable is separate and may be absent on an older libva. Only
     // fill it in when this build and the client both opted in; otherwise a
     // client that probes VAProfileNone gets nothing to call.
-    if (ctx->vtable_vpp && vpp_available(*d)) {
+    if (ctx->vtable_vpp && vpp_available(d)) {
         ctx->vtable_vpp->version = VA_DRIVER_VTABLE_VPP_VERSION;
         ctx->vtable_vpp->vaQueryVideoProcFilters = queryVideoProcFilters;
         ctx->vtable_vpp->vaQueryVideoProcFilterCaps = queryVideoProcFilterCaps;
         ctx->vtable_vpp->vaQueryVideoProcPipelineCaps = queryVideoProcPipelineCaps;
     }
+}
+
+VAStatus terminate(VADriverContextP ctx)
+{
+    auto* d = static_cast<DriverData*>(ctx->pDriverData);
+    if (!d)
+        return VA_STATUS_SUCCESS;
+    // Contexts first: their sessions drain and close before surfaces drop
+    // the frames they hold.
+    while (!d->contexts.empty())
+        destroyContext(ctx, d->contexts.begin()->first);
+    d->configs.clear();
+    d->images.clear();
+    d->buffers.clear();
+    d->surfaces.clear();
+    d->copier.reset();
+    delete d;
+    ctx->pDriverData = nullptr;
+    return VA_STATUS_SUCCESS;
+}
+
+} // namespace va
+
+using namespace va;
+
+extern "C" VAStatus __attribute__((visibility("default"))) VA_DRIVER_INIT_FUNC(VADriverContextP ctx)
+{
+    auto* d = new DriverData;
+    d->options = iris::Options::from_environment();
+    d->trace = iris::Trace(d->options.trace);
+    try {
+        d->capabilities = probe_capabilities(d->options);
+    } catch (const std::exception& error) {
+        if (ctx->error_callback)
+            ctx->error_callback(ctx, const_cast<char*>((std::string("iris: ") + error.what() + "\n").c_str()));
+        delete d;
+        return VA_STATUS_ERROR_OPERATION_FAILED;
+    }
+    d->render_fd = render_fd_of(ctx);
+    // Defer copy-engine creation until context creation so capability probing
+    // stays thread-free for Chromium GPU sandbox initialization.
+    d->trace("va init node=%s encoder=%s render_fd=%d copy=deferred profiles=%zu encode_profiles=%zu",
+        d->capabilities.node.c_str(),
+        d->capabilities.encoder_node.empty() ? "-" : d->capabilities.encoder_node.c_str(), d->render_fd,
+        d->capabilities.profiles.size(), d->capabilities.encode_profiles.size());
+
+    fill_context(ctx, *d);
 
     ctx->pDriverData = d;
     return VA_STATUS_SUCCESS;
