@@ -1,8 +1,10 @@
 # Iris Kernel Module Patches
 
-This directory provides four qualified kernel patches (0001-0004) plus three
-experimental ones (0005-0007), targeting the `qcom-iris` driver on
-`ianchb/sm8550-mainline` (branch `sheng-7.2.6`, commit `42f3b40c702a`).
+Two patch sets live here. 0001-0007 target `sheng-7.2.6`
+(`42f3b40c702a`): four qualified patches, plus three experimental ones.
+0008-0009 target `sheng-7.3.4` (`87ac0f2347eb`), whose in-tree driver already
+carries the request-sync-frame control and the stability fixes that 7.2.6
+needs patches for, so the 7.3.4 set is smaller.
 
 Only 0001-0004 make up the module the driver's decode results in
 TEST-RESULTS.md are qualified on, including the AV1 zero-copy Import run. The
@@ -26,6 +28,8 @@ completion-preserving 0005 form").
 | `0005-media-iris-recycle-decoder-buffers-for-non-display-pictures.patch` | upstream Iris patches | Recycles non-display (NOSHOW) decoder buffers internally | **Experimental, rejected.** Requeues NOSHOW CAPTURE buffers in the kernel instead of completing them to userspace; this driver's AV1 path consumes those completions by decode order to publish hidden reference frames. Built into the module once: all three qualified AV1 clips failed under import, copy and direct, and native `v4l2av1dec` reached EOS on the same node (`TEST-RESULTS.md` §"0005 on the target"). Never build it into a released module. |
 | `0006-media-iris-discard-unmatched-timestamp-metadata.patch` | downstream timestamp-metadata fix | Discards unmatched timestamp metadata instead of borrowing | **Experimental, one guarded WP1 run only.** Built, installed with 0001-0004, rebooted and run through the four-codec matrix, long VP9 clip, AV1 real/DRC clips, EOS and slow-CAPTURE probes on `sheng`. The upstream defect was not reproduced on the 0001-0004 baseline, so the verdict is "no regression", not "fixed". It is not part of the qualified baseline and adds no codec, profile or publish-policy claim. |
 | `0007-media-iris-complete-noshow-pictures-without-an-error.patch` | this repository | Completes non-display (NOSHOW) pictures without `V4L2_BUF_FLAG_ERROR` and without the picture-type flags, keeping the timestamp 0004 preserves | **Experimental, rejected.** The completion-preserving form of 0005: nothing is recycled in the kernel, the false error is simply not attached. Built with 0001-0004, installed and booted (module `f070ae18…`); the installed driver then failed all three AV1 clips under import, copy and direct, while the same driver with the unflagged-NOSHOW tolerance in the session decoded byte-identical output and matched the qualified baseline's counters. It therefore buys nothing over the qualified module. Never build it into a released module. |
+| `0008-7.3.4-decode-order-and-deblocking.patch` | this repository | Exposes decode-order output (`HFI_PROP_DECODE_ORDER_OUTPUT`) and the six H.264/HEVC loop-filter controls (`HFI_PROP_DEBLOCKING_MODE`) on the 7.3.4 driver, and raises the decoder CAPTURE ceiling to `DEFAULT_MAX_HOST_BUF_COUNT` | **Required on 7.3.4.** Without it the driver opens in display-order mode and the Import zero-copy path is unavailable. Carries the control-id mapping in both directions: `iris_get_v4l2_id()` alone registers a control that `VIDIOC_S_CTRL` then rejects with EINVAL. |
+| `0009-7.3.4-preserve-timestamps-on-error-buffers.patch` | this repository | Preserves the buffer timestamp on `V4L2_BUF_FLAG_ERROR` completions | **Required on 7.3.4.** Same change as 0004, rebased onto the 7.3.4 source. |
 
 ## Integrity
 
@@ -40,17 +44,27 @@ The downstream kernel spec pins these patches by commit hash against the tag `ir
 
 `build-module.sh` builds only `drivers/media/platform/qcom/iris` against the
 running kernel. It does not install a module and does not reboot. The source
-tree must be `ianchb/sm8550-mainline` at `42f3b40c702a` (`sheng-7.2.6`), on a
-case-sensitive filesystem: a case-insensitive checkout collides Linux's
-`xt_TCPMSS.c` / `xt_tcpmss.c` and breaks the build. The target here is f2fs.
+tree must match the running kernel, on a case-sensitive filesystem: a
+case-insensitive checkout collides Linux's `xt_TCPMSS.c` / `xt_tcpmss.c` and
+breaks the build. The target here is f2fs.
 
 ```sh
+# 7.2.6
 git clone --depth 1 -b sheng-7.2.6 https://github.com/ianchb/sm8550-mainline linux
 sh packaging/kernel/build-module.sh --source linux
 # WP1 only: add 0006 to the four qualified patches, never 0005.
 sh packaging/kernel/build-module.sh --source linux \
     --patch 0001 --patch 0002 --patch 0003 --patch 0004 --patch 0006
+
+# 7.3.4
+git clone --depth 1 -b sheng-7.3.4 https://github.com/ianchb/sm8550-mainline linux
+sh packaging/kernel/build-module.sh --source linux --patch 0008 --patch 0009
 ```
+
+On 7.3.4, `CONFIG_LOCALVERSION_AUTO` appends `-g<sha>` to the release, so a
+tree that has the patches applied as uncommitted changes produces a vermagic
+the running kernel does not accept. Commit the applied patches in the scratch
+clone, or drop `LOCALVERSION_AUTO` from `.config`, before building.
 
 The script takes `.config` from `/proc/config.gz` rather than a
 `/boot/config-*` file: on `sheng`, those two files have different hashes and
@@ -97,7 +111,7 @@ The `[5] optional kernel controls` section resolves both nodes by the
 `iris_driver` name and reports `display_delay`, `min_number_of_capture_buffers`,
 `force_key_frame` and the loop-filter controls.
 
-The seven patch files are kernel fragments targeting GPL-2.0-only sources under
+The nine patch files are kernel fragments targeting GPL-2.0-only sources under
 `drivers/media/platform/qcom/iris/`. They are not compiled into the MIT driver
 package, so they have no SPDX header of their own; the patched files keep the
 kernel's own identifier. `SHA256SUMS` pins each patch for the downstream

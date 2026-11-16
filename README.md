@@ -73,20 +73,22 @@ upload.
 
 | Operation | 720p | 1080p | 4K |
 | --- | ---: | ---: | ---: |
-| Decode | 759 fps | 581 fps | 359 fps |
-| Encode | 644 fps | 591 fps | 167 fps |
+| Decode | 953 fps | 754 fps | 346 fps |
+| Encode | 679 fps | 585 fps | 172 fps |
 
 Clocks are pinned because throughput on this SoC follows DVFS more than it
-follows the driver; an unpinned run measures the governor. Multi-codec sweeps,
-transcode, concurrency, power and VPP numbers, and the method behind each cell
-are in [TEST-RESULTS.md](TEST-RESULTS.md).
+follows the driver; an unpinned run measures the governor. These are the
+numbers on the 7.3.4 kernel; the 7.2.6 table was 759 / 581 / 359 and
+644 / 591 / 167. Multi-codec sweeps, transcode, concurrency, power and VPP
+numbers, and the method behind each cell are in
+[TEST-RESULTS.md](TEST-RESULTS.md).
 
 ## Requirements
 
 - Target SoC: Qualcomm SM8550 (HFI gen2 Iris VPU), aarch64.
 - Core dependencies: `libva` >= 1.1, `libdrm` >= 2.4.52. GPU copy engine requires EGL, GLES, and GBM.
 - Distribution: Fedora 44 is the qualified baseline. Packages for Fedora, Arch and Debian/Ubuntu arm64 are provided in `packaging/` and `debian/`.
-- Supporting kernel patches: Located in `packaging/kernel/` with module rebuild instructions. On stock kernels without these patches, the driver falls back to display-order decoding (GPU copy) and intra-period repositioning for IDR requests.
+- Supporting kernel patches: Located in `packaging/kernel/` with module rebuild instructions. The qualified combination is `sheng-7.3.4` (`87ac0f2347eb`) with patches 0008-0009; `sheng-7.2.6` (`42f3b40c702a`) with 0001-0004 also remains qualified. On stock kernels without these patches, the driver falls back to display-order decoding (GPU copy) and intra-period repositioning for IDR requests.
 
 ## Installation
 

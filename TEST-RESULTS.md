@@ -8767,3 +8767,119 @@ throughput or thermal results, and the two-hour `iris-concurrency-soak.sh` at
 640x360 remains the long-window record. An earlier unguarded pool-size sweep
 reached `pool=24` and reset the tablet, changing the boot ID; per the guard
 procedure that is a failed experiment and none of its output is evidence.
+
+## Kernel 7.3.4: the same decode and encode on the newer kernel (2026-11-16)
+
+The target moved from `sheng-7.2.6` to `sheng-7.3.4`
+(`7.3.4-sm8550-00104-g87ac0f2347eb`, commit `87ac0f2347eb`). The in-tree
+driver already implements the encoder's `REQUEST_SYNC_FRAME` control and the
+error-completion stability fixes that 7.2.6 needs patches 0003 and 0004 for,
+so the 7.3.4 patch set is two files, not four: 0008 carries decode-order
+output, the six loop-filter controls and the CAPTURE ceiling, and 0009 carries
+the timestamp copy. `packaging/kernel/README.md` describes both.
+
+The boot image is the 7.3.4 kernel with this device's DTB appended and the
+cmdline unchanged (`root=PARTLABEL=linux rootwait rw` plus the bootloader's
+Android properties). It was written to the inactive slot, read back and
+compared byte for byte, then made active; both slots were backed up first.
+Module and kernel vermagic are
+`7.3.4-sm8550-00104-g87ac0f2347eb` exactly, which needed
+`CONFIG_LOCALVERSION_AUTO` off and the patches committed in the scratch tree:
+an uncommitted tree produces a `-dirty` or bare `+` suffix that the running
+kernel rejects.
+
+Source `aa62e0a7ffc198e95d5a59f90d4cee2f49ca6980`, `source_dirty=0`, tracked
+source digest `ee3c7246f881c2b9b61fa75291fb7079ddcaddddeab28ca6f6632265603e1ada`
+— the same installed driver as the 7.2.6 records above, so a difference below
+is the kernel, not the driver. Target `sheng`, boot
+`fd0b90f4-d968-4340-94f9-f2fd7bc6c52a`, decoder `/dev/video17` and encoder
+`/dev/video18` resolved by `iris_driver`, module
+`8f771ada9bc16711465e2f56dcd1fee82d979edcceb5ce985a30ecc99f79dc75`. Battery
+57-63 % discharging, hottest zone 29-87 °C across the runs, and the boot ID
+is the same one the run started on, so no reset occurred.
+
+Both gates ran under `test/remote/gate.sh` with guard `status=complete` on
+boot `fd0b90f4-d968-4340-94f9-f2fd7bc6c52a`. The run records are
+`run-734-8k` and `run-734-two-player`; the 8K record's `source_dirty=1`
+because the documentation in this change was still uncommitted when it ran,
+which does not affect the driver or the module the record names.
+
+### The 7.3.4 patch pair is what turns decode-order on
+
+A stock 7.3.4 module opens in display order and every decode falls back to
+GPU copy. The first patched module still did, and the cause was in the patch:
+it registered `V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE` through
+`iris_get_v4l2_id()` but did not map it back in `iris_get_cap_id()`, so
+`VIDIOC_QUERYCTRL` listed the control and `VIDIOC_S_CTRL` rejected it with
+`EINVAL`. `v4l2-ctl --set-ctrl=display_delay_enable=1` returned `EINVAL` on
+the control the same node advertised, which is what named the defect. 0008
+now carries both directions, and `test/iris-kernel-patch-check.sh` asserts
+both markers.
+
+### Decode and encode, same driver, new kernel
+
+`test/iris-8k-gate.sh`, one finite 7680x4320 clip per qualified codec,
+software framemd5 oracle, `publish=auto`:
+
+| Codec | Granted CAPTURE pool | Frames | Frame hashes | Errors / drops / misplaced | LAST / drain |
+| --- | --- | --- | --- | --- | --- |
+| H.264 | 8 | 4/4 | exact | 0 | 1 / 1 |
+| HEVC | 8 | 4/4 | exact | 0 | 1 / 1 |
+| VP9 | 8 | 4/4 | exact | 0 | 1 / 1 |
+| AV1 | 8 | 4/4 | exact | 0 | 1 / 1 |
+
+`test/iris-two-player-gate.sh`, two independent 1920x1080 H.264 clients
+started together, each with its own VA display and trace:
+
+| Lane | Frames | Frame hashes | Errors / drops | LAST |
+| --- | --- | --- | --- | --- |
+| a | 90/90 | exact | 0 | 1 |
+| b | 90/90 | exact | 0 | 1 |
+
+The Import policy was exercised at 8K as well: `publish=import` gave
+`mem=import pool=8 frames=4 md5=exact err=0` for H.264 and HEVC, and
+`direct`, `import` and `copy` all decoded the same four frames to the same
+hashes under `mode=decode-order`, so the three policies agree on this kernel.
+
+Encode on 7.3.4 was checked against the requested rate as well: H.264 VBR at a
+4 Mbit/s target produced 4007485 bit/s over 300 1080p pictures, and HEVC
+3985581 bit/s, both within 0.4 % of the target.
+
+### Throughput on 7.3.4
+
+Same method as the 2026-11-14 table: every CPU policy in `performance` at its
+maximum (2016/2803/2956 MHz), `3d00000.gpu` in `userspace` at 680 MHz, x265
+ultrafast clips with `bframes=0` and `keyint=60`, five rounds per cell, encode
+`-c:v h264_vaapi -rc_mode VBR -async_depth 4` over an `-f lavfi` `testsrc2`
+source. Clips are 900 frames at 720p and 1080p and 480 at 4K.
+
+| Operation | 720p | 1080p | 4K |
+| --- | ---: | ---: | ---: |
+| Decode | 953 fps | 754 fps | 346 fps |
+| Encode | 679 fps | 585 fps | 172 fps |
+
+Each cell is the mean of five rounds; the per-round spread was 948-957,
+746-761, 341-349, 676-682, 579-589 and 170-174 fps respectively, so every cell
+is tighter than 1.5 %.
+
+Against the 7.2.6 table (759 / 581 / 359 decode, 644 / 591 / 167 encode),
+the moves are +25.5 % at 720p decode, +29.7 % at 1080p decode, +5.3 % at 720p
+encode and +2.8 % at 4K encode. Two cells are lower: 4K decode at -3.6 % and
+1080p encode at -1.0 %, the latter inside the run-to-run spread.
+
+The 4K encode cell was probed rather than explained away. Three builds of this
+driver were measured against the shipped one on the same boot: 8 encoder
+OUTPUT slots instead of 4 gave 169.1 fps against 171.6, 8 CAPTURE slots gave
+the same as 4, and a slot wait that polls `POLLOUT` as well as `POLLIN`
+changed nothing. All three are within the shipped build's spread. The hottest
+thermal zone ran from 29 to 87 °C across the runs with no step in the per-round
+numbers, so it is not throttling, and client CPU time is 2.99 s over 300
+pictures against 2.98 s for the same pipeline on 7.2.6. The 4K encode cell is
+therefore reported as measured, not as a regression this work explains.
+
+What this does not prove: one synthetic clip per size, so content effects are
+not sampled; the 4K cell sits close enough to the encoder's own ceiling that
+a different content mix would move it; and no long-window soak has been run
+on 7.3.4, so the two-hour 640x360 record above still belongs to 7.2.6. The
+capability table and the VA profiles are unchanged: this section moves the
+kernel, not what the driver advertises.

@@ -58,17 +58,17 @@ HEVC Main 8-bit，FFmpeg 8.1.3。CPU 锁最高频，GPU 锁 680 MHz。解码不�
 
 | 操作 | 720p | 1080p | 4K |
 | --- | ---: | ---: | ---: |
-| 解码 | 759 fps | 581 fps | 359 fps |
-| 编码 | 644 fps | 591 fps | 167 fps |
+| 解码 | 953 fps | 754 fps | 346 fps |
+| 编码 | 679 fps | 585 fps | 172 fps |
 
-这个 SoC 的吞吐主要跟着 DVFS 走，不锁频测到的是调频策略。多编码格式、转码、并发、功耗与 VPP 数据，以及每个数字的测法，见 [TEST-RESULTS.md](TEST-RESULTS.md)。
+这组是 7.3.4 内核上的数字；7.2.6 上是 759 / 581 / 359 与 644 / 591 / 167。这个 SoC 的吞吐主要跟着 DVFS 走，不锁频测到的是调频策略。多编码格式、转码、并发、功耗与 VPP 数据，以及每个数字的测法，见 [TEST-RESULTS.md](TEST-RESULTS.md)。
 
 ## 运行环境
 
 - 目标平台：高通 SM8550（HFI gen2 Iris VPU），aarch64 架构。
 - 核心依赖：`libva` >= 1.1，`libdrm` >= 2.4.52。GPU 拷贝引擎需要 EGL、GLES 和 GBM 支持。
 - 发行版基准：以 Fedora 44 作为基准验证环境；`packaging/` 与 `debian/` 下提供 Fedora、Arch 与 Debian/Ubuntu arm64 的打包规则。
-- 配套内核补丁：位于 `packaging/kernel/`，附带模块独立编译指南。在未应用补丁的原版内核上，驱动会自动降级至显示顺序解码（GPU 拷贝模式），并将 IDR 请求回退至修改 intra period 方案。
+- 配套内核补丁：位于 `packaging/kernel/`，附带模块独立编译指南。当前验证组合是 `sheng-7.3.4`（`87ac0f2347eb`）配 0008-0009；`sheng-7.2.6`（`42f3b40c702a`）配 0001-0004 同样仍然有效。在未应用补丁的原版内核上，驱动会自动降级至显示顺序解码（GPU 拷贝模式），并将 IDR 请求回退至修改 intra period 方案。
 
 ## 安装与配置
 

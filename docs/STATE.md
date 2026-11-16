@@ -12,14 +12,18 @@ boundary. If this page and either of those disagree, those two win.
 | --- | --- |
 | Source | `phxinyang/qualcomm-iris-vaapi`, branch `main` |
 | Distribution baseline | Fedora 44, aarch64 |
-| Kernel | `ianchb/sm8550-mainline`, branch `sheng-7.2.6`, commit `42f3b40c702a`, with patches 0001-0004 |
+| Kernel | `ianchb/sm8550-mainline`, branch `sheng-7.3.4`, commit `87ac0f2347eb`, with patches 0008-0009 |
 | VA driver runtime | `v4l2_drv_video.so`, resolved by `iris_driver` QUERYCAP name |
 | Package | `libva-v4l2-iris`, `Version: 0.1.0`, `Release: 4%{?dist}` |
 
-Stock kernels without the four patches still build and install. The driver
-falls back to display-order decoding with GPU copy, and requested IDRs are
-handled by intra-period repositioning. No capability claim in this page
-extends to that fallback.
+The 7.3.4 combination is what `TEST-RESULTS.md` records from 2026-11-16: the
+four codecs at 8K, two concurrent 1080p clients, the Import policy and the
+encode rates, all on boot `fd0b90f4-d968-4340-94f9-f2fd7bc6c52a`. The 7.2.6
+combination (`42f3b40c702a` with 0001-0004) remains qualified and is what the
+earlier records in that file used. Stock kernels without the patches still
+build and install: the driver falls back to display-order decoding with GPU
+copy, and requested IDRs are handled by intra-period repositioning. No
+capability claim in this page extends to that fallback.
 
 ## Capability boundary
 
@@ -39,12 +43,15 @@ checks, not throughput or thermal results.
 
 ## Kernel patches
 
-`packaging/kernel/README.md` describes all seven patches and their evidence.
-0001-0004 are the qualified module. 0005 was run on the target and
+`packaging/kernel/README.md` describes all nine patches and their evidence.
+0001-0004 are the qualified 7.2.6 module. 0005 was run on the target and
 rejected; 0006 is one guarded run with a no-regression verdict; 0007 was
 built and run with a no-reason-to-ship verdict. None of 0005-0007 belongs in
-a released module. `SHA256SUMS` and `test/iris-kernel-patch-check.sh` pin the
-files downstream build recipes consume.
+a released module. 0008-0009 are the 7.3.4 set, and both are required there:
+7.3.4 already carries request-sync-frame and the stability fixes 7.2.6 needs
+patches for, so the set is smaller, not larger. `SHA256SUMS` and
+`test/iris-kernel-patch-check.sh` pin the files downstream build recipes
+consume.
 
 ## Distribution packaging
 

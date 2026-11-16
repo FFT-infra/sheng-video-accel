@@ -49,7 +49,10 @@ fixes are in scope.
 Five Iris kernel changes are adopted as part of the target. The first two
 were first applied to a `sheng-7.2.2` tree; after the target moved to
 `kernel-sheng-7.2.6-1` the rebased patches and the module-only build recipe
-live in `packaging/kernel/`:
+live in `packaging/kernel/`. On `sheng-7.3.4` the same five changes are
+carried by two patches instead of four, because the 7.3.4 driver already
+implements `REQUEST_SYNC_FRAME` and the error-completion stability fixes
+that 7.2.6 needs separate patches for:
 
 | Patch | What it changes | Why the driver needs it |
 | --- | --- | --- |
@@ -59,8 +62,9 @@ live in `packaging/kernel/`:
 | encoder `REQUEST_SYNC_FRAME` | Exposes `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`, sent as `HFI_PROP_REQUEST_SYNC_FRAME` with the sequence-header mode from `PREPEND_SPSPPS_TO_IDR` | Without it a requested IDR is produced by moving the intra period, which costs two control writes per request and leaves the parameter sets for the driver to prefix. |
 | timestamp on error completions | `iris_vb2_buffer_done()` copies `buf->timestamp` onto a `V4L2_BUF_FLAG_ERROR` CAPTURE completion instead of zeroing it | The CAPTURE timestamp is the token that names the picture. Zeroed, a corrupt picture cannot be attributed: the target stays pending until a drain or the sync bound, and the client sees `TIMEDOUT` rather than `DECODING_ERROR`. |
 
-The target runs a module built from all four patches
-(`TEST-RESULTS.md`, `REQUEST_SYNC_FRAME` on the target). The driver still
+The 7.2.6 target runs a module built from 0001-0004; the 7.3.4 target runs
+0008-0009, which carry all five changes above (`TEST-RESULTS.md`,
+`REQUEST_SYNC_FRAME` on the target). The driver still
 detects each control and falls back when it is absent, so a stock module
 keeps working: display order with the drain fallback, deblocking refused,
 the intra-period lever, and an error completion reported at the drain.

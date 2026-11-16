@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Keep the four kernel patches honest about what they are and what they touch.
+# Keep the kernel patches honest about what they are and what they touch.
 #
 # `packaging/kernel/` is the only kernel code this project owns, and it is
 # consumed by a second repository that fetches each patch by URL and verifies
@@ -60,15 +60,16 @@ if [ -n "$bad" ]; then
     fail "recorded hash does not match: $bad"
 fi
 
-# Only the seven patches may be listed, and every one of them must be.
+# Only the nine patches may be listed, and every one of them must be.
+# 0001-0007 apply to sheng-7.2.6; 0008-0009 are the 7.3.4 set.
 listed=$(awk '{print $2}' "$sums")
-for name in 0001 0002 0003 0004 0005 0006 0007; do
+for name in 0001 0002 0003 0004 0005 0006 0007 0008 0009; do
     printf '%s\n' "$listed" | grep -q "^$name-" \
         || fail "SHA256SUMS does not record $name"
 done
 count=$(printf '%s\n' "$listed" | grep -c '\.patch$' || true)
-[ "$count" -eq 7 ] \
-    || fail "SHA256SUMS must record exactly seven patches, found $count"
+[ "$count" -eq 9 ] \
+    || fail "SHA256SUMS must record exactly nine patches, found $count"
 for name in $(printf '%s\n' "$listed" | grep '\.patch$'); do
     [ -f "$kernel_dir/$name" ] || fail "SHA256SUMS records a file that is not there: $name"
 done
@@ -118,6 +119,28 @@ expect_marker "$kernel_dir/0007-media-iris-complete-noshow-pictures-without-an-e
 expect_marker "$kernel_dir/0007-media-iris-complete-noshow-pictures-without-an-error.patch" \
     '+	if (!buf->data_size && inst->state == IRIS_INST_STREAMING && !noshow &&' 1
 
+# 0008 and 0009 are the 7.3.4 set. 0008 carries the mapping in both
+# directions: a forward-only mapping registers the control and then rejects
+# every write to it, which is the defect this pair exists to prevent.
+expect_marker "$kernel_dir/0008-7.3.4-decode-order-and-deblocking.patch" \
+    '+#define HFI_PROP_DECODE_ORDER_OUTPUT' 1
+expect_marker "$kernel_dir/0008-7.3.4-decode-order-and-deblocking.patch" \
+    '+		dst_vq->max_num_buffers = DEFAULT_MAX_HOST_BUF_COUNT;' 1
+expect_marker "$kernel_dir/0008-7.3.4-decode-order-and-deblocking.patch" \
+    '+	case V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE:' 1
+expect_marker "$kernel_dir/0008-7.3.4-decode-order-and-deblocking.patch" \
+    '+	case DISPLAY_DELAY_ENABLE:' 1
+# The deblocking caps go into both HFI gen2 encoder tables, milos and
+# sm8550; this device reads the sm8550 one.
+expect_marker "$kernel_dir/0008-7.3.4-decode-order-and-deblocking.patch" \
+    '+		.cap_id = DEBLOCK_MODE_H264,' 2
+expect_marker "$kernel_dir/0008-7.3.4-decode-order-and-deblocking.patch" \
+    '+#define HFI_PROP_DEBLOCKING_MODE' 1
+expect_marker "$kernel_dir/0009-7.3.4-preserve-timestamps-on-error-buffers.patch" \
+    '+		vb2->timestamp = buf->timestamp;' 1
+expect_marker "$kernel_dir/0009-7.3.4-preserve-timestamps-on-error-buffers.patch" \
+    '-		vb2->timestamp = 0;' 1
+
 # 0004's whole point is that the copy lands in the ERROR branch. Checking the
 # line order inside the hunk is what distinguishes that from a copy added to
 # the normal completion path, where the timestamp was already correct.
@@ -128,6 +151,15 @@ done_call=$(grep -nF 'v4l2_m2m_buf_done' "$patch4" | head -1 | cut -d: -f1)
 if [ -z "$error_branch" ] || [ -z "$copy" ] || [ -z "$done_call" ] \
         || [ "$error_branch" -ge "$copy" ] || [ "$copy" -ge "$done_call" ]; then
     fail "0004: the timestamp copy is not inside the ERROR branch"
+fi
+
+patch9=$kernel_dir/0009-7.3.4-preserve-timestamps-on-error-buffers.patch
+error_branch=$(grep -nF 'if (buf->flags & V4L2_BUF_FLAG_ERROR) {' "$patch9" | head -1 | cut -d: -f1)
+copy=$(grep -nF '+		vb2->timestamp = buf->timestamp;' "$patch9" | head -1 | cut -d: -f1)
+done_call=$(grep -nF 'v4l2_m2m_buf_done' "$patch9" | head -1 | cut -d: -f1)
+if [ -z "$error_branch" ] || [ -z "$copy" ] || [ -z "$done_call" ] \
+        || [ "$error_branch" -ge "$copy" ] || [ "$copy" -ge "$done_call" ]; then
+    fail "0009: the timestamp copy is not inside the ERROR branch"
 fi
 
 # Every path the patch touches belongs to the Iris driver. `git apply
@@ -200,4 +232,4 @@ if [ "$failures" -ne 0 ]; then
     printf 'FAIL kernel patches: %d problem(s)\n' "$failures" >&2
     exit 1
 fi
-printf 'PASS kernel patches: seven files, recorded hashes, Iris-only paths\n'
+printf 'PASS kernel patches: nine files, recorded hashes, Iris-only paths\n'

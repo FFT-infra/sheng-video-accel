@@ -263,6 +263,66 @@ command actually resolves (`driver`/`driver_path`). When the command sets
 tree is visible in the record instead of being remembered as an installed
 package. A guard that stopped the run exits 3, and its state says why.
 
+## Kernel upgrade and boot-slot rollback
+
+A kernel change on `sheng` is two independent steps: the boot image decides
+which kernel boots, and the module tree decides which `qcom-iris.ko` that
+kernel loads. They fail separately, so record and revert them separately.
+
+The tablet has two boot slots. `qbootctl -a` prints the active one and
+`/dev/disk/by-partlabel/boot_a` / `boot_b` name the partitions. Flashing the
+slot that is *not* active leaves the running system intact until the next
+boot, and the bootloader falls back to the other slot if the new one does not
+come up.
+
+Back up both slots before touching either. A slot is 96 MiB, so keep the
+copies on the target rather than in the repository:
+
+```sh
+mkdir -p ~/iris-vaapi-lab/rollback
+sudo dd if=/dev/disk/by-partlabel/boot_a of=~/iris-vaapi-lab/rollback/boot_a.img bs=1M
+sudo dd if=/dev/disk/by-partlabel/boot_b of=~/iris-vaapi-lab/rollback/boot_b.img bs=1M
+sha256sum ~/iris-vaapi-lab/rollback/boot_*.img
+```
+
+The slot carries an `ANDROID!` header: kernel size and load address, a zero
+ramdisk size, tags at `0x1e00000`, page size 4096. Rebuild the image by
+changing only the payload and recomputing the header fields; the cmdline is
+part of the header and on this device is `root=PARTLABEL=linux rootwait rw`
+plus the Android boot properties the bootloader supplies. An image whose
+cmdline differs from the one that boots today is a different experiment.
+
+Flashing is a readback-verified write, not a blind `dd`:
+
+```sh
+sudo dd if=~/Lab/Bridge/tmp/boot_734_sheng.img of=/dev/disk/by-partlabel/boot_b bs=1M conv=fsync
+sudo dd if=/dev/disk/by-partlabel/boot_b bs=1M count=<image-size-in-MiB> \
+    | cmp - ~/Lab/Bridge/tmp/boot_734_sheng.img
+```
+
+`cmp` must print nothing. Then set the slot active, reboot, and confirm
+`uname -r`. Do not write the module tree until the new kernel is running:
+`build-module.sh` takes `uname -r` and `/proc/config.gz` from the running
+kernel, so a module built before the reboot targets the old release and is
+rejected by vermagic.
+
+```sh
+sudo qbootctl -s b
+sudo systemctl reboot
+uname -r
+```
+
+Installing the module tree is a separate step; the recipe and the
+`CONFIG_LOCALVERSION_AUTO` trap are in `packaging/kernel/README.md`. Keep the
+previous `qcom-iris.ko.zst` beside the new one so a reload can be undone
+without a reflash.
+
+Rolling back is the same two steps in reverse: reflash the backup image onto
+the slot, or switch the active slot back with `qbootctl -s a`, restore the
+previous module, `depmod -a`, reboot. A boot that hangs after a kernel change
+is a failed experiment: revert first, then re-read the change. Never treat a
+boot that needed a manual restart as evidence about the kernel under test.
+
 ## Distribution packaging
 
 `scripts/install-system.sh` is enough for a lab target, but it needs a build
