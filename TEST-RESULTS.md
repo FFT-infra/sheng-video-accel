@@ -8754,3 +8754,76 @@ The two `session open` records are 1 ms apart (`t=11` and `t=12` within their
 own processes) and both finish at about 2.5 s, so the sessions overlapped.
 This is a short exact-pixel gate, not a throughput or thermal soak; the
 two-hour `iris-concurrency-soak.sh` at 640x360 remains the long-window record.
+
+## Installed-package re-run of the 8K, two-player and codec gates (2026-11-16)
+
+The two runs above used a build-tree driver through `LIBVA_DRIVERS_PATH`.
+`docs/POST-MERGE-BACKLOG.md` §0 requires an installed-package gate after any
+`src/` change, so the current driver was installed with
+`scripts/install-system.sh build` (no `DESTDIR`, no build-tree override) and
+re-run. Source commit `aa62e0a7ffc198e95d5a59f90d4cee2f49ca6980`,
+`source_dirty=0`, tracked source digest
+`ee3c7246f881c2b9b61fa75291fb7079ddcaddddeab28ca6f6632265603e1ada`. Installed
+driver and both aliases SHA-256
+`679a339e631e3935e1f0c697612a5341afc09ed1c97ff8281788e3ac38a56aa8`, module
+`b90bd823fdab98957739ad2196eb4016f5a264f2280d22735963e40c8488c715`, kernel
+`7.2.6-sm8550-g42f3b40-iris1`, boot
+`581953b0-89df-4712-9fba-0e2d77682af7` unchanged through all four runs,
+decoder `/dev/video17` and encoder `/dev/video18` resolved by `iris_driver`
+QUERYCAP name. This is the installed package: `vainfo` with no `LIBVA_*`
+override opens `/usr/lib64/dri/msm_drv_video.so`, and ffmpeg's verbose log
+shows libva trying the `dri-nonfree`/`dri-freeworld` paths before finding the
+installed `dri/msm_drv_video.so` with `__vaDriverInit_1_23`.
+
+`test/remote/gate.sh` now records both `identity.driver` (the driver the
+command resolves) and `identity.installed_driver`. For the two gates run with
+no `LIBVA_*` override, both fields are `679a339e…` and
+`driver_path=/usr/lib64/dri/v4l2_drv_video.so`. The matrix and encode-quality
+gates name `LIBVA_DRIVERS_PATH=/usr/lib64/dri` because those two scripts need
+an explicit driver directory; that path is the installed directory, not a
+build tree, so both fields still agree. Every run was wrapped by the guard:
+`status=complete`, boot ID unchanged, battery 41 % discharging, hottest zone
+37 C (from the guard's thermal inventory), no reset and no thermal breach.
+
+| Gate | Command shape | Result |
+| --- | --- | --- |
+| `test/iris-8k-gate.sh` | no `LIBVA_*` override | H.264/HEVC/VP9/AV1 4/4 frames each, pool=8, firmware-min 7/7/4/4, framemd5 exact, errors=0, LAST/drain=1; run `run-installed-8k` |
+| `test/iris-two-player-gate.sh` | no `LIBVA_*` override | a/b 90/90 frames, framemd5 exact, errors=0, LAST=1, both `session open` on `/dev/video17` at `t=12`; run `run-installed-two-player` |
+| `test/iris-matrix.sh` | `LIBVA_DRIVERS_PATH=/usr/lib64/dri` | H.264/VP9/HEVC/AV1 48/48 exact frame MD5, `submitted=48 capture=48 drops=0 timeouts=0`, AV1 `noshow=23`; run `run-installed-matrix` |
+| `test/iris-encode-quality.sh` | `LIBVA_DRIVERS_PATH=/usr/lib64/dri` | H.264 SSIM 0.9986 / 0.9977, HEVC 0.9968 / 0.9951 (encode / decode-to-encode), 120/120 frames each, blank-stream control below the floor, per-codec scratch released; run `run-installed-encode-quality` |
+
+The four run records are
+`~/iris-vaapi-lab/artifacts/run-installed-{8k,two-player,matrix,encode-quality}/`.
+The two-player gate no longer injects `LIBVA_DRIVERS_PATH` when the caller
+leaves it unset, so an installed-package run cannot silently load a build
+tree. Before this fix its comment promised the installed package but its
+`run_player` always exported `LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH=…/build/src`.
+
+### Install audit and rollback
+
+The install replaced the 2026-11-14 driver (`3c9a857d73f9a36ac0445ec1319b0223d206777c9e34ff579ec2cdf956af7b8a`,
+RPM `libva-v4l2-iris-0.1.0-4.fc44.aarch64`) with the rebuilt `679a339e…`.
+`install-system.sh` backed the old driver up to
+`/usr/local/share/iris-vaapi/backup/v4l2_drv_video.so` and wrote
+`previous_driver_sha256` into
+`/usr/local/share/iris-vaapi/install-manifest.txt`. A second install to refresh
+the recorded source commit replaced that backup with the same `679a339e…`
+bytes, so the original `3c9a857…` was also copied to
+`~/Lab/Bridge/tmp/install-audit-92bd8c8/rollback-anchor.so` on the target;
+`pre.txt` and `post.txt` in that directory record the before/after hashes,
+boot, kernel, RPM NEVRA and libva driverdir.
+
+Rollback path: `sudo sh scripts/uninstall-system.sh` restores the manifest's
+`previous_driver_backup` and removes the installed files. To restore the exact
+pre-experiment bytes, copy `rollback-anchor.so` over
+`/usr/lib64/dri/v4l2_drv_video.so` (the aliases are symlinks to it) and rewrite
+or remove the manifest; verify with `sha256sum` and `vainfo` afterwards. The
+RPM database still names `0.1.0-4.fc44`, so an `rpm --verify` after a file-level
+rollback reports a hash mismatch for the driver; a full package rollback needs
+a reinstall of that RPM. No `git clean`, reset or destructive action was used;
+untracked target files under `~/Lab/Bridge/tmp` were preserved.
+
+The spec `Release` was `3%{?dist}` while the installed RPM reported `4.fc44`;
+`packaging/fedora/libva-v4l2-iris.spec`, its `%changelog`, `docs/STATE.md` and
+`test/iris-packaging-check.sh` now pin one version fact, so the installed
+NEVRA and the source tree agree.
