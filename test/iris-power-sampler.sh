@@ -95,7 +95,16 @@ case "$workload" in
         [ -r "$clip" ] || fail "clip not found: $clip"
         ;;
     encode)
-        case "$codec" in h264|hevc) ;; *) fail "--codec must be h264 or hevc" ;; esac
+        case "$codec" in
+            h264) sw_codec=x264 ;;
+            hevc) sw_codec=x265 ;;
+            *) fail "--codec must be h264 or hevc" ;;
+        esac
+        # A missing software encoder exits the loop on its first iteration and
+        # leaves the gauge sampling an idle device, which reads as a hardware
+        # win. Check it before the first round, not after the last one.
+        ffmpeg -hide_banner -encoders 2>/dev/null | grep -q " lib$sw_codec " ||
+            fail "ffmpeg has no lib$sw_codec; the software arm cannot run"
         ;;
     *) fail "--workload must be decode or encode" ;;
 esac
@@ -115,6 +124,12 @@ if [ -n "$driver" ]; then
     [ -f "$driver" ] || fail "driver not found: $driver"
     driver=$(CDPATH='' cd -- "$(dirname -- "$driver")" && pwd)/$(basename -- "$driver")
     va_env="LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH=$(dirname "$driver")"
+elif [ -n "${LIBVA_DRIVERS_PATH:-}" ]; then
+    # The caller chose a build tree through the environment. Name that
+    # driver in the record; reporting "installed" would name a library the
+    # arms never loaded.
+    driver=$LIBVA_DRIVERS_PATH/v4l2_drv_video.so
+    [ -f "$driver" ] || fail "LIBVA_DRIVERS_PATH has no v4l2_drv_video.so: $LIBVA_DRIVERS_PATH"
 fi
 driver_sha=$(sha256sum ${driver:-$(sed -n 's/^driver_path=//p' /usr/local/share/iris-vaapi/install-manifest.txt 2>/dev/null | head -1)} 2>/dev/null | cut -d' ' -f1 || true)
 if [ "$workload" = encode ]; then
@@ -176,9 +191,9 @@ arm() {
                 while :; do
                     ffmpeg -hide_banner -loglevel error \
                         -f lavfi -i "testsrc2=size=$1:rate=30" -frames:v 120 \
-                        -c:v "lib$2" -preset "$3" -b:v "$4" -pix_fmt yuv420p \
+                        -c:v "lib$5" -preset "$3" -b:v "$4" -pix_fmt yuv420p \
                         -g 60 -f null - || break
-                done' sh "$size" "$codec" "$preset" "$bitrate" > "$out/$tag-workload.log" 2>&1 &
+                done' sh "$size" "$codec" "$preset" "$bitrate" "$sw_codec" > "$out/$tag-workload.log" 2>&1 &
         fi
     elif [ "$tag" = va ]; then
         # shellcheck disable=SC2086
@@ -194,6 +209,12 @@ arm() {
     fi
     pid=$!
     collect "$seconds" "$run"
+    # A loop that already exited sampled an idle device for part of the
+    # window. The increment would then be a small positive number that reads
+    # as an efficient arm, so the round is refused instead of averaged.
+    if ! kill -0 "$pid" 2>/dev/null; then
+        fail "the $tag workload stopped before the window closed: $(head -1 "$out/$tag-workload.log" 2>/dev/null)"
+    fi
     # The loop runs one ffmpeg at a time; stop the loop and its current child.
     pkill -P "$pid" 2>/dev/null || true
     kill "$pid" 2>/dev/null || true
