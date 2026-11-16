@@ -33,6 +33,8 @@
 
 只有 `data/iris-codec-capabilities.json` 标记为 `production: supported` 的编码格式才对外声明 VA profile。一致性列的数字都来自与软件解码的逐帧比对；具体运行、语料，以及每个未通过向量的归类记录在 `TEST-RESULTS.md`。浏览器会话只有在媒体表面报告了选中的解码器，并给出解码帧数与丢帧数时，才算走硬件。
 
+Fluster 数字是历史记录，不是每次构建都重跑。H.264 72/135 与 HEVC 141/147 来自 2026-10-24 在装机包上用 Fluster 0.8.0 跑的一次，源码 commit 为 `434be71`，见 `TEST-RESULTS.md` 的「Codec conformance: Fluster on the installed package」；VP9 176/305 来自 2026-10-25 的 `VP9-TEST-VECTORS` 语料重跑，见 `TEST-RESULTS.md` 的「VP9 corpus re-run」。这些数字不是驱动缺陷计数，每个未通过向量的归类都写在对应章节。
+
 AV1 film grain 合成已支持。客户端给出独立的 `current_display_picture` 时，驱动以 grain 关闭的方式解码该访问单元，并在画面 `endPicture` 内同步把 grain 混合到显示表面，赶在客户端复用无 grain 的 `current_frame` 之前完成。以 side data 导出 grain 参数的客户端仍自行合成。`test/iris-av1-grain-gate.sh` 要求每个下载帧与 libdav1d 的加 grain 输出逐字节一致。
 
 ### 编码

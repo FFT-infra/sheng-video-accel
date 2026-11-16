@@ -127,6 +127,12 @@ echo "== remote gate command transport"
 # land the command in a per-run file and read it by path.
 run gate-command-file grep -Fq 'remote_cmd' "$test_dir/remote/gate.sh"
 run gate-no-stdin-child sh -c '! grep -Fq "guard.sh -- sh -s" "$1"' sh "$test_dir/remote/gate.sh"
+# A run record that always hashes the installed package lies whenever a gate
+# names a build tree with LIBVA_DRIVERS_PATH. Both the override path and the
+# installed hash have to be in the identity the summary.json consumes.
+run gate-resolved-driver grep -Fq 'driver_override' "$test_dir/remote/gate.sh"
+run gate-installed-driver grep -Fq 'installed_driver=' "$test_dir/remote/gate.sh"
+run gate-driver-path grep -Fq 'driver_path=' "$test_dir/remote/gate.sh"
 
 echo "== python syntax"
 for script in "$test_dir"/*.py "$test_dir"/remote/*.py "$test_dir"/vulkan-vpp/*.py; do

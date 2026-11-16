@@ -14,6 +14,7 @@ concurrency_soak="$root/test/iris-concurrency-soak.sh"
 dynamic_resolution="$root/test/iris-dynamic-resolution.sh"
 eightk_gate="$root/test/iris-8k-gate.sh"
 two_player_gate="$root/test/iris-two-player-gate.sh"
+encode_quality="$root/test/iris-encode-quality.sh"
 
 # The two new target gates must stay exact pixel oracles and must refuse a
 # pool that would reintroduce the 8K ENOMEM. These are text guards for the
@@ -27,6 +28,13 @@ if ! grep -Fq 'framemd5 differs from the software baseline' "$two_player_gate" \
     || ! grep -Fq 'run_player a' "$two_player_gate" \
     || ! grep -Fq 'run_player b' "$two_player_gate"; then
     echo "FAIL two-player gate no longer runs two independent exact-pixel clients" >&2
+    exit 1
+fi
+# An installed-package run must not be silently redirected to a build tree.
+# The default has to stay empty and the driver export has to be conditional.
+if grep -Eq 'driver_path=\$\{LIBVA_DRIVERS_PATH:-[^}]*build' "$two_player_gate" \
+    || ! grep -Fq "set_driver=''" "$two_player_gate"; then
+    echo "FAIL two-player gate forces a build-tree driver on installed-package runs" >&2
     exit 1
 fi
 
@@ -91,6 +99,13 @@ fi
 if grep -q 'va-same-context\|same-context path' "$dynamic_resolution" \
     || ! grep -q 'va-single-process' "$dynamic_resolution"; then
     echo "FAIL dynamic-resolution gate claims FFmpeg reuses one VA context" >&2
+    exit 1
+fi
+
+# The encode-quality gate must free each codec's multi-MiB raw frames before
+# the next codec allocates its own, or the target's small free space fills up.
+if ! grep -Fq 'rm -f "$stream" "$decoded" "$ref" "$blank"' "$encode_quality"; then
+    echo "FAIL encode-quality gate no longer releases each codec's scratch frames" >&2
     exit 1
 fi
 

@@ -26,7 +26,7 @@
 
 Name:           libva-v4l2-iris
 Version:        0.1.0
-Release:        3%{?dist}
+Release:        4%{?dist}
 Summary:        VA-API backend for the Qualcomm Iris V4L2 stateful decoder and encoder
 
 # Driver source is MIT; COPYING.LGPL retains upstream provenance. The AND is
@@ -152,6 +152,10 @@ sh scripts/refresh-install-manifest.sh \
 %{_datadir}/iris-vaapi/install-manifest.txt
 
 %changelog
+* Tue Nov 10 2026 Iris VA-API maintainers - 0.1.0-4
+- Installed on the SM8550 target for the installed-package driver gates. The
+  spec now matches the release number that target reports.
+
 * Sun Oct 25 2026 Iris VA-API maintainers - 0.1.0-3
 - Ship the scripts the package already referenced but did not carry: a clean
   checkout built no installer input at all.

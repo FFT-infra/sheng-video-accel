@@ -35,7 +35,11 @@ clip_b=${IRIS_TWO_PLAYER_CLIP_B:-}
 publish=${IRIS_TWO_PLAYER_PUBLISH:-}
 render=${IRIS_RENDER_NODE:-/dev/dri/renderD128}
 out=${IRIS_TWO_PLAYER_OUT:-$(iris_artifact_dir two-player-gate)}
-driver_path=${LIBVA_DRIVERS_PATH:-$root/build/src}
+# An empty override means the installed package: do not export
+# LIBVA_DRIVERS_PATH at all, or libva would load a build tree the caller never
+# named. A named override is verified to hold the driver before any player is
+# started.
+driver_path=${LIBVA_DRIVERS_PATH:-}
 
 fail() {
     echo "FAIL two-player: $*" >&2
@@ -51,7 +55,8 @@ for clip in "$clip_a" "$clip_b"; do
     [ "$geometry" = "1920,1080" ] || fail "clip is $geometry, expected 1920,1080: $clip"
 done
 [ -e "$render" ] || fail "render node missing: $render"
-[ -f "$driver_path/v4l2_drv_video.so" ] || fail "no v4l2_drv_video.so in $driver_path"
+[ -z "$driver_path" ] || [ -f "$driver_path/v4l2_drv_video.so" ] \
+    || fail "no v4l2_drv_video.so in $driver_path"
 command -v ffmpeg >/dev/null 2>&1 || fail 'ffmpeg is required'
 command -v ffprobe >/dev/null 2>&1 || fail 'ffprobe is required'
 
@@ -62,9 +67,17 @@ set_publish=''
 run_player() {
     lane=$1
     clip=$2
+    # With no LIBVA_DRIVERS_PATH the caller is testing the installed package:
+    # inherit the environment untouched, so libva resolves the system driver
+    # with no override at all. Only a named build tree gets a driver name and
+    # path, because that tree has no msm alias to resolve by DRM name.
+    if [ -n "$driver_path" ]; then
+        set_driver="LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH=$driver_path"
+    else
+        set_driver=''
+    fi
     # shellcheck disable=SC2086
-    env LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH="$driver_path" \
-        V4L2_VA_TRACE=1 $set_publish \
+    env $set_driver V4L2_VA_TRACE=1 $set_publish \
         ffmpeg -y -nostdin -hide_banner -loglevel error -vaapi_device "$render" \
         -re -hwaccel vaapi -hwaccel_output_format vaapi -i "$clip" \
         -vf 'hwdownload,format=nv12,format=yuv420p' \

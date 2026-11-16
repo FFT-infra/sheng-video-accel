@@ -256,10 +256,12 @@ IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh \
 
 The record is `summary.json` with schema `qualcomm-iris-vaapi/target-run-v1`,
 plus `identity.txt`, `command.stdout`, `command.stderr` and the guard
-directory copied back from the target. The runner does not deploy: it reports
-the driver and module hashes the target holds, so a run against a stale
-install is visible in the record instead of being remembered. A guard that
-stopped the run exits 3, and its state says why.
+directory copied back from the target. The runner does not deploy: `identity`
+names both the installed package (`installed_driver`) and the driver the
+command actually resolves (`driver`/`driver_path`). When the command sets
+`LIBVA_DRIVERS_PATH`, `driver` is that build tree, so a run that used a build
+tree is visible in the record instead of being remembered as an installed
+package. A guard that stopped the run exits 3, and its state says why.
 
 ## Distribution packaging
 

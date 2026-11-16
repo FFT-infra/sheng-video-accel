@@ -78,17 +78,41 @@ commit=$(git -C "$here/../.." rev-parse HEAD 2>/dev/null || echo unknown)
 dirty=0
 [ -z "$(git -C "$here/../.." status --porcelain 2>/dev/null)" ] || dirty=1
 
+# A run that names LIBVA_DRIVERS_PATH loads that build tree, not the installed
+# package. Extract the override so the identity below hashes the driver the
+# command will actually use. The value is passed through an ssh env assignment,
+# so keep it to plain path characters.
+driver_override=$(printf '%s\n' "$*" | sed -n 's/.*LIBVA_DRIVERS_PATH=\([^[:space:]]*\).*/\1/p' | head -1)
+if [ -n "$driver_override" ]; then
+    case $driver_override in
+        *[!A-Za-z0-9_./~-]*) fail "unsafe LIBVA_DRIVERS_PATH in command: $driver_override" ;;
+    esac
+fi
+
 # Identity comes from the target, by driver name. A node number is not stable
 # across boots, so it is recorded only beside the name v4l2-ctl reports for it.
-ssh -o ConnectTimeout=10 "$host" "cd ~/$remote_root && sh -s" >"$out/identity.txt" <<'IDENTITY' || fail "cannot read identity from $host"
+ssh -o ConnectTimeout=10 "$host" "cd ~/$remote_root && IRIS_GATE_DRIVER_PATH='$driver_override' sh -s" >"$out/identity.txt" <<'IDENTITY' || fail "cannot read identity from $host"
 set -eu
 . ./test/lib/iris-env.sh
 decoder=$(iris_resolve_device)
 encoder=$(iris_resolve_encoder || true)
+override=${IRIS_GATE_DRIVER_PATH:-}
+installed_path=/usr/lib64/dri/v4l2_drv_video.so
+installed_driver=$(sha256sum "$installed_path" 2>/dev/null | cut -d' ' -f1)
+if [ -n "$override" ]; then
+    run_path=$override/v4l2_drv_video.so
+    driver=$(sha256sum "$run_path" 2>/dev/null | cut -d' ' -f1)
+    [ -n "$driver" ] || driver=missing
+else
+    run_path=$installed_path
+    driver=$installed_driver
+fi
 printf 'boot=%s\n' "$(cat /proc/sys/kernel/random/boot_id)"
 printf 'kernel=%s\n' "$(uname -r)"
 printf 'module=%s\n' "$(sha256sum "/lib/modules/$(uname -r)/kernel/drivers/media/platform/qcom/iris/qcom-iris.ko.zst" 2>/dev/null | cut -d' ' -f1)"
-printf 'driver=%s\n' "$(sha256sum /usr/lib64/dri/v4l2_drv_video.so 2>/dev/null | cut -d' ' -f1)"
+printf 'driver=%s\n' "$driver"
+printf 'driver_path=%s\n' "$run_path"
+printf 'installed_driver=%s\n' "$installed_driver"
 printf 'decoder_node=%s\n' "$decoder"
 printf 'decoder_name=%s\n' "$(v4l2-ctl -d "$decoder" --info 2>/dev/null | sed -n 's/.*Card type *: *//p')"
 printf 'encoder_node=%s\n' "${encoder:-none}"

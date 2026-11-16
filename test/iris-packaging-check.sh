@@ -20,6 +20,8 @@ set -eu
 root=${1:-$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)}
 spec=$root/packaging/fedora/libva-v4l2-iris.spec
 pkgbuild=$root/packaging/arch/PKGBUILD
+debian_changelog=$root/debian/changelog
+state=$root/docs/STATE.md
 installer=$root/scripts/install-system.sh
 refresh_manifest=$root/scripts/refresh-install-manifest.sh
 failures=0
@@ -29,9 +31,27 @@ fail() {
     printf 'FAIL packaging: %s\n' "$*" >&2
 }
 
-for path in "$spec" "$pkgbuild" "$installer" "$refresh_manifest"; do
+for path in "$spec" "$pkgbuild" "$debian_changelog" "$state" "$installer" "$refresh_manifest"; do
     [ -f "$path" ] || { fail "missing $path"; exit 1; }
 done
+
+# One source version across the three package formats and the current-state
+# page. The target reports the installed RPM's NEVRA, so a spec whose Release
+# drifted from that number makes an installed-package gate claim unverifiable.
+version=$(sed -n 's/^Version:[[:space:]]*//p' "$spec" | head -1)
+release=$(sed -n 's/^Release:[[:space:]]*\([0-9]*\).*/\1/p' "$spec" | head -1)
+[ -n "$version" ] || fail 'spec has no Version field'
+[ -n "$release" ] || fail 'spec has no numeric Release field'
+grep -Fq "pkgver=$version" "$pkgbuild" \
+    || fail "PKGBUILD pkgver disagrees with spec Version $version"
+grep -Fq "libva-v4l2-iris ($version)" "$debian_changelog" \
+    || fail "debian/changelog disagrees with spec Version $version"
+grep -Fq "maintainers - $version-$release" "$spec" \
+    || fail "spec %changelog has no entry for $version-$release"
+grep -Fq "Version: $version" "$state" \
+    || fail "docs/STATE.md disagrees with spec Version $version"
+grep -Fq "Release: $release%{?dist}" "$state" \
+    || fail "docs/STATE.md disagrees with spec Release $release"
 
 # The installer is the single source of truth for the layout. Read the paths
 # out of it rather than restating them here, so a change there fails this

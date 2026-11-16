@@ -14,7 +14,7 @@ boundary. If this page and either of those disagree, those two win.
 | Distribution baseline | Fedora 44, aarch64 |
 | Kernel | `ianchb/sm8550-mainline`, branch `sheng-7.2.6`, commit `42f3b40c702a`, with patches 0001-0004 |
 | VA driver runtime | `v4l2_drv_video.so`, resolved by `iris_driver` QUERYCAP name |
-| Package | `libva-v4l2-iris`, `Version: 0.1.0`, `Release: 3%{?dist}` |
+| Package | `libva-v4l2-iris`, `Version: 0.1.0`, `Release: 4%{?dist}` |
 
 Stock kernels without the four patches still build and install. The driver
 falls back to display-order decoding with GPU copy, and requested IDRs are

@@ -63,7 +63,9 @@ IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh \
 
 `gate.sh` records `summary.json` (schema `qualcomm-iris-vaapi/target-run-v1`),
 module and driver hashes, boot ID, thermal and battery state, and the command's
-output.
+output. `identity.driver` is the driver the command resolves: a
+`LIBVA_DRIVERS_PATH` override hashes that build tree, while
+`identity.installed_driver` keeps the system package hash for comparison.
 
 ### Browser Acceptance Gate
 
