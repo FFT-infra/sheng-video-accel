@@ -562,6 +562,77 @@ absolute build-tree path to gate a build instead. Neither gate is a Meson
 test: both need the Iris decoder node. A run whose boot ID changes, or that
 trips the thermal ceiling, is a failed experiment.
 
+### Real-clip media and the pin
+
+Two gates decide from a recorded publish count rather than from a whole-file
+comparison: `iris-real-clip-gate.sh` and `iris-av1-grain-gate.sh`. A count is
+a property of one exact file, so both refuse a media directory that does not
+pin its clips. The directory must hold a `SHA256SUMS` beside the media:
+
+```sh
+cd /path/to/realclip
+sha256sum *.webm *.mkv *.md5 > SHA256SUMS
+```
+
+Generate the clips and their software baselines once, on the target, in a
+scratch directory (never in the repository). Every baseline is named
+`<name>-sw.md5` and must come from a software decoder:
+
+```sh
+# 1280x720 AV1, 120 frames, every picture Import.
+ffmpeg -y -hide_banner -loglevel error -f lavfi \
+    -i testsrc2=size=1280x720:rate=30 -frames:v 120 \
+    -c:v libsvtav1 -preset 8 -pix_fmt yuv420p -g 30 av1-720.webm
+
+# 80 frames that switch 1280x720 -> 854x480 mid-stream (DRC). Encode the two
+# halves at the sizes the driver was gated with, then concatenate; the second
+# half must open on a key frame or it cannot be decoded at the new geometry.
+ffmpeg -y -hide_banner -loglevel error -f lavfi \
+    -i testsrc2=size=1280x720:rate=30 -frames:v 40 \
+    -c:v libsvtav1 -preset 8 -pix_fmt yuv420p -g 20 hi.mkv
+ffmpeg -y -hide_banner -loglevel error -f lavfi \
+    -i testsrc2=size=854x480:rate=30 -frames:v 40 \
+    -c:v libsvtav1 -preset 8 -pix_fmt yuv420p -g 20 lo.mkv
+ffmpeg -y -hide_banner -loglevel error -i hi.mkv -i lo.mkv \
+    -filter_complex '[0:v][1:v]concat=n=2:v=1[out]' -map '[out]' \
+    -c:v libsvtav1 -preset 8 resize-av1.mkv
+rm -f hi.mkv lo.mkv
+
+# 3840x2160 AV1, 30 frames.
+ffmpeg -y -hide_banner -loglevel error -f lavfi \
+    -i testsrc2=size=3840x2160:rate=30 -frames:v 30 \
+    -c:v libsvtav1 -preset 10 -pix_fmt yuv420p -g 15 av1-4k.mkv
+
+for clip in av1-720.webm resize-av1.mkv av1-4k.mkv; do
+    ffmpeg -y -hide_banner -loglevel error -c:v libdav1d -i "$clip" \
+        -pix_fmt yuv420p -f framemd5 "${clip%.*}-sw.md5"
+done
+sha256sum *.webm *.mkv *.md5 > SHA256SUMS
+```
+
+The expected publish counts live in each gate's `expected_counts()`, keyed by
+clip hash. A clip the table does not know is refused rather than measured
+against another file's numbers. To add one, run the decode once by hand with
+the trace on, read the counts off it, and record them with a comment saying
+why they are what they are:
+
+```sh
+V4L2_VA_TRACE=1 V4L2_VA_PUBLISH=import \
+ffmpeg -y -hide_banner -loglevel error -vaapi_device /dev/dri/renderD128 \
+    -hwaccel vaapi -hwaccel_output_format vaapi -i new-clip.mkv \
+    -vf 'hwdownload,format=nv12,format=yuv420p' -f framemd5 /dev/null \
+    2>new-clip.trace
+grep -c 'publish=import' new-clip.trace
+grep -c 'publish=copy-' new-clip.trace
+grep -c 'publish=invisible' new-clip.trace
+tail -1 new-clip.trace     # session finish: submitted, completed, drains
+```
+
+Then add the hash to `SHA256SUMS` and a row to `expected_counts()`. The counts
+describe the qualified Import policy; a clip whose first run reports
+`publish=copy-*` or `publish=error` is not qualified and must not be added
+with those numbers.
+
 ## Host-side release gate
 
 The CI and local release sequence is:

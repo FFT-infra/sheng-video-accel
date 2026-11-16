@@ -109,4 +109,22 @@ if ! grep -Fq 'rm -f "$stream" "$decoded" "$ref" "$blank"' "$encode_quality"; th
     exit 1
 fi
 
+# A gate whose oracle is a hardcoded publish count is a statement about one
+# exact media file. Without a pin the file can be replaced and the count goes
+# stale silently: av1-720.webm was swapped on 2026-11-15 and invisible=42
+# became 15, which read as a driver regression. Both counting gates must
+# verify the media identity and look the counts up by clip hash.
+real_clip="$root/test/iris-real-clip-gate.sh"
+grain_gate="$root/test/iris-av1-grain-gate.sh"
+for gate in "$real_clip" "$grain_gate"; do
+    if ! grep -Fq 'iris_require_media_pin "$clip_dir"' "$gate"; then
+        echo "FAIL $(basename "$gate") does not pin its media directory" >&2
+        exit 1
+    fi
+    if ! grep -Fq 'expected_counts()' "$gate" || ! grep -Fq 'iris_media_sha' "$gate"; then
+        echo "FAIL $(basename "$gate") hardcodes counts instead of keying them by clip hash" >&2
+        exit 1
+    fi
+done
+
 echo "PASS source invariants"
