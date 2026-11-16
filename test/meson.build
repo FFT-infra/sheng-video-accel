@@ -257,6 +257,16 @@ va_vtable_test = executable(
              '-DVA_DRIVER_INIT_FUNC=' + va_driver_init_func])
 test('va-vtable', va_vtable_test)
 
+# The config attributes a client branches on, and createConfig's value check.
+# Links the real config.cc against a constructed DriverData, as va-vtable does.
+va_config_attributes_test = executable(
+  'va-config-attributes-test',
+  files('unit/va-config-attributes-test.cc') + va_driver_sources,
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20',
+             '-DVA_DRIVER_INIT_FUNC=' + va_driver_init_func])
+test('va-config-attributes', va_config_attributes_test)
+
 # Hardware-independent regression guards for the browser-facing queue and
 # stable-export invariants. The integration probe above remains opt-in because
 # hosts without /dev/video nodes cannot execute it.

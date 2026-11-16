@@ -4,8 +4,6 @@
 
 #include "../util/error.h"
 
-#include <algorithm>
-#include <cstring>
 
 namespace va {
 
@@ -137,6 +135,35 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
             // NOT_SUPPORTED answer makes it compute -1.
             attributes[i].value = encode ? 1 : VA_ATTRIB_NOT_SUPPORTED;
             break;
+        case VAConfigAttribEncInterlaced:
+            // The firmware writes progressive parameter sets only. NONE is
+            // the truthful "no interlaced" value; NOT_SUPPORTED would make a
+            // client skip the attribute and guess.
+            attributes[i].value = encode ? VA_ENC_INTERLACED_NONE : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribEncSliceStructure:
+            // One full-picture slice, which the EQUAL_ROWS shape describes as
+            // closely as VA can express: there is no per-row independent
+            // slice, just one slice covering all rows.
+            attributes[i].value = encode ? VA_ENC_SLICE_STRUCTURE_EQUAL_ROWS : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribEncQualityRange:
+            // One quality level. The firmware has no speed/quality knob, so
+            // clients must see a range of 1 rather than an unknown attribute.
+            attributes[i].value = encode ? 1 : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribPredictionDirection:
+            // One past reference. FFmpeg and GStreamer both need this to know
+            // B pictures are not the default.
+            attributes[i].value = encode ? VA_PREDICTION_DIRECTION_PREVIOUS : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribDecAV1Features:
+            // Large-scale tiles are unsupported, but the attribute is known:
+            // answering 0 lets a client ask instead of treating AV1 config
+            // as a driver that does not understand the profile.
+            attributes[i].value = (decode && profile == VAProfileAV1Profile0)
+                ? 0 : VA_ATTRIB_NOT_SUPPORTED;
+            break;
         case VAConfigAttribEncIntraRefresh:
             // The firmware sweeps one band of rows per picture, so the
             // rolling-row form is the one it can express; the column form,
@@ -191,8 +218,8 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
         }
 #endif
         default:
-            // Slice structure, ROI, quality range and tiles stay unsupported:
-            // the firmware decides the layout.
+            // ROI, quantization, JPEG, tiling and the extended rate-control
+            // surface stay unsupported: the firmware decides the layout.
             attributes[i].value = VA_ATTRIB_NOT_SUPPORTED;
             break;
         }
@@ -226,9 +253,21 @@ VAStatus createConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entr
             rt_format |= VA_RT_FORMAT_YUV420_10;
         uint32_t rate_control = VA_RC_VBR;
         for (int i = 0; i < count; ++i) {
-            if (attributes[i].type == VAConfigAttribRTFormat && attributes[i].value != VA_ATTRIB_NOT_SUPPORTED)
+            if (attributes[i].value == VA_ATTRIB_NOT_SUPPORTED)
+                continue;
+            // A real client passes only RTFormat and RateControl here. Check
+            // the known attributes against what getConfigAttributes answers;
+            // an unknown type stays accepted so a newer client can still open
+            // a config, but a value we cannot honour fails now instead of at
+            // renderPicture.
+            VAConfigAttrib query = { attributes[i].type, 0 };
+            getConfigAttributes(ctx, profile, entrypoint, &query, 1);
+            if (query.value != VA_ATTRIB_NOT_SUPPORTED)
+                iris::require((attributes[i].value & ~query.value) == 0,
+                    "unsupported config attribute value", VA_STATUS_ERROR_ATTR_NOT_SUPPORTED);
+            if (attributes[i].type == VAConfigAttribRTFormat)
                 rt_format = attributes[i].value;
-            if (attributes[i].type == VAConfigAttribRateControl && attributes[i].value != VA_ATTRIB_NOT_SUPPORTED)
+            if (attributes[i].type == VAConfigAttribRateControl)
                 rate_control = attributes[i].value;
         }
         if (entrypoint == VAEntrypointVideoProc) {
