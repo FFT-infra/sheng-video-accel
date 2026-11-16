@@ -9083,8 +9083,10 @@ display at brightness 901 of 2047.
 
 Kernel `7.3.4-sm8550-00104-g87ac0f2347eb`, boot
 `fd0b90f4-d968-4340-94f9-f2fd7bc6c52a`, encoder node `/dev/video18`
-(`iris_driver`, NV12 OUTPUT / H.264-HEVC CAPTURE), driver
-`db5517eb…e647` built from `91e0f14`.
+(`iris_driver`, NV12 OUTPUT / H.264-HEVC CAPTURE). The control evidence below
+came from the direct-node probe; the VA-path numbers were re-run on the
+committed tree, driver `1cc41d8c…a221` built from `2cda745`
+(`source_dirty=0`, tracked `2081bd53…a8603d`), and reproduced byte for byte.
 
 The encoder node lists three capability groups this driver never wrote:
 rolling intra refresh, long-term references, and hierarchical (temporal)
