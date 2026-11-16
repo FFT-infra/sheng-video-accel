@@ -9272,3 +9272,47 @@ copy path that goes through Vulkan instead of EGL — the VPP backend already is
 Vulkan, so a UBWC surface could be sampled there today, but decode still has to
 hand pixels to a client. The capability table's decode and encode entries
 record the measurement.
+
+## The branch head as a live install, 7.3.4 (2026-11-16)
+
+Every target record on this branch until now loaded a build-tree override
+through `LIBVA_DRIVERS_PATH`. This run installs the branch head into libva's
+own driver directory and repeats the gates with no override at all.
+
+Source `6d89564149fe30b7bc36fb19a14f02aeda91323a`, tracked-source digest
+`f5de45f1…9eec35`, artifact `1cc41d8c…a221`, 11,892,856 bytes; installed with
+`scripts/install-system.sh`, recorded in
+`/usr/local/share/iris-vaapi/install-manifest.txt` as
+`source_dirty=0`; the previous driver `679a339e…` is kept at the manifest's
+backup path. This is a live system install, not a `DESTDIR` staging run.
+Boot `fd0b90f4-d968-4340-94f9-f2fd7bc6c52a`, kernel
+`7.3.4-sm8550-00104-g87ac0f2347eb`, module `8f771ada…dc75`, decoder
+`/dev/video17` and encoder `/dev/video18` resolved by `iris_driver`. Every run
+below reported `driver_path=/usr/lib64/dri/v4l2_drv_video.so` and
+`installed_driver=1cc41d8c…a221`, under `test/remote/gate.sh` with
+`guard=complete`.
+
+| gate | result |
+| --- | --- |
+| `iris-8k-gate.sh` | H.264, HEVC, VP9 and AV1 at 7680x4320, 4 frames each, `framemd5=exact`, `errors=0 last=1 drain=1`, `pool=8` |
+| `iris-real-clip-gate.sh` plain | AV1 720p, `frames=120 import=120 copy=0 invisible=15`, exact |
+| `iris-real-clip-gate.sh` drc | `frames=80 submitted=80 completed=80 import=40 copy=40 invisible=1`, exact |
+| `iris-real-clip-gate.sh` 4k | AV1 3840x2160, `frames=30 import=30 copy=0 invisible=0`, exact |
+| `iris-two-player-gate.sh` | two independent 1080p H.264 clients, `a` and `b` 90/90 frames exact, `errors=0 last=1` |
+| `iris-encode-quality.sh` | 1080p H.264 SSIM 0.998596 / worst 0.9985, HEVC 0.996808 / 0.9963; blank controls 0.000034; decode-to-encode 0.997654 and 0.995067; 8K H.264 0.995885 with IRQ +24, HEVC 0.997403 with +23 |
+| `iris-encode-baseline.sh` | H.264 496.4 fps against libx264 126.9 (3.91x) at 0.0027 against 0.0339 CPU s/frame; HEVC 537.1 against libx265 35.4 (15.19x) at 0.0027 against 0.1639 |
+
+The real-clip `drc` lane is the only one that publishes half its frames by GPU
+copy: the set exists to exercise the in-context resolution change, and the
+40 Import / 40 Copy split is the expected shape, not a fallback.
+
+The baseline fps cells are lower than the 507.3 / 548.7 recorded above because
+the device was unpinned and warm; the software arms moved with them, and the
+speedup ratio is unchanged at the same settings. Battery was at 59–60 % and
+discharging throughout, so no run here was taken on charger power.
+
+What this does not prove: no browser session, GStreamer element, VPP case or
+Fluster vector ran from the installed driver in this pass. Those were
+qualified on the build tree and on 7.2.6's installed package; this pass moves
+the 7.3.4 branch-head decode and encode paths onto the system driver, not the
+whole 2026-11-15 matrix.
