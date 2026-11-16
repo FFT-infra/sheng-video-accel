@@ -37,7 +37,11 @@ namespace va {
 constexpr const char* kVendor = "Qualcomm Iris V4L2 stateful (libva-v4l2)";
 constexpr unsigned kMaxProfiles = 16;
 constexpr unsigned kMaxEntrypoints = 2;
-constexpr unsigned kMaxAttributes = 8;
+// getConfigAttributes answers any type a client asks for, so this ceiling is
+// only what vaMaxNumConfigAttributes reports. Keep it at the full libva 1.23
+// config-attribute range; a smaller number makes the driver look narrower
+// than it is to a client sizing its query array.
+constexpr unsigned kMaxAttributes = 16;
 // What vaMaxNumImageFormats reports, and therefore the largest list
 // queryImageFormats may fill: a client sizes its array from this number.
 // NV12 and P010 for the codecs, I420 as the planar form of the same 4:2:0
