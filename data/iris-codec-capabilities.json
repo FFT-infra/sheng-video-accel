@@ -26,7 +26,8 @@
       "rejected": [
         "MVC/multiview",
         "interlaced",
-        "non-8-bit or non-4:2:0"
+        "H.264 High 10: the node's decode profile mask lists Baseline, Constrained Baseline, Main, High and Constrained High and no HIGH_10 (iris_hfi_gen2.c inst_fw_cap_sm8550_dec), and this driver exposes no H264High10 profile",
+        "non-4:2:0 chroma: every CAPTURE format the node enumerates is 4:2:0"
       ],
       "publish_import": "qualified",
       "encode": {
@@ -125,8 +126,8 @@
       ],
       "fallback": "software",
       "rejected": [
-        "show_existing_frame through VA",
-        "12-bit",
+        "show_existing_frame through VA (VADecPictureParameterBufferVP9 has no frame_to_show field)",
+        "12-bit: src/codec/vp9.cc refuses it with VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT before any buffer is queued. The 2026-11-12 hang in TEST-RESULTS.md is the native v4l2vp9dec element taking ten 12-bit access units and never returning a CAPTURE buffer; it is not this driver",
         "RGB"
       ],
       "publish_import": "qualified",
@@ -158,8 +159,8 @@
       ],
       "fallback": "software",
       "rejected": [
-        "12-bit",
-        "large-scale tile (10-bit only)"
+        "12-bit: the node has no 12-bit CAPTURE format, and the VA layer refuses the stream at profile selection",
+        "large-scale tile: src/codec/av1_obu.cc refuses a picture whose large_scale_tile bit is set. VAConfigAttribDecAV1Features answers VA_ATTRIB_NOT_SUPPORTED, and neither FFmpeg nor Chrome reads that attribute (0 references in the target's libavcodec), so the answer reaches no client"
       ],
       "film_grain_note": "Synthesis is qualified for AV1Profile0 at 8 and 10 bits. The client names the ungrained decode target as current_frame and a separate grained current_display_picture; the driver decodes the rebuilt access unit with apply_grain=0 and blends in userspace (src/va/grain.cc) from that picture's endPicture, before the client can recycle current_frame. The 2026-11-14 gate resolved the 320x240 NV12 20-frame and 352x290 P010 2-frame clips frame-by-frame identical to libdav1d's grained output under V4L2_VA_PUBLISH=import, and both clips matched under direct and copy as well. TEST-RESULTS.md records the run",
       "publish_import": "qualified",

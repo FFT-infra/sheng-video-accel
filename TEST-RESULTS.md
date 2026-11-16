@@ -8971,3 +8971,46 @@ PASS AV1 film grain gate set=all publish=import driver=/home/xinyang/iris-vaapi-
 ```
 
 Every lane's framemd5 matched its software baseline byte for byte.
+
+## Decode rejections: what the node says, what this driver says (2026-11-16)
+
+The capability table's decode `rejected` lists mixed three different kinds of
+limit into one phrase. Each entry was re-read against the 7.3.4 kernel source
+and the driver, and the wording now says which side refuses.
+
+`inst_fw_cap_sm8550_dec[]` in `iris_hfi_gen2.c` is the table the SM8550
+decoder actually uses (line 2041; `inst_fw_cap_milos_dec` is a second table
+at line 2107 for another part). Its `PROFILE_H264` entry:
+
+```c
+.step_or_mask = BIT(V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE) |
+                BIT(V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_BASELINE) |
+                BIT(V4L2_MPEG_VIDEO_H264_PROFILE_MAIN) |
+                BIT(V4L2_MPEG_VIDEO_H264_PROFILE_HIGH) |
+                BIT(V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_HIGH),
+```
+
+There is no `HIGH_10` (V4L2 value 5) in the mask, so a High 10 stream cannot
+select a profile on this node at all. That is a kernel-side limit, not a
+driver omission, and the old wording ("non-8-bit or non-4:2:0") hid it behind
+a phrase that also covered 4:2:2 and 12-bit. The entry is now two rows: H.264
+High 10 names the mask, and non-4:2:0 chroma names the CAPTURE enumeration
+(`NV12`, `Q08C`, `P010`, `Q10C`, all 4:2:0).
+
+VP9 12-bit is refused by this driver, not by the node. `src/codec/vp9.cc`
+requires `bit_depth == 10` for Profile 2 and answers
+`VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT` before any buffer is queued. The hang
+recorded on 2026-11-12 belongs to the native `v4l2vp9dec` element: it accepted
+ten 12-bit access units, never signalled a source change, never returned a
+CAPTURE buffer, and sat in `Waiting for decoder stop` until the guard
+expired. Two different components, one symptom in the old record.
+
+AV1 large-scale tile is refused in `src/codec/av1_obu.cc` when the picture's
+`large_scale_tile` bit is set. `VAConfigAttribDecAV1Features` is not answered
+by this driver at all, which leaves it at `VA_ATTRIB_NOT_SUPPORTED`; the
+target's `libavcodec.so.62` contains no reference to that attribute, so no
+client asks. The entry now says both halves instead of "(10-bit only)", which
+was never the reason.
+
+No code changed. `test/iris-codec-matrix-check.sh` still passes, and the
+driver's advertised profile set is unchanged.
