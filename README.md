@@ -88,7 +88,12 @@ unpinned (`test/iris-encode-baseline.sh`): H.264 encodes 4.4x faster than
 libx264 `veryfast` (507 against 116 fps) at 3.1 against 37.3 ms of client CPU
 per frame, and HEVC 15.2x faster than libx265 (549 against 36 fps) at 2.6
 against 161.5 ms. Encoding reaches 7680x4320 in both codecs, verified by
-frame-hash comparison against a software decode.
+frame-hash comparison against a software decode. At the same settings with
+the screen off and the tablet on battery, the encoder lifts whole-device
+power 2.8 and 3.0 W above the idle baseline, against 4.8 and 5.7 W for
+libx264/libx265 at `veryfast` (`test/iris-power-sampler.sh --workload
+encode`); most of that gap is the software encoders' client CPU. Thermal state moves the absolute numbers,
+so the method and its caveats are in [TEST-RESULTS.md](TEST-RESULTS.md).
 
 ## Requirements
 

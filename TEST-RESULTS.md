@@ -9074,10 +9074,46 @@ at 3 ms per frame, because the client only uploads NV12 and waits.
 
 What this does not measure: quality at equal rate. The two arms are matched
 on bitrate, not on distortion, and a preset comparison at equal SSIM would
-move the software numbers. The power half is written
-(`iris-power-sampler.sh --workload encode`) but not yet measured: it needs
-the screen off and the tablet on battery, and this session ran with the
-display at brightness 901 of 2047.
+move the software numbers.
+
+### Encode power against software
+
+`iris-power-sampler.sh --workload encode` re-encodes `testsrc2` back to back
+in each arm and samples the battery gauge at 1 Hz: 10 s of baseline, a 20 s
+workload window, 10 s of baseline, five rounds, the first 4 s of each window
+dropped. The VA and software arms alternate every round, so a drift in
+background power loads both arms instead of one. The number is whole-device
+increment over the mean of the two baselines, not encoder-package power.
+
+Screen off (backlight 0), battery discharging at 60–62 %, no charger:
+H.264 and HEVC each 1080p, 4 Mbit/s, `veryfast`, boot
+`fd0b90f4-d968-4340-94f9-f2fd7bc6c52a`, driver `1cc41d8c…a221`, source
+`15ec695`, `source_dirty=0`, `guard=complete`:
+
+| Codec | VA increment | libx increment | Difference |
+| --- | ---: | ---: | ---: |
+| H.264 | 2.79 W ± 0.17 | 4.80 W ± 0.20 | −2.01 W |
+| HEVC | 3.02 W ± 0.16 | 5.65 W ± 0.18 | −2.63 W |
+
+A whole-device increment of 2.8 W at 1080p is a large fraction of the
+tablet's idle draw, so this is not a claim about how the encoder spends it:
+the CPU arm is eight cores at full utilisation and the VA arm is one small
+uploader, and much of the gap is the software encoder's client CPU, which
+the equal-rate measurement above puts at 37 ms (H.264) and 161 ms (HEVC) per
+frame against 3 ms.
+
+Thermal state sets the absolute numbers, not the sign. An earlier pair of
+runs on the same tree, taken with the SoC held at 95 °C by an unrelated
+process, read VA 1.24 W against software 1.73 W for H.264 and gave
+intervals wide enough to cross zero for HEVC. The table above is from a
+device that started at 45 °C; its hottest zone reached 91 °C in the H.264
+run and 95 °C in HEVC, with no step in the per-round numbers.
+
+Both runs also caught a defect in the sampler: the software arm named its
+encoder `libh264`, ffmpeg exited on the first iteration, and the gauge
+sampled an idle device. The script now refuses a missing software encoder
+before the first round and a workload loop that stops before the window
+closes, so neither can read as an efficient arm again.
 
 ## Encoder capabilities: what the firmware acts on (2026-11-16)
 

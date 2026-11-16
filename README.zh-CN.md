@@ -63,7 +63,7 @@ HEVC Main 8-bit，FFmpeg 8.1.3。CPU 锁最高频，GPU 锁 680 MHz。解码不�
 
 这组是 7.3.4 内核上的数字；7.2.6 上是 759 / 581 / 359 与 644 / 591 / 167。这个 SoC 的吞吐主要跟着 DVFS 走，不锁频测到的是调频策略。多编码格式、转码、并发、功耗与 VPP 数据，以及每个数字的测法，见 [TEST-RESULTS.md](TEST-RESULTS.md)。
 
-同参数（1080p、4 Mbit/s、300 帧、GOP 60、不锁频）对软件编码器（`test/iris-encode-baseline.sh`）：H.264 比 libx264 `veryfast` 快 4.4 倍（507 对 116 fps），客户端每帧 CPU 3.1 ms 对 37.3 ms；HEVC 比 libx265 快 15.2 倍（549 对 36 fps），2.6 ms 对 161.5 ms。两种编码都能到 7680x4320，已用帧哈希与软件解码逐帧比对。
+同参数（1080p、4 Mbit/s、300 帧、GOP 60、不锁频）对软件编码器（`test/iris-encode-baseline.sh`）：H.264 比 libx264 `veryfast` 快 4.4 倍（507 对 116 fps），客户端每帧 CPU 3.1 ms 对 37.3 ms；HEVC 比 libx265 快 15.2 倍（549 对 36 fps），2.6 ms 对 161.5 ms。两种编码都能到 7680x4320，已用帧哈希与软件解码逐帧比对。同一组参数、关屏、电池供电时，整机功耗比空闲基线高 2.8 W 和 3.0 W，libx264/libx265 则高 4.8 W 和 5.7 W（`test/iris-power-sampler.sh --workload encode`），其中大部分差距是软件编码器的客户端 CPU。热状态会改变绝对值，测法与限制见 [TEST-RESULTS.md](TEST-RESULTS.md)。
 
 ## 运行环境
 
