@@ -125,7 +125,9 @@ Target-compiled diagnostic probe binaries:
 - **`test/iris-va-image-gate.sh` / `iris-va-image-probe.cc`**: Upload/download testing for `vaPutImage` and `vaGetImage`.
 - **`test/iris-gstreamer-gate.sh`**: Validates GStreamer integration (`vaav1dec`, `vah264enc`, `vah265enc`) and allowlist behavior.
 - **`test/iris-alloc-chain.sh`**: Walks the stable buffer fallback hierarchy (MSM GEM coherent -> MSM GEM write-combined -> system DMA heap) using `test/alloc-fault.so`.
-- **`test/iris-encode-quality.sh`**: Verifies hardware encode fidelity (SSIM floors and IRQ counter increments).
+- **`test/iris-encode-quality.sh`**: Verifies hardware encode fidelity (SSIM floors and IRQ counter increments), including a 7680x4320 lane per codec (`IRIS_ENCODE_8K=0` skips it).
+- **`test/iris-encode-baseline.sh`**: Same source and bitrate through `h264_vaapi`/`hevc_vaapi` and libx264/libx265. Reports fps, client CPU seconds per frame and the round-to-round spread; `--power` also runs the encode workload through `iris-power-sampler.sh`.
+- **`test/iris-power-sampler.sh`**: Battery-side power of a decode (`--clip`) or an encode (`--workload encode --codec h264|hevc`) against software, as an increment over a pre/post baseline.
 
 ---
 

@@ -9014,3 +9014,67 @@ was never the reason.
 
 No code changed. `test/iris-codec-matrix-check.sh` still passes, and the
 driver's advertised profile set is unchanged.
+
+## 8K encode and the software-encoder baseline (2026-11-16)
+
+Two claims had no evidence behind them: the encoder's advertised maximum
+(8192x8192 from the node, 8192 in `Capabilities`) and the value of hardware
+encoding at all. Neither had a gate.
+
+### 8K encode
+
+`test/iris-encode-quality.sh` grew a 7680x4320 lane, opt out with
+`IRIS_ENCODE_8K=0`. It encodes `IRIS_ENCODE_8K_FRAMES` (default 8) pictures
+per codec, requires the stream to report 7680x4320 with that many pictures,
+compares the platform decode against a software decode of the same bytes by
+frame hash, and measures SSIM against a freshly generated `testsrc2` at the
+same size. framemd5 replaces the rawvideo oracle here because one 8K frame is
+50 MiB and the target had 7.6 GiB free. The lane refuses to start with less
+than 512 MiB in its scratch directory.
+
+| Codec | Frames | Geometry | Platform vs software decode | SSIM | IRQ delta |
+| --- | ---: | --- | --- | ---: | ---: |
+| H.264 | 8 | 7680x4320 | frame hashes identical | 0.9959 | +25 |
+| HEVC | 8 | 7680x4320 | frame hashes identical | 0.9947 | +23 |
+
+Both 8K streams decoded with `submitted=8 completed=8 errors=0 drops=0
+timeouts=0 drains=1 misplaced=0`. The gate's 1080p lanes passed in the same
+run: H.264 SSIM 0.9986 / worst frame 0.9985, HEVC 0.9968 / 0.9963, both
+decode-to-encode passes above the floor, and a blank stream still scores
+0.000034.
+
+That is a capability probe at eight pictures, not an 8K streaming, thermal
+or power result. It does move the encode evidence from 4K to the decode
+ceiling, so the 8192 the driver advertises is now backed by a real encode at
+7680x4320.
+
+### Hardware against software
+
+`test/iris-encode-baseline.sh` runs the same `testsrc2` source, size, frame
+rate, GOP (60) and bitrate (4 Mbit/s) through `h264_vaapi`/`hevc_vaapi` and
+through libx264/libx265 at `veryfast`. Each arm gets a discarded warm-up round
+and then `--rounds` measured rounds. fps is pictures per second of process
+wall clock from FFmpeg's own `bench:` line; CPU is client utime+stime per
+frame.
+
+1080p, 4 Mbit/s, 300 frames per round, 5 rounds, boot
+`fd0b90f4-d968-4340-94f9-f2fd7bc6c52a`, driver `a50ef3be…44a23`,
+governor `schedutil` (the clocks are not writable without root, so these
+numbers are unpinned):
+
+| Codec | VA fps (min..max) | libx fps (min..max) | Speedup | VA CPU s/frame | Software CPU s/frame |
+| --- | --- | --- | ---: | ---: | ---: |
+| H.264 | 507.3 (476.2..522.6) | 116.2 (93.5..135.2) | 4.4x | 0.0031 | 0.0373 |
+| HEVC | 548.7 (534.8..562.9) | 36.0 (35.5..36.7) | 15.2x | 0.0026 | 0.1615 |
+
+The H.264 software arm is the noisy one: 93.5 to 135.2 fps across five
+rounds, which is thread scheduling on eight cores rather than the encoder.
+The hardware arms vary by under 10 % and their CPU cost is essentially flat
+at 3 ms per frame, because the client only uploads NV12 and waits.
+
+What this does not measure: quality at equal rate. The two arms are matched
+on bitrate, not on distortion, and a preset comparison at equal SSIM would
+move the software numbers. The power half is written
+(`iris-power-sampler.sh --workload encode`) but not yet measured: it needs
+the screen off and the tablet on battery, and this session ran with the
+display at brightness 901 of 2047.

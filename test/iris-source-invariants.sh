@@ -108,6 +108,14 @@ if ! grep -Fq 'rm -f "$stream" "$decoded" "$ref" "$blank"' "$encode_quality"; th
     echo "FAIL encode-quality gate no longer releases each codec's scratch frames" >&2
     exit 1
 fi
+# The 8K encode lane writes one 50 MiB frame at a time and must check free
+# space before it starts, and its oracle must be the frame hashes rather than
+# a whole-file compare: the two framemd5 writers differ in their header.
+if ! grep -Fq '8K lane needs 512 MiB free' "$encode_quality" \
+    || ! grep -Fq "FNR == NR { if (/^0,/) a[++n] = \$0; next }" "$encode_quality"; then
+    echo "FAIL encode-quality 8K lane no longer checks free space and frame hashes" >&2
+    exit 1
+fi
 
 # A gate whose oracle is a hardcoded publish count is a statement about one
 # exact media file. Without a pin the file can be replaced and the count goes

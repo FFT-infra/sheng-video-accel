@@ -20,13 +20,27 @@
 # Usage:
 #   test/iris-power-sampler.sh [--clip PATH] [--seconds N] [--rounds N]
 #                              [--driver PATH] [--out DIR]
+#   test/iris-power-sampler.sh --workload encode --codec h264|hevc
+#                              [--size WxH] [--bitrate B] [--preset P] ...
 #
 # Options:
-#   --clip PATH       Elementary H.264 stream to decode (required).
+#   --clip PATH       Elementary H.264 stream to decode (required for the
+#                     decode workload).
+#   --workload W      decode (default) or encode.
+#   --codec C         h264 or hevc, for the encode workload (default h264).
+#   --size WxH        encode source size (default 1920x1080).
+#   --bitrate B       encode target bitrate (default 4M).
+#   --preset P        software encode preset (default veryfast).
 #   --seconds N       Sample each arm for N seconds (default 20).
 #   --rounds N        Rounds, one VA and one software arm each (default 4).
 #   --driver PATH     VA driver under test (default: the installed one).
 #   --out DIR         Artifact directory (default: lab artifacts).
+#
+# The encode workload re-encodes a synthetic source back to back in each arm:
+# `testsrc2` through `h264_vaapi`/`hevc_vaapi`, and the same source through
+# libx264/libx265 at the same size, rate, GOP and bitrate. It answers what a
+# decode-only measurement cannot: whether hardware encoding saves energy at
+# all, and how much of the difference is the client CPU.
 #
 # The workload re-decodes the clip back to back, so the sampling window is
 # always full. A paced `-re` run leaves the device idle most of the time and
@@ -52,6 +66,11 @@ seconds=20
 rounds=4
 driver=''
 out=''
+workload=decode
+codec=h264
+size=1920x1080
+bitrate=4M
+preset=veryfast
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -60,13 +79,26 @@ while [ "$#" -gt 0 ]; do
         --rounds) rounds=${2:?}; shift 2 ;;
         --driver) driver=${2:?}; shift 2 ;;
         --out) out=${2:?}; shift 2 ;;
-        -h|--help) sed -n '3,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --workload) workload=${2:?}; shift 2 ;;
+        --codec) codec=${2:?}; shift 2 ;;
+        --size) size=${2:?}; shift 2 ;;
+        --bitrate) bitrate=${2:?}; shift 2 ;;
+        --preset) preset=${2:?}; shift 2 ;;
+        -h|--help) sed -n '3,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) fail "unknown argument: $1" ;;
     esac
 done
 
-[ -n "$clip" ] || fail '--clip is required'
-[ -r "$clip" ] || fail "clip not found: $clip"
+case "$workload" in
+    decode)
+        [ -n "$clip" ] || fail '--clip is required'
+        [ -r "$clip" ] || fail "clip not found: $clip"
+        ;;
+    encode)
+        case "$codec" in h264|hevc) ;; *) fail "--codec must be h264 or hevc" ;; esac
+        ;;
+    *) fail "--workload must be decode or encode" ;;
+esac
 [ -r "$battery/voltage_now" ] && [ -r "$battery/current_now" ] || fail "no battery gauge at $battery"
 
 status=$(cat "$battery/status" 2>/dev/null || echo unknown)
@@ -85,12 +117,20 @@ if [ -n "$driver" ]; then
     va_env="LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH=$(dirname "$driver")"
 fi
 driver_sha=$(sha256sum ${driver:-$(sed -n 's/^driver_path=//p' /usr/local/share/iris-vaapi/install-manifest.txt 2>/dev/null | head -1)} 2>/dev/null | cut -d' ' -f1 || true)
-node=$(iris_resolve_device 2>/dev/null || echo unknown)
+if [ "$workload" = encode ]; then
+    node=$(iris_resolve_encoder 2>/dev/null || echo unknown)
+else
+    node=$(iris_resolve_device 2>/dev/null || echo unknown)
+fi
 boot_id=$(cat /proc/sys/kernel/random/boot_id)
 [ -n "$out" ] || out=$(iris_artifact_dir power)/$(date +%Y%m%d-%H%M%S)
 mkdir -p "$out"
 
-echo "Iris power clip=$clip node=$node driver=${driver:-installed} sha256=${driver_sha:-NA} boot=$boot_id seconds=$seconds rounds=$rounds"
+if [ "$workload" = encode ]; then
+    echo "Iris power workload=encode codec=$codec node=$node driver=${driver:-installed} sha256=${driver_sha:-NA} boot=$boot_id size=$size bitrate=$bitrate preset=$preset seconds=$seconds rounds=$rounds"
+else
+    echo "Iris power clip=$clip node=$node driver=${driver:-installed} sha256=${driver_sha:-NA} boot=$boot_id seconds=$seconds rounds=$rounds"
+fi
 echo "Iris power artifacts: $out"
 
 sample() {
@@ -118,7 +158,29 @@ arm() {
     tag=$1
     pre=$out/$tag-pre.txt; run=$out/$tag-run.txt; post=$out/$tag-post.txt
     collect 10 "$pre"
-    if [ "$tag" = va ]; then
+    if [ "$workload" = encode ]; then
+        # One encode per iteration. -f null discards the stream, so the arm
+        # measures the encoder and not the disk. The source is regenerated
+        # by lavfi each time, which is the same CPU cost in both arms.
+        if [ "$tag" = va ]; then
+            # shellcheck disable=SC2086
+            env $va_env sh -c '
+                while :; do
+                    ffmpeg -hide_banner -loglevel error -vaapi_device "$1" \
+                        -f lavfi -i "testsrc2=size=$2:rate=30" -frames:v 120 \
+                        -vf format=nv12,hwupload -c:v "${3}_vaapi" \
+                        -b:v "$4" -g 60 -f null - || break
+                done' sh "$render" "$size" "$codec" "$bitrate" > "$out/$tag-workload.log" 2>&1 &
+        else
+            sh -c '
+                while :; do
+                    ffmpeg -hide_banner -loglevel error \
+                        -f lavfi -i "testsrc2=size=$1:rate=30" -frames:v 120 \
+                        -c:v "lib$2" -preset "$3" -b:v "$4" -pix_fmt yuv420p \
+                        -g 60 -f null - || break
+                done' sh "$size" "$codec" "$preset" "$bitrate" > "$out/$tag-workload.log" 2>&1 &
+        fi
+    elif [ "$tag" = va ]; then
         # shellcheck disable=SC2086
         env $va_env LIBVA_V4L2_VIDEO_PATH="$node" sh -c '
             while :; do
@@ -153,7 +215,12 @@ while [ "$round" -lt "$rounds" ]; do
     echo "round $round: va=${va}uW sw=${sw}uW"
 done
 
-awk -v sz="$(basename "$clip")" '/^round /{n++; v[n]=$3; s[n]=$4; sub(/^va=/,"",v[n]); sub(/^sw=/,"",s[n]); sv+=v[n]; ss+=s[n]}
+if [ "$workload" = encode ]; then
+    label="encode-$codec-$size-$bitrate"
+else
+    label=$(basename "$clip")
+fi
+awk -v sz="$label" '/^round /{n++; v[n]=$3; s[n]=$4; sub(/^va=/,"",v[n]); sub(/^sw=/,"",s[n]); sv+=v[n]; ss+=s[n]}
 END {
     if (!n) { print "RESULT no rounds"; exit 1 }
     mv=sv/n; ms=ss/n

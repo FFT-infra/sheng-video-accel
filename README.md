@@ -83,6 +83,13 @@ numbers on the 7.3.4 kernel; the 7.2.6 table was 759 / 581 / 359 and
 numbers, and the method behind each cell are in
 [TEST-RESULTS.md](TEST-RESULTS.md).
 
+Against software encoders at the same 1080p, 4 Mbit/s, 300 frames and GOP 60,
+unpinned (`test/iris-encode-baseline.sh`): H.264 encodes 4.4x faster than
+libx264 `veryfast` (507 against 116 fps) at 3.1 against 37.3 ms of client CPU
+per frame, and HEVC 15.2x faster than libx265 (549 against 36 fps) at 2.6
+against 161.5 ms. Encoding reaches 7680x4320 in both codecs, verified by
+frame-hash comparison against a software decode.
+
 ## Requirements
 
 - Target SoC: Qualcomm SM8550 (HFI gen2 Iris VPU), aarch64.
