@@ -80,12 +80,17 @@ dirty=0
 
 # A run that names LIBVA_DRIVERS_PATH loads that build tree, not the installed
 # package. Extract the override so the identity below hashes the driver the
-# command will actually use. The value is passed through an ssh env assignment,
-# so keep it to plain path characters.
+# command will actually use. The value travels inside single quotes over ssh,
+# where `~` does not expand, so require an absolute path rather than record a
+# hash for a path that would resolve to "missing".
 driver_override=$(printf '%s\n' "$*" | sed -n 's/.*LIBVA_DRIVERS_PATH=\([^[:space:]]*\).*/\1/p' | head -1)
 if [ -n "$driver_override" ]; then
     case $driver_override in
-        *[!A-Za-z0-9_./~-]*) fail "unsafe LIBVA_DRIVERS_PATH in command: $driver_override" ;;
+        /*) ;;
+        *) fail "LIBVA_DRIVERS_PATH must be absolute in the command: $driver_override" ;;
+    esac
+    case $driver_override in
+        *[!A-Za-z0-9_./-]*) fail "unsafe LIBVA_DRIVERS_PATH in command: $driver_override" ;;
     esac
 fi
 
