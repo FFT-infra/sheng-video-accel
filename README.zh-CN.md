@@ -48,9 +48,9 @@ AV1 film grain 合成已支持。客户端给出独立的 `current_display_pictu
 
 | 接口入口 | 支持特性 | 输入格式 | 输出格式 | 一致性 |
 | --- | --- | --- | --- | --- |
-| `VAEntrypointVideoProc`（`VAProfileNone`，需显式开启） | 任意比例缩放（最近邻 / 双线性 / 驱动自选：缩小区域均值、放大三次插值）、裁剪、旋转、镜像；NV12 与 P010 双向位深转换；HDR10 转 SDR 色调映射；最多十六层叠加合成（Y'CbCr 或打包 BGRA/RGBA） | NV12、P010、BGRA、RGBA | NV12、P010 | 最近邻缩放与裁剪与 swscale 逐字节一致；双线性与四点模型相差不超过 1 个码值；色调映射与 BT.2390/BT.709 管线相差不超过 1 个码值；合成 alpha 0 与 1 两端与输入帧逐字节一致 |
+| `VAEntrypointVideoProc`（`VAProfileNone`） | 任意比例缩放（最近邻 / 双线性 / 驱动自选：缩小区域均值、放大三次插值）、裁剪、旋转、镜像；NV12 与 P010 双向位深转换；HDR10 转 SDR 色调映射；最多十六层叠加合成（Y'CbCr 或打包 BGRA/RGBA） | NV12、P010、BGRA、RGBA | NV12、P010 | 最近邻缩放与裁剪与 swscale 逐字节一致；双线性与四点模型相差不超过 1 个码值；色调映射与 BT.2390/BT.709 管线相差不超过 1 个码值；合成 alpha 0 与 1 两端与输入帧逐字节一致 |
 
-视频处理基于 Vulkan 计算内核实现，默认关闭，环境变量 `V4L2_VA_VPP` 存在且非空即启用（例如 `V4L2_VA_VPP=0` 也算启用）。调度管线会自动等待前序解码完成再读取源表面。关于着色器实现、执行顺序与管线约束，详见 [docs/architecture.md](docs/architecture.md)。
+视频处理基于 Vulkan 计算内核实现，构建中找到 Vulkan 即默认可用；设置 `V4L2_VA_VPP=0` 可以把 `VAProfileNone` / `VAEntrypointVideoProc` 入口从客户端的 profile 列表里关掉。调度管线会自动等待前序解码完成再读取源表面。关于着色器实现、执行顺序与管线约束，详见 [docs/architecture.md](docs/architecture.md)。
 
 ## 性能
 
@@ -143,6 +143,6 @@ mpv、VLC、Sunshine、Firefox、GStreamer 的逐项配置，以及 FFmpeg 的�
 | `V4L2_VA_SYNC_TIMEOUT_MS` | 2000 | session 等待超时时间（毫秒） |
 | `V4L2_VA_COPY` | gpu | 拷贝引擎选择（`gpu` 或 `cpu`） |
 | `V4L2_VA_PUBLISH` | auto | 强制指定发布模式（`auto`、`direct`、`import`、`copy`） |
-| `V4L2_VA_VPP` | off | 启用 Vulkan 视频处理后端（`VAEntrypointVideoProc`：缩放、裁剪、旋转、镜像、位深转换、色调映射、多层合成） |
+| `V4L2_VA_VPP` | on | 设为 `0` 关闭 Vulkan 视频处理后端（`VAEntrypointVideoProc`：缩放、裁剪、旋转、镜像、位深转换、色调映射、多层合成） |
 | `V4L2_VA_B_FRAMES` | off | 启用 H.264 编码器的 B 帧；要求客户端管线保持三帧以上在途（FFmpeg：`-async_depth 3`） |
 | `V4L2_VA_DUMP` | off | 提交的码流单元转储目录路径 |

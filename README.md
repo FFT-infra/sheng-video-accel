@@ -61,9 +61,9 @@ AV1 film grain synthesis is supported. When a client names a separate `current_d
 
 | Entrypoint | Supported operations | Input | Output | Conformance |
 | --- | --- | --- | --- | --- |
-| `VAEntrypointVideoProc` (`VAProfileNone`, opt-in) | Scale at any ratio (nearest-neighbour, bilinear, or driver-selected: area-average down, bicubic up), crop, rotation, mirroring; NV12/P010 bit-depth conversion; HDR10 to SDR tone mapping; up to 16-layer compositing (Y'CbCr or packed BGRA/RGBA) | NV12, P010, BGRA, RGBA | NV12, P010 | Nearest-neighbour scale and crop byte-identical to swscale; bilinear within 1 code of the 4-tap model; tone mapper within 1 code of BT.2390/BT.709; composite alpha 0 and 1 match the input |
+| `VAEntrypointVideoProc` (`VAProfileNone`) | Scale at any ratio (nearest-neighbour, bilinear, or driver-selected: area-average down, bicubic up), crop, rotation, mirroring; NV12/P010 bit-depth conversion; HDR10 to SDR tone mapping; up to 16-layer compositing (Y'CbCr or packed BGRA/RGBA) | NV12, P010, BGRA, RGBA | NV12, P010 | Nearest-neighbour scale and crop byte-identical to swscale; bilinear within 1 code of the 4-tap model; tone mapper within 1 code of BT.2390/BT.709; composite alpha 0 and 1 match the input |
 
-Video processing runs via pinned Vulkan compute kernels on surface DMA-BUFs. It is disabled by default and enabled whenever the `V4L2_VA_VPP` environment variable is set to a non-empty value (e.g. `V4L2_VA_VPP=0` also enables it). Dispatches wait for pending decode completions before reading source surfaces. Shaders, execution order, and pipeline constraints are documented in [docs/architecture.md](docs/architecture.md).
+Video processing runs via pinned Vulkan compute kernels on surface DMA-BUFs. It is available by default on a build that found Vulkan; set `V4L2_VA_VPP=0` to keep the `VAProfileNone` / `VAEntrypointVideoProc` entrypoint out of a client's profile list. Dispatches wait for pending decode completions before reading source surfaces. Shaders, execution order, and pipeline constraints are documented in [docs/architecture.md](docs/architecture.md).
 
 ## Performance
 
@@ -176,6 +176,6 @@ Imported DMA-BUF surfaces must match native CAPTURE layout (single linear object
 | `V4L2_VA_SYNC_TIMEOUT_MS` | 2000 | Bounded session wait timeout in milliseconds |
 | `V4L2_VA_COPY` | gpu | Copy engine selection (`gpu` or `cpu`) |
 | `V4L2_VA_PUBLISH` | auto | Force publication mode (`auto`, `direct`, `import`, `copy`) |
-| `V4L2_VA_VPP` | off | Enable Vulkan video processing (`VAEntrypointVideoProc`: scale, crop, rotate, mirror, NV12/P010 conversion, tone map, overlay) |
+| `V4L2_VA_VPP` | on | Set to `0` to disable Vulkan video processing (`VAEntrypointVideoProc`: scale, crop, rotate, mirror, NV12/P010 conversion, tone map, overlay) |
 | `V4L2_VA_B_FRAMES` | off | Opt in to B pictures in the H.264 encoder; requires a client pipeline of three pictures or more (FFmpeg: `-async_depth 3`) |
 | `V4L2_VA_DUMP` | off | Directory path to dump submitted access units |

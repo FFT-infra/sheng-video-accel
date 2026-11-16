@@ -37,7 +37,7 @@ Non-goals: being a generic backend for stateless request-API decoders (that
 is upstream `mxsrc/libva-v4l2`'s job and stays on `master`), VP9, AV1 and
 10-bit encode, HEVC B-frames, ROI, multi-slice and tiles, `VAEntrypointEncSliceLP`,
 and shipping a custom Chromium. (Video post-processing is supported via
-an opt-in Vulkan compute backend under `V4L2_VA_VPP`).
+a Vulkan compute backend, on by default and disabled by `V4L2_VA_VPP=0`).
 
 ## 2. Target and kernel contract
 
@@ -457,8 +457,8 @@ surface's pending decode before it reads that surface — a client that issues
 the processor's picture straight behind the decode (FFmpeg's `overlay_vaapi`
 does) would otherwise composite a black frame — and a source whose decode never
 lands fails the picture. The entrypoint is advertised only when the
-build found Vulkan and the client set `V4L2_VA_VPP` (§6), so an installed
-decode/encode client sees the surface it qualified against. The kernel and the
+build found Vulkan and the client did not set `V4L2_VA_VPP=0` (§6), so an
+installed decode/encode client sees the surface it qualified against. The kernel and the
 VA surface path are gated separately in §9:
 `test/vulkan-vpp/nv12_scale_gate.sh` and `test/vulkan-vpp/p010_scale_gate.sh`
 check every pixel of the primitive, for both interpolation methods — the point
@@ -525,7 +525,7 @@ Read once in `VA_DRIVER_INIT_FUNC`, stored in `Options`, passed down.
 | `V4L2_VA_SYNC_TIMEOUT_MS` | `2000` | Bounded `vaSyncSurface` wait; first frame of a cold session gets `30000`. |
 | `V4L2_VA_COPY` | `gpu` | Copy engine for persistent exports: `gpu` or `cpu`. |
 | `V4L2_VA_PUBLISH` | `auto` | Force `copy`, `direct` or `import` for diagnostics. |
-| `V4L2_VA_VPP` | off | Opt in to the `VAProfileNone` / `VAEntrypointVideoProc` entrypoint. Off keeps the decode/encode surface unchanged. |
+| `V4L2_VA_VPP` | on | Set to `0` to remove the `VAProfileNone` / `VAEntrypointVideoProc` entrypoint. On keeps the decode/encode surface unchanged. |
 | `V4L2_VA_DUMP` | off | Directory for submitted access units. |
 
 Eight switches, down from eighteen. `test/iris-env-doc-check.sh` keeps README
@@ -771,7 +771,7 @@ must match `scale` then `format` byte for byte;
 `test/vulkan-vpp/transpose_vaapi_gate.sh` checks every direction the pipeline
 caps advertise — three quarter turns, a horizontal and a vertical mirror, and a
 quarter turn with each — against the software filters, in NV12 and P010. Both
-VA-level gates check that the entrypoint is refused without `V4L2_VA_VPP`.
+VA-level gates check that `V4L2_VA_VPP=0` still refuses the entrypoint.
 `test/vulkan-vpp/tonemap_gate.sh` drives the one filter through
 `iris-va-vpp-probe tonemap`: no FFmpeg in 8.1 can feed `tonemap_vaapi` a raw
 P010 frame, so the probe builds the HDR10 metadata buffer itself and compares

@@ -13,9 +13,9 @@
 # at swscale's point positions, so the comparison is byte-exact at any ratio,
 # not just at 2x.
 #
-# The entrypoint is opt-in. The same client must be refused without
-# V4L2_VA_VPP, which is what keeps a VPP-capable build from changing the
-# decode/encode surface an installed client already qualified against.
+# The entrypoint is on by default. The same client must be refused when
+# V4L2_VA_VPP=0, which keeps a single documented switch able to hide the
+# VAProfileNone surface from a client that qualified against it.
 #
 # Target prerequisites: ffmpeg built with --enable-vaapi (scale_vaapi,
 # hwupload, hwdownload), libvulkan, and a driver .so built with the Vulkan
@@ -149,17 +149,17 @@ for c in $up_cases; do
 done
 [ "$failed" -eq 0 ] || fail "VPP output differs from swscale neighbor for at least one ratio"
 
-echo "== opt-in is required: the same client is refused without V4L2_VA_VPP"
+echo "== V4L2_VA_VPP=0 is required to refuse the same client"
 if env LIBVA_DRIVER_NAME=v4l2 $driver_env \
-        LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_TRACE=1 \
+        LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_VPP=0 V4L2_VA_TRACE=1 \
         timeout 120 ffmpeg -y -xerror -hide_banner -loglevel error \
         -vaapi_device "$render" -f rawvideo -pix_fmt nv12 -s 64x64 -i "$work/src-64x64.nv12" \
         -vf 'format=nv12,hwupload,scale_vaapi=w=128:h=128,hwdownload,format=nv12' \
         -f rawvideo "$work/default.nv12" 2>"$work/default.trace"; then
-    fail "scale_vaapi ran without V4L2_VA_VPP; the entrypoint must stay opt-in"
+    fail "scale_vaapi ran with V4L2_VA_VPP=0; the entrypoint must be disabled"
 fi
 if grep -q 'entrypoint=videoproc' "$work/default.trace"; then
-    fail "videoproc appeared without the opt-in"
+    fail "videoproc appeared with V4L2_VA_VPP=0"
 fi
 
 echo "== an unsupported output format is still refused"

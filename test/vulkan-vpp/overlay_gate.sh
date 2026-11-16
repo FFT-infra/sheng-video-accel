@@ -32,7 +32,7 @@
 # before the pass it blends onto, an odd or out-of-bounds rectangle, a crop of
 # the main surface, an overlay region that leaves its own surface, more than
 # sixteen layers and an alpha outside 0..1 are all refused rather than
-# approximated. So is the whole entrypoint without V4L2_VA_VPP.
+# approximated. So is the whole entrypoint with V4L2_VA_VPP=0.
 
 set -eu
 
@@ -316,16 +316,16 @@ refuse alpha-range 128 72 64 48 16 16 64 48 1.50
 refuse overlay-crop-outside 128 72 64 48 16 16 64 48 0.50 --crop=64x48+16+16
 refuse overlay-crop-odd 128 72 64 48 16 16 64 48 0.50 --crop=31x24+0+0
 
-echo "== opt-in is required: the same client is refused without V4L2_VA_VPP"
+echo "== V4L2_VA_VPP=0 is required to refuse the same client"
 rc=0
-env LIBVA_DRIVER_NAME=v4l2 $driver_env LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_TRACE=1 \
+env LIBVA_DRIVER_NAME=v4l2 $driver_env LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_VPP=0 V4L2_VA_TRACE=1 \
     timeout 120 "$probe" overlay "$render" 64 64 32 32 16 16 32 32 0.50 "$work/default.raw" \
     >"$work/default.log" 2>"$work/default.trace" || rc=$?
 if [ "$rc" -eq 0 ]; then
-    fail "a composite ran without V4L2_VA_VPP; the entrypoint must stay opt-in"
+    fail "a composite ran with V4L2_VA_VPP=0; the entrypoint must be disabled"
 fi
 if grep -q 'overlay=' "$work/default.trace"; then
-    fail "a composited picture appeared without the opt-in"
+    fail "a composited picture appeared with V4L2_VA_VPP=0"
 fi
 
 printf 'driver_path=%s\n' "$driver_path"
