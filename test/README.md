@@ -93,6 +93,8 @@ Acceptance requires inspecting `chrome://media-internals` during playback:
   ./test/iris-concurrency-soak.sh dual-h264
   ./test/iris-concurrency-soak.sh mixed
   ```
+- **`test/iris-8k-gate.sh`**: 7680x4320 decode for all four qualified codecs. Asserts the granted CAPTURE pool is the memory-budgeted one (not the old fixed 32), exact framemd5 against a software baseline, terminal LAST and zero completion errors. See [docs/build-and-deploy.md](../docs/build-and-deploy.md#8k-geometry-and-two-client-gates) for the clip generation.
+- **`test/iris-two-player-gate.sh`**: Two independent 1920x1080 ffmpeg processes with their own VA display and driver trace, both required to finish with exact pixels and no completion errors. Leaves `LIBVA_DRIVERS_PATH` unset to test the installed package.
 
 ---
 

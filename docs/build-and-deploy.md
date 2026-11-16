@@ -448,18 +448,35 @@ geometry and resolution edges. Both need a guard wrapper, because a failed
 allocation at 8K can reset the firmware.
 
 Generate the 8K clips and their software baselines once, on the target, in a
-scratch directory (never in the repository):
+scratch directory (never in the repository). The gate reads `h264.mkv` and
+`hevc.mkv` but `vp9.webm` and `av1.webm`, and every baseline is named
+`<name>-sw.md5`:
 
 ```sh
-for spec in 'h264 libx264 -preset ultrafast' 'hevc libx265 -preset ultrafast' \
-            'vp9 libvpx-vp9 -b:v 8M -deadline realtime -cpu-used 8' \
-            'av1 libsvtav1 -preset 12'; do
-    set -- $spec
-    ffmpeg -f lavfi -i testsrc2=size=7680x4320:rate=24 -frames:v 4 \
-        -c:v "$2" "${@:3}" -pix_fmt yuv420p -g 4 -y "$1.mkv"
-    ffmpeg -i "$1.mkv" -pix_fmt yuv420p -f framemd5 "$1-sw.md5"
+cd /path/to/8k-clips
+ffmpeg -y -hide_banner -loglevel error -f lavfi \
+    -i testsrc2=size=7680x4320:rate=24 -frames:v 4 \
+    -c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p -g 4 \
+    h264.mkv
+ffmpeg -y -hide_banner -loglevel error -f lavfi \
+    -i testsrc2=size=7680x4320:rate=24 -frames:v 4 \
+    -c:v libx265 -preset ultrafast -x265-params keyint=4:min-keyint=4:scenecut=0 \
+    -pix_fmt yuv420p hevc.mkv
+ffmpeg -y -hide_banner -loglevel error -f lavfi \
+    -i testsrc2=size=7680x4320:rate=24 -frames:v 4 \
+    -c:v libvpx-vp9 -b:v 8M -deadline realtime -cpu-used 8 -pix_fmt yuv420p \
+    -g 4 vp9.webm
+ffmpeg -y -hide_banner -loglevel error -f lavfi \
+    -i testsrc2=size=7680x4320:rate=24 -frames:v 4 \
+    -c:v libsvtav1 -preset 12 -pix_fmt yuv420p -g 4 av1.webm
+for clip in h264.mkv hevc.mkv vp9.webm av1.webm; do
+    ffmpeg -y -hide_banner -loglevel error -i "$clip" -pix_fmt yuv420p \
+        -f framemd5 "${clip%.*}-sw.md5"
 done
 ```
+
+The software baselines must come from a software decoder, never from this
+driver: a broken driver must not bless its own output.
 
 Run the 8K gate under the experiment guard. It checks the pool sizing, exact
 pixels, terminal LAST and zero completion errors for all four codecs:
