@@ -6,10 +6,11 @@
 # the pool against a memory budget; this gate proves the budget actually lets
 # all four qualified codecs decode at 8K, byte for byte, with a terminal LAST.
 #
-# The driver is chosen by the caller's environment. Leave LIBVA_DRIVERS_PATH
-# unset to test the installed package, or point it at a build tree. The VA
-# driver name is never unset here: a run that names a build tree needs libva
-# to load that driver, not the installed one.
+# The driver is chosen by the caller's environment, which this gate inherits
+# untouched. Leave LIBVA_DRIVERS_PATH unset to test the installed package, or
+# name a build tree and set LIBVA_DRIVER_NAME=v4l2 so libva loads that driver
+# instead of the installed alias. The gate never unsets the driver name itself:
+# doing so made a build-tree run fail to initialise libva.
 #
 # Usage:
 #   IRIS_8K_DIR=DIR sh test/iris-8k-gate.sh
