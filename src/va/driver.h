@@ -385,6 +385,7 @@ VAStatus syncBuffer(VADriverContextP ctx, VABufferID id, uint64_t timeout_ns);
 // only asks, and a timeout leaves the ticket in place to ask again.
 VAStatus claim_coded(DriverData& d, const std::shared_ptr<Buffer>& b, uint64_t timeout_ns);
 VAStatus querySurfaceStatus(VADriverContextP ctx, VASurfaceID id, VASurfaceStatus* status);
+VAStatus querySurfaceError(VADriverContextP ctx, VASurfaceID id, VAStatus error_status, void** error_info);
 VAStatus querySurfaceAttributes(VADriverContextP ctx, VAConfigID config, VASurfaceAttrib* attributes, unsigned* count);
 VAStatus exportSurfaceHandle(VADriverContextP ctx, VASurfaceID id, uint32_t mem_type, uint32_t flags, void* descriptor);
 VAStatus putSurface(VADriverContextP ctx, VASurfaceID id, void* draw, short srcx, short srcy, unsigned short srcw,
