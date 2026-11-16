@@ -159,6 +159,7 @@ Imported DMA-BUF surfaces must match native CAPTURE layout (single linear object
 - **Encode features**: Single full-picture slice only. Multi-slice, tiles and ROI return `VA_STATUS_ERROR_UNIMPLEMENTED`. B pictures are opt-in with `V4L2_VA_B_FRAMES` and are H.264 only; they need a client pipeline of at least three pictures (FFmpeg: `-bf 1 -async_depth 3`).
 - **Intra refresh**: A rolling-row request (`VAEncMiscParameterRIR`) reaches the encoder and changes the bitstream, under CBR only; the firmware ignores the period under VBR and CQP, so the driver refuses it there. No client requests it today: FFmpeg's `h264_vaapi`/`hevc_vaapi` and GStreamer's `vah264enc` expose no such option. VA has no encode-side long-term-reference field, so `ltr_count`/`frame_ltr_index`/`use_ltr_frames` are unreachable from any VA client and are not advertised.
 - **Packed headers**: Extradata emission reports `VA_ENC_PACKED_HEADER_NONE`. Parameter sets are carried in-band.
+- **UBWC surfaces**: The decoder node enumerates the compressed `Q08C`/`Q10C` CAPTURE formats and the firmware writes real UBWC. Turnip decodes it byte-exactly through `VK_EXT_image_drm_format_modifier`, but EGL — the Copy publish path and `vaGetImage`/`vaPutImage` — does not, and `QCOM_COMPRESSED` on P010 is not offered at all. No VA client requests a compressed surface either, so surfaces stay `NV12`/`P010` and imported DMA-BUFs must be `DRM_FORMAT_MOD_LINEAR`. See [TEST-RESULTS.md](TEST-RESULTS.md) for the measurement.
 
 ## Environment Variables
 

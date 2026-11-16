@@ -9167,3 +9167,62 @@ all: `va_enc_h264.h` and `va_enc_hevc.h` contain no `long_term` member,
 `src/codec/encode_h264.cc` rejects an LTR reference in a picture's reference
 list. No VA client can ask for one, so this is an interface limit rather than
 a driver gap, and the controls stay unwritten.
+
+## UBWC (Q08C/Q10C): real on the firmware side, readable only through Vulkan (2026-11-16)
+
+The decoder's CAPTURE queue enumerates `Q08C` and `Q10C` beside `NV12` and
+`P010`, and the kernel implements both layouts: `iris_yuv_buffer_size_qc08c`
+and `_qc10c` in `iris_buffer.c` compute four 4 KiB-aligned regions, and
+`iris_vdec.c` accepts the formats. The question this driver has to answer is
+not whether the node can write them but whether anything on the stack can read
+them back, because a VA surface nothing can sample is not a capability.
+
+**The firmware does write real UBWC.** Decoding 20 frames of a static 640x480
+H.264 source into `Q08C` and into `NV12` through `v4l2-ctl`, the Q08C luma
+region shares 105 of 307200 bytes with the linear luma (0.03 %), and the
+linear luma's first 512 bytes appear nowhere in the Q08C buffer. The first
+4 KiB region carries structured values (0x11-0x1f) rather than pixels: that is
+the metadata plane, not luma. Size image is 479232 bytes, which is the kernel's
+four-plane formula exactly (4096 + 307200 + 4096 + 163840).
+
+**Vulkan decodes it, byte-exactly.** Turnip (`Turnip Adreno (TM) 740`, Mesa
+26.2.6) accepts `DRM_FORMAT_MOD_QCOM_COMPRESSED`
+(`0x0500000000000001`) for a `VK_FORMAT_G8_B8R8_2PLANE_420_UNORM` image
+created with `VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT`, imports the captured
+buffer as a dma-buf, copies the luma plane to a linear buffer, and the result
+is identical to the linear `NV12` decode: 307200 of 307200 bytes, maximum
+difference 0. `vkGetImageSubresourceLayout` reports plane 0 at offset 0 with
+pitch 640, which is the firmware's own luma offset, so the metadata planes are
+found by the driver's own arithmetic rather than by anything the importer
+passes.
+
+**EGL/GLES does not.** `eglCreateImageKHR` accepts the same modifier on an
+`NV12` DMA-BUF and then reads back the wrong pixels: against the linear decode
+the mean absolute difference is 98 of 255, and three candidate metadata
+placements (metadata first as the kernel writes it, metadata last as
+`dpu_formats.c` orders it, and metadata after each plane) all read back
+identically wrong. That matters because `src/iris/gpu_copy.cc` — the Copy
+publish path and every `vaGetImage`/`vaPutImage` transfer — is EGL. A
+`Q08C` CAPTURE buffer could be decoded into, but the driver could not copy it
+out to a client surface.
+
+**10-bit has no reader.** EGL advertises `QCOM_COMPRESSED` for `NV12` only,
+not for `P010`, so `Q10C` has no consumer on either path.
+
+**Decode is also barely faster.** 120 frames of 3840x2160 H.264 through
+`v4l2-ctl --stream-mmap=8`, three runs each: `Q08C` 383/396/392 ms against
+`NV12` 411/398/408 ms, about 4 %.
+
+**No client asks for it.** A VA surface only becomes compressed if the client
+sets `VASurfaceAttribDRMFormatModifiers`; FFmpeg's `h264_vaapi`/`hevc_vaapi`
+do not, and neither does anything else this driver runs. So a compressed
+surface format would be reachable only by a client that does not exist, and it
+would break the Copy path for the clients that do.
+
+The formats therefore stay unadvertised: `querySurfaceAttributes` lists
+`NV12`/`P010`, and `src/util/prime.cc` and `src/va/surface.cc` keep requiring
+`DRM_FORMAT_MOD_LINEAR` for import. The one thing that would reopen this is a
+copy path that goes through Vulkan instead of EGL — the VPP backend already is
+Vulkan, so a UBWC surface could be sampled there today, but decode still has to
+hand pixels to a client. The capability table's decode entries record the
+measurement.

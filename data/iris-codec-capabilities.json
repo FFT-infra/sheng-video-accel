@@ -27,7 +27,8 @@
         "MVC/multiview",
         "interlaced",
         "H.264 High 10: the node's decode profile mask lists Baseline, Constrained Baseline, Main, High and Constrained High and no HIGH_10 (iris_hfi_gen2.c inst_fw_cap_sm8550_dec), and this driver exposes no H264High10 profile",
-        "non-4:2:0 chroma: every CAPTURE format the node enumerates is 4:2:0"
+        "non-4:2:0 chroma: every CAPTURE format the node enumerates is 4:2:0",
+        "UBWC-compressed CAPTURE (Q08C/Q10C): the node enumerates both and the firmware writes real UBWC (0.03% byte agreement with the linear luma). Turnip decodes it byte-exactly through VK_EXT_image_drm_format_modifier (307200/307200 luma bytes, max diff 0), but EGL -- the Copy publish path and vaGetImage/vaPutImage -- reads back the wrong pixels for the same buffer, and QCOM_COMPRESSED on P010 is not advertised at all, so Q10C has no reader. No VA client sets VASurfaceAttribDRMFormatModifiers either. TEST-RESULTS.md, \"UBWC (Q08C/Q10C)\"."
       ],
       "publish_import": "qualified",
       "encode": {
@@ -81,7 +82,8 @@
       "rejected": [
         "long-term references whose POC MSB cycles do not ascend",
         "interlaced",
-        "12-bit"
+        "12-bit",
+        "UBWC-compressed CAPTURE (Q08C/Q10C): the node enumerates both and the firmware writes real UBWC (0.03% byte agreement with the linear luma). Turnip decodes it byte-exactly through VK_EXT_image_drm_format_modifier (307200/307200 luma bytes, max diff 0), but EGL -- the Copy publish path and vaGetImage/vaPutImage -- reads back the wrong pixels for the same buffer, and QCOM_COMPRESSED on P010 is not advertised at all, so Q10C has no reader. No VA client sets VASurfaceAttribDRMFormatModifiers either. TEST-RESULTS.md, \"UBWC (Q08C/Q10C)\"."
       ],
       "publish_import": "qualified",
       "encode": {
@@ -132,7 +134,8 @@
       "rejected": [
         "show_existing_frame through VA (VADecPictureParameterBufferVP9 has no frame_to_show field)",
         "12-bit: src/codec/vp9.cc refuses it with VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT before any buffer is queued. The 2026-11-12 hang in TEST-RESULTS.md is the native v4l2vp9dec element taking ten 12-bit access units and never returning a CAPTURE buffer; it is not this driver",
-        "RGB"
+        "RGB",
+        "UBWC-compressed CAPTURE (Q08C/Q10C): the node enumerates both and the firmware writes real UBWC (0.03% byte agreement with the linear luma). Turnip decodes it byte-exactly through VK_EXT_image_drm_format_modifier (307200/307200 luma bytes, max diff 0), but EGL -- the Copy publish path and vaGetImage/vaPutImage -- reads back the wrong pixels for the same buffer, and QCOM_COMPRESSED on P010 is not advertised at all, so Q10C has no reader. No VA client sets VASurfaceAttribDRMFormatModifiers either. TEST-RESULTS.md, \"UBWC (Q08C/Q10C)\"."
       ],
       "publish_import": "qualified",
       "import_note": "an alt-ref access unit decodes as two pictures, so the session lends one picture one buffer per completion (the same client buffer queued twice). Chrome destroys a VP9 surface as soon as it has composited the frame, often while the picture is still with the firmware: on 2026-11-11 that released 564 of 768 queueings and dropped 541 completions. The session now retains such a target and completes it (`target detached`), and the 2026-11-12 gates qualified Import: 48/48 four-codec matrix, FFmpeg 1280x720 alt-ref clip 515/515 with framemd5 equal to the software decode, and two guarded Chrome 156 windows at submitted=1705 completed=1705 drops=0 retained=1161 and submitted=1588 completed=1588 drops=0; the Copy baseline over the same clip and window dropped 3 of 1705. TEST-RESULTS.md records each run",
@@ -164,7 +167,8 @@
       "fallback": "software",
       "rejected": [
         "12-bit: the node has no 12-bit CAPTURE format, and the VA layer refuses the stream at profile selection",
-        "large-scale tile: src/codec/av1_obu.cc refuses a picture whose large_scale_tile bit is set. VAConfigAttribDecAV1Features answers VA_ATTRIB_NOT_SUPPORTED, and neither FFmpeg nor Chrome reads that attribute (0 references in the target's libavcodec), so the answer reaches no client"
+        "large-scale tile: src/codec/av1_obu.cc refuses a picture whose large_scale_tile bit is set. VAConfigAttribDecAV1Features answers VA_ATTRIB_NOT_SUPPORTED, and neither FFmpeg nor Chrome reads that attribute (0 references in the target's libavcodec), so the answer reaches no client",
+        "UBWC-compressed CAPTURE (Q08C/Q10C): the node enumerates both and the firmware writes real UBWC (0.03% byte agreement with the linear luma). Turnip decodes it byte-exactly through VK_EXT_image_drm_format_modifier (307200/307200 luma bytes, max diff 0), but EGL -- the Copy publish path and vaGetImage/vaPutImage -- reads back the wrong pixels for the same buffer, and QCOM_COMPRESSED on P010 is not advertised at all, so Q10C has no reader. No VA client sets VASurfaceAttribDRMFormatModifiers either. TEST-RESULTS.md, \"UBWC (Q08C/Q10C)\"."
       ],
       "film_grain_note": "Synthesis is qualified for AV1Profile0 at 8 and 10 bits. The client names the ungrained decode target as current_frame and a separate grained current_display_picture; the driver decodes the rebuilt access unit with apply_grain=0 and blends in userspace (src/va/grain.cc) from that picture's endPicture, before the client can recycle current_frame. The 2026-11-14 gate resolved the 320x240 NV12 20-frame and 352x290 P010 2-frame clips frame-by-frame identical to libdav1d's grained output under V4L2_VA_PUBLISH=import, and both clips matched under direct and copy as well. TEST-RESULTS.md records the run",
       "publish_import": "qualified",

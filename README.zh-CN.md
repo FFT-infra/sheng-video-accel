@@ -131,6 +131,7 @@ mpv、VLC、Sunshine、Firefox、GStreamer 的逐项配置，以及 FFmpeg 的�
 - **编码高级特性**：仅支持单图单切片结构。多切片、分块（Tiles）及 ROI 配置直接返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。B 帧需通过 `V4L2_VA_B_FRAMES` 显式开启，且仅限 H.264；客户端管线需至少保持三帧在途（FFmpeg：`-bf 1 -async_depth 3`）。
 - **intra refresh**：滚动行刷新请求（`VAEncMiscParameterRIR`）能到达编码器并改变码流，但只在 CBR 下生效；VBR 和 CQP 下固件忽略周期，驱动在这两种模式下直接拒绝。目前没有客户端请求它：FFmpeg 的 `h264_vaapi`/`hevc_vaapi` 和 GStreamer 的 `vah264enc` 都没有对应选项。VA 接口没有编码侧长期参考字段，`ltr_count`/`frame_ltr_index`/`use_ltr_frames` 任何 VA 客户端都表达不了，驱动也不声明。
 - **封装头信息**：头信息声明为 `VA_ENC_PACKED_HEADER_NONE`，参数集随码流带内传输。
+- **UBWC 压缩表面**：解码节点列出 `Q08C`/`Q10C` 两个压缩 CAPTURE 格式，固件也确实写出真 UBWC。Turnip 能通过 `VK_EXT_image_drm_format_modifier` 逐字节解出来，但 EGL（Copy 发布路径与 `vaGetImage`/`vaPutImage`）读回的是错的像素，`P010` 上的 `QCOM_COMPRESSED` 也根本没有提供。同样没有 VA 客户端会请求压缩表面，所以表面格式保持 `NV12`/`P010`，导入的 DMA-BUF 必须是 `DRM_FORMAT_MOD_LINEAR`。测量记录见 [TEST-RESULTS.md](TEST-RESULTS.md)。
 
 ## 环境变量
 
