@@ -9495,9 +9495,11 @@ mask still get `ATTR_NOT_SUPPORTED`. `test/unit/va-config-attributes-test.cc`
 pins both statuses. The comparison numbers are kept in the local, gitignored
 `notes/comparison.md`; they are not published in this repository.
 
-Two performance cells remain open in those local notes and were not chased
-here: HEVC Main10 1080p decode at roughly 1 % and 4K encode at -4.7 % on the
-7.3.4 pinned-clock table. Neither is a capability difference.
+The two performance cells noted above were remeasured on 2026-11-17 with
+pinned clocks. HEVC Main10 1080p decode is at parity; the 4K encode depth-4
+cell is bimodal on both drivers and its mean reverses with run order, so
+neither is a capability difference. The comparison numbers stay in the local,
+gitignored `notes/comparison.md`.
 
 The committed head `146e2cc` (clean tree) was redeployed and installed with
 `scripts/install-system.sh`; `/usr/lib64/dri/v4l2_drv_video.so` is now
@@ -9509,3 +9511,17 @@ kernel and module as above, with no `LIBVA_DRIVERS_PATH` override:
 `driver_path=/usr/lib64/dri/v4l2_drv_video.so`. `run-static-checks.sh` PASS,
 `meson test -C build-local` 33/33, `meson test -C build-asan` 33/33,
 `git diff --check` clean.
+
+The head `aa375a3` raises `kMaxAttributes` from 8 to the full libva 1.23
+config-attribute range (16); `getConfigAttributes` already answered any
+requested type, so this only stops `vaMaxNumConfigAttributes` understating
+the driver to a client sizing its query array. It was redeployed and
+installed live as above; `/usr/lib64/dri/v4l2_drv_video.so` is now
+`35cdab55…d591`, `source_dirty=0`, with `79674337…d980` at the backup path.
+On the same boot, kernel and module, with no `LIBVA_DRIVERS_PATH` override:
+`iris-vp9-p2-gate.sh` (30/30 exact, 12 P010 surfaces),
+`iris-encode-quality.sh` and `iris-encode-misc-bound-probe` (three PASS)
+again completed `guard=complete exit=0` with
+`driver_path=/usr/lib64/dri/v4l2_drv_video.so`. `run-static-checks.sh` PASS,
+`meson test -C build-local` 33/33, `meson test -C build-asan` rebuilt from
+this head 33/33, `git diff --check` clean.
