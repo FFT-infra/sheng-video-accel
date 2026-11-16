@@ -1075,6 +1075,10 @@ VAStatus renderPicture(VADriverContextP ctx, VAContextID id, VABufferID* buffers
                     c->enc_picture.picture = b->data.data();
                     break;
                 case VAEncMiscParameterBufferType:
+                    // A client can create a misc buffer with any element size;
+                    // the header we are about to read is not guaranteed to fit.
+                    iris::require(b->size >= sizeof(VAEncMiscParameterBuffer),
+                        "encode misc buffer is too small", VA_STATUS_ERROR_INVALID_PARAMETER);
                     for (unsigned k = 0; k < b->count; ++k) {
                         const auto* raw = b->data.data() + static_cast<size_t>(k) * b->size;
                         const auto* header = reinterpret_cast<const VAEncMiscParameterBuffer*>(raw);
@@ -1086,7 +1090,11 @@ VAStatus renderPicture(VADriverContextP ctx, VAContextID id, VABufferID* buffers
                         case VAEncMiscParameterTypeQualityLevel:
                             // One advertised level. The firmware has no
                             // quality knob, so a client asking for more must
-                            // be told instead of silently ignored.
+                            // be told instead of silently ignored. The
+                            // quality_level field follows the header, so a
+                            // truncated element cannot be read here.
+                            iris::require(b->size >= sizeof(VAEncMiscParameterBuffer) + sizeof(uint32_t),
+                                "encode quality buffer is too small", VA_STATUS_ERROR_INVALID_PARAMETER);
                             iris::require(reinterpret_cast<const VAEncMiscParameterBufferQualityLevel*>(
                                               header->data)->quality_level <= 1,
                                 "unsupported encoder quality level", VA_STATUS_ERROR_INVALID_PARAMETER);

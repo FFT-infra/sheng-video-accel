@@ -9416,3 +9416,33 @@ with `guard=complete exit=0`, on the same boot, kernel and module as above.
 
 The installed driver hash equals the build-tree hash the build-tree gate used,
 so the two records describe the same bytes.
+
+## Encode misc buffer bounds (2026-11-17)
+
+`src/va/picture.cc` began validating `VAEncMiscParameterBufferType` in
+`033c3ce`, but `createBuffer` lets a client choose any element size, so a
+buffer smaller than `VAEncMiscParameterBuffer` made `renderPicture` read
+`header->type` (and, for QualityLevel, `header->data[0]`) past the client's
+bytes. A one-off probe on the target showed the old driver reading a garbage
+`type` out of the neighbouring heap (status 20, `UNIMPLEMENTED`) for a 1-byte
+element, and a header-only QualityLevel element reading a garbage
+`quality_level` that happened to be <= 1 and passing silently. Neither was a
+refusal; both were out-of-bounds reads.
+
+`renderPicture` now requires every misc element to hold the header, and the
+QualityLevel branch additionally requires the `quality_level` word. The
+refusal is `VA_STATUS_ERROR_INVALID_PARAMETER` (18). `test/iris-encode-misc-
+bound-probe.cc` is a built-only target probe: it opens three independent
+encode contexts, submits a 1-byte element, a header-only QualityLevel element
+and a full one, and requires the first two to be refused and the third to open
+a picture. The host unit tests cannot cover this path because an encode
+context opens the V4L2 encoder node.
+
+Under `test/remote/gate.sh` with `guard=complete exit=0`, boot
+`fd0b90f4-d968-4340-94f9-f2fd7bc6c52a`, kernel 7.3.4, module `8f771ada…dc75`,
+decoder `/dev/video17`, encoder `/dev/video18`, build-tree driver
+`701ac2e9…6f0a` (`LIBVA_DRIVER_NAME=v4l2` with
+`LIBVA_DRIVERS_PATH=/home/xinyang/iris-vaapi-lab/src/build/src`):
+`size=1 status=18`, `header-only quality status=18`,
+`full quality status=0`, all three PASS. The installed driver at the time was
+`aeab4f7f…51f6` (without this fix), which is the comparison above.

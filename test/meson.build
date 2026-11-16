@@ -100,6 +100,18 @@ executable(
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 
+# Hardware probe, built but not registered as a meson test: an encode misc
+# parameter buffer can arrive with an element too small for its header. The
+# host unit tests cannot open an encoder context, so this drives the refusal
+# through the public VA API on the target.
+if va_drm_dep.found()
+  executable(
+    'iris-encode-misc-bound-probe',
+    'iris-encode-misc-bound-probe.cc',
+    dependencies: [va_drm_dep],
+    cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+endif
+
 # Hardware probe, built but not registered as a meson test: the stable-buffer
 # allocation chain (MSM cached-coherent, MSM write-combined, system DMA heap).
 # Every rung needs an MSM render node, and the fallthroughs are only reached
