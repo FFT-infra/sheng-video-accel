@@ -9392,6 +9392,27 @@ second probe over every decode profile confirmed the new answers: VP9 P2
 
 `test/run-static-checks.sh` PASS, `meson test -C build-local` 33/33,
 `meson test -C build-asan` 33/33 (the VA glue touched `config.cc`), and
-`git diff --check` clean. No installed-package run was taken for these four
-changes; the live install on this boot is still `1cc41d8c…a221`, so the
-build-tree gate is the evidence, not a claim about the system driver.
+`git diff --check` clean.
+
+The committed head (`a6b1581`, clean tree) was then deployed, rebuilt and
+installed into libva's own driver directory with
+`scripts/install-system.sh`: `/usr/lib64/dri/v4l2_drv_video.so` is now
+`aeab4f7f…51f6`, recorded in
+`/usr/local/share/iris-vaapi/install-manifest.txt` as `source_dirty=0`,
+with the previous `1cc41d8c…a221` kept at the manifest's backup path. This
+is a live system install, not a `DESTDIR` staging run. Every gate below ran
+with no `LIBVA_DRIVERS_PATH` override and reported
+`driver_path=/usr/lib64/dri/v4l2_drv_video.so` under `test/remote/gate.sh`
+with `guard=complete exit=0`, on the same boot, kernel and module as above.
+
+| gate | result |
+| --- | --- |
+| `iris-vp9-p2-gate.sh` | 640x360 10-bit Profile 2, `frames=30 import=30 copy=0 invisible=0`, 12 P010 surfaces, 0 NV12, exact framemd5 |
+| `iris-real-clip-gate.sh` plain / drc / 4k | all three sets exact, same import/copy/invisible counts as the previous install |
+| `iris-encode-quality.sh` | 1080p H.264/HEVC SSIM and 8K lanes unchanged |
+| `iris-8k-gate.sh` | four codecs 4/4 frames, `pool=8`, `framemd5=exact`, `errors=0 last=1 drain=1` |
+| `iris-two-player-gate.sh` | two independent 1080p clients, a and b 90/90 exact, `errors=0 last=1` |
+| `vulkan-vpp/scale_vaapi_gate.sh` (`IRIS_VPP_INSTALLED=1`) | 8 ratios, 3 P010, exact swscale neighbour oracle, `driver_source=installed-package`, `V4L2_VA_VPP=0` refusal still required |
+
+The installed driver hash equals the build-tree hash the build-tree gate used,
+so the two records describe the same bytes.
