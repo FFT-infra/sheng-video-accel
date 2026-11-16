@@ -9498,3 +9498,14 @@ pins both statuses. The comparison numbers are kept in the local, gitignored
 Two performance cells remain open in those local notes and were not chased
 here: HEVC Main10 1080p decode at roughly 1 % and 4K encode at -4.7 % on the
 7.3.4 pinned-clock table. Neither is a capability difference.
+
+The committed head `146e2cc` (clean tree) was redeployed and installed with
+`scripts/install-system.sh`; `/usr/lib64/dri/v4l2_drv_video.so` is now
+`79674337…d980`, recorded as `source_dirty=0`, with `701ac2e9…6f0a` kept at
+the manifest's backup path. Live install, not `DESTDIR`. On the same boot,
+kernel and module as above, with no `LIBVA_DRIVERS_PATH` override:
+`iris-vp9-p2-gate.sh`, `iris-encode-quality.sh` and
+`iris-encode-misc-bound-probe` all reported `guard=complete exit=0` and
+`driver_path=/usr/lib64/dri/v4l2_drv_video.so`. `run-static-checks.sh` PASS,
+`meson test -C build-local` 33/33, `meson test -C build-asan` 33/33,
+`git diff --check` clean.
