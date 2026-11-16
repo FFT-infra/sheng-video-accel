@@ -9446,3 +9446,28 @@ decoder `/dev/video17`, encoder `/dev/video18`, build-tree driver
 `size=1 status=18`, `header-only quality status=18`,
 `full quality status=0`, all three PASS. The installed driver at the time was
 `aeab4f7f…51f6` (without this fix), which is the comparison above.
+
+### Final install after the misc-buffer fix (2026-11-17)
+
+The committed head `12c0297` (clean tree) was redeployed and installed with
+`scripts/install-system.sh`; `/usr/lib64/dri/v4l2_drv_video.so` is now
+`701ac2e9…6f0a`, recorded as `source_dirty=0`, with `aeab4f7f…51f6` kept at
+the manifest's backup path. This is a live install, not `DESTDIR`. The driver
+bytes are those the build-tree misc-bounds probe already exercised. Every run
+below used no `LIBVA_DRIVERS_PATH` override and reported
+`driver_path=/usr/lib64/dri/v4l2_drv_video.so` under `test/remote/gate.sh`
+with `guard=complete exit=0`, on boot `fd0b90f4-d968-4340-94f9-f2fd7bc6c52a`,
+kernel `7.3.4-sm8550-00104-g87ac0f2347eb`, module `8f771ada…dc75`, decoder
+`/dev/video17`, encoder `/dev/video18`.
+
+| gate | result |
+| --- | --- |
+| `iris-encode-misc-bound-probe` (installed) | `size=1` and header-only QualityLevel refused with status 18; full element opens a picture; three PASS |
+| `iris-encode-quality.sh` | unchanged, `guard=complete` |
+| `iris-real-clip-gate.sh` plain / drc / 4k | all three exact, `guard=complete` |
+| `iris-vp9-p2-gate.sh` | 30/30 exact framemd5, 12 P010 surfaces, 0 NV12, `import=30` |
+| `vulkan-vpp/scale_vaapi_gate.sh` | qualified on the `aeab4f7f…51f6` install above; the misc fix does not touch the VideoProc path |
+
+`test/run-static-checks.sh` PASS, `meson test -C build-local` 33/33,
+`meson test -C build-asan` 33/33, `git diff --check` clean on the committed
+tree.
