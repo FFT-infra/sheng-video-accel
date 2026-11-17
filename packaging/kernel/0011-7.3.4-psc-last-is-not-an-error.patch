@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: xinyang <xinyang@localhost>
+Date: Wed, 18 Nov 2026 12:00:00 +0800
+Subject: [PATCH] media: iris: do not mark a PSC LAST completion as an error (7.3.4)
+
+A zero-length CAPTURE buffer that ends a sequence is reported with
+HFI_BUF_FW_FLAG_PSC_LAST. The empty-payload rule exempts only
+HFI_BUF_FW_FLAG_LAST, so the sequence-change completion is returned with
+V4L2_BUF_FLAG_ERROR even though it is a normal result. The false error
+also reaches native V4L2 clients, which treat an error buffer as a
+dropped frame.
+
+Exempt PSC_LAST from the error rule. The buffer keeps the flags it
+already carries; only the fabricated error is removed.
+
+Adapted from Project SunUEFI's 0004-media.patch (GPL-2.0-only).
+---
+ drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c b/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c
+index 8c2644c..a80f41f 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c
+@@ -391,7 +391,7 @@ static int iris_hfi_gen2_handle_output_buffer(struct iris_inst *inst,
+ 	buf->flags = iris_hfi_gen2_get_driver_buffer_flags(inst, hfi_buffer->flags);
+
+ 	if (!buf->data_size && inst->state == IRIS_INST_STREAMING &&
+-	    !(hfi_buffer->flags & HFI_BUF_FW_FLAG_LAST)) {
++	    !(hfi_buffer->flags & (HFI_BUF_FW_FLAG_LAST | HFI_BUF_FW_FLAG_PSC_LAST))) {
+ 		buf->flags |= V4L2_BUF_FLAG_ERROR;
+ 	}
+
+--
+2.56.0

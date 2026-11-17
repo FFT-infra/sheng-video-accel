@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: xinyang <xinyang@localhost>
+Date: Wed, 18 Nov 2026 12:00:00 +0800
+Subject: [PATCH] media: iris: complete the drain on an error LAST (7.3.4)
+
+iris_vb2_buffer_done() returns from the V4L2_BUF_FLAG_ERROR branch before
+it reaches the LAST handling. A drain can end with an empty buffer that
+carries both V4L2_BUF_FLAG_ERROR and V4L2_BUF_FLAG_LAST; the EOS event is
+then never queued and the m2m context is not marked stopped, so the next
+capture QBUF can emit another LAST into the new resolution's queue.
+
+Record LAST before returning an error buffer. The error state, the zero
+payload and the timestamp 0009 preserves are unchanged.
+
+Adapted from Project SunUEFI's 0004-media.patch (GPL-2.0-only), which
+makes the same ordering change to the HFI gen2 driver.
+---
+ drivers/media/platform/qcom/iris/iris_buffer.c | 25 +++++++++++++---------
+ 1 file changed, 15 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_buffer.c b/drivers/media/platform/qcom/iris/iris_buffer.c
+index f790483..15801af 100644
+--- a/drivers/media/platform/qcom/iris/iris_buffer.c
++++ b/drivers/media/platform/qcom/iris/iris_buffer.c
+@@ -896,6 +896,21 @@ int iris_vb2_buffer_done(struct iris_inst *inst, struct iris_buffer *buf)
+
+ 	vbuf->flags |= buf->flags;
+
++	/* LAST completes the drain even if the final frame has no valid
++	 * payload. Record it before returning an error buffer, otherwise the
++	 * next capture QBUF can emit another LAST into the new resolution's
++	 * queue.
++	 */
++	if (vbuf->flags & V4L2_BUF_FLAG_LAST) {
++		if (!v4l2_m2m_has_stopped(m2m_ctx)) {
++			const struct v4l2_event ev = { .type = V4L2_EVENT_EOS };
++
++			v4l2_event_queue_fh(&inst->fh, &ev);
++			v4l2_m2m_mark_stopped(m2m_ctx);
++		}
++		inst->last_buffer_dequeued = true;
++	}
++
+ 	if (buf->flags & V4L2_BUF_FLAG_ERROR) {
+ 		state = VB2_BUF_STATE_ERROR;
+ 		vb2_set_plane_payload(vb2, 0, 0);
+@@ -913,16 +928,6 @@ int iris_vb2_buffer_done(struct iris_inst *inst, struct iris_buffer *buf)
+ 		vbuf->sequence = inst->sequence_out++;
+ 	}
+
+-	if (vbuf->flags & V4L2_BUF_FLAG_LAST) {
+-		if (!v4l2_m2m_has_stopped(m2m_ctx)) {
+-			const struct v4l2_event ev = { .type = V4L2_EVENT_EOS };
+-
+-			v4l2_event_queue_fh(&inst->fh, &ev);
+-			v4l2_m2m_mark_stopped(m2m_ctx);
+-		}
+-		inst->last_buffer_dequeued = true;
+-	}
+-
+ 	state = VB2_BUF_STATE_DONE;
+ 	vb2->timestamp = buf->timestamp;
+ 	v4l2_m2m_buf_done(vbuf, state);
+--
+2.56.0

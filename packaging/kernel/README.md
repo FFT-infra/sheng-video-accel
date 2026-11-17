@@ -2,16 +2,19 @@
 
 Two patch sets live here. 0001-0007 target `sheng-7.2.6`
 (`42f3b40c702a`): four qualified patches, plus three experimental ones.
-0008-0009 target `sheng-7.3.4` (`87ac0f2347eb`), whose in-tree driver already
+0008-0012 target `sheng-7.3.4` (`87ac0f2347eb`), whose in-tree driver already
 carries the request-sync-frame control and the stability fixes that 7.2.6
-needs patches for, so the 7.3.4 set is smaller.
+needs patches for, so the 7.3.4 set is smaller. 0008-0009 are qualified;
+0010-0012 are drain and IRQ backports that have not run on hardware yet.
 
 Only 0001-0004 make up the 7.2.6 module; on 7.3.4 the qualified set is
 0008-0009. `TEST-RESULTS.md` records the hardware evidence for the qualified
 combination, including the AV1 zero-copy Import run. None of the experimental
-patches (0005-0007) is part of a qualified baseline: 0006 had one guarded run
-on `sheng` with a "no regression" verdict and no capability change, while 0005
-and 0007 were rejected on hardware. The driver detects missing kernel controls
+patches (0005-0007, 0010-0012) is part of a qualified baseline: 0006 had one
+guarded run on `sheng` with a "no regression" verdict and no capability
+change, while 0005 and 0007 were rejected on hardware. 0010-0012 come from
+Project SunUEFI's media patch for the same HFI gen2 driver and are
+host-checked only. The driver detects missing kernel controls
 at runtime and degrades gracefully on stock kernels.
 
 ## Patch Summary
@@ -27,6 +30,9 @@ at runtime and degrades gracefully on stock kernels.
 | `0007-media-iris-complete-noshow-pictures-without-an-error.patch` | this repository | Completes non-display (NOSHOW) pictures without `V4L2_BUF_FLAG_ERROR` and without the picture-type flags, keeping the timestamp 0004 preserves | **Experimental, rejected.** The completion-preserving form of 0005: nothing is recycled in the kernel, the false error is simply not attached. Built with 0001-0004, installed and booted (module `f070ae18…`); the installed driver then failed all three AV1 clips under import, copy and direct, while the same driver with the unflagged-NOSHOW tolerance in the session decoded byte-identical output and matched the qualified baseline's counters. It therefore buys nothing over the qualified module. Never build it into a released module. |
 | `0008-7.3.4-decode-order-and-deblocking.patch` | this repository | Exposes decode-order output (`HFI_PROP_DECODE_ORDER_OUTPUT`) and the six H.264/HEVC loop-filter controls (`HFI_PROP_DEBLOCKING_MODE`) on the 7.3.4 driver, and raises the decoder CAPTURE ceiling to `DEFAULT_MAX_HOST_BUF_COUNT` | **Required on 7.3.4.** Without it the driver opens in display-order mode and the Import zero-copy path is unavailable. Carries the control-id mapping in both directions: `iris_get_v4l2_id()` alone registers a control that `VIDIOC_S_CTRL` then rejects with EINVAL. |
 | `0009-7.3.4-preserve-timestamps-on-error-buffers.patch` | this repository | Preserves the buffer timestamp on `V4L2_BUF_FLAG_ERROR` completions | **Required on 7.3.4.** Same change as 0004, rebased onto the 7.3.4 source. |
+| `0010-7.3.4-complete-drain-on-error-last.patch` | Project SunUEFI media patch | Records `V4L2_BUF_FLAG_LAST` before the error return in `iris_vb2_buffer_done()` | **Experimental, no target run.** Without it an error LAST completes without the EOS event and the m2m context stays unstoppable, so a later CAPTURE QBUF can emit another LAST into the new resolution's queue. Not part of the qualified baseline. |
+| `0011-7.3.4-psc-last-is-not-an-error.patch` | Project SunUEFI media patch | Exempts `HFI_BUF_FW_FLAG_PSC_LAST` from the zero-payload error rule | **Experimental, no target run.** A sequence-change boundary is a normal completion; the fabricated `V4L2_BUF_FLAG_ERROR` reaches native V4L2 clients as a dropped frame. Not part of the qualified baseline. |
+| `0012-7.3.4-quiesce-irq-before-core-lock.patch` | Project SunUEFI media patch | Disables the Iris IRQ around the `core->lock` section in `iris_core_deinit()` | **Experimental, no target run.** The IRQ thread takes the same lock; `power_off`'s `disable_irq()` can then wait for the thread it is blocking. Not part of the qualified baseline. |
 
 ## Integrity
 
@@ -56,6 +62,9 @@ sh packaging/kernel/build-module.sh --source linux \
 # 7.3.4
 git clone --depth 1 -b sheng-7.3.4 https://github.com/ianchb/sm8550-mainline linux
 sh packaging/kernel/build-module.sh --source linux --patch 0008 --patch 0009
+# Experimental only: add the drain and IRQ backports.
+sh packaging/kernel/build-module.sh --source linux \
+    --patch 0008 --patch 0009 --patch 0010 --patch 0011 --patch 0012
 ```
 
 On 7.3.4, `CONFIG_LOCALVERSION_AUTO` appends `-g<sha>` to the release, so a
@@ -106,7 +115,7 @@ The `[5] optional kernel controls` section resolves both nodes by the
 `iris_driver` name and reports `display_delay`, `min_number_of_capture_buffers`,
 `force_key_frame` and the loop-filter controls.
 
-The nine patch files are kernel fragments targeting GPL-2.0-only sources under
+The twelve patch files are kernel fragments targeting GPL-2.0-only sources under
 `drivers/media/platform/qcom/iris/`. They are not compiled into the MIT driver
 package, so they have no SPDX header of their own; the patched files keep the
 kernel's own identifier. `SHA256SUMS` pins each patch for the downstream

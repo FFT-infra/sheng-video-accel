@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: xinyang <xinyang@localhost>
+Date: Wed, 18 Nov 2026 12:00:00 +0800
+Subject: [PATCH] media: iris: quiesce the IRQ thread before taking core->lock (7.3.4)
+
+iris_core_deinit() takes core->lock while the IRQ thread may already hold
+it. iris_vpu_power_off() then calls disable_irq() from inside that lock,
+and disable_irq() waits for the IRQ thread to finish, so a thread that is
+blocked on core->lock deadlocks the unload.
+
+Disable the IRQ before taking the lock and re-enable it after releasing
+it, balanced independently of the power state.
+
+Adapted from Project SunUEFI's 0004-media.patch (GPL-2.0-only).
+---
+ drivers/media/platform/qcom/iris/iris_core.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_core.c b/drivers/media/platform/qcom/iris/iris_core.c
+index 8c335db..6a72885 100644
+--- a/drivers/media/platform/qcom/iris/iris_core.c
++++ b/drivers/media/platform/qcom/iris/iris_core.c
+@@ -16,6 +16,11 @@ void iris_core_deinit(struct iris_core *core)
+
+ 	ret = pm_runtime_resume_and_get(core->dev);
+
++	/* The IRQ thread takes core->lock. Quiesce it before taking that lock,
++	 * otherwise power_off's disable_irq() can wait for a thread blocked on
++	 * us. Keep this extra disable balanced independently of power state.
++	 */
++	disable_irq(core->irq);
+ 	mutex_lock(&core->lock);
+ 	if (core->state != IRIS_CORE_DEINIT) {
+ 		iris_fw_unload(core);
+@@ -27,6 +32,7 @@ void iris_core_deinit(struct iris_core *core)
+ 		core->state = IRIS_CORE_DEINIT;
+ 	}
+ 	mutex_unlock(&core->lock);
++	enable_irq(core->irq);
+
+ 	if (!ret)
+ 		pm_runtime_put_sync(core->dev);
+--
+2.56.0
