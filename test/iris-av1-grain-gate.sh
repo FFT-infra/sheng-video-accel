@@ -43,6 +43,7 @@ case $clip_set in all|nv12|p010) ;; *) echo "FAIL unknown IRIS_GRAIN_CLIP_SET=$c
 [ -d "$clip_dir" ] || { echo "FAIL clip directory missing: $clip_dir" >&2; exit 2; }
 [ -e "$render" ] || { echo "FAIL render node missing: $render" >&2; exit 2; }
 command -v ffmpeg >/dev/null 2>&1 || { echo 'FAIL ffmpeg is required' >&2; exit 2; }
+iris_require_media_pin "$clip_dir" || exit 2
 if [ -n "$driver_path" ]; then
     [ -f "$driver_path/v4l2_drv_video.so" ] \
         || { echo "FAIL no v4l2_drv_video.so in $driver_path" >&2; exit 2; }
@@ -69,16 +70,41 @@ run_ffmpeg() {
 # picture structure, recorded from the reference run: `imports` is one per
 # submitted picture (AV1 also submits frames it never shows), and `invisible`
 # is the install half of each two-completion unit.
+#
+# The counts are keyed by clip hash, not by lane: a count describes one exact
+# file, and a replaced file would otherwise be measured against the old
+# numbers and read as a driver defect. A clip with no row is refused.
+expected_counts() {
+    case $1 in
+    # 320x240, film-grain-test=1, 20 displayed pictures. 21 submitted (the
+    # encoder also wrote a hidden picture), 11 invisible install halves.
+    17495e033ca5449bd37e17c4d30689f1f562018885b155c0bcfca0afd4e3e3f5)
+        echo '21 0 11' ;;
+    # 352x290 10-bit, 2 displayed pictures, no hidden unit and no invisible
+    # half: both publications are Import.
+    d8ea6b246e4df8a9c53ad930de24184e1cf16491ed36a1aa9dde12cf584954ad)
+        echo '2 0 0' ;;
+    esac
+}
+
 run_clip() {
     name=$1
     clip=$2
     frames=$3
     filter=$4
-    imports=${5:-$frames}
-    copies=${6:-0}
-    invisible=${7:-0}
 
     [ -r "$clip_dir/$clip" ] || { echo "FAIL clip missing: $clip_dir/$clip" >&2; return 1; }
+    sha=$(iris_media_sha "$clip_dir" "$clip")
+    [ -n "$sha" ] || { echo "FAIL $name: cannot hash $clip_dir/$clip" >&2; return 1; }
+    counts=$(expected_counts "$sha")
+    if [ -z "$counts" ]; then
+        echo "FAIL $name: clip $clip (sha256 $sha) has no recorded counts." >&2
+        echo "      Measure it once, then add a row to expected_counts() in this script" >&2
+        echo "      and the file's hash to $clip_dir/SHA256SUMS." >&2
+        return 1
+    fi
+    set -- $counts
+    imports=$1 copies=$2 invisible=$3
     [ -r "$clip_dir/$name-sw.md5" ] || {
         echo "FAIL software baseline missing: $clip_dir/$name-sw.md5" >&2
         return 1
@@ -118,7 +144,7 @@ if [ "$clip_set" = all ] || [ "$clip_set" = nv12 ]; then
     # 320x240, film-grain-test=1: an 8-bit stream whose every visible frame
     # carries grain parameters, so the whole blend path is exercised rather
     # than a single salted frame.
-    run_clip grain8 grain8.webm 20 'hwdownload,format=yuv420p' 21 0 11 || failures=$((failures + 1))
+    run_clip grain8 grain8.webm 20 'hwdownload,format=yuv420p' || failures=$((failures + 1))
 fi
 if [ "$clip_set" = all ] || [ "$clip_set" = p010 ]; then
     # 352x290, 10-bit: the same blend over P010 storage, where the 10-bit

@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # Compare this driver against libavcodec on the HEVC conformance vectors that
-# Phase 7 recorded as pixel-different, using normalised output.
+# Fluster records as pixel-different, using normalised output.
 #
 # A raw framemd5 hashes the decoder's frame layout as well as its pixels, so a
 # stride difference makes identical pictures hash differently. Both sides are

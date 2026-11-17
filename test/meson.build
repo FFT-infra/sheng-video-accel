@@ -53,6 +53,19 @@ if va_drm_dep.found()
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
 
+# Hardware probe, built but not registered as a meson test: a VA client's
+# rolling intra refresh. The unit tests cover the controls the session writes
+# and the mapping from VA's window to a period; only the firmware can say
+# whether the request changes the stream, and this drives it through the
+# public API so the answer comes from the path a client uses.
+if va_drm_dep.found()
+  executable(
+    'iris-encode-ir-probe',
+    'iris-encode-ir-probe.cc',
+    dependencies: [va_drm_dep],
+    cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+endif
+
 # Hardware probe, built but not registered as a meson test: the upload half of
 # the image API. vaPutImage and the derived-image write path are what put
 # client pixels into a surface; vaGetImage reads them back. No decode is
@@ -86,6 +99,18 @@ executable(
   'iris-encode-control-probe.cc',
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+
+# Hardware probe, built but not registered as a meson test: an encode misc
+# parameter buffer can arrive with an element too small for its header. The
+# host unit tests cannot open an encoder context, so this drives the refusal
+# through the public VA API on the target.
+if va_drm_dep.found()
+  executable(
+    'iris-encode-misc-bound-probe',
+    'iris-encode-misc-bound-probe.cc',
+    dependencies: [va_drm_dep],
+    cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+endif
 
 # Hardware probe, built but not registered as a meson test: the stable-buffer
 # allocation chain (MSM cached-coherent, MSM write-combined, system DMA heap).
@@ -231,6 +256,29 @@ va_vpp_query_test = executable(
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('va-vpp-query', va_vpp_query_test)
 
+# The vtable a VA client receives. fill_context is the whole of the init
+# function except the capability probe, so this links the real driver and
+# asserts the 50 required slots are filled and the 10 libva guards stay empty.
+# The -D is the same one the module gets: VA_DRIVER_INIT_FUNC is defined only
+# by that build, not by the installed libva headers.
+va_vtable_test = executable(
+  'va-vtable-test',
+  files('unit/va-vtable-test.cc') + va_driver_sources,
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20',
+             '-DVA_DRIVER_INIT_FUNC=' + va_driver_init_func])
+test('va-vtable', va_vtable_test)
+
+# The config attributes a client branches on, and createConfig's value check.
+# Links the real config.cc against a constructed DriverData, as va-vtable does.
+va_config_attributes_test = executable(
+  'va-config-attributes-test',
+  files('unit/va-config-attributes-test.cc') + va_driver_sources,
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20',
+             '-DVA_DRIVER_INIT_FUNC=' + va_driver_init_func])
+test('va-config-attributes', va_config_attributes_test)
+
 # Hardware-independent regression guards for the browser-facing queue and
 # stable-export invariants. The integration probe above remains opt-in because
 # hosts without /dev/video nodes cannot execute it.
@@ -248,11 +296,15 @@ test('iris-codec-matrix-check', find_program('iris-codec-matrix-check.sh'),
      args: [meson.project_source_root()])
 test('iris-trace-vocab-check', find_program('python3'),
      args: ['-I', files('iris-trace-vocab-check.py'), meson.project_source_root()])
+test('iris-va-vtable-surface', find_program('python3'),
+     args: ['-I', files('iris-va-vtable-surface-check.py'), meson.project_source_root()])
 test('iris-experiment-guard-self-test', find_program('iris-experiment-guard-self-test.sh'),
      args: [meson.project_source_root()])
 test('iris-eos-check-self-test', find_program('iris-eos-check-self-test.sh'),
      args: [meson.project_source_root()])
 test('iris-clip-trace-check-self-test', find_program('iris-clip-trace-check-self-test.sh'),
+     args: [meson.project_source_root()])
+test('iris-gate-output-self-test', find_program('iris-gate-output-self-test.sh'),
      args: [meson.project_source_root()])
 test('iris-deploy-path-check', find_program('iris-deploy-path-check.sh'),
      args: [meson.project_source_root()])

@@ -6,8 +6,8 @@
 #
 #   mpv      ~/.config/mpv/mpv.conf with hwdec=vaapi. mpv's default is
 #            hwdec=no, so a VA client that needs no environment still needs
-#            this one line. The qualified run is TEST-RESULTS.md
-#            "Client coverage": `--hwdec=vaapi --vo=gpu --gpu-context=wayland`.
+#            this one line. The qualified setting is
+#            `--hwdec=vaapi --vo=gpu --gpu-context=wayland`.
 #   Firefox  media.hardware-video-decoding.force-enabled in user.js, so
 #            Firefox probes VA-API instead of deciding from its own
 #            blocklist. This has NOT been verified as a Firefox decode run on

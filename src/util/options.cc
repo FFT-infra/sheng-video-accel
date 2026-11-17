@@ -52,7 +52,10 @@ Options Options::from_environment()
         else if (std::strcmp(publish, "import") == 0)
             options.publish = PublishOverride::Import;
     }
-    options.vpp_enabled = env("V4L2_VA_VPP") != nullptr;
+    // Available whenever the build found Vulkan. Only an explicit "0" turns
+    // it off; a client that sets any other value still gets the entrypoint.
+    const char* vpp = env("V4L2_VA_VPP");
+    options.vpp_enabled = !vpp || std::strcmp(vpp, "0") != 0;
     options.b_frames = env("V4L2_VA_B_FRAMES") != nullptr;
     if (const char* dump = env("V4L2_VA_DUMP"))
         options.dump_dir = dump;

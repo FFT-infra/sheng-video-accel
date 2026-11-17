@@ -24,8 +24,8 @@
 #                             overlay colour, which is the conversion itself
 #   alpha 0.25                the mix, from the main frame's own codes
 #
-# The entrypoint stays opt-in: the same graph must be refused without
-# V4L2_VA_VPP.
+# The entrypoint is on by default: the same graph must be refused with
+# V4L2_VA_VPP=0.
 
 set -eu
 
@@ -242,17 +242,17 @@ if cmp -s "$work/alpha1.nv12" "$work/main.nv12"; then
 fi
 [ "$failed" -eq 0 ] || fail "overlay_vaapi did not produce the documented composite"
 
-echo "== opt-in is required: the same graph is refused without V4L2_VA_VPP"
-if env LIBVA_DRIVER_NAME=v4l2 $driver_env LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_TRACE=1 \
+echo "== V4L2_VA_VPP=0 is required to refuse the same graph"
+if env LIBVA_DRIVER_NAME=v4l2 $driver_env LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_VPP=0 V4L2_VA_TRACE=1 \
         timeout 120 ffmpeg -y -xerror -hide_banner -loglevel error -vaapi_device "$render" \
         -f rawvideo -pix_fmt nv12 -s "${width}x${height}" -i "$work/main.nv12" \
         -f rawvideo -pix_fmt bgra -s "${ow}x${oh}" -i "$work/ovl-red.bgra" \
         -filter_complex "[0:v]format=nv12,hwupload[m];[1:v]format=bgra,hwupload[o];[m][o]overlay_vaapi=x=0:y=0:w=${width}:h=${height}:alpha=1.0[v];[v]hwdownload,format=nv12[out]" \
         -map "[out]" -frames:v 1 -f rawvideo "$work/default.nv12" 2>"$work/default.trace"; then
-    fail "overlay_vaapi ran without V4L2_VA_VPP; the entrypoint must stay opt-in"
+    fail "overlay_vaapi ran with V4L2_VA_VPP=0; the entrypoint must be disabled"
 fi
 if grep -q 'entrypoint=videoproc' "$work/default.trace"; then
-    fail "videoproc appeared without the opt-in"
+    fail "videoproc appeared with V4L2_VA_VPP=0"
 fi
 
 printf 'driver_path=%s\n' "$driver_path"

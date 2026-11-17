@@ -5,7 +5,7 @@
     "production_va_requires_exact_evidence": true,
     "unknown_codec_action": "software-fallback",
     "import_requires_exact_evidence": true,
-    "evidence": "TEST-RESULTS.md (Phase 3, 5, 7 sections; Import gate 2026-09-22)"
+    "evidence": "TEST-RESULTS.md (current qualified-combination hardware evidence)"
   },
   "codecs": [
     {
@@ -26,7 +26,9 @@
       "rejected": [
         "MVC/multiview",
         "interlaced",
-        "non-8-bit or non-4:2:0"
+        "H.264 High 10: the node's decode profile mask lists Baseline, Constrained Baseline, Main, High and Constrained High and no HIGH_10 (iris_hfi_gen2.c inst_fw_cap_sm8550_dec), and this driver exposes no H264High10 profile",
+        "non-4:2:0 chroma: every CAPTURE format the node enumerates is 4:2:0",
+        "UBWC-compressed CAPTURE (Q08C/Q10C): the node enumerates both and the firmware writes real UBWC (0.03% byte agreement with the linear luma). Turnip decodes it byte-exactly through VK_EXT_image_drm_format_modifier (307200/307200 luma bytes, max diff 0), but EGL -- the Copy publish path and vaGetImage/vaPutImage -- reads back the wrong pixels for the same buffer, and QCOM_COMPRESSED on P010 is not advertised at all, so Q10C has no reader. No VA client sets VASurfaceAttribDRMFormatModifiers either. TEST-RESULTS.md records the measurement."
       ],
       "publish_import": "qualified",
       "encode": {
@@ -53,8 +55,11 @@
           "multi-slice",
           "weighted prediction, scaling lists and chroma QP offsets",
           "more than one reference index",
-          "10-bit or non-4:2:0"
-        ]
+          "10-bit or non-4:2:0",
+          "intra refresh forms other than rolling-row, and a per-picture insertion location: the firmware takes one period and decides the sweep itself. Long-term references (ltr_count/frame_ltr_index/use_ltr_frames): VA has no encode-side long-term-reference field at all, so no VA client can ask for one and the driver advertises none.",
+          "UBWC-compressed encode input (Q08C): the encoder node accepts Q08C on its raw OUTPUT queue, but nothing on this stack compresses a frame into it. Turnip decompresses UBWC and can render into a QCOM_COMPRESSED image, yet no VA client supplies compressed input and the driver has no compressor to fill the format itself. NV12 stays the only raw format. TEST-RESULTS.md records the measurement."
+        ],
+        "intra_refresh": "rolling-row intra refresh: a VAEncMiscParameterRIR with enable_rir_row maps to V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD, and the firmware sweeps one band of rows per picture. Honoured under CBR only: measured byte-identical to a stream without it under VBR and CQP, so the driver refuses the request there. test/iris-encode-ir-probe.cc drives it through the public VA API and requires the bitstream to change. No VA client requests it today: FFmpeg 8.1.3's h264_vaapi and hevc_vaapi have no such option and libavcodec.so.62 has zero references to VAConfigAttribEncIntraRefresh or VAEncMiscParameterTypeRIR, so this is a driver capability with no client gate behind it."
       },
       "experimental": [
         "B-frames: opt-in with V4L2_VA_B_FRAMES, one B per P. The firmware holds each queued picture until the next one arrives, so the client must keep three pictures in flight (FFmpeg -async_depth 3); with its default two the session stalls at the first pair boundary. The intra period is rounded to a whole number of (P, B) groups, without which the firmware's IDR lands inside a pair and the stream is corrupt from that IDR on. Gate: 300 frames of 720p H.264, 45.06 dB mean PSNR, B pictures present. On a 300-frame 720p natural clip at CQP the encoder spends 20.5 % fewer bits at QP 26 (3652.6 against 4593.3 kbit/s at 37.25 against 37.26 dB) and 12.1 % fewer at QP 30, where libx264 saves 26.8 % and 18.2 %; at VBR it buys 0.5-0.6 dB for 6-10 % more rate (TEST-RESULTS.md)."
@@ -78,7 +83,8 @@
       "rejected": [
         "long-term references whose POC MSB cycles do not ascend",
         "interlaced",
-        "12-bit"
+        "12-bit",
+        "UBWC-compressed CAPTURE (Q08C/Q10C): the node enumerates both and the firmware writes real UBWC (0.03% byte agreement with the linear luma). Turnip decodes it byte-exactly through VK_EXT_image_drm_format_modifier (307200/307200 luma bytes, max diff 0), but EGL -- the Copy publish path and vaGetImage/vaPutImage -- reads back the wrong pixels for the same buffer, and QCOM_COMPRESSED on P010 is not advertised at all, so Q10C has no reader. No VA client sets VASurfaceAttribDRMFormatModifiers either. TEST-RESULTS.md records the measurement."
       ],
       "publish_import": "qualified",
       "encode": {
@@ -104,8 +110,11 @@
           "deblocking other than the firmware default on a kernel without the loop-filter controls (the stock SM8550 module; packaging/kernel/0002-* adds them)",
           "multi-slice",
           "tiles and wavefront coding",
-          "weighted prediction, scaling lists, chroma QP offsets and CTU bit limits"
-        ]
+          "weighted prediction, scaling lists, chroma QP offsets and CTU bit limits",
+          "intra refresh forms other than rolling-row, and a per-picture insertion location: the firmware takes one period and decides the sweep itself. Long-term references (ltr_count/frame_ltr_index/use_ltr_frames): VA has no encode-side long-term-reference field at all, so no VA client can ask for one and the driver advertises none.",
+          "UBWC-compressed encode input (Q08C): the encoder node accepts Q08C on its raw OUTPUT queue, but nothing on this stack compresses a frame into it. Turnip decompresses UBWC and can render into a QCOM_COMPRESSED image, yet no VA client supplies compressed input and the driver has no compressor to fill the format itself. NV12 stays the only raw format. TEST-RESULTS.md records the measurement."
+        ],
+        "intra_refresh": "rolling-row intra refresh: a VAEncMiscParameterRIR with enable_rir_row maps to V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD, and the firmware sweeps one band of rows per picture. Honoured under CBR only: measured byte-identical to a stream without it under VBR and CQP, so the driver refuses the request there. test/iris-encode-ir-probe.cc drives it through the public VA API and requires the bitstream to change. No VA client requests it today: FFmpeg 8.1.3's h264_vaapi and hevc_vaapi have no such option and libavcodec.so.62 has zero references to VAConfigAttribEncIntraRefresh or VAEncMiscParameterTypeRIR, so this is a driver capability with no client gate behind it."
       },
       "experimental": []
     },
@@ -125,12 +134,14 @@
       ],
       "fallback": "software",
       "rejected": [
-        "show_existing_frame through VA",
-        "12-bit",
-        "RGB"
+        "show_existing_frame through VA (VADecPictureParameterBufferVP9 has no frame_to_show field)",
+        "12-bit: src/codec/vp9.cc refuses it with VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT before any buffer is queued. The node's native v4l2vp9dec element can also take 12-bit access units and never return a CAPTURE buffer; that is the element, not this driver.",
+        "RGB",
+        "UBWC-compressed CAPTURE (Q08C/Q10C): the node enumerates both and the firmware writes real UBWC (0.03% byte agreement with the linear luma). Turnip decodes it byte-exactly through VK_EXT_image_drm_format_modifier (307200/307200 luma bytes, max diff 0), but EGL -- the Copy publish path and vaGetImage/vaPutImage -- reads back the wrong pixels for the same buffer, and QCOM_COMPRESSED on P010 is not advertised at all, so Q10C has no reader. No VA client sets VASurfaceAttribDRMFormatModifiers either. TEST-RESULTS.md records the measurement."
       ],
+      "rt_format_note": "VP9 Profile 2 has no legal 8-bit stream (libvpx refuses to encode one; src/codec/vp9.cc requires bit_depth == 10), so VAEntrypointVLD answers VA_RT_FORMAT_YUV420_10 only (0x100) and createConfig defaults to the same mask when the client passes no RT-format attribute. HEVC Main10 and AV1 Profile0 also decode 8-bit streams and keep both bits (0x101). test/unit/va-config-attributes-test.cc pins the answers and the default; test/iris-vp9-p2-gate.sh requires P010 surfaces and 30/30 exact framemd5 on a generated 10-bit Profile 2 clip. TEST-RESULTS.md records the measurement.",
       "publish_import": "qualified",
-      "import_note": "an alt-ref access unit decodes as two pictures, so the session lends one picture one buffer per completion (the same client buffer queued twice). Chrome destroys a VP9 surface as soon as it has composited the frame, often while the picture is still with the firmware: on 2026-11-11 that released 564 of 768 queueings and dropped 541 completions. The session now retains such a target and completes it (`target detached`), and the 2026-11-12 gates qualified Import: 48/48 four-codec matrix, FFmpeg 1280x720 alt-ref clip 515/515 with framemd5 equal to the software decode, and two guarded Chrome 156 windows at submitted=1705 completed=1705 drops=0 retained=1161 and submitted=1588 completed=1588 drops=0; the Copy baseline over the same clip and window dropped 3 of 1705. TEST-RESULTS.md records each run",
+      "import_note": "an alt-ref access unit decodes as two pictures, so the session lends one picture one buffer per completion (the same client buffer queued twice). Chrome destroys a VP9 surface as soon as it has composited the frame, often while the picture is still with the firmware, which releases the buffer early and drops completions. The session retains such a target and completes it (`target detached`), and the Import gates qualify it: 48/48 four-codec matrix, FFmpeg 1280x720 alt-ref clip 515/515 with framemd5 equal to the software decode, and two guarded Chrome 156 windows at submitted=1705 completed=1705 drops=0 retained=1161 and submitted=1588 completed=1588 drops=0; the Copy baseline over the same clip and window dropped 3 of 1705. TEST-RESULTS.md records each run.",
       "encode": {
         "production": "absent",
         "va_profiles": [],
@@ -158,13 +169,14 @@
       ],
       "fallback": "software",
       "rejected": [
-        "12-bit",
-        "large-scale tile (10-bit only)"
+        "12-bit: the node has no 12-bit CAPTURE format, and the VA layer refuses the stream at profile selection",
+        "large-scale tile: src/codec/av1_obu.cc refuses a picture whose large_scale_tile bit is set. VAConfigAttribDecAV1Features is a known attribute on AV1 VLD and answers 0 (no feature flags), and neither FFmpeg nor Chrome reads that attribute (0 references in the target's libavcodec), so the answer reaches no client today",
+        "UBWC-compressed CAPTURE (Q08C/Q10C): the node enumerates both and the firmware writes real UBWC (0.03% byte agreement with the linear luma). Turnip decodes it byte-exactly through VK_EXT_image_drm_format_modifier (307200/307200 luma bytes, max diff 0), but EGL -- the Copy publish path and vaGetImage/vaPutImage -- reads back the wrong pixels for the same buffer, and QCOM_COMPRESSED on P010 is not advertised at all, so Q10C has no reader. No VA client sets VASurfaceAttribDRMFormatModifiers either. TEST-RESULTS.md records the measurement."
       ],
-      "film_grain_note": "Synthesis is qualified for AV1Profile0 at 8 and 10 bits. The client names the ungrained decode target as current_frame and a separate grained current_display_picture; the driver decodes the rebuilt access unit with apply_grain=0 and blends in userspace (src/va/grain.cc) from that picture's endPicture, before the client can recycle current_frame. The 2026-11-14 gate resolved the 320x240 NV12 20-frame and 352x290 P010 2-frame clips frame-by-frame identical to libdav1d's grained output under V4L2_VA_PUBLISH=import, and both clips matched under direct and copy as well. TEST-RESULTS.md records the run",
+      "film_grain_note": "Synthesis is qualified for AV1Profile0 at 8 and 10 bits. The client names the ungrained decode target as current_frame and a separate grained current_display_picture; the driver decodes the rebuilt access unit with apply_grain=0 and blends in userspace (src/va/grain.cc) from that picture's endPicture, before the client can recycle current_frame. The gate resolves the 320x240 NV12 20-frame and 352x290 P010 2-frame clips frame-by-frame identical to libdav1d's grained output under V4L2_VA_PUBLISH=import, and both clips matched under direct and copy as well. TEST-RESULTS.md records the run",
       "publish_import": "qualified",
-      "sync_note": "The default internal eight-slot DPB translator submits each AV1 picture at vaEndPicture; it assigns refresh slots itself and rewrites ref_frame_idx[] to those slot numbers, so no held picture or successor is needed. When all eight slots are still referenced, the previous uncommitted picture is replayed as a hidden NOSHOW frame in the same temporal unit before the shown frame; the two completions share one token. The first NOSHOW half is invisible and consumes one Import buffer without publishing pixels; the second half is the client picture and publishes even when its own show_frame=0 makes both halves NOSHOW. Target::invisible counts the consumed first half, and a NOSHOW LAST marker at a resolution-change boundary is consumed as invisible rather than failing a token. A client show_frame=0 picture is submitted immediately with no client pixels to publish. A new key frame clears internal slot identities and EOS has no held tail. The firmware returns hidden pictures without pixels; the session attributes them by token or decode order. Import lends one client DMA-BUF per completion, including the invisible half; a completion that lands in a neighbour's buffer fails both surfaces. The installed-package gates for this default path passed on 2026-11-11 on the 0001-0004 module: four-codec matrix 48/48 exact under V4L2_VA_PUBLISH=import, real 1280x720 AV1 clip 120/120 exact framemd5 with 120 publish=import, 42 publish=invisible and 0 errors/drops, and the 1280x720->854x480 in-context DRC clip 80/80 exact framemd5 with 84 completions (42 import, 42 copy-gpu after the DRC switch, 63 invisible). Firefox 158 local AV1 and live YouTube/Bilibili AV1 now report hardware decode with frame/drop windows and no held-picture error; Chrome 156 reports VaapiVideoDecoder with kIsPlatformVideoDecoder=true on both live sites. TEST-RESULTS.md records each run",
-      "resolution_note": "A resolution change inside one VA context is supported: CAPTURE must be streaming before the rebuilt pool is queued, because the kernel clears its DRC boundary sub-state (DRC | DRC_LAST) only in iris_process_streamon_output and completes an earlier CAPTURE QBUF as an empty LAST, after which vb2 returns -EPIPE for every later DQBUF. enter_streaming() streams first for both Mmap and Import memories. A client that keeps exporting surfaces at the old CAPTURE geometry cannot receive the new geometry through Import: the 2026-11-10 DRC trace records 'import rejected: client layout differs from the CAPTURE layout' (client stride=1280 size=1413120, capture stride=896 size=647168), configures an Mmap pool and publishes the second half with copy-gpu. Keeping the Import pool would write 896-pitch pixels into a 1280-pitch client buffer; the GPU copy is the fail-safe path, and test/iris-clip-trace-check.sh requires the recorded reason before accepting those copies. Framemd5 on 2026-10-24: 2 of 6 runs passed before the change, 44 of 44 after; the boundary access unit returns a second time as 0x4009 (KEYFRAME, real pixels). TEST-RESULTS.md records the run",
+      "sync_note": "The default internal eight-slot DPB translator submits each AV1 picture at vaEndPicture; it assigns refresh slots itself and rewrites ref_frame_idx[] to those slot numbers, so no held picture or successor is needed. When all eight slots are still referenced, the previous uncommitted picture is replayed as a hidden NOSHOW frame in the same temporal unit before the shown frame; the two completions share one token. The first NOSHOW half is invisible and consumes one Import buffer without publishing pixels; the second half is the client picture and publishes even when its own show_frame=0 makes both halves NOSHOW. Target::invisible counts the consumed first half, and a NOSHOW LAST marker at a resolution-change boundary is consumed as invisible rather than failing a token. A client show_frame=0 picture is submitted immediately with no client pixels to publish. A new key frame clears internal slot identities and EOS has no held tail. The firmware returns hidden pictures without pixels; the session attributes them by token or decode order. Import lends one client DMA-BUF per completion, including the invisible half; a completion that lands in a neighbour's buffer fails both surfaces. The installed-package gates for this default path pass on the qualified module: four-codec matrix 48/48 exact under V4L2_VA_PUBLISH=import, real 1280x720 AV1 clip 120/120 exact framemd5 with 120 publish=import, 15 publish=invisible and 0 errors/drops, and the 1280x720->854x480 in-context DRC clip 80/80 exact framemd5 with 80 completions (40 import, 40 copy-gpu after the DRC switch, 1 invisible). Firefox 158 local AV1 and live YouTube/Bilibili AV1 report hardware decode with frame/drop windows and no held-picture error; Chrome 156 reports VaapiVideoDecoder with kIsPlatformVideoDecoder=true on both live sites. TEST-RESULTS.md records each run",
+      "resolution_note": "A resolution change inside one VA context is supported: CAPTURE must be streaming before the rebuilt pool is queued, because the kernel clears its DRC boundary sub-state (DRC | DRC_LAST) only in iris_process_streamon_output and completes an earlier CAPTURE QBUF as an empty LAST, after which vb2 returns -EPIPE for every later DQBUF. enter_streaming() streams first for both Mmap and Import memories. A client that keeps exporting surfaces at the old CAPTURE geometry cannot receive the new geometry through Import: the DRC trace records 'import rejected: client layout differs from the CAPTURE layout' (client stride=1280 size=1413120, capture stride=896 size=647168), configures an Mmap pool and publishes the second half with copy-gpu. Keeping the Import pool would write 896-pitch pixels into a 1280-pitch client buffer; the GPU copy is the fail-safe path, and test/iris-clip-trace-check.sh requires the recorded reason before accepting those copies. Framemd5: 2 of 6 runs passed before the change, 44 of 44 after; the boundary access unit returns a second time as 0x4009 (KEYFRAME, real pixels). TEST-RESULTS.md records the run",
       "encode": {
         "production": "absent",
         "va_profiles": [],

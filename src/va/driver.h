@@ -37,7 +37,11 @@ namespace va {
 constexpr const char* kVendor = "Qualcomm Iris V4L2 stateful (libva-v4l2)";
 constexpr unsigned kMaxProfiles = 16;
 constexpr unsigned kMaxEntrypoints = 2;
-constexpr unsigned kMaxAttributes = 8;
+// getConfigAttributes answers any type a client asks for, so this ceiling is
+// only what vaMaxNumConfigAttributes reports. Keep it at the full libva 1.23
+// config-attribute range; a smaller number makes the driver look narrower
+// than it is to a client sizing its query array.
+constexpr unsigned kMaxAttributes = 16;
 // What vaMaxNumImageFormats reports, and therefore the largest list
 // queryImageFormats may fill: a client sizes its array from this number.
 // NV12 and P010 for the codecs, I420 as the planar form of the same 4:2:0
@@ -352,6 +356,13 @@ iris::StableBuffer& ensure_stable(DriverData& d, Surface& surface);
 // Probe the node once at init.
 Capabilities probe_capabilities(const iris::Options& options);
 
+// Fill everything a VA context needs except the probed capabilities: the
+// version and table-size fields, the vendor string, the 50 entry points and,
+// when the client offers the VPP sub-table and this build has the backend,
+// the three VideoProc entry points. No ioctl and no driver state is touched,
+// so a host test can drive it with a zeroed VADriverContext.
+void fill_context(VADriverContextP ctx, DriverData& d);
+
 // Entry points (one per VA vtable slot we implement).
 VAStatus terminate(VADriverContextP ctx);
 VAStatus queryConfigProfiles(VADriverContextP ctx, VAProfile* profiles, int* count);
@@ -385,6 +396,7 @@ VAStatus syncBuffer(VADriverContextP ctx, VABufferID id, uint64_t timeout_ns);
 // only asks, and a timeout leaves the ticket in place to ask again.
 VAStatus claim_coded(DriverData& d, const std::shared_ptr<Buffer>& b, uint64_t timeout_ns);
 VAStatus querySurfaceStatus(VADriverContextP ctx, VASurfaceID id, VASurfaceStatus* status);
+VAStatus querySurfaceError(VADriverContextP ctx, VASurfaceID id, VAStatus error_status, void** error_info);
 VAStatus querySurfaceAttributes(VADriverContextP ctx, VAConfigID config, VASurfaceAttrib* attributes, unsigned* count);
 VAStatus exportSurfaceHandle(VADriverContextP ctx, VASurfaceID id, uint32_t mem_type, uint32_t flags, void* descriptor);
 VAStatus putSurface(VADriverContextP ctx, VASurfaceID id, void* draw, short srcx, short srcy, unsigned short srcw,

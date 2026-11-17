@@ -207,6 +207,21 @@ void EncoderSession::configure(
     // checked for consistency but do not reach the kernel.
     set_control(V4L2_CID_MPEG_VIDEO_B_FRAMES, static_cast<int32_t>(params.b_frames), "b frames");
     set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, gop_control(aligned_intra_period(params)), "gop size");
+    // Rolling intra refresh. The firmware acts on the period only under CBR:
+    // measured byte-identical to a stream without it under VBR and CQP
+    // (TEST-RESULTS.md, "Encoder capabilities"), so a client asking for it in
+    // either mode is refused rather than handed a stream that ignores the
+    // request.
+    if (params.intra_refresh_period) {
+        require(params.rate_mode == RateMode::Cbr,
+            "rolling intra refresh needs CBR; the firmware ignores it otherwise",
+            VA_STATUS_ERROR_UNIMPLEMENTED);
+        set_control(V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE,
+            V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE_CYCLIC, "intra refresh type");
+        set_control(V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD,
+            static_cast<int32_t>(params.intra_refresh_period), "intra refresh period");
+        trace_("encode intra-refresh period=%u", params.intra_refresh_period);
+    }
     if (params.min_qp >= 0)
         set_control(h264 ? V4L2_CID_MPEG_VIDEO_H264_MIN_QP : V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP, params.min_qp,
             "min qp");
@@ -390,6 +405,11 @@ void EncoderSession::apply_dynamic(const EncodeParams& params)
     // coded against the old one.
     require(params.b_frames == applied_.b_frames,
         "changing the B picture count requires a new context", VA_STATUS_ERROR_UNIMPLEMENTED);
+    // The refresh period is per-context in V4L2. The kernel marks it dynamic
+    // only for a random period, and this driver writes the cyclic one, so a
+    // change needs a new context rather than a write the kernel refuses.
+    require(params.intra_refresh_period == applied_.intra_refresh_period,
+        "changing the intra refresh period requires a new context", VA_STATUS_ERROR_UNIMPLEMENTED);
     if (params.rate_mode == RateMode::Cqp && params.qp != applied_.qp) {
         set_frame_qp(params.qp);
         applied_.qp = params.qp;

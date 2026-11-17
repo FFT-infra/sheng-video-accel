@@ -4,8 +4,6 @@
 
 #include "../util/error.h"
 
-#include <algorithm>
-#include <cstring>
 
 namespace va {
 
@@ -18,6 +16,22 @@ VAStatus guarded(VADriverContextP ctx, const char* where, auto&& body)
     } catch (const std::exception& error) {
         return report(ctx, where, error);
     }
+}
+
+// The RT-format mask a VLD config answers, and the default when a client
+// opens one without an RT-format attribute (FFmpeg does this for VP9 P2).
+// Both surfaces must agree, so one function computes them.
+uint32_t decode_rt_format(const DriverData& d, VAProfile profile)
+{
+    // VP9 Profile 2 has no legal 8-bit stream: libvpx refuses to encode one
+    // and src/codec/vp9.cc requires bit_depth == 10. HEVC Main10 and AV1
+    // Profile0 also decode 8-bit streams, so they keep both bits.
+    if (profile == VAProfileVP9Profile2 && d.capabilities.p010)
+        return VA_RT_FORMAT_YUV420_10;
+    uint32_t value = VA_RT_FORMAT_YUV420;
+    if (p010_decode_profile(profile) && d.capabilities.p010)
+        value |= VA_RT_FORMAT_YUV420_10;
+    return value;
 }
 
 } // namespace
@@ -77,9 +91,7 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
         switch (attributes[i].type) {
         case VAConfigAttribRTFormat:
             if (decode) {
-                attributes[i].value = VA_RT_FORMAT_YUV420;
-                if (p010_decode_profile(profile) && d.capabilities.p010)
-                    attributes[i].value |= VA_RT_FORMAT_YUV420_10;
+                attributes[i].value = decode_rt_format(d, profile);
             } else if (encode) {
                 // The encoder's raw port is NV12 only.
                 attributes[i].value = VA_RT_FORMAT_YUV420;
@@ -137,6 +149,44 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
             // NOT_SUPPORTED answer makes it compute -1.
             attributes[i].value = encode ? 1 : VA_ATTRIB_NOT_SUPPORTED;
             break;
+        case VAConfigAttribEncInterlaced:
+            // The firmware writes progressive parameter sets only. NONE is
+            // the truthful "no interlaced" value; NOT_SUPPORTED would make a
+            // client skip the attribute and guess.
+            attributes[i].value = encode ? VA_ENC_INTERLACED_NONE : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribEncSliceStructure:
+            // One full-picture slice, which the EQUAL_ROWS shape describes as
+            // closely as VA can express: there is no per-row independent
+            // slice, just one slice covering all rows.
+            attributes[i].value = encode ? VA_ENC_SLICE_STRUCTURE_EQUAL_ROWS : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribEncQualityRange:
+            // One quality level. The firmware has no speed/quality knob, so
+            // clients must see a range of 1 rather than an unknown attribute.
+            attributes[i].value = encode ? 1 : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribPredictionDirection:
+            // One past reference. FFmpeg and GStreamer both need this to know
+            // B pictures are not the default.
+            attributes[i].value = encode ? VA_PREDICTION_DIRECTION_PREVIOUS : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribDecAV1Features:
+            // Large-scale tiles are unsupported, but the attribute is known:
+            // answering 0 lets a client ask instead of treating AV1 config
+            // as a driver that does not understand the profile.
+            attributes[i].value = (decode && profile == VAProfileAV1Profile0)
+                ? 0 : VA_ATTRIB_NOT_SUPPORTED;
+            break;
+        case VAConfigAttribEncIntraRefresh:
+            // The firmware sweeps one band of rows per picture, so the
+            // rolling-row form is the one it can express; the column form,
+            // the adaptive form and a per-picture insertion location are
+            // not. Honoured under CBR only (TEST-RESULTS.md, "Encoder
+            // capabilities"), which is the rate control this driver offers a
+            // client that wants it.
+            attributes[i].value = encode ? VA_ENC_INTRA_REFRESH_ROLLING_ROW : VA_ATTRIB_NOT_SUPPORTED;
+            break;
 #if VA_CHECK_VERSION(1, 13, 0)
         case VAConfigAttribEncHEVCFeatures: {
             // The firmware writes the parameter sets, so the answer is what a
@@ -182,8 +232,8 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
         }
 #endif
         default:
-            // Slice structure, ROI, quality range and tiles stay unsupported:
-            // the firmware decides the layout.
+            // ROI, quantization, JPEG, tiling and the extended rate-control
+            // surface stay unsupported: the firmware decides the layout.
             attributes[i].value = VA_ATTRIB_NOT_SUPPORTED;
             break;
         }
@@ -211,15 +261,33 @@ VAStatus createConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entr
                 VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
         }
         uint32_t rt_format = VA_RT_FORMAT_YUV420;
-        if (entrypoint == VAEntrypointVLD && d.capabilities.p010 && p010_decode_profile(profile))
-            rt_format |= VA_RT_FORMAT_YUV420_10;
+        if (entrypoint == VAEntrypointVLD)
+            rt_format = decode_rt_format(d, profile);
         if (entrypoint == VAEntrypointVideoProc && d.capabilities.p010)
             rt_format |= VA_RT_FORMAT_YUV420_10;
         uint32_t rate_control = VA_RC_VBR;
         for (int i = 0; i < count; ++i) {
-            if (attributes[i].type == VAConfigAttribRTFormat && attributes[i].value != VA_ATTRIB_NOT_SUPPORTED)
+            if (attributes[i].value == VA_ATTRIB_NOT_SUPPORTED)
+                continue;
+            // A real client passes only RTFormat and RateControl here. Check
+            // the known attributes against what getConfigAttributes answers;
+            // an unknown type stays accepted so a newer client can still open
+            // a config, but a value we cannot honour fails now instead of at
+            // renderPicture.
+            VAConfigAttrib query = { attributes[i].type, 0 };
+            getConfigAttributes(ctx, profile, entrypoint, &query, 1);
+            if (query.value != VA_ATTRIB_NOT_SUPPORTED) {
+                // An RT-format the driver cannot honour is a format refusal,
+                // not a generic attribute one: clients key off this status to
+                // pick another surface format.
+                const VAStatus status = attributes[i].type == VAConfigAttribRTFormat
+                    ? VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT : VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
+                iris::require((attributes[i].value & ~query.value) == 0,
+                    "unsupported config attribute value", status);
+            }
+            if (attributes[i].type == VAConfigAttribRTFormat)
                 rt_format = attributes[i].value;
-            if (attributes[i].type == VAConfigAttribRateControl && attributes[i].value != VA_ATTRIB_NOT_SUPPORTED)
+            if (attributes[i].type == VAConfigAttribRateControl)
                 rate_control = attributes[i].value;
         }
         if (entrypoint == VAEntrypointVideoProc) {

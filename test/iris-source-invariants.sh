@@ -108,5 +108,34 @@ if ! grep -Fq 'rm -f "$stream" "$decoded" "$ref" "$blank"' "$encode_quality"; th
     echo "FAIL encode-quality gate no longer releases each codec's scratch frames" >&2
     exit 1
 fi
+# Each large encode lane writes one 50 MiB frame at a time and must check free
+# space before it starts, and its oracle must be the frame hashes rather than
+# a whole-file compare: the two framemd5 writers differ in their header. The
+# lane is parameterized (8K plus IRIS_ENCODE_EXTRA_GEOM), so match the guard
+# inside check_large_lane, not an 8K-specific message.
+if ! grep -Fq 'check_large_lane()' "$encode_quality" \
+    || ! grep -Fq 'needs 512 MiB free in $work' "$encode_quality" \
+    || ! grep -Fq "FNR == NR { if (/^0,/) a[++n] = \$0; next }" "$encode_quality"; then
+    echo "FAIL encode-quality large lane no longer checks free space and frame hashes" >&2
+    exit 1
+fi
+
+# A gate whose oracle is a hardcoded publish count is a statement about one
+# exact media file. Without a pin the file can be replaced and the count goes
+# stale silently: a replaced clip changed the recorded invisible count, which
+# read as a driver regression. Both counting gates must
+# verify the media identity and look the counts up by clip hash.
+real_clip="$root/test/iris-real-clip-gate.sh"
+grain_gate="$root/test/iris-av1-grain-gate.sh"
+for gate in "$real_clip" "$grain_gate"; do
+    if ! grep -Fq 'iris_require_media_pin "$clip_dir"' "$gate"; then
+        echo "FAIL $(basename "$gate") does not pin its media directory" >&2
+        exit 1
+    fi
+    if ! grep -Fq 'expected_counts()' "$gate" || ! grep -Fq 'iris_media_sha' "$gate"; then
+        echo "FAIL $(basename "$gate") hardcodes counts instead of keying them by clip hash" >&2
+        exit 1
+    fi
+done
 
 echo "PASS source invariants"

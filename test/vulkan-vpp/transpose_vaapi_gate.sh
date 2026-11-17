@@ -20,9 +20,9 @@
 # flips. transpose_vaapi itself refuses a direction whose bit is missing from
 # pipeline_caps.mirror_flags, so running them is also the caps check.
 #
-# The entrypoint is opt-in. The same client must be refused without
-# V4L2_VA_VPP, which is what keeps a VPP-capable build from changing the
-# decode/encode surface an installed client already qualified against.
+# The entrypoint is on by default. The same client must be refused when
+# V4L2_VA_VPP=0, which keeps a single documented switch able to hide the
+# VAProfileNone surface from a client that qualified against it.
 #
 # Target prerequisites: ffmpeg built with --enable-vaapi (transpose_vaapi,
 # hwupload, hwdownload), libvulkan, and a driver .so built with the Vulkan
@@ -169,17 +169,17 @@ for case in nv12-64x64-hflip nv12-64x64-clock_flip p010le-128x72-vflip; do
         || fail "$case produced no videoproc records"
 done
 
-echo "== opt-in is required: the same client is refused without V4L2_VA_VPP"
+echo "== V4L2_VA_VPP=0 is required to refuse the same client"
 if env LIBVA_DRIVER_NAME=v4l2 $driver_env \
-        LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_TRACE=1 \
+        LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_VPP=0 V4L2_VA_TRACE=1 \
         timeout 120 ffmpeg -y -xerror -hide_banner -loglevel error \
         -vaapi_device "$render" -f rawvideo -pix_fmt nv12 -s 64x64 -i "$work/src-nv12-64x64.raw" \
         -vf 'format=nv12,hwupload,transpose_vaapi=dir=clock,hwdownload,format=nv12' \
         -f rawvideo "$work/default.nv12" 2>"$work/default.trace"; then
-    fail "transpose_vaapi ran without V4L2_VA_VPP; the entrypoint must stay opt-in"
+    fail "transpose_vaapi ran with V4L2_VA_VPP=0; the entrypoint must be disabled"
 fi
 if grep -q 'entrypoint=videoproc' "$work/default.trace"; then
-    fail "videoproc appeared without the opt-in"
+    fail "videoproc appeared with V4L2_VA_VPP=0"
 fi
 
 printf 'driver_path=%s\n' "$driver_path"

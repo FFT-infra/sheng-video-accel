@@ -24,7 +24,7 @@
 #
 # The refusals are part of the contract: an NV12 source, a filter without its
 # parameters, and a rotation in the same picture are all refused rather than
-# approximated. So is the whole entrypoint without V4L2_VA_VPP.
+# approximated. So is the whole entrypoint with V4L2_VA_VPP=0.
 
 set -eu
 
@@ -150,14 +150,14 @@ refuse nv12-source --source-nv12
 refuse no-parameters --no-filter
 refuse odd-crop --crop=1,0,64,64
 
-echo "== opt-in is required: the same client is refused without V4L2_VA_VPP"
-if env LIBVA_DRIVER_NAME=v4l2 $driver_env LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_TRACE=1 \
+echo "== V4L2_VA_VPP=0 is required to refuse the same client"
+if env LIBVA_DRIVER_NAME=v4l2 $driver_env LIBVA_V4L2_VIDEO_PATH="$device" V4L2_VA_VPP=0 V4L2_VA_TRACE=1 \
         timeout 120 "$probe" tonemap "$render" 64 64 1000 "$work/default.nv12" \
         >"$work/default.log" 2>"$work/default.trace"; then
-    fail "tonemap ran without V4L2_VA_VPP; the entrypoint must stay opt-in"
+    fail "tonemap ran with V4L2_VA_VPP=0; the entrypoint must be disabled"
 fi
 if grep -q 'tonemap=hdr10' "$work/default.trace"; then
-    fail "a tone-mapped picture appeared without the opt-in"
+    fail "a tone-mapped picture appeared with V4L2_VA_VPP=0"
 fi
 
 printf 'driver_path=%s\n' "$driver_path"

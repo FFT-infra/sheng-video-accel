@@ -1,24 +1,33 @@
 # Porting to another Qualcomm SoC
 
 This is a portability checklist, not a support claim. The only qualified
-target is the Xiaomi Pad 6S Pro (`sheng`, SM8550) on Fedora 44 with the
-`sheng-7.2.6` kernel at `42f3b40c702a`. `data/iris-codec-capabilities.json`
-names that target; do not broaden its `target` field to imply support for
-another SoC. No codec, profile or publish policy may be advertised on a new
-SoC until its own hardware gate passes and `TEST-RESULTS.md` records the run.
+target is the Xiaomi Pad 6S Pro (`sheng`, SM8550) on Fedora 44, running
+either the `sheng-7.2.6` kernel at `42f3b40c702a` with patches 0001-0004 or
+`sheng-7.3.4` at `87ac0f2347eb` with patches 0008-0009.
+`data/iris-codec-capabilities.json` names that target; do not broaden its
+`target` field to imply support for another SoC. No codec, profile or publish
+policy may be advertised on a new SoC until its own hardware gate passes and
+`TEST-RESULTS.md` records the run.
 
 ## What is SM8550-specific
 
-1. **Kernel patches.** The seven files in `packaging/kernel/` are rebased onto
-   `ianchb/sm8550-mainline` `sheng-7.2.6` (`42f3b40c702a`). 0001 adds
-   `DISPLAY_DELAY_ENABLE`/`DISPLAY_DELAY` to `inst_fw_cap_sm8550_dec` and the
-   `sm8550_vdec_input_config_param_*` arrays; 0002 and 0003 add controls to
-   `inst_fw_cap_sm8550_enc`; 0004 changes `iris_vb2_buffer_done()`; 0005, 0006
-   and 0007 are experimental and must stay out of a port baseline. 0006 has one
-   guarded WP1 run on SM8550 with a "no regression" verdict; 0005 and 0007 were
-   run on hardware and rejected. None of these adds a fix claim or
-   portability evidence. A new SoC has its own platform tables and firmware
-   capability enum, so every hunk needs re-review and rebase, not a blind `git am`.
+1. **Kernel patches.** The nine files in `packaging/kernel/` target
+   `ianchb/sm8550-mainline`: 0001-0007 apply to `sheng-7.2.6`
+   (`42f3b40c702a`) and 0008-0009 to `sheng-7.3.4` (`87ac0f2347eb`). On
+   7.2.6, 0001 adds `DISPLAY_DELAY_ENABLE`/`DISPLAY_DELAY` to
+   `inst_fw_cap_sm8550_dec` and the `sm8550_vdec_input_config_param_*` arrays;
+   0002 and 0003 add controls to `inst_fw_cap_sm8550_enc`; 0004 changes
+   `iris_vb2_buffer_done()`. On 7.3.4, 0008 carries the decode-order and
+   deblocking changes for both gen2 encoder tables and 0009 the timestamp
+   change. 0005, 0006 and 0007 are experimental and must stay out of a port
+   baseline. 0006 had one guarded run on SM8550 with a "no regression"
+   verdict; 0005 and 0007 were rejected on hardware. None of these
+   adds a fix claim or portability evidence. A new SoC has its own platform
+   tables and firmware capability enum, so every hunk needs re-review and
+   rebase, not a blind `git am`. A patch also has to be carried forward to
+   whichever kernel branch the port runs: 7.3.4 needs two patches where 7.2.6
+   needed four, and the difference is what the kernel already implements, not
+   what the driver needs.
    `test/iris-kernel-patch-check.sh` pins the current hashes and paths; refresh
    `SHA256SUMS` in the same commit as any patch change.
 2. **Kernel build identity.** The target config has BTI/PAC enabled
@@ -54,10 +63,10 @@ SoC until its own hardware gate passes and `TEST-RESULTS.md` records the run.
    Arch PKGBUILD comment names an `arch-xiaomi-sheng` image. The Debian
    package is built in a clean chroot: `libgbm-dev` is pinned to the distro's
    Mesa and is not safe to install over a vendor-patched stack. See
-   `docs/build-and-deploy.md` and WP6 in `docs/POST-MERGE-BACKLOG.md` §16.
+   `docs/development.md` for the chroot recipe.
 7. **Validation records.** Every hardware result in `TEST-RESULTS.md` came
    from this target's installed package, driver hash, boot ID, resolved node,
-   decoder name, frame/drop counts and 0001-0004 module. Those records do not
+   decoder name, frame/drop counts and kernel module. Those records do not
    transfer to a new SoC. `docs/architecture.md` §2 and §9 describe the kernel
    contract and gate sequence that must be re-run.
 
@@ -75,7 +84,8 @@ SoC until its own hardware gate passes and `TEST-RESULTS.md` records the run.
   READMEs and the required checks in one commit.
 - Re-run the four-codec matrix, real AV1 clip, in-context DRC clip, 10-bit
   probe, 17-case browser matrix and A11-style independent-oracle corpus under
-  `scripts/iris-experiment-guard.sh`, recording every §1.8 evidence field.
+  `scripts/iris-experiment-guard.sh`, recording the source commit, driver
+  hash, boot ID, resolved node and frame/drop counts.
 - Re-run host gates: `sh test/run-static-checks.sh`,
   `meson test -C build-local --print-errorlogs`, `git diff --check`, and CI.
 - Record the new source commit, driver hash, module hash, boot ID, resolved

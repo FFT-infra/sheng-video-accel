@@ -74,7 +74,7 @@ Capabilities probe_capabilities(const iris::Options& options)
 
     // Profiles: every entry here is qualified in
     // data/iris-codec-capabilities.json; a codec is advertised only after its
-    // hardware gate passed (architecture §9, Phase 5).
+    // hardware gate passed (docs/architecture.md §9).
     // profile-qualified-begin
     if (caps.output_formats.count(V4L2_PIX_FMT_H264) && caps.nv12) {
         caps.profiles.insert(VAProfileH264ConstrainedBaseline);
@@ -86,20 +86,20 @@ Capabilities probe_capabilities(const iris::Options& options)
         if (caps.p010)
             caps.profiles.insert(VAProfileHEVCMain10);
     }
-    // VP9 passed its Phase 5 gate on the decode-order module (matrix,
-    // 100 context recreations, 100 resolution switches, Chrome 1080p with
-    // alt-ref); see TEST-RESULTS.md.
+    // VP9 is qualified on the decode-order module (matrix, 100 context
+    // recreations, 100 resolution switches, Chrome 1080p with alt-ref); see
+    // TEST-RESULTS.md.
     if (caps.output_formats.count(V4L2_PIX_FMT_VP9) && caps.nv12) {
         caps.profiles.insert(VAProfileVP9Profile0);
         if (caps.p010)
             caps.profiles.insert(VAProfileVP9Profile2);
     }
-    // AV1 passed its first gate on 2026-10-22 (matrix, FFmpeg over alt-ref
-    // and no-alt-ref streams bit-exact against libdav1d, Chrome 152). The
-    // internal-DPB translator submits each picture at vaEndPicture, so a
-    // client that syncs each surface never waits for a successor; its own
-    // installed-package matrix, clip, DRC and browser gates are recorded in
-    // TEST-RESULTS.md.
+    // AV1 is qualified at 8 and 10 bits (matrix, FFmpeg over alt-ref and
+    // no-alt-ref streams bit-exact against libdav1d, browser media-surface
+    // evidence). The internal-DPB translator submits each picture at
+    // vaEndPicture, so a client that syncs each surface never waits for a
+    // successor; its installed-package matrix, clip, DRC and browser gates
+    // are recorded in TEST-RESULTS.md.
     if (caps.output_formats.count(V4L2_PIX_FMT_AV1) && caps.nv12)
         caps.profiles.insert(VAProfileAV1Profile0);
     // profile-qualified-end
@@ -160,6 +160,81 @@ int render_fd_of(VADriverContextP ctx)
 
 } // namespace
 
+void fill_context(VADriverContextP ctx, DriverData& d)
+{
+    ctx->version_major = VA_MAJOR_VERSION;
+    ctx->version_minor = VA_MINOR_VERSION;
+    ctx->max_profiles = kMaxProfiles;
+    ctx->max_entrypoints = kMaxEntrypoints;
+    ctx->max_attributes = kMaxAttributes;
+    ctx->max_image_formats = kMaxImageFormats;
+    ctx->max_subpic_formats = kMaxSubpictureFormats;
+    ctx->max_display_attributes = kMaxDisplayAttributes;
+    ctx->str_vendor = kVendor;
+
+    VADriverVTable* vtable = ctx->vtable;
+    vtable->vaTerminate = terminate;
+    vtable->vaQueryConfigProfiles = queryConfigProfiles;
+    vtable->vaQueryConfigEntrypoints = queryConfigEntrypoints;
+    vtable->vaQueryConfigAttributes = queryConfigAttributes;
+    vtable->vaGetConfigAttributes = getConfigAttributes;
+    vtable->vaCreateConfig = createConfig;
+    vtable->vaDestroyConfig = destroyConfig;
+    vtable->vaQueryDisplayAttributes = queryDisplayAttributes;
+    vtable->vaGetDisplayAttributes = getDisplayAttributes;
+    vtable->vaSetDisplayAttributes = setDisplayAttributes;
+    vtable->vaCreateSurfaces = createSurfaces;
+    vtable->vaCreateSurfaces2 = createSurfaces2;
+    vtable->vaDestroySurfaces = destroySurfaces;
+    vtable->vaSyncSurface = syncSurface;
+    vtable->vaSyncBuffer = syncBuffer;
+    vtable->vaQuerySurfaceStatus = querySurfaceStatus;
+    vtable->vaQuerySurfaceError = querySurfaceError;
+    vtable->vaQuerySurfaceAttributes = querySurfaceAttributes;
+    vtable->vaExportSurfaceHandle = exportSurfaceHandle;
+    vtable->vaPutSurface = putSurface;
+    vtable->vaLockSurface = lockSurface;
+    vtable->vaUnlockSurface = unlockSurface;
+    vtable->vaCreateContext = createContext;
+    vtable->vaDestroyContext = destroyContext;
+    vtable->vaBeginPicture = beginPicture;
+    vtable->vaRenderPicture = renderPicture;
+    vtable->vaEndPicture = endPicture;
+    vtable->vaCreateBuffer = createBuffer;
+    vtable->vaDestroyBuffer = destroyBuffer;
+    vtable->vaMapBuffer = mapBuffer;
+    vtable->vaUnmapBuffer = unmapBuffer;
+    vtable->vaBufferSetNumElements = bufferSetNumElements;
+    vtable->vaBufferInfo = bufferInfo;
+    vtable->vaAcquireBufferHandle = acquireBufferHandle;
+    vtable->vaReleaseBufferHandle = releaseBufferHandle;
+    vtable->vaQueryImageFormats = queryImageFormats;
+    vtable->vaCreateImage = createImage;
+    vtable->vaDeriveImage = deriveImage;
+    vtable->vaDestroyImage = destroyImage;
+    vtable->vaSetImagePalette = setImagePalette;
+    vtable->vaGetImage = getImage;
+    vtable->vaPutImage = putImage;
+    vtable->vaQuerySubpictureFormats = querySubpictureFormats;
+    vtable->vaCreateSubpicture = createSubpicture;
+    vtable->vaDestroySubpicture = destroySubpicture;
+    vtable->vaSetSubpictureImage = setSubpictureImage;
+    vtable->vaSetSubpictureChromakey = setSubpictureChromakey;
+    vtable->vaSetSubpictureGlobalAlpha = setSubpictureGlobalAlpha;
+    vtable->vaAssociateSubpicture = associateSubpicture;
+    vtable->vaDeassociateSubpicture = deassociateSubpicture;
+
+    // The VPP vtable is separate and may be absent on an older libva. Only
+    // fill it in when this build and the client both opted in; otherwise a
+    // client that probes VAProfileNone gets nothing to call.
+    if (ctx->vtable_vpp && vpp_available(d)) {
+        ctx->vtable_vpp->version = VA_DRIVER_VTABLE_VPP_VERSION;
+        ctx->vtable_vpp->vaQueryVideoProcFilters = queryVideoProcFilters;
+        ctx->vtable_vpp->vaQueryVideoProcFilterCaps = queryVideoProcFilterCaps;
+        ctx->vtable_vpp->vaQueryVideoProcPipelineCaps = queryVideoProcPipelineCaps;
+    }
+}
+
 VAStatus terminate(VADriverContextP ctx)
 {
     auto* d = static_cast<DriverData*>(ctx->pDriverData);
@@ -204,76 +279,7 @@ extern "C" VAStatus __attribute__((visibility("default"))) VA_DRIVER_INIT_FUNC(V
         d->capabilities.encoder_node.empty() ? "-" : d->capabilities.encoder_node.c_str(), d->render_fd,
         d->capabilities.profiles.size(), d->capabilities.encode_profiles.size());
 
-    ctx->version_major = VA_MAJOR_VERSION;
-    ctx->version_minor = VA_MINOR_VERSION;
-    ctx->max_profiles = kMaxProfiles;
-    ctx->max_entrypoints = kMaxEntrypoints;
-    ctx->max_attributes = kMaxAttributes;
-    ctx->max_image_formats = kMaxImageFormats;
-    ctx->max_subpic_formats = kMaxSubpictureFormats;
-    ctx->max_display_attributes = kMaxDisplayAttributes;
-    ctx->str_vendor = kVendor;
-
-    VADriverVTable* vtable = ctx->vtable;
-    vtable->vaTerminate = terminate;
-    vtable->vaQueryConfigProfiles = queryConfigProfiles;
-    vtable->vaQueryConfigEntrypoints = queryConfigEntrypoints;
-    vtable->vaQueryConfigAttributes = queryConfigAttributes;
-    vtable->vaGetConfigAttributes = getConfigAttributes;
-    vtable->vaCreateConfig = createConfig;
-    vtable->vaDestroyConfig = destroyConfig;
-    vtable->vaQueryDisplayAttributes = queryDisplayAttributes;
-    vtable->vaGetDisplayAttributes = getDisplayAttributes;
-    vtable->vaSetDisplayAttributes = setDisplayAttributes;
-    vtable->vaCreateSurfaces = createSurfaces;
-    vtable->vaCreateSurfaces2 = createSurfaces2;
-    vtable->vaDestroySurfaces = destroySurfaces;
-    vtable->vaSyncSurface = syncSurface;
-    vtable->vaSyncBuffer = syncBuffer;
-    vtable->vaQuerySurfaceStatus = querySurfaceStatus;
-    vtable->vaQuerySurfaceAttributes = querySurfaceAttributes;
-    vtable->vaExportSurfaceHandle = exportSurfaceHandle;
-    vtable->vaPutSurface = putSurface;
-    vtable->vaLockSurface = lockSurface;
-    vtable->vaUnlockSurface = unlockSurface;
-    vtable->vaCreateContext = createContext;
-    vtable->vaDestroyContext = destroyContext;
-    vtable->vaBeginPicture = beginPicture;
-    vtable->vaRenderPicture = renderPicture;
-    vtable->vaEndPicture = endPicture;
-    vtable->vaCreateBuffer = createBuffer;
-    vtable->vaDestroyBuffer = destroyBuffer;
-    vtable->vaMapBuffer = mapBuffer;
-    vtable->vaUnmapBuffer = unmapBuffer;
-    vtable->vaBufferSetNumElements = bufferSetNumElements;
-    vtable->vaBufferInfo = bufferInfo;
-    vtable->vaAcquireBufferHandle = acquireBufferHandle;
-    vtable->vaReleaseBufferHandle = releaseBufferHandle;
-    vtable->vaQueryImageFormats = queryImageFormats;
-    vtable->vaCreateImage = createImage;
-    vtable->vaDeriveImage = deriveImage;
-    vtable->vaDestroyImage = destroyImage;
-    vtable->vaSetImagePalette = setImagePalette;
-    vtable->vaGetImage = getImage;
-    vtable->vaPutImage = putImage;
-    vtable->vaQuerySubpictureFormats = querySubpictureFormats;
-    vtable->vaCreateSubpicture = createSubpicture;
-    vtable->vaDestroySubpicture = destroySubpicture;
-    vtable->vaSetSubpictureImage = setSubpictureImage;
-    vtable->vaSetSubpictureChromakey = setSubpictureChromakey;
-    vtable->vaSetSubpictureGlobalAlpha = setSubpictureGlobalAlpha;
-    vtable->vaAssociateSubpicture = associateSubpicture;
-    vtable->vaDeassociateSubpicture = deassociateSubpicture;
-
-    // The VPP vtable is separate and may be absent on an older libva. Only
-    // fill it in when this build and the client both opted in; otherwise a
-    // client that probes VAProfileNone gets nothing to call.
-    if (ctx->vtable_vpp && vpp_available(*d)) {
-        ctx->vtable_vpp->version = VA_DRIVER_VTABLE_VPP_VERSION;
-        ctx->vtable_vpp->vaQueryVideoProcFilters = queryVideoProcFilters;
-        ctx->vtable_vpp->vaQueryVideoProcFilterCaps = queryVideoProcFilterCaps;
-        ctx->vtable_vpp->vaQueryVideoProcPipelineCaps = queryVideoProcPipelineCaps;
-    }
+    fill_context(ctx, *d);
 
     ctx->pDriverData = d;
     return VA_STATUS_SUCCESS;

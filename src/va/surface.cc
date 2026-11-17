@@ -494,6 +494,27 @@ VAStatus querySurfaceStatus(VADriverContextP ctx, VASurfaceID id, VASurfaceStatu
     });
 }
 
+VAStatus querySurfaceError(VADriverContextP ctx, VASurfaceID id, VAStatus error_status, void** error_info)
+{
+    return guarded(ctx, "querySurfaceError", [&] {
+        auto& d = data(ctx);
+        if (!error_info)
+            return VA_STATUS_ERROR_INVALID_PARAMETER;
+        {
+            std::lock_guard<std::recursive_mutex> lock(d.mutex);
+            surface(d, id);
+        }
+        // libva dispatches this slot without a null check, so leaving it empty
+        // crashes any client that asks after a failed sync. The firmware
+        // reports whole-picture failures, not per-MB ones, so there is no
+        // record to hand back: a valid surface answers with an empty list and
+        // the caller reads its own error status.
+        (void)error_status;
+        *error_info = nullptr;
+        return VA_STATUS_SUCCESS;
+    });
+}
+
 VAStatus querySurfaceAttributes(VADriverContextP ctx, VAConfigID config, VASurfaceAttrib* attributes, unsigned* count)
 {
     auto& d = data(ctx);

@@ -29,9 +29,14 @@
 #                      (default iris-vaapi-lab/src)
 #   IRIS_REMOTE_RUNS   remote directory for run artifacts, relative to the
 #                      remote home (default iris-vaapi-lab/runs)
+#   IRIS_GATE_ALLOW_EMPTY_OUTPUT=1
+#                      permit a command that deliberately prints nothing.
+#                      By default an empty guarded child stdout is refused:
+#                      a green record with no output proves nothing ran.
 #
 # Exit status is the command's own, except that a guard which stopped the run
-# (reboot, thermal trip, timeout) is reported as 3 and a missing identity as 4.
+# (reboot, thermal trip, timeout) is reported as 3, a missing identity as 4,
+# and an empty guarded child stdout as 5.
 
 set -eu
 
@@ -185,4 +190,12 @@ case $guard_status in
     *) printf 'FAIL guard stopped the run: %s\n' "$guard_status" >&2; exit 3 ;;
 esac
 [ "$rc" -eq 0 ] || exit "$rc"
+
+# A guard that reached "complete" with an empty child stdout proves nothing:
+# a command can be landed wrong (a `sh -c` whose quoting was flattened, a
+# heredoc the child never read) and still exit 0. A flattened `sh -c` once
+# left a green record behind an unexecuted probe. gate-output-check.sh refuses
+# a silent run by default; a caller with a genuinely silent command opts out
+# explicitly.
+"$here/gate-output-check.sh" "$out" "${IRIS_GATE_ALLOW_EMPTY_OUTPUT:-0}"
 printf 'PASS %s\n' "$*"

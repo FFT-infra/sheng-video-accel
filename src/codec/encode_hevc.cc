@@ -261,6 +261,24 @@ public:
             require(!params->pic_fields.bits.idr_pic_flag, "an IDR needs an I slice",
                 VA_STATUS_ERROR_INVALID_PARAMETER);
         }
+        if (const auto* rir = static_cast<const VAEncMiscParameterRIR*>(
+                find_misc(picture.misc, VAEncMiscParameterTypeRIR))) {
+            // Same mapping as H.264: one period, and the firmware sweeps the
+            // picture itself. VA counts the window in MB rows, which for
+            // 4:2:0 is 16 lines; the node takes a picture count, so the
+            // period is how many pictures one full sweep needs.
+            require(rir->rir_flags.bits.enable_rir_row && !rir->rir_flags.bits.enable_rir_column,
+                "only a rolling row intra refresh is supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+            const unsigned rows = rir->intra_insert_size;
+            require(rows > 0, "intra refresh needs an insertion size",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
+            const unsigned mb_rows = (coded_height + 15) / 16;
+            intra_refresh_period_ = mb_rows > rows ? (mb_rows + rows - 1) / rows : 1;
+        }
+        // Per-context control, and the client may render the refresh buffer
+        // with one picture only; every picture carries what it last
+        // configured, or apply_dynamic() reads the next one as a change.
+        out.intra_refresh_period = intra_refresh_period_;
         // With one B per P nothing predicts from that B, so a client marks it
         // non-reference. The firmware owns the structure and the flag does not
         // reach it; a non-reference P picture would still promise a stream the
@@ -302,6 +320,9 @@ private:
     // rate rather than the client's target.
     uint32_t bitrate_ = 0;
     uint32_t peak_bitrate_ = 0;
+    // The sweep period the client configured most recently, for the same
+    // reason as the two rates above.
+    unsigned intra_refresh_period_ = 0;
 };
 
 } // namespace

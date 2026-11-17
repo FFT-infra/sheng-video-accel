@@ -58,6 +58,8 @@ jobs:
             session \
             deferred-copy \
             va-vpp-query \
+            va-vtable \
+            iris-va-vtable-surface \
             annexb \
             hevc-parameter-sets \
             av1-obu \
@@ -75,6 +77,7 @@ jobs:
             iris-env-doc-check \
             iris-eos-check-self-test \
             iris-clip-trace-check-self-test \
+            iris-gate-output-self-test \
             iris-experiment-guard-self-test \
             iris-packaging-check \
             iris-spec-selfobsolete-check \

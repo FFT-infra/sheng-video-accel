@@ -37,7 +37,7 @@ Non-goals: being a generic backend for stateless request-API decoders (that
 is upstream `mxsrc/libva-v4l2`'s job and stays on `master`), VP9, AV1 and
 10-bit encode, HEVC B-frames, ROI, multi-slice and tiles, `VAEntrypointEncSliceLP`,
 and shipping a custom Chromium. (Video post-processing is supported via
-an opt-in Vulkan compute backend under `V4L2_VA_VPP`).
+a Vulkan compute backend, on by default and disabled by `V4L2_VA_VPP=0`).
 
 ## 2. Target and kernel contract
 
@@ -49,7 +49,10 @@ fixes are in scope.
 Five Iris kernel changes are adopted as part of the target. The first two
 were first applied to a `sheng-7.2.2` tree; after the target moved to
 `kernel-sheng-7.2.6-1` the rebased patches and the module-only build recipe
-live in `packaging/kernel/`:
+live in `packaging/kernel/`. On `sheng-7.3.4` the same five changes are
+carried by two patches instead of four, because the 7.3.4 driver already
+implements `REQUEST_SYNC_FRAME` and the error-completion stability fixes
+that 7.2.6 needs separate patches for:
 
 | Patch | What it changes | Why the driver needs it |
 | --- | --- | --- |
@@ -59,8 +62,8 @@ live in `packaging/kernel/`:
 | encoder `REQUEST_SYNC_FRAME` | Exposes `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME`, sent as `HFI_PROP_REQUEST_SYNC_FRAME` with the sequence-header mode from `PREPEND_SPSPPS_TO_IDR` | Without it a requested IDR is produced by moving the intra period, which costs two control writes per request and leaves the parameter sets for the driver to prefix. |
 | timestamp on error completions | `iris_vb2_buffer_done()` copies `buf->timestamp` onto a `V4L2_BUF_FLAG_ERROR` CAPTURE completion instead of zeroing it | The CAPTURE timestamp is the token that names the picture. Zeroed, a corrupt picture cannot be attributed: the target stays pending until a drain or the sync bound, and the client sees `TIMEDOUT` rather than `DECODING_ERROR`. |
 
-The target runs a module built from all four patches
-(`TEST-RESULTS.md`, `REQUEST_SYNC_FRAME` on the target). The driver still
+The 7.2.6 target runs a module built from 0001-0004; the 7.3.4 target runs
+0008-0009, which carry all five changes above. The driver still
 detects each control and falls back when it is absent, so a stock module
 keeps working: display order with the drain fallback, deblocking refused,
 the intra-period lever, and an error completion reported at the drain.
@@ -82,8 +85,8 @@ control at session open and runs in one of two session modes:
   waking every 25 ms in every context.
 
 Kernel version, Iris module hash and firmware identity are part of every
-hardware result (`test/remote/provenance.py` already records `uname`; the
-module hash is added in Phase 1).
+hardware result (`test/remote/provenance.py` and `test/remote/gate.sh` record
+them).
 
 ## 3. The one ownership model
 
@@ -277,14 +280,14 @@ Ordering facts learned on this firmware and kept verbatim:
   lost varies from run to run: the boundary access unit also completes once
   with `ERROR|LAST`, and that is what makes the failure intermittent rather
   than deterministic. `enter_streaming()` streams `CAPTURE` first, for both
-  Mmap and Import memories; `TEST-RESULTS.md` records 2 of 6 framemd5 runs
-  passing before the change and 44 of 44 after. In a passing run the boundary
+  Mmap and Import memories; queueing before `STREAMON` failed 2 of 6 framemd5
+  runs and this order passes 44 of 44. In a passing run the boundary
   access unit comes back a second time as `0x4009` (`KEYFRAME`, real pixels).
   The kernel sub-state transitions (`0x16` -> `0x42` -> `0`) are the same in
   both cases, which is why the defect could not be seen there.
 - VP9 in-context resolution change and VP9 context recreation rebooted the
-  device on display-order firmware; VP9 bring-up (Phase 5) runs under
-  `scripts/iris-experiment-guard.sh` only.
+  device on display-order firmware; VP9 runs under
+  `scripts/iris-experiment-guard.sh` only on that firmware.
 
 ### 4.1 Encode Session Architecture
 
@@ -453,8 +456,8 @@ surface's pending decode before it reads that surface — a client that issues
 the processor's picture straight behind the decode (FFmpeg's `overlay_vaapi`
 does) would otherwise composite a black frame — and a source whose decode never
 lands fails the picture. The entrypoint is advertised only when the
-build found Vulkan and the client set `V4L2_VA_VPP` (§6), so an installed
-decode/encode client sees the surface it qualified against. The kernel and the
+build found Vulkan and the client did not set `V4L2_VA_VPP=0` (§6), so an
+installed decode/encode client sees the surface it qualified against. The kernel and the
 VA surface path are gated separately in §9:
 `test/vulkan-vpp/nv12_scale_gate.sh` and `test/vulkan-vpp/p010_scale_gate.sh`
 check every pixel of the primitive, for both interpolation methods — the point
@@ -521,7 +524,7 @@ Read once in `VA_DRIVER_INIT_FUNC`, stored in `Options`, passed down.
 | `V4L2_VA_SYNC_TIMEOUT_MS` | `2000` | Bounded `vaSyncSurface` wait; first frame of a cold session gets `30000`. |
 | `V4L2_VA_COPY` | `gpu` | Copy engine for persistent exports: `gpu` or `cpu`. |
 | `V4L2_VA_PUBLISH` | `auto` | Force `copy`, `direct` or `import` for diagnostics. |
-| `V4L2_VA_VPP` | off | Opt in to the `VAProfileNone` / `VAEntrypointVideoProc` entrypoint. Off keeps the decode/encode surface unchanged. |
+| `V4L2_VA_VPP` | on | Set to `0` to remove the `VAProfileNone` / `VAEntrypointVideoProc` entrypoint. On keeps the decode/encode surface unchanged. |
 | `V4L2_VA_DUMP` | off | Directory for submitted access units. |
 
 Eight switches, down from eighteen. `test/iris-env-doc-check.sh` keeps README
@@ -675,6 +678,10 @@ encode input fence fd=<n> waited=<ms>                 (only when the input's
                                                        write fence was pending
                                                        20 ms or longer)
 encode deblocking mode=<0|1|2> alpha=<n> beta=<n> via=default|V4L2
+encode intra-refresh period=<n>                        (pictures one rolling
+                                                       sweep takes; the
+                                                       firmware honours it
+                                                       under CBR only)
 encode idr lever=sync-frame|intra-period               (which requested-IDR
                                                        lever this kernel has)
 encode drain result=complete
@@ -704,33 +711,29 @@ They name driver startup or teardown failures, not session completions.
 These are the accepted exceptions for `test/iris-trace-vocab-check.py`, which
 compares every trace format prefix in `src/` against the list above.
 
-## 9. Phases and gates
+## 9. Verification and gates
 
-Each phase is independently mergeable and leaves a shippable driver. Each
-ends with a tag. Gates are commands, not opinions.
+A codec, profile or publish policy is advertised only after its hardware gate
+passes and `TEST-RESULTS.md` records the run; anything without a passing gate
+stays out of `data/iris-codec-capabilities.json`. Host checks run in CI with
+no device. Target gates run on SM8550 under
+`scripts/iris-experiment-guard.sh` through `test/remote/gate.sh`, which records
+the source commit, driver and module hashes, boot ID, resolved nodes and
+guard state beside the command's output.
 
-| Phase | Deliverable | Gate | Tag |
-| --- | --- | --- | --- |
-| 0 | Branch layout, baseline, acceptance script, this document, tests unpinned from source text | static checks; driver bytes identical; baseline in `TEST-RESULTS.md` | `pre-rebuild-20260920` |
-| 1 | Kernel: both Iris patches on `sheng-7.2.2`, `qcom-iris.ko` rebuilt and installed with rollback kept (rebased onto `sheng-7.2.6` later; `packaging/kernel/`) | `display_delay*` controls present; acceptance H.264+HEVC on the unchanged driver; boot ID unchanged | (module only; `ROLLBACK.sh` under the lab dir) |
-| — | Kernel track: encoder loop-filter controls (`packaging/kernel/0002-*`), the encoder `REQUEST_SYNC_FRAME` control (`packaging/kernel/0003-*`) and error-completion timestamps (`packaging/kernel/0004-*`), all rebased onto `sheng-7.2.6` | 0002/0003: the six DEBLOCK and one `REQUEST_SYNC_FRAME` capability appear once in `inst_fw_cap_sm8550_enc`, `force_key_frame` is listed by `--list-ctrls` on the loaded module, `encode idr lever=sync-frame`, and the IDR/segment/pipelining runs in `TEST-RESULTS.md` match the GOP record. 0004: a truncated HEVC stream fails its surface at dequeue (`publish=error`) instead of at the drain, a mid-stream corrupt picture does not stop the pictures after it, and the decode matrix (AV1 `noshow=23` included) is unchanged | (not tagged) |
-| 2 | `src/iris/` core with the FakeDevice unit suite | `meson test` green on host | (in `phase-3-core-rewired`) |
-| 3 | VA glue on the core for H.264 + HEVC, GPU blit engine, old tree deleted | host units; matrix 48/48 both codecs; structure matrix; DRC; 120 s soak; Chrome both codecs; FFmpeg `publish=direct` | `phase-3-core-rewired` |
-| 5 | VP9 qualified and advertised; AV1 rebuilt OBU and decode contract (matrix, FFmpeg over alt-ref and no-alt-ref, Chrome) | VP9: matrix, 100 context recreations, 100 DRC switches, Chrome with alt-ref, all guarded. AV1: matrix with `--hidden-pictures`, native-vs-VA frame MD5, Chrome acceptance; see §9 and `TEST-RESULTS.md` | `phase-5-vp9-qualified` |
-| 6 | Harness/packaging/docs trimmed to the shipped tree | static checks; RPM built and installed; acceptance from the installed package for H.264/HEVC/VP9 | `phase-6-packaged` |
-| 7 | 10-bit (HEVC Main10, VP9 Profile 2) qualified; Fluster conformance on the new driver; module identity in provenance | 10-bit framemd5 both codecs; Chrome Main10; Fluster H.264/HEVC driver-path counts recorded against the old tree's | `phase-7-conformance` |
-| 8 | `VAEntrypointEncSlice` on the second Iris node: H.264 Constrained Baseline/Main/High and HEVC Main, CBR/VBR/CQP, NV12 in, Annex-B out | `vainfo` lists `VAEntrypointEncSlice`; FFmpeg's 300-frame GOP-60 acceptance for both codecs (CQP, no bitrate) with keyframes at 0/60/120/180/240, software-identical decode and an IRQ delta, and the decode matrix re-run unchanged; `encode-session` for the deblocking refusal a kernel without loop-filter controls must produce; `encode-params` for the translation and the request rejections, `annexb` for what a requested IDR carries; on the target, one-second segments cut at `-force_key_frames` in both codecs and a 24 fps run past every GOP boundary | (in `feat/encode-entrypoints`) |
-| 9 | AV1 Profile 0 qualified at both bit depths: P010 advertised and the capture format taken from the stream | native-vs-VA frame MD5 over a 10-bit stream, Chrome on the same stream selecting `VaapiVideoDecoder` with P010 surfaces, and the 8-bit/HEVC Main10/VP9 rows unchanged; see §9 and `TEST-RESULTS.md` | (not tagged) |
+Host checks are `sh test/run-static-checks.sh`,
+`meson test -C build-local --print-errorlogs`, the sanitizer build and
+`git diff --check`. The static runner pins the shader binaries, kernel patch
+hashes, node-resolution rule, install manifest, source-archive boundary and
+the trace vocabulary; `test/meson.build` registers the same host tests CI
+requires.
 
-Phase 4 (GPU copy engine) was delivered inside Phase 3; the numbering above
-is the one the tags carry.
-
-Research track, resolved: client-owned CAPTURE buffers.
-`test/iris-import-probe.cc` is the acceptance program; it proved that the
-firmware does not honour QBUF order when it has several buffers to choose
-from (246/360 wrong under the doc's original model), and the Import policy
-is the deformation that survives that finding (one picture in flight, no
-holes). Results and the VP9 open failure: TEST-RESULTS.md.
+The Import policy accepts only the ownership model that the acceptance
+program `test/iris-import-probe.cc` can prove: the firmware does not honour
+QBUF order when it has several buffers to choose from, so the session queues
+exactly one client picture at a time and never skips a submitted picture (one
+picture in flight, no holes). A completion whose token does not match its
+buffer's token fails both surfaces and is never published.
 
 Client memory entering through `vaCreateSurfaces2` (DRM_PRIME_2 or PRIME_1,
 §3.4) is the same policy reached from the API. Its gates are `prime-import`
@@ -763,7 +766,7 @@ must match `scale` then `format` byte for byte;
 `test/vulkan-vpp/transpose_vaapi_gate.sh` checks every direction the pipeline
 caps advertise — three quarter turns, a horizontal and a vertical mirror, and a
 quarter turn with each — against the software filters, in NV12 and P010. Both
-VA-level gates check that the entrypoint is refused without `V4L2_VA_VPP`.
+VA-level gates check that `V4L2_VA_VPP=0` still refuses the entrypoint.
 `test/vulkan-vpp/tonemap_gate.sh` drives the one filter through
 `iris-va-vpp-probe tonemap`: no FFmpeg in 8.1 can feed `tonemap_vaapi` a raw
 P010 frame, so the probe builds the HDR10 metadata buffer itself and compares

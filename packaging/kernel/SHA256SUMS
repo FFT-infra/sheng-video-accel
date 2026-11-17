@@ -5,3 +5,5 @@ b8e3600e79b9277448d7b84445cf28b623dbbac546081c685153e3dba247f0a9  0003-media-iri
 f8cf222758c711a3589e76d49bf9d6bdb83c16365890b6e3aa9890aae3dc17f2  0005-media-iris-recycle-decoder-buffers-for-non-display-pictures.patch
 ca1bb3dc8c4aa691b64898528dbe99eab5d371ef5931e6cff43c5c9aee91b5c1  0006-media-iris-discard-unmatched-timestamp-metadata.patch
 2124be61542bd536f5b457e4afd115a54964cc8fc126d3ae4a62acfba4a0d7c8  0007-media-iris-complete-noshow-pictures-without-an-error.patch
+09496c489d8df038907e6f4ac48586dd9c5440e0f9f71c955e50cdd0e0324774  0008-7.3.4-decode-order-and-deblocking.patch
+f2f992ade957d44416f62bc68d0a72afe422c03ba55f5730db4488757482f65a  0009-7.3.4-preserve-timestamps-on-error-buffers.patch

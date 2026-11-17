@@ -30,7 +30,7 @@ project('libva-v4l2', ['cpp', 'c'],
 	# Meson's own default is -O0, and the translator is a per-frame
 	# bit-level parser, so that default costs an order of magnitude in CPU
 	# per frame: 1080p HEVC measured 6.6 s per 300 frames at -O0 against
-	# 0.45 s at -O2 (TEST-RESULTS.md). Optimise by default; debugoptimized
+	# 0.45 s at -O2. Optimise by default; debugoptimized
 	# keeps assertions and symbols for the hardware gates.
 	default_options: ['buildtype=debugoptimized'],
 	meson_version: '>= 0.56.0')
@@ -67,6 +67,22 @@ va_api_major_version = va_api_version_array[0]
 va_api_minor_version = va_api_version_array[1]
 
 va_driver_init_func = '__vaDriverInit_@0@_@1@'.format(va_api_major_version, va_api_minor_version)
+
+# The VA glue is one translation unit per entry-point group. It is listed here
+# rather than in src/meson.build because test/meson.build builds a second
+# target from the same set: the vtable-completeness unit test links the real
+# driver so its assertions run against the real assignments.
+va_driver_sources = files(
+  'src/va/driver.cc',
+  'src/va/report.cc',
+  'src/va/tables.cc',
+  'src/va/config.cc',
+  'src/va/surface.cc',
+  'src/va/picture.cc',
+  'src/va/buffer.cc',
+  'src/va/image.cc',
+  'src/va/vpp.cc',
+)
 
 subdir('src')
 subdir('test')

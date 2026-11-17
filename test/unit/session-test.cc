@@ -1072,8 +1072,8 @@ void test_import_altref_gets_a_buffer_per_completion()
     // The firmware decodes a VP9 alt-ref superframe as two pictures and does
     // not return the invisible half before it has a slot for the visible
     // one. An Import pool that lent the picture one buffer therefore stalled
-    // on every alt-ref (~500 ms measured on the target, TEST-RESULTS.md
-    // 2026-09-22). Both halves land in the same client buffer, so lending it
+    // on every alt-ref (~500 ms measured on the target). Both halves land in
+    // the same client buffer, so lending it
     // twice keeps the firmware's choice empty while giving it the room it
     // needs.
     Harness h;

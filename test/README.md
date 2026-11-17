@@ -28,7 +28,7 @@ meson test -C build-local --print-errorlogs
 - Asserts that `v4l-utils`, FFmpeg, and Vulkan build/runtime dependencies are declared.
 - Verifies provenance refresh after stripping.
 
-> **Note (Debian Packaging)**: Building the Debian package requires a Debian host or chroot (`sbuild`, `pbuilder`). `dh_shlibdeps` aborts on Fedora hosts due to missing shlibs databases. See `TEST-RESULTS.md` §"Debian packaging" for details.
+> **Note (Debian Packaging)**: Building the Debian package requires a Debian host or chroot (`sbuild`, `pbuilder`). `dh_shlibdeps` aborts on Fedora hosts due to missing shlibs databases. See `docs/development.md` for the chroot recipe.
 
 ---
 
@@ -57,7 +57,6 @@ Target gates should be executed remotely under `scripts/iris-experiment-guard.sh
 
 ```sh
 IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh \
-    --out /tmp/iris-run-$$ \
     -- sh test/iris-gstreamer-gate.sh --clip <clip-path>
 ```
 
@@ -66,6 +65,10 @@ module and driver hashes, boot ID, thermal and battery state, and the command's
 output. `identity.driver` is the driver the command resolves: a
 `LIBVA_DRIVERS_PATH` override hashes that build tree, while
 `identity.installed_driver` keeps the system package hash for comparison.
+A run whose guarded child prints nothing is refused as a false green, even
+when the guard itself reached `complete` with exit 0; set
+`IRIS_GATE_ALLOW_EMPTY_OUTPUT=1` for a deliberately silent command.
+`test/iris-gate-output-self-test.sh` pins that contract on the host.
 
 ### Browser Acceptance Gate
 
@@ -88,19 +91,20 @@ Acceptance requires inspecting `chrome://media-internals` during playback:
 - **`test/iris-structure-matrix.sh`**: Isolates H.264 reference structures (all-I, IP-only, B=2, B=4) with bit-exact MD5 checks.
 - **`test/iris-zero-copy-suite.sh`**: Validates the Direct zero-copy path (`publish=direct`) with zero GPU/CPU copy overhead.
 - **`test/iris-dynamic-resolution.sh`**: Alternates 640x360 and 1280x720 geometries 100 times to verify in-stream dynamic resolution changes across single-process and multi-process contexts.
-- **`test/iris-concurrency-soak.sh`**: Multi-context thermal and stability soak (defaults to 7200 s). Enforces an 85 °C thermal ceiling, monitors battery draw, and requires exact MD5 preflight checks:
+- **`test/iris-concurrency-soak.sh`**: Multi-context thermal and stability soak (defaults to 7200 s). Enforces a 100 °C thermal guard, monitors battery draw, and requires exact MD5 preflight checks:
   ```sh
   ./test/iris-concurrency-soak.sh dual-h264
   ./test/iris-concurrency-soak.sh mixed
   ```
-- **`test/iris-8k-gate.sh`**: 7680x4320 decode for all four qualified codecs. Asserts the granted CAPTURE pool is the memory-budgeted one (not the old fixed 32), exact framemd5 against a software baseline, terminal LAST and zero completion errors. See [docs/build-and-deploy.md](../docs/build-and-deploy.md#8k-geometry-and-two-client-gates) for the clip generation.
+- **`test/iris-8k-gate.sh`**: 7680x4320 decode for all four qualified codecs. Asserts the granted CAPTURE pool is the memory-budgeted one (not the old fixed 32), exact framemd5 against a software baseline, terminal LAST and zero completion errors. See [docs/development.md](../docs/development.md#8k-geometry-and-two-client-gates) for the clip generation.
 - **`test/iris-two-player-gate.sh`**: Two independent 1920x1080 ffmpeg processes with their own VA display and driver trace, both required to finish with exact pixels and no completion errors. Leaves `LIBVA_DRIVERS_PATH` unset to test the installed package.
+- **`test/iris-vp9-p2-gate.sh`**: VP9 Profile 2 (10-bit) decode. Generates its own `yuv420p10le` clip, requires `VAEntrypointVLD` to answer `VA_RT_FORMAT_YUV420_10` only, and checks that a client opening the config with no RT-format attribute still gets P010 surfaces byte-identical to a software decode. Pins the `createConfig` default and the `getConfigAttributes` answer tested by `test/unit/va-config-attributes-test.cc`.
 
 ---
 
 ## 4. Video Processing (VPP) Gates
 
-Video post-processing runs via pinned Vulkan compute shaders (`VAEntrypointVideoProc`, opt-in via `V4L2_VA_VPP=1`).
+Video post-processing runs via pinned Vulkan compute shaders (`VAEntrypointVideoProc`, available by default on a build that found Vulkan; disable with `V4L2_VA_VPP=0`).
 
 | Gate Script | Description | Oracle / Tolerance |
 | --- | --- | --- |
@@ -125,7 +129,17 @@ Target-compiled diagnostic probe binaries:
 - **`test/iris-va-image-gate.sh` / `iris-va-image-probe.cc`**: Upload/download testing for `vaPutImage` and `vaGetImage`.
 - **`test/iris-gstreamer-gate.sh`**: Validates GStreamer integration (`vaav1dec`, `vah264enc`, `vah265enc`) and allowlist behavior.
 - **`test/iris-alloc-chain.sh`**: Walks the stable buffer fallback hierarchy (MSM GEM coherent -> MSM GEM write-combined -> system DMA heap) using `test/alloc-fault.so`.
-- **`test/iris-encode-quality.sh`**: Verifies hardware encode fidelity (SSIM floors and IRQ counter increments).
+- **`test/iris-encode-quality.sh`**: Verifies hardware encode fidelity (SSIM floors and IRQ counter increments), including a 7680x4320 lane per codec (`IRIS_ENCODE_8K=0` skips it). `IRIS_ENCODE_EXTRA_GEOM` adds further geometries, each with the same oracle and `IRIS_ENCODE_EXTRA_FRAMES` frames.
+- **`test/iris-encode-baseline.sh`**: Same source and bitrate through `h264_vaapi`/`hevc_vaapi` and libx264/libx265. Reports fps, client CPU seconds per frame and the round-to-round spread; `--power` also runs the encode workload through `iris-power-sampler.sh`.
+- **`test/iris-encode-ir-probe.cc`**: Encodes one multi-picture CBR stream through the public VA API twice, with and without a rolling intra refresh, and requires the bitstream to differ. The unit tests cover the controls and the mapping; only the firmware can say whether the request changes what it codes. `test/iris-encode-control-probe.cc` is the same idea for the deblocking controls.
+- **`test/iris-encode-misc-bound-probe.cc`**: Built-only target probe for an encode misc parameter buffer whose element is too small for its header. Requires `renderPicture` to refuse a 1-byte element and a header-only QualityLevel element with `VA_STATUS_ERROR_INVALID_PARAMETER`, while a full element still opens a picture. The host unit tests cannot open an encoder context, so this runs against the target's nodes.
+- **`test/iris-power-sampler.sh`**: Battery-side power of a decode (`--clip`) or an encode (`--workload encode --codec h264|hevc`) against software, as an increment over a pre/post baseline.
+- **`test/iris-throughput.sh`**: Decode throughput through this driver against the native V4L2 decoders on the target. A regression guard for two builds on the same boot, not a cross-machine benchmark.
+- **`test/iris-hevc-conformance.sh`**: Compares this driver with libavcodec on the HEVC vectors Fluster records as pixel-different, with both sides normalised to one pixel format before hashing.
+- **`test/iris-hevc-scaling-check.sh`**: Opt-in target regression for `scaling_list_enabled_flag`: a VA IQ buffer is required even when the stream uses the default scaling lists.
+- **`test/av1-obu-roundtrip.sh`**: Decodes the driver's rebuilt AV1 OBU stream (`V4L2_VA_DUMP`) with libdav1d and compares it with a software decode of the source.
+- **`test/iris-av1-browser-matrix.sh`**: One AV1 clip through Firefox (WebDriver BiDi) and Chrome (CDP) plus the driver trace, against the installed package with no overrides.
+- **`test/vulkan-vpp/make-spv.sh`**: Host-only regeneration of the checked-in SPIR-V modules and `SHA256SUMS`; the target has no glslang.
 
 ---
 

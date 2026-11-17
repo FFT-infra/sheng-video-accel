@@ -70,3 +70,32 @@ iris_artifact_dir() {
     lab=${IRIS_LAB_ROOT:-$HOME/iris-vaapi-lab}
     printf '%s/artifacts/%s\n' "$lab" "$1"
 }
+
+# iris_require_media_pin <dir>: refuse a media directory whose clips are not
+# pinned by a SHA256SUMS beside them.
+#
+# A gate that hardcodes an expected count is a statement about one file. When
+# the file changes the count goes stale silently and the gate reports a
+# driver defect that is not there: a replaced clip silently changed the
+# recorded invisible count. Gates whose oracle is a whole-file
+# framemd5 comparison do not need this, because a different file fails the
+# comparison. Gates that count publish records do.
+iris_require_media_pin() {
+    dir=$1
+    [ -d "$dir" ] || { echo "FAIL media directory missing: $dir" >&2; return 1; }
+    [ -r "$dir/SHA256SUMS" ] || {
+        echo "FAIL $dir has no SHA256SUMS; the gate's expected counts describe one exact file" >&2
+        echo "      generate the pins with: (cd $dir && sha256sum *.webm *.mkv > SHA256SUMS)" >&2
+        return 1
+    }
+    ( cd "$dir" && sha256sum -c --quiet SHA256SUMS ) || {
+        echo "FAIL $dir does not match its SHA256SUMS; the media is not the one the counts describe" >&2
+        return 1
+    }
+}
+
+# iris_media_sha <dir> <file>: echo the clip's sha256, for a per-clip count
+# table. Fails when the file is absent.
+iris_media_sha() {
+    sha256sum "$1/$2" 2>/dev/null | cut -d' ' -f1
+}
