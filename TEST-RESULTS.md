@@ -225,6 +225,32 @@ CAPTURE DMA-BUFs as Vulkan external memory.
 | `overlay_vaapi_gate.sh` | exact against a BT.709 reference with premultiplied BGRA |
 | `prereq.sh` | coherent CPU read-back of imported DMA-BUFs |
 
+## Experimental kernel patches
+
+Patches 0010-0012 (`packaging/kernel/README.md`) were built into the 7.3.4
+module from kernel source commit `87ac0f2347eb`, installed as
+`9bad78eab5b18fc23781e74d5da140a3cbf0424797eeefd1fc539487b83b607c`, and run
+on boot `5aa19762-7d68-49b8-9af8-12fd8aba4b53`. The VA driver stayed the
+installed `35cdab55…d591`. They are not part of the qualified combination.
+
+| Gate | Result |
+| --- | --- |
+| `test/iris-real-clip-gate.sh` `set=plain` | `120/120` Import, `invisible=15`, byte-exact against the software decode, `guard=complete` |
+| `test/iris-matrix.sh` | H.264, HEVC, VP9, AV1 `48/48` each, `drops=0 timeouts=0`, AV1 `noshow=23` |
+| `test/iris-av1-grain-gate.sh` `set=all` | grain8 `20/20`, grain10 `2/2`, byte-exact |
+| DRC clip, qualified module | sequence-change LAST `flags=0x104040`, `invisible=63`, `84/84`, byte-exact |
+| DRC clip, experimental set | sequence-change LAST `flags=0x104000`, `invisible=62`, `84/84`, byte-exact |
+| H.264 encode, 30 frames | `encode drain result=complete`, no sync timeout |
+| `modprobe -r qcom_iris`, qualified module | hung in `D` at `disable_irq -> __synchronize_irq` from `iris_core_deinit` |
+| `modprobe -r qcom_iris` + reload, experimental set | both completed in under a second, both nodes re-probed |
+
+0012 is the demonstrated fix. 0011 removes the fabricated error from the
+sequence-change completion and, as a side effect, one boundary NOSHOW
+completion is no longer published through this driver's invisible path;
+visible output is unchanged. 0010 was not isolated from 0011 in this run.
+The qualified module was restored (`8f771ada…dc75`) and the target rebooted
+after the run.
+
 ## Boundaries
 
 UBWC `Q08C`/`Q10C` CAPTURE formats are enumerated by the node and the

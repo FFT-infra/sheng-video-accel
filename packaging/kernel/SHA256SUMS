@@ -7,3 +7,6 @@ ca1bb3dc8c4aa691b64898528dbe99eab5d371ef5931e6cff43c5c9aee91b5c1  0006-media-iri
 2124be61542bd536f5b457e4afd115a54964cc8fc126d3ae4a62acfba4a0d7c8  0007-media-iris-complete-noshow-pictures-without-an-error.patch
 09496c489d8df038907e6f4ac48586dd9c5440e0f9f71c955e50cdd0e0324774  0008-7.3.4-decode-order-and-deblocking.patch
 f2f992ade957d44416f62bc68d0a72afe422c03ba55f5730db4488757482f65a  0009-7.3.4-preserve-timestamps-on-error-buffers.patch
+06299e7ad414167c6cbc26047593e54b40232813ed4e4c71fa1810d940a7bce1  0010-7.3.4-complete-drain-on-error-last.patch
+c64b28df77996e770c48bcaeacfc49bf79f8a5b1f3bf94710845a6a999edcbdc  0011-7.3.4-psc-last-is-not-an-error.patch
+1d277619f687ebc07aa86f8cc7afab4fac9e1258ce0cee42b69348ec01021808  0012-7.3.4-quiesce-irq-before-core-lock.patch

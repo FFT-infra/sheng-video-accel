@@ -60,16 +60,16 @@ if [ -n "$bad" ]; then
     fail "recorded hash does not match: $bad"
 fi
 
-# Only the nine patches may be listed, and every one of them must be.
-# 0001-0007 apply to sheng-7.2.6; 0008-0009 are the 7.3.4 set.
+# Only the twelve patches may be listed, and every one of them must be.
+# 0001-0007 apply to sheng-7.2.6; 0008-0012 are the 7.3.4 set.
 listed=$(awk '{print $2}' "$sums")
-for name in 0001 0002 0003 0004 0005 0006 0007 0008 0009; do
+for name in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011 0012; do
     printf '%s\n' "$listed" | grep -q "^$name-" \
         || fail "SHA256SUMS does not record $name"
 done
 count=$(printf '%s\n' "$listed" | grep -c '\.patch$' || true)
-[ "$count" -eq 9 ] \
-    || fail "SHA256SUMS must record exactly nine patches, found $count"
+[ "$count" -eq 12 ] \
+    || fail "SHA256SUMS must record exactly twelve patches, found $count"
 for name in $(printf '%s\n' "$listed" | grep '\.patch$'); do
     [ -f "$kernel_dir/$name" ] || fail "SHA256SUMS records a file that is not there: $name"
 done
@@ -140,6 +140,22 @@ expect_marker "$kernel_dir/0009-7.3.4-preserve-timestamps-on-error-buffers.patch
     '+		vb2->timestamp = buf->timestamp;' 1
 expect_marker "$kernel_dir/0009-7.3.4-preserve-timestamps-on-error-buffers.patch" \
     '-		vb2->timestamp = 0;' 1
+
+# 0010 moves the LAST record above the error return. The added and the
+# removed occurrence are both counted, so an edit that leaves the old block
+# behind fails.
+expect_marker "$kernel_dir/0010-7.3.4-complete-drain-on-error-last.patch" \
+    '+	if (vbuf->flags & V4L2_BUF_FLAG_LAST) {' 1
+expect_marker "$kernel_dir/0010-7.3.4-complete-drain-on-error-last.patch" \
+    '-	if (vbuf->flags & V4L2_BUF_FLAG_LAST) {' 1
+# 0011 must widen the zero-payload exemption, not replace one flag with the
+# other: LAST still has to be exempt.
+expect_marker "$kernel_dir/0011-7.3.4-psc-last-is-not-an-error.patch" \
+    '+	    !(hfi_buffer->flags & (HFI_BUF_FW_FLAG_LAST | HFI_BUF_FW_FLAG_PSC_LAST))) {' 1
+expect_marker "$kernel_dir/0012-7.3.4-quiesce-irq-before-core-lock.patch" \
+    '+	disable_irq(core->irq);' 1
+expect_marker "$kernel_dir/0012-7.3.4-quiesce-irq-before-core-lock.patch" \
+    '+	enable_irq(core->irq);' 1
 
 # 0004's whole point is that the copy lands in the ERROR branch. Checking the
 # line order inside the hunk is what distinguishes that from a copy added to
@@ -232,4 +248,4 @@ if [ "$failures" -ne 0 ]; then
     printf 'FAIL kernel patches: %d problem(s)\n' "$failures" >&2
     exit 1
 fi
-printf 'PASS kernel patches: nine files, recorded hashes, Iris-only paths\n'
+printf 'PASS kernel patches: twelve files, recorded hashes, Iris-only paths\n'
