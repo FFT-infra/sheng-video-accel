@@ -2591,7 +2591,8 @@ explains three of them:
 - **36 × `vp90-2-14` dynamic resize with frame-parallel tiles, content
   mismatch.** The frames decode (the trace shows two sessions, 432x240 then
   896x480, and every submitted picture completes) but the MD5s differ from
-  `libvpx-vp9`. Not classified further here.
+  `libvpx-vp9`. Not classified further here; the 2026-11-17 section below
+  resolves this family as a corpus/reference-MD5 mismatch.
 - **24 × `vp90-2-21` timeouts** at the 20 s bound, and **3 more** in the
   `05`/`18`/`22` vectors.
 - **`vp90-2-10-show-existing-frame`** and **`vp90-2-16-intra-only`** crash;
@@ -9553,7 +9554,7 @@ empty-output guard also caught a genuine slip during this set: an
 `IRIS_8K_DIR=... sh test/iris-8k-gate.sh` passed through `sh -c` lost its
 quoting and was refused rather than recorded green.
 
-## Encode geometries between 4K and 8K; VP9 2-14 as a reference mismatch (2026-11-17)
+## Encode geometries between 4K and 8K (2026-11-17)
 
 `test/iris-encode-quality.sh` takes `IRIS_ENCODE_EXTRA_GEOM` (space-separated)
 and `IRIS_ENCODE_EXTRA_FRAMES` (default 4). Each extra geometry runs the same
@@ -9573,17 +9574,64 @@ The default invocation still passes with the 8K lane. These records were
 taken with the geometry test change uncommitted (`source_dirty=1`); the
 driver binary is unchanged, and the commit adds no driver code.
 
-Fluster's VA-API decoder classes leave `hw_output_format` empty and
-`hw_download` false, so the VP9 suite does not export a driver surface. A
-wrapper setting those attributes to the values the Vulkan/CUDA classes use
-(verified from the generated command: `-hwaccel_output_format vaapi` and
-`hwdownload,format=nv12`) ran the full suite at 175/305, with all 36
-`vp90-2-14` still failing against the corpus MD5s. The plain 176/305 differs
-only by a 30 s timeout on `vp90-2-22-svc_1280x720_3.ivf`.
+## What the 176/305 corpus number counts (2026-11-17)
 
-Against this machine's `libvpx-vp9` as the oracle, all 36 `vp90-2-14`
-vectors are byte-identical, both with the plain FFmpeg command and with an
-explicit `hwdownload,format=nv12,format=pix_fmts=yuv420p` filter (36/36 in
-each). Fluster's own software decoder fails the same family and scores
-242/305 here. The 176/305 figure is a reference-MD5 mismatch, not a
-decode-defect count; the 2-14 family must not be quoted as one.
+The two earlier VP9 corpus sections quote 175/305 and 176/305 as "pass"
+counts. Neither is a count of driver-correct decodes: Fluster compares each
+vector against a recorded MD5 from the corpus, and on this machine its own
+software `libvpx-vp9` arm scores 242/305 and fails the same `vp90-2-14`
+family. Fluster's VA-API decoder leaves `hw_output_format` empty and `hw_download`
+false, so that arm does not export a driver surface. A wrapper setting those
+attributes to the values the Vulkan/CUDA classes use (verified from the
+generated `-hwaccel_output_format vaapi` + `hwdownload,format=nv12` command)
+scored 175/305; the plain 176/305 differs only by a 30 s timeout. Against
+this machine's libvpx, all 36 `vp90-2-14` vectors are byte-identical through
+the driver with or without an explicit hwdownload (36/36 in each). The 36 are
+a corpus reference-version mismatch, not decode defects; the earlier
+sections are kept as printed, but 176/305 must not be quoted as a defect
+count.
+
+## 4K decode tracks the access unit, not the geometry (2026-11-17)
+
+The 7.3.4 throughput table reports 346 fps at 4K from one `testsrc2` clip.
+To sample content at the same geometry, three 3840x2160 x265 clips
+(`bframes=0`, `keyint=60`, ultrafast) were decoded through the installed
+package on a quiet machine with CPU policies in `performance` and the GPU at
+680 MHz, five interleaved rounds each, on boot `fd0b90f4` with driver
+`35cdab55…d591`. A first pass overlapped the 1800 s soak below and is not
+quoted; the table is the clean re-run after both soak workers exited.
+
+| Source | Frames | KiB/access unit | Mean fps | Range |
+| --- | ---: | ---: | ---: | ---: |
+| `testsrc2`, crf 28 (the throughput clip) | 480 | 88.4 | 340.6 | 336.8-343.3 |
+| `smptebars`, crf 28 | 300 | 0.3 | 391.5 | 385.6-400.0 |
+| `testsrc2`, crf 12 | 300 | 379.4 | 84.9 | 84.1-85.4 |
+
+The three cells differ by 4.6x while each stays within 4 %. Decode speed at
+4K tracks access-unit size, not resolution alone, so the single 346 fps
+figure describes one bitrate and one content shape. The 7.2.6-to-7.3.4 move
+of -3.6 % is far smaller than this content effect and cannot be attributed to
+the driver without hash-pinned clips on both kernels.
+
+## 1800 s concurrency window on 7.3.4 (2026-11-17)
+
+`test/iris-concurrency-soak.sh mixed` ran for 1800 s, `profile=SHORTENED`,
+under `test/remote/gate.sh` on source `1670977` (`source_dirty=0`) with
+`guard=complete exit=0`. Boot `fd0b90f4`, kernel
+`7.3.4-sm8550-00104-g87ac0f2347eb`, module `8f771ada…9dc75`, driver
+`35cdab55…d591` from `/usr/lib64/dri/v4l2_drv_video.so` (no build-tree
+override), decoder `/dev/video17` and encoder `/dev/video18` resolved by
+`iris_driver`. H.264 and HEVC 640x360 at 24 fps ran in two independent VA
+contexts.
+
+| Lane | Frames | Preflight | Teardown |
+| --- | ---: | --- | --- |
+| `mixed-h264` | 43200 | exact framemd5 vs software | `timeouts=0`, terminal LAST drain |
+| `mixed-hevc` | 43200 | exact framemd5 vs software | `timeouts=0`, terminal LAST drain |
+
+Both traces show `session open`, zero `publish=drop`, `publish=error`,
+`publish=misplaced`, `capture error index=` and `sync timeout token=`. The
+boot ID is unchanged across the window; the pack went 30 % -> 25 % and the
+hottest thermal-zone sample was 93.9 °C, below the 100 °C guard and with no
+firmware reset. This is a 30-minute window, not the two-hour record that
+still belongs to 7.2.6.

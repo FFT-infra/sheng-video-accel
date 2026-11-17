@@ -41,9 +41,10 @@ A profile is advertised only for the codecs marked `production: supported` in
 `data/iris-codec-capabilities.json`. Every number in the Conformance column is
 a frame-by-frame comparison against a software decode; the Fluster counts are
 corpus results rather than a per-build regression, and `TEST-RESULTS.md` names
-each corpus and classifies every vector that fails. A browser session counts as
-hardware only when the media surface reports the selected decoder together with
-decoded and dropped frame counts.
+each corpus and classifies every vector that fails. The VP9 corpus's reference
+MD5s predate this machine's libvpx, so 176/305 is not a decode-defect count.
+A browser session counts as hardware only when the media surface reports the
+selected decoder together with decoded and dropped frame counts.
 
 Decode is qualified up to 7680x4320 for all four codecs, and for two concurrent
 1080p clients.
