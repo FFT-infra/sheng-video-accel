@@ -9540,3 +9540,15 @@ behaviour, and is registered in the CI required list. `run-static-checks.sh`
 PASS, `meson test -C build-local` 34/34, `meson test -C build-asan` 34/34,
 `git diff --check` clean. The capability table is unchanged; this is a gate
 runner fix, not a codec claim.
+
+The full target set was then re-run through the new runner on source `03bba32`
+(`source_dirty=0`), same boot `fd0b90f4`, kernel and module, driver
+`35cdab55…d591` from `/usr/lib64/dri/v4l2_drv_video.so` with no
+`LIBVA_DRIVERS_PATH` override. All five reported `guard=complete exit=0` with
+non-empty child output: `iris-8k-gate.sh` (four codecs, 4/4 exact, `pool=8`,
+`errors=0 last=1 drain=1`), `iris-two-player-gate.sh` (a and b 90/90 exact),
+`iris-vp9-p2-gate.sh` (30/30 exact, 12 P010 surfaces), `iris-encode-quality.sh`
+(1080p and 8K lanes) and `iris-encode-misc-bound-probe` (three PASS). The
+empty-output guard also caught a genuine slip during this set: an
+`IRIS_8K_DIR=... sh test/iris-8k-gate.sh` passed through `sh -c` lost its
+quoting and was refused rather than recorded green.
