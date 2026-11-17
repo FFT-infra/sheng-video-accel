@@ -5,7 +5,7 @@
 A libva driver for the Qualcomm Iris V4L2 video decoder and encoder on SM8550
 (sheng, Xiaomi Pad 6S Pro) running ARM64 Linux. Decoded frames reach client
 buffers without a copy on qualified pipelines. Chrome, Firefox, FFmpeg, Kodi,
-mpv, GStreamer and Sunshine use it through the standard VA-API interface.
+mpv, GStreamer and Sunshine use it through VA-API.
 
 ## Capabilities
 
@@ -19,20 +19,20 @@ mpv, GStreamer and Sunshine use it through the standard VA-API interface.
 | AV1 | Profile 0 (8/10-bit) | Import (zero-copy, decode-order kernel) | Bit-exact against libdav1d; film grain synthesis included |
 
 A profile is advertised only for codecs marked `production: supported` in
-`data/iris-codec-capabilities.json`. Every conformance number is a frame-by-frame
-comparison with a software decode. Fluster counts are corpus results, not
-per-build regressions; `TEST-RESULTS.md` names each corpus and classifies every
-vector that fails. The VP9 reference MD5s predate this machine's libvpx. 176/305
-is not a decode-defect count.
+`data/iris-codec-capabilities.json`. Conformance numbers are frame-by-frame
+comparisons against a software decode. Fluster counts are corpus results, not
+per-build regressions; `TEST-RESULTS.md` classifies every failing vector. The
+VP9 reference MD5s predate this machine's libvpx; 176/305 is not a decode-defect
+count.
 
 Decode is qualified up to 7680x4320 for all four codecs, and for two concurrent
 1080p clients.
 
 AV1 film grain synthesis runs in user space. When a client names a separate
-`current_display_picture`, the driver decodes with grain off and blends it onto
-that surface before the client can recycle `current_frame`. Clients that pass
-grain as side data blend it themselves. `test/iris-av1-grain-gate.sh` requires
-every frame to match libdav1d's grained output byte for byte.
+`current_display_picture`, the driver blends grain onto that surface before the
+client can recycle `current_frame`. Clients that pass grain as side data blend
+it themselves. `test/iris-av1-grain-gate.sh` requires every frame to match
+libdav1d's grained output byte for byte.
 
 ### Encode
 
@@ -51,10 +51,7 @@ every frame to match libdav1d's grained output byte for byte.
 | Tone mapping | HDR10 to SDR |
 | Compositing | up to 16 layers, Y'CbCr or packed BGRA/RGBA |
 
-Input is NV12, P010, BGRA or RGBA; output is NV12 or P010. Nearest-neighbour
-scale and crop are byte-identical to swscale, bilinear is within 1 code of the
-4-tap model, tone mapping within 1 code of BT.2390/BT.709, and composite alpha 0
-and 1 match the input.
+Input is NV12, P010, BGRA or RGBA; output is NV12 or P010.
 
 Video processing uses pinned Vulkan compute kernels on surface DMA-BUFs. A build
 that found Vulkan exposes `VAProfileNone` / `VAEntrypointVideoProc`;
@@ -130,15 +127,13 @@ upload.
 | Decode | 953 fps | 754 fps | 346 fps |
 | Encode | 679 fps | 585 fps | 172 fps |
 
-These are the numbers on the qualified 7.3.4 combination. Throughput on this SoC
-follows DVFS more than the driver, so an unpinned run measures the governor.
-Multi-codec sweeps, transcode, concurrency, power, VPP numbers and the method
-behind each cell are in [TEST-RESULTS.md](TEST-RESULTS.md).
+These are the numbers on the qualified 7.3.4 combination. Throughput follows
+DVFS more than the driver, so an unpinned run measures the governor. Sweeps,
+power and method are in [TEST-RESULTS.md](TEST-RESULTS.md).
 
 At 1080p and 4 Mbit/s, H.264 encodes 4.4x faster than libx264 `veryfast`, HEVC
-15.2x faster than libx265, at a fraction of the client CPU, and both reach
-7680x4320 (`test/iris-encode-baseline.sh`). Exact rates, power and method are in
-[TEST-RESULTS.md](TEST-RESULTS.md).
+15.2x faster than libx265, and both reach 7680x4320
+(`test/iris-encode-baseline.sh`).
 
 ## Memory model
 
@@ -166,9 +161,8 @@ Imported DMA-BUFs must match the native CAPTURE layout: one linear object with a
   `V4L2_VA_B_FRAMES`, H.264 only, and need at least three pictures in flight
   (FFmpeg: `-bf 1 -async_depth 3`).
 - **Intra refresh**: rolling-row requests (`VAEncMiscParameterRIR`) are honoured
-  under CBR and refused under VBR/CQP. No current client requests them. VA has
-  no encode-side long-term-reference field. `ltr_count`, `frame_ltr_index` and
-  `use_ltr_frames` are unreachable and not advertised.
+  under CBR and refused under VBR/CQP. `ltr_count`, `frame_ltr_index` and
+  `use_ltr_frames` are not advertised.
 - **Packed headers**: extradata reports `VA_ENC_PACKED_HEADER_NONE`; parameter
   sets travel in-band.
 - **UBWC**: the node enumerates `Q08C`/`Q10C` and the firmware writes real UBWC.

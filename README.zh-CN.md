@@ -2,7 +2,7 @@
 
 [English](README.md) | **中文**
 
-面向 SM8550（sheng，小米平板 6S Pro）的 Qualcomm Iris V4L2 VA-API 视频驱动，运行于 ARM64 Linux。已验收的流水线上，解码帧直接进入客户端缓冲区。Chrome、Firefox、FFmpeg、Kodi、mpv、GStreamer 与 Sunshine 通过 VA-API 使用它。
+面向 SM8550（sheng，小米平板 6S Pro）的 Qualcomm Iris V4L2 VA-API 视频驱动，运行于 ARM64 Linux。已验收的流水线上，解码帧直接进入客户端缓冲区。Chrome、Firefox、FFmpeg、Kodi、mpv、GStreamer 与 Sunshine 都通过 VA-API 使用它。
 
 ## 支持特性
 
@@ -15,11 +15,11 @@
 | VP9 | Profile 0, Profile 2 | Import（零拷贝） | Fluster 176/305 |
 | AV1 | Profile 0（8/10 位） | Import（零拷贝，解码顺序内核） | 与 libdav1d 逐帧一致，含 film grain 合成 |
 
-只有能力表标记 `production: supported` 的编码格式才声明 VA profile。一致性数字来自与软件解码的逐帧比对；语料结果和失败向量的归类见 `TEST-RESULTS.md`。VP9 的参考 MD5 早于本机 libvpx，176/305 不是解码缺陷数。
+只有能力表标记 `production: supported` 的编码格式才声明 VA profile。一致性数字来自与软件解码的逐帧比对。Fluster 是语料结果，不是每次构建的回归；失败向量归类见 `TEST-RESULTS.md`。VP9 参考 MD5 早于本机 libvpx，176/305 不是解码缺陷数。
 
 解码上限 7680x4320，四种编码格式均支持；两个 1080p 客户端可同时解码。
 
-AV1 film grain 合成在用户态完成。客户端给出独立的 `current_display_picture` 时，驱动以 grain 关闭解码，并在复用 `current_frame` 之前把 grain 混到显示表面。以 side data 传 grain 参数的客户端自行合成。`test/iris-av1-grain-gate.sh` 要求每帧与 libdav1d 的加 grain 输出逐字节一致。
+AV1 film grain 合成在用户态完成。客户端给出独立的 `current_display_picture` 时，驱动在复用 `current_frame` 之前把 grain 混到显示表面。以 side data 传 grain 参数的客户端自行合成。`test/iris-av1-grain-gate.sh` 要求每帧与 libdav1d 的加 grain 输出逐字节一致。
 
 ### 编码
 
@@ -38,7 +38,7 @@ AV1 film grain 合成在用户态完成。客户端给出独立的 `current_disp
 | 色调映射 | HDR10 转 SDR |
 | 合成 | 最多 16 层，Y'CbCr 或打包 BGRA/RGBA |
 
-输入为 NV12、P010、BGRA 或 RGBA，输出为 NV12 或 P010。最近邻缩放与裁剪和 swscale 逐字节一致。双线性与四点模型相差不超过 1 个码值。色调映射与 BT.2390/BT.709 相差不超过 1 个码值；合成 alpha 0 与 1 两端与输入一致。
+输入为 NV12、P010、BGRA 或 RGBA，输出为 NV12 或 P010。
 
 视频处理由 Vulkan 计算内核完成，直接读写表面 DMA-BUF。构建中找到 Vulkan 即提供 `VAProfileNone` / `VAEntrypointVideoProc`，设 `V4L2_VA_VPP=0` 可关闭。细节见 [docs/architecture.md](docs/architecture.md)。
 
@@ -95,9 +95,9 @@ HEVC Main 8-bit，FFmpeg 8.1.3。CPU 锁最高频，GPU 锁 680 MHz。解码不�
 | 解码 | 953 fps | 754 fps | 346 fps |
 | 编码 | 679 fps | 585 fps | 172 fps |
 
-这组数字来自已验收的 7.3.4 组合。吞吐主要跟 DVFS 走，不锁频测到的是调频策略。其余数据见 [TEST-RESULTS.md](TEST-RESULTS.md)。
+这组数字来自已验收的 7.3.4 组合。吞吐主要跟 DVFS 走，不锁频测到的是调频策略。完整数据见 [TEST-RESULTS.md](TEST-RESULTS.md)。
 
-1080p、4 Mbit/s 下，H.264 比 libx264 `veryfast` 快 4.4 倍，HEVC 比 libx265 快 15.2 倍，客户端 CPU 也低一个数量级，两种编码都能到 7680x4320（`test/iris-encode-baseline.sh`）。具体帧率、功耗与测法见 [TEST-RESULTS.md](TEST-RESULTS.md)。
+1080p、4 Mbit/s 下，H.264 比 libx264 `veryfast` 快 4.4 倍，HEVC 比 libx265 快 15.2 倍，两种编码都能到 7680x4320（`test/iris-encode-baseline.sh`）。
 
 ## 缓冲模型
 
@@ -112,7 +112,7 @@ HEVC Main 8-bit，FFmpeg 8.1.3。CPU 锁最高频，GPU 锁 680 MHz。解码不�
 - **AV1 分辨率切换**：上下文内切换后，继续按旧几何导出表面的客户端在这些帧上得到 GPU 拷贝。Chromium 播本地文件时可能选软件 AV1 解码器，是否走硬件以浏览器门禁为准。
 - **原版内核**：解码降级为 GPU 拷贝，IDR 请求改为移动 intra period。
 - **编码**：仅单图单切片。多切片、分块与 ROI 返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。B 帧需 `V4L2_VA_B_FRAMES` 开启，仅 H.264，客户端需保持至少三帧在途（FFmpeg：`-bf 1 -async_depth 3`）。
-- **intra refresh**：滚动行请求（`VAEncMiscParameterRIR`）在 CBR 下生效，VBR/CQP 下拒绝。目前没有客户端请求。VA 没有编码侧长期参考字段，`ltr_count`/`frame_ltr_index`/`use_ltr_frames` 无法表达，也不声明。
+- **intra refresh**：滚动行请求（`VAEncMiscParameterRIR`）在 CBR 下生效，VBR/CQP 下拒绝。`ltr_count`/`frame_ltr_index`/`use_ltr_frames` 不声明。
 - **封装头**：extradata 报告 `VA_ENC_PACKED_HEADER_NONE`，参数集随码流带内传输。
 - **UBWC**：节点列出 `Q08C`/`Q10C`，固件确实写出 UBWC。Turnip 能逐字节解 Q08C，EGL（Copy 路径与 `vaGetImage`/`vaPutImage`）不能，P010 也没有压缩格式。没有客户端请求压缩表面，表面保持 `NV12`/`P010`，导入必须是 `DRM_FORMAT_MOD_LINEAR` 平面。
 
