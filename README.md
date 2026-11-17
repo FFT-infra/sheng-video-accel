@@ -20,20 +20,19 @@ mpv, GStreamer and Sunshine use it through the standard VA-API interface.
 
 A profile is advertised only for codecs marked `production: supported` in
 `data/iris-codec-capabilities.json`. Every conformance number is a frame-by-frame
-comparison with a software decode; the Fluster counts are corpus results rather
-than per-build regressions, and `TEST-RESULTS.md` names each corpus and
-classifies every vector that fails. The VP9 reference MD5s predate this
-machine's libvpx, so 176/305 is not a decode-defect count.
+comparison with a software decode. Fluster counts are corpus results, not
+per-build regressions; `TEST-RESULTS.md` names each corpus and classifies every
+vector that fails. The VP9 reference MD5s predate this machine's libvpx. 176/305
+is not a decode-defect count.
 
 Decode is qualified up to 7680x4320 for all four codecs, and for two concurrent
 1080p clients.
 
 AV1 film grain synthesis runs in user space. When a client names a separate
 `current_display_picture`, the driver decodes with grain off and blends it onto
-that surface before the client can recycle the ungrained `current_frame`.
-Clients that pass grain parameters as side data keep blending it themselves.
-`test/iris-av1-grain-gate.sh` requires every frame to match libdav1d's grained
-output byte for byte.
+that surface before the client can recycle `current_frame`. Clients that pass
+grain as side data blend it themselves. `test/iris-av1-grain-gate.sh` requires
+every frame to match libdav1d's grained output byte for byte.
 
 ### Encode
 
@@ -58,9 +57,8 @@ scale and crop are byte-identical to swscale, bilinear is within 1 code of the
 and 1 match the input.
 
 Video processing uses pinned Vulkan compute kernels on surface DMA-BUFs. A build
-that found Vulkan exposes `VAProfileNone` / `VAEntrypointVideoProc`; set
-`V4L2_VA_VPP=0` to remove it. Dispatches wait for pending decode completions
-before reading source surfaces. Shaders and pipeline constraints are in
+that found Vulkan exposes `VAProfileNone` / `VAEntrypointVideoProc`;
+`V4L2_VA_VPP=0` removes it. Details are in
 [docs/architecture.md](docs/architecture.md).
 
 ## Requirements
@@ -71,9 +69,9 @@ before reading source surfaces. Shaders and pipeline constraints are in
 - Distribution: Fedora 44 is the qualified baseline. `packaging/` and `debian/`
   carry Fedora, Arch and Debian/Ubuntu arm64 packages.
 - Kernel: `sheng-7.3.4` (`87ac0f2347eb`) with patches 0008-0009, or
-  `sheng-7.2.6` (`42f3b40c702a`) with 0001-0004. Both are qualified. The driver
-  still builds and installs on a stock kernel; see Known limits for the
-  fallback. Patch sources and rebuild instructions are in `packaging/kernel/`.
+  `sheng-7.2.6` (`42f3b40c702a`) with 0001-0004. Both are qualified. On a stock
+  kernel the driver still builds and installs; the fallback is under Known
+  limits. Sources and rebuild instructions are in `packaging/kernel/`.
 
 ## Install
 
@@ -104,7 +102,8 @@ sudo apt install ../libva-v4l2-iris_0.1.0_arm64.deb
 Build the Debian package in a chroot (`sbuild`, `pbuilder`): `libgbm-dev` is
 pinned to the distribution's Mesa and can downgrade a vendor-patched graphics
 stack. The package installs the driver plus the `msm_drv_video.so` and
-`qcom_drv_video.so` aliases, so libva resolves it without `LIBVA_DRIVER_NAME`.
+`qcom_drv_video.so` aliases. libva resolves the driver without
+`LIBVA_DRIVER_NAME`.
 
 ## Verify
 
@@ -131,20 +130,15 @@ upload.
 | Decode | 953 fps | 754 fps | 346 fps |
 | Encode | 679 fps | 585 fps | 172 fps |
 
-Clocks are pinned because throughput on this SoC follows DVFS more than the
-driver; an unpinned run measures the governor. These are the numbers on the
-qualified 7.3.4 combination. Multi-codec sweeps, transcode, concurrency, power,
-VPP numbers and the method behind each cell are in
-[TEST-RESULTS.md](TEST-RESULTS.md).
+These are the numbers on the qualified 7.3.4 combination. Throughput on this SoC
+follows DVFS more than the driver, so an unpinned run measures the governor.
+Multi-codec sweeps, transcode, concurrency, power, VPP numbers and the method
+behind each cell are in [TEST-RESULTS.md](TEST-RESULTS.md).
 
-At 1080p, 4 Mbit/s, 300 frames, GOP 60, unpinned
-(`test/iris-encode-baseline.sh`): H.264 is 4.4x faster than libx264 `veryfast`
-(507 against 116 fps) and HEVC 15.2x faster than libx265 (549 against 36 fps),
-at 3.1 against 37.3 ms and 2.6 against 161.5 ms of client CPU per frame. Both
-codecs reach 7680x4320, verified by frame hash against a software decode. With
-the screen off on battery, encode adds 2.8 and 3.0 W over idle against 4.8 and
-5.7 W for the software encoders (`test/iris-power-sampler.sh --workload
-encode`).
+At 1080p and 4 Mbit/s, H.264 encodes 4.4x faster than libx264 `veryfast`, HEVC
+15.2x faster than libx265, at a fraction of the client CPU, and both reach
+7680x4320 (`test/iris-encode-baseline.sh`). Exact rates, power and method are in
+[TEST-RESULTS.md](TEST-RESULTS.md).
 
 ## Memory model
 
@@ -162,9 +156,9 @@ Imported DMA-BUFs must match the native CAPTURE layout: one linear object with a
 ## Known limits
 
 - **AV1 resolution change**: after an in-context change, a client that keeps
-  exporting surfaces at the old geometry gets GPU copy for those pictures
-  instead of a pitch mismatch. Chromium may choose its software AV1 decoder for
-  local files; the browser gate decides what ran.
+  exporting surfaces at the old geometry gets GPU copy for those pictures.
+  Chromium may choose its software AV1 decoder for local files; the browser gate
+  decides what ran.
 - **Stock kernel**: decode degrades to GPU copy, and IDR requests move the intra
   period instead of forcing a frame.
 - **Encode**: one full-picture slice. Multi-slice, tiles and ROI return
@@ -173,14 +167,14 @@ Imported DMA-BUFs must match the native CAPTURE layout: one linear object with a
   (FFmpeg: `-bf 1 -async_depth 3`).
 - **Intra refresh**: rolling-row requests (`VAEncMiscParameterRIR`) are honoured
   under CBR and refused under VBR/CQP. No current client requests them. VA has
-  no encode-side long-term-reference field, so `ltr_count`, `frame_ltr_index`
-  and `use_ltr_frames` are unreachable and not advertised.
+  no encode-side long-term-reference field. `ltr_count`, `frame_ltr_index` and
+  `use_ltr_frames` are unreachable and not advertised.
 - **Packed headers**: extradata reports `VA_ENC_PACKED_HEADER_NONE`; parameter
   sets travel in-band.
 - **UBWC**: the node enumerates `Q08C`/`Q10C` and the firmware writes real UBWC.
   Turnip decodes Q08C byte-exactly, but EGL (the Copy path and
   `vaGetImage`/`vaPutImage`) does not, and P010 has no compressed format. No VA
-  client asks for one, so surfaces stay `NV12`/`P010` and imports must be
+  client asks for one. Surfaces stay `NV12`/`P010`; imports must be
   `DRM_FORMAT_MOD_LINEAR` planes.
 
 ## Environment variables
