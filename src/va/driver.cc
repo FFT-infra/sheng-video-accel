@@ -74,7 +74,7 @@ Capabilities probe_capabilities(const iris::Options& options)
 
     // Profiles: every entry here is qualified in
     // data/iris-codec-capabilities.json; a codec is advertised only after its
-    // hardware gate passed (architecture §9, Phase 5).
+    // hardware gate passed (docs/architecture.md §9).
     // profile-qualified-begin
     if (caps.output_formats.count(V4L2_PIX_FMT_H264) && caps.nv12) {
         caps.profiles.insert(VAProfileH264ConstrainedBaseline);
@@ -86,20 +86,20 @@ Capabilities probe_capabilities(const iris::Options& options)
         if (caps.p010)
             caps.profiles.insert(VAProfileHEVCMain10);
     }
-    // VP9 passed its Phase 5 gate on the decode-order module (matrix,
-    // 100 context recreations, 100 resolution switches, Chrome 1080p with
-    // alt-ref); see TEST-RESULTS.md.
+    // VP9 is qualified on the decode-order module (matrix, 100 context
+    // recreations, 100 resolution switches, Chrome 1080p with alt-ref); see
+    // TEST-RESULTS.md.
     if (caps.output_formats.count(V4L2_PIX_FMT_VP9) && caps.nv12) {
         caps.profiles.insert(VAProfileVP9Profile0);
         if (caps.p010)
             caps.profiles.insert(VAProfileVP9Profile2);
     }
-    // AV1 passed its first gate on 2026-10-22 (matrix, FFmpeg over alt-ref
-    // and no-alt-ref streams bit-exact against libdav1d, Chrome 152). The
-    // internal-DPB translator submits each picture at vaEndPicture, so a
-    // client that syncs each surface never waits for a successor; its own
-    // installed-package matrix, clip, DRC and browser gates are recorded in
-    // TEST-RESULTS.md.
+    // AV1 is qualified at 8 and 10 bits (matrix, FFmpeg over alt-ref and
+    // no-alt-ref streams bit-exact against libdav1d, browser media-surface
+    // evidence). The internal-DPB translator submits each picture at
+    // vaEndPicture, so a client that syncs each surface never waits for a
+    // successor; its installed-package matrix, clip, DRC and browser gates
+    // are recorded in TEST-RESULTS.md.
     if (caps.output_formats.count(V4L2_PIX_FMT_AV1) && caps.nv12)
         caps.profiles.insert(VAProfileAV1Profile0);
     // profile-qualified-end

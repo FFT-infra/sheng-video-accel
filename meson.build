@@ -30,7 +30,7 @@ project('libva-v4l2', ['cpp', 'c'],
 	# Meson's own default is -O0, and the translator is a per-frame
 	# bit-level parser, so that default costs an order of magnitude in CPU
 	# per frame: 1080p HEVC measured 6.6 s per 300 frames at -O0 against
-	# 0.45 s at -O2 (TEST-RESULTS.md). Optimise by default; debugoptimized
+	# 0.45 s at -O2. Optimise by default; debugoptimized
 	# keeps assertions and symbols for the hardware gates.
 	default_options: ['buildtype=debugoptimized'],
 	meson_version: '>= 0.56.0')

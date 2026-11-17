@@ -464,9 +464,9 @@ change; the single-process lane therefore qualifies context retirement and
 session cleanup rather than asserting a client behavior FFmpeg does not have.
 
 VP9 runs the same lanes with `IRIS_DYNAMIC_CODECS=vp9`; on the decode-order
-kernel module it passed all 100 switches in both lanes (TEST-RESULTS.md,
-Phase 5). Run it through `scripts/iris-experiment-guard.sh` on any other
-kernel, because the old display-order module rebooted on VP9 source changes.
+kernel module it passed all 100 switches in both lanes (TEST-RESULTS.md). Run
+it through `scripts/iris-experiment-guard.sh` on any other kernel, because the
+display-order module can reset the device on VP9 source changes.
 A missing device format, required element or VA capability is a failure,
 not a skip.
 Development runs may shorten the matrix explicitly with

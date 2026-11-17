@@ -22,9 +22,9 @@ so renaming one does not rename the others:
 `msm_drv_video.so` and `qcom_drv_video.so` are installed aliases of the same
 driver, for clients that resolve by DRM driver name or that set
 `LIBVA_DRIVER_NAME=qcom`. The source archive is an upstream build artifact:
-`.gitattributes` keeps CI, agent instructions and experiment records out of it,
-while the three distribution packaging formats stay in because the shipped
-spec runs `test/iris-packaging-check.sh` against them.
+`.gitattributes` keeps CI metadata and agent instructions out of it, while the
+three distribution packaging formats stay in because the shipped spec runs
+`test/iris-packaging-check.sh` against them.
 
 ## Capabilities
 
@@ -79,9 +79,8 @@ upload.
 
 Clocks are pinned because throughput on this SoC follows DVFS more than it
 follows the driver; an unpinned run measures the governor. These are the
-numbers on the 7.3.4 kernel; the 7.2.6 table was 759 / 581 / 359 and
-644 / 591 / 167. Multi-codec sweeps, transcode, concurrency, power and VPP
-numbers, and the method behind each cell are in
+numbers on the qualified 7.3.4 combination. Multi-codec sweeps, transcode,
+concurrency, power and VPP numbers, and the method behind each cell are in
 [TEST-RESULTS.md](TEST-RESULTS.md).
 
 Against software encoders at the same 1080p, 4 Mbit/s, 300 frames and GOP 60,

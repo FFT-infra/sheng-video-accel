@@ -2,9 +2,9 @@
 
 # Regression for the gate runner's "no output is not a pass" contract. A guard
 # can reach status=complete with exit=0 while the child command never ran --
-# the 2026-11-17 misc-bound run landed `sh -c LIBVA_DRIVER_NAME=v4l2 ...`
-# with its quoting flattened, so the probe was never executed but the record
-# was green. This is a host-side test: it builds fake run directories rather
+# a `sh -c LIBVA_DRIVER_NAME=v4l2 ...` with its quoting flattened left the
+# probe unexecuted behind a green record. This is a host-side test: it builds
+# fake run directories rather
 # than ssh-ing to a target.
 
 set -eu

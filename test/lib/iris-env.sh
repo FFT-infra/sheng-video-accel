@@ -76,8 +76,8 @@ iris_artifact_dir() {
 #
 # A gate that hardcodes an expected count is a statement about one file. When
 # the file changes the count goes stale silently and the gate reports a
-# driver defect that is not there: av1-720.webm was replaced on 2026-11-15 and
-# the recorded invisible=42 became 15. Gates whose oracle is a whole-file
+# driver defect that is not there: a replaced clip silently changed the
+# recorded invisible count. Gates whose oracle is a whole-file
 # framemd5 comparison do not need this, because a different file fails the
 # comparison. Gates that count publish records do.
 iris_require_media_pin() {

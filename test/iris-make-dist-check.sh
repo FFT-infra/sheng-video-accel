@@ -69,16 +69,15 @@ if grep -qE "^$prefix(\.git/|build[^/]*/|.*\.tar\.gz\$)" "$entries"; then
     fail 'archive carries git metadata, build output or another archive'
 fi
 
-# The archive is a source artifact, so CI, agent instructions and experiment
-# records stay in the repository. .gitattributes carries the exclusions and
-# git archive applies them. The negation matters: a removed or misspelled rule
-# would otherwise ship these files with no failing check.
+# The archive is a source artifact, so CI metadata and agent instructions stay
+# in the repository. .gitattributes carries the exclusions and git archive
+# applies them. The negation matters: a removed or misspelled rule would
+# otherwise ship these files with no failing check.
 for path in \
     .gitattributes \
     .gitignore \
     .github/workflows/ci.yml \
-    AGENTS.md \
-    docs/experiments/av1-noshow-dpb-spike.md; do
+    AGENTS.md; do
     if grep -Fxq "$prefix$path" "$entries"; then
         fail "repository-only file leaked into the source archive: $path"
     fi

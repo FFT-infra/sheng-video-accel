@@ -5,12 +5,12 @@
 # changing-resolution stream, one FFmpeg VA process matches software, and
 # fresh VA decoder contexts repeatedly decode each geometry.
 #
-# VP9 was withdrawn here on the old tree: its context recreation and source
-# changes rebooted the tablet. Phase 5 re-enabled it on the decode-order
-# module, where neither reproduced (100 recreations plus 100 in-stream
-# switches, pixels equal to software), and `IRIS_DYNAMIC_CODECS=vp9` has run
-# since. Under `V4L2_VA_PUBLISH=import` the resolution change also rebuilds an
-# Import pool, which is a different path from that run.
+# VP9 is qualified on the decode-order module: 100 recreations plus 100
+# in-stream switches, pixels equal to software, and
+# `IRIS_DYNAMIC_CODECS=vp9` is part of the default run. On display-order
+# firmware the source-change path can reset the device, so that combination
+# needs `scripts/iris-experiment-guard.sh`. Under `V4L2_VA_PUBLISH=import` the
+# resolution change also rebuilds an Import pool, which is a different path.
 # Missing formats, elements or advertised support are failures, never SKIPs.
 
 set -eu

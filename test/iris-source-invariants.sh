@@ -122,8 +122,8 @@ fi
 
 # A gate whose oracle is a hardcoded publish count is a statement about one
 # exact media file. Without a pin the file can be replaced and the count goes
-# stale silently: av1-720.webm was swapped on 2026-11-15 and invisible=42
-# became 15, which read as a driver regression. Both counting gates must
+# stale silently: a replaced clip changed the recorded invisible count, which
+# read as a driver regression. Both counting gates must
 # verify the media identity and look the counts up by clip hash.
 real_clip="$root/test/iris-real-clip-gate.sh"
 grain_gate="$root/test/iris-av1-grain-gate.sh"

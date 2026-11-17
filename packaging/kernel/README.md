@@ -6,16 +6,13 @@ Two patch sets live here. 0001-0007 target `sheng-7.2.6`
 carries the request-sync-frame control and the stability fixes that 7.2.6
 needs patches for, so the 7.3.4 set is smaller.
 
-Only 0001-0004 make up the module the driver's decode results in
-TEST-RESULTS.md are qualified on, including the AV1 zero-copy Import run. The
-lab module `b90bd823` also carries 0006; its guarded WP1 run found no frame
-effect, so no capability claim rests on that extra patch. The driver detects
-missing kernel controls at runtime and degrades gracefully on stock kernels.
-None of the experimental patches is part of that qualified baseline: 0006 has
-one guarded WP1 run on `sheng` recorded in TEST-RESULTS.md, with a "no
-regression" verdict and no capability change, and 0007 was built, installed
-and run with a "no reason to ship" verdict (TEST-RESULTS.md, "The
-completion-preserving 0005 form").
+Only 0001-0004 make up the 7.2.6 module; on 7.3.4 the qualified set is
+0008-0009. `TEST-RESULTS.md` records the hardware evidence for the qualified
+combination, including the AV1 zero-copy Import run. None of the experimental
+patches (0005-0007) is part of a qualified baseline: 0006 had one guarded run
+on `sheng` with a "no regression" verdict and no capability change, while 0005
+and 0007 were rejected on hardware. The driver detects missing kernel controls
+at runtime and degrades gracefully on stock kernels.
 
 ## Patch Summary
 
@@ -25,8 +22,8 @@ completion-preserving 0005 form").
 | `0002-media-iris-deblocking-filter-controls.patch` | upstream Iris patches | Exposes H.264 and HEVC loop-filter controls (`HFI_PROP_DEBLOCKING_MODE`) | Allows forwarding of client slice deblocking requests |
 | `0003-media-iris-encoder-request-sync-frame.patch` | Qualcomm (Wangao Wang) | Implements `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` (`HFI_PROP_REQUEST_SYNC_FRAME`) | Enables direct hardware sync-frame requests |
 | `0004-media-iris-preserve-timestamps-on-error-buffers.patch` | upstream Iris patches | Preserves buffer timestamp on `V4L2_BUF_FLAG_ERROR` completions | Allows immediate failure attribution for corrupted frames |
-| `0005-media-iris-recycle-decoder-buffers-for-non-display-pictures.patch` | upstream Iris patches | Recycles non-display (NOSHOW) decoder buffers internally | **Experimental, rejected.** Requeues NOSHOW CAPTURE buffers in the kernel instead of completing them to userspace; this driver's AV1 path consumes those completions by decode order to publish hidden reference frames. Built into the module once: all three qualified AV1 clips failed under import, copy and direct, and native `v4l2av1dec` reached EOS on the same node (`TEST-RESULTS.md` §"0005 on the target"). Never build it into a released module. |
-| `0006-media-iris-discard-unmatched-timestamp-metadata.patch` | downstream timestamp-metadata fix | Discards unmatched timestamp metadata instead of borrowing | **Experimental, one guarded WP1 run only.** Built, installed with 0001-0004, rebooted and run through the four-codec matrix, long VP9 clip, AV1 real/DRC clips, EOS and slow-CAPTURE probes on `sheng`. The upstream defect was not reproduced on the 0001-0004 baseline, so the verdict is "no regression", not "fixed". It is not part of the qualified baseline and adds no codec, profile or publish-policy claim. |
+| `0005-media-iris-recycle-decoder-buffers-for-non-display-pictures.patch` | upstream Iris patches | Recycles non-display (NOSHOW) decoder buffers internally | **Experimental, rejected.** Requeues NOSHOW CAPTURE buffers in the kernel instead of completing them to userspace; this driver's AV1 path consumes those completions by decode order to publish hidden reference frames. Built into the module once: all three qualified AV1 clips failed under import, copy and direct, and native `v4l2av1dec` reached EOS on the same node. Never build it into a released module. |
+| `0006-media-iris-discard-unmatched-timestamp-metadata.patch` | downstream timestamp-metadata fix | Discards unmatched timestamp metadata instead of borrowing | **Experimental, one guarded no-regression run only.** Built, installed with 0001-0004, rebooted and run through the four-codec matrix, long VP9 clip, AV1 real/DRC clips, EOS and slow-CAPTURE probes on `sheng`. The upstream defect was not reproduced on the 0001-0004 baseline, so the verdict is "no regression", not "fixed". It is not part of the qualified baseline and adds no codec, profile or publish-policy claim. |
 | `0007-media-iris-complete-noshow-pictures-without-an-error.patch` | this repository | Completes non-display (NOSHOW) pictures without `V4L2_BUF_FLAG_ERROR` and without the picture-type flags, keeping the timestamp 0004 preserves | **Experimental, rejected.** The completion-preserving form of 0005: nothing is recycled in the kernel, the false error is simply not attached. Built with 0001-0004, installed and booted (module `f070ae18…`); the installed driver then failed all three AV1 clips under import, copy and direct, while the same driver with the unflagged-NOSHOW tolerance in the session decoded byte-identical output and matched the qualified baseline's counters. It therefore buys nothing over the qualified module. Never build it into a released module. |
 | `0008-7.3.4-decode-order-and-deblocking.patch` | this repository | Exposes decode-order output (`HFI_PROP_DECODE_ORDER_OUTPUT`) and the six H.264/HEVC loop-filter controls (`HFI_PROP_DEBLOCKING_MODE`) on the 7.3.4 driver, and raises the decoder CAPTURE ceiling to `DEFAULT_MAX_HOST_BUF_COUNT` | **Required on 7.3.4.** Without it the driver opens in display-order mode and the Import zero-copy path is unavailable. Carries the control-id mapping in both directions: `iris_get_v4l2_id()` alone registers a control that `VIDIOC_S_CTRL` then rejects with EINVAL. |
 | `0009-7.3.4-preserve-timestamps-on-error-buffers.patch` | this repository | Preserves the buffer timestamp on `V4L2_BUF_FLAG_ERROR` completions | **Required on 7.3.4.** Same change as 0004, rebased onto the 7.3.4 source. |
@@ -52,7 +49,7 @@ breaks the build. The target here is f2fs.
 # 7.2.6
 git clone --depth 1 -b sheng-7.2.6 https://github.com/ianchb/sm8550-mainline linux
 sh packaging/kernel/build-module.sh --source linux
-# WP1 only: add 0006 to the four qualified patches, never 0005.
+# Experimental only: add 0006 to the four qualified patches, never 0005.
 sh packaging/kernel/build-module.sh --source linux \
     --patch 0001 --patch 0002 --patch 0003 --patch 0004 --patch 0006
 
@@ -82,12 +79,10 @@ the installed `qcom-iris.ko.zst`. `run-static-checks.sh` parses this script.
 
 ### Installation
 
-Installation is a separate, explicit decision. WP1's installation, reboot and
-guarded gates are recorded in `TEST-RESULTS.md` §"WP1: 0006 loaded on sheng";
-the three interrupted guard attempts are retained as audit records. Before
-replacing anything, record the source commit, the installed driver hash, the
-kernel module hash, boot ID, resolved decoder/encoder nodes, battery state and
-thermal zones. Keep the rollback copy from `build-module.sh`.
+Installation is a separate, explicit decision. Before replacing anything,
+record the source commit, the installed driver hash, the kernel module hash,
+boot ID, resolved decoder/encoder nodes, battery state and thermal zones. Keep
+the rollback copy from `build-module.sh`.
 
 ```sh
 work=${IRIS_KERNEL_BUILD_DIR:-/tmp/iris-kernel-module}

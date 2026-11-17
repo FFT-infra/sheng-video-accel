@@ -3,8 +3,8 @@
 # Refuse a gate run whose guarded child produced no output. A guard can reach
 # status=complete with exit=0 while the command never ran: a `sh -c` whose
 # quoting was flattened by the runner, or a heredoc a backgrounded child never
-# read. The 2026-11-17 misc-bound run was exactly that -- three missing PASS
-# lines behind a green record.
+# read. A flattened `sh -c` once produced three missing PASS lines behind a
+# green record.
 #
 # Usage: gate-output-check.sh <run-dir> [allow-empty]
 #   allow-empty=1 opts out for a deliberately silent command.

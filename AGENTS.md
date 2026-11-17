@@ -18,10 +18,11 @@ under `src/`.
   kernel patch hashes live in `packaging/kernel/SHA256SUMS`; the source
   archive boundary lives in `.gitattributes` and `scripts/make-dist.sh`.
   Checks enforce all five. The current qualified combination in
-  `docs/STATE.md`, the patch rationale in `packaging/kernel/README.md` and
-  the backlog are prose; nothing enforces them, which is exactly why they
-  drift. `TEST-RESULTS.md` and `docs/POST-MERGE-BACKLOG.md` are historical
-  records, not current-state sources.
+  `docs/STATE.md` and the current hardware evidence in `TEST-RESULTS.md` are
+  maintained together with the table; the patch rationale in
+  `packaging/kernel/README.md` is prose. Superseded runs, refuted hypotheses
+  and interrupted experiments are not kept in the tree — they live in git
+  history.
 - Evidence before capability. A codec, profile or publish policy is
   advertised only after its hardware gate passed and TEST-RESULTS.md records
   the run (docs/architecture.md §9). The Import policy additionally keeps one

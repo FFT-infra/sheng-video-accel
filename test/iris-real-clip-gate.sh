@@ -72,8 +72,8 @@ run_ffmpeg() {
 # The expected counts are a property of one exact file, not of the lane. Each
 # row is "<sha256> <frames> <import> <copy> <invisible> <why>". A clip whose
 # hash is absent is refused instead of being measured against another file's
-# numbers: av1-720.webm was replaced on 2026-11-15 and the recorded
-# invisible=42 silently became 15, which reads as a driver regression.
+# numbers: a replaced clip silently changed the recorded invisible count,
+# which reads as a driver regression.
 expected_counts() {
     sha=$1
     case $sha in

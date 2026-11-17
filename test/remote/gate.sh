@@ -193,8 +193,9 @@ esac
 
 # A guard that reached "complete" with an empty child stdout proves nothing:
 # a command can be landed wrong (a `sh -c` whose quoting was flattened, a
-# heredoc the child never read) and still exit 0. The 2026-11-17 misc-bound
-# run did exactly that. gate-output-check.sh refuses a silent run by default;
-# a caller with a genuinely silent command opts out explicitly.
+# heredoc the child never read) and still exit 0. A flattened `sh -c` once
+# left a green record behind an unexecuted probe. gate-output-check.sh refuses
+# a silent run by default; a caller with a genuinely silent command opts out
+# explicitly.
 "$here/gate-output-check.sh" "$out" "${IRIS_GATE_ALLOW_EMPTY_OUTPUT:-0}"
 printf 'PASS %s\n' "$*"

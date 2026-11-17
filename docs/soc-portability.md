@@ -20,8 +20,8 @@ policy may be advertised on a new SoC until its own hardware gate passes and
    `iris_vb2_buffer_done()`. On 7.3.4, 0008 carries the decode-order and
    deblocking changes for both gen2 encoder tables and 0009 the timestamp
    change. 0005, 0006 and 0007 are experimental and must stay out of a port
-   baseline. 0006 has one guarded WP1 run on SM8550 with a "no regression"
-   verdict; 0005 and 0007 were run on hardware and rejected. None of these
+   baseline. 0006 had one guarded run on SM8550 with a "no regression"
+   verdict; 0005 and 0007 were rejected on hardware. None of these
    adds a fix claim or portability evidence. A new SoC has its own platform
    tables and firmware capability enum, so every hunk needs re-review and
    rebase, not a blind `git am`. A patch also has to be carried forward to
@@ -63,7 +63,7 @@ policy may be advertised on a new SoC until its own hardware gate passes and
    Arch PKGBUILD comment names an `arch-xiaomi-sheng` image. The Debian
    package is built in a clean chroot: `libgbm-dev` is pinned to the distro's
    Mesa and is not safe to install over a vendor-patched stack. See
-   `docs/build-and-deploy.md` and WP6 in `docs/POST-MERGE-BACKLOG.md` §16.
+   `docs/build-and-deploy.md` for the chroot recipe.
 7. **Validation records.** Every hardware result in `TEST-RESULTS.md` came
    from this target's installed package, driver hash, boot ID, resolved node,
    decoder name, frame/drop counts and kernel module. Those records do not
@@ -84,7 +84,8 @@ policy may be advertised on a new SoC until its own hardware gate passes and
   READMEs and the required checks in one commit.
 - Re-run the four-codec matrix, real AV1 clip, in-context DRC clip, 10-bit
   probe, 17-case browser matrix and A11-style independent-oracle corpus under
-  `scripts/iris-experiment-guard.sh`, recording every §1.8 evidence field.
+  `scripts/iris-experiment-guard.sh`, recording the source commit, driver
+  hash, boot ID, resolved node and frame/drop counts.
 - Re-run host gates: `sh test/run-static-checks.sh`,
   `meson test -C build-local --print-errorlogs`, `git diff --check`, and CI.
 - Record the new source commit, driver hash, module hash, boot ID, resolved
