@@ -66,6 +66,10 @@ module and driver hashes, boot ID, thermal and battery state, and the command's
 output. `identity.driver` is the driver the command resolves: a
 `LIBVA_DRIVERS_PATH` override hashes that build tree, while
 `identity.installed_driver` keeps the system package hash for comparison.
+A run whose guarded child prints nothing is refused as a false green, even
+when the guard itself reached `complete` with exit 0; set
+`IRIS_GATE_ALLOW_EMPTY_OUTPUT=1` for a deliberately silent command.
+`test/iris-gate-output-self-test.sh` pins that contract on the host.
 
 ### Browser Acceptance Gate
 

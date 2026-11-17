@@ -180,6 +180,7 @@ run iris-va-vtable-surface python3 -I "$test_dir/iris-va-vtable-surface-check.py
 run iris-experiment-guard-self-test sh "$test_dir/iris-experiment-guard-self-test.sh" "$root"
 run iris-eos-check-self-test sh "$test_dir/iris-eos-check-self-test.sh" "$root"
 run iris-clip-trace-check-self-test sh "$test_dir/iris-clip-trace-check-self-test.sh" "$root"
+run iris-gate-output-self-test sh "$test_dir/iris-gate-output-self-test.sh" "$root"
 run av1-install-tu-roundtrip sh "$test_dir/av1-install-tu-roundtrip.sh" "$root"
 run av1-dpb-oracle sh "$test_dir/av1-dpb-oracle.sh" "$root"
 run iris-setup-path-check sh "$test_dir/iris-setup-path-check.sh" "$root"

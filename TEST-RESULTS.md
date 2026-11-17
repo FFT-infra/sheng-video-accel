@@ -9525,3 +9525,18 @@ again completed `guard=complete exit=0` with
 `driver_path=/usr/lib64/dri/v4l2_drv_video.so`. `run-static-checks.sh` PASS,
 `meson test -C build-local` 33/33, `meson test -C build-asan` rebuilt from
 this head 33/33, `git diff --check` clean.
+
+A target run can reach `guard=complete exit=0` with an empty child stdout when
+the landed command never executed: the 2026-11-17 misc-bound run used
+`sh -c 'LIBVA_DRIVER_NAME=v4l2 ...'`, whose quoting the runner flattened, so
+the probe did not run but the record was green. `test/remote/gate.sh` now
+refuses an empty guarded child stdout (exit 5) unless
+`IRIS_GATE_ALLOW_EMPTY_OUTPUT=1` opts out. On the same boot and installed
+driver as above, the original command is refused with
+`FAIL gate produced no child output` and the correct command still passes
+with three PASS lines. `test/iris-gate-output-self-test.sh` pins the empty,
+missing, opt-out and real-output cases on the host, is red on the old
+behaviour, and is registered in the CI required list. `run-static-checks.sh`
+PASS, `meson test -C build-local` 34/34, `meson test -C build-asan` 34/34,
+`git diff --check` clean. The capability table is unchanged; this is a gate
+runner fix, not a codec claim.
