@@ -17,9 +17,9 @@ under `src/`.
   `README.md`; the trace vocabulary lives in `docs/architecture.md` §8;
   kernel patch hashes live in `packaging/kernel/SHA256SUMS`; the source
   archive boundary lives in `.gitattributes` and `scripts/make-dist.sh`.
-  Checks enforce all five. The current qualified combination in
-  `docs/STATE.md` and the current hardware evidence in `TEST-RESULTS.md` are
-  maintained together with the table; the patch rationale in
+  Checks enforce all five. The current qualified combination in `README.md`
+  and the current hardware evidence in `TEST-RESULTS.md` are maintained
+  together with the table; the patch rationale in
   `packaging/kernel/README.md` is prose. Superseded runs, refuted hypotheses
   and interrupted experiments are not kept in the tree — they live in git
   history.
@@ -66,5 +66,5 @@ is not an installation.
 - Functional package conflicts, patch authorship and `SHA256SUMS` stay as
   they are.
 - Experiments that can reset firmware follow the guard procedure in
-  docs/build-and-deploy.md. A reset or a thermal breach is a failed
-  experiment, not evidence of codec support.
+  `docs/development.md`. A reset or a thermal breach is a failed experiment,
+  not evidence of codec support.

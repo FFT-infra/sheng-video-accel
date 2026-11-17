@@ -28,7 +28,7 @@ meson test -C build-local --print-errorlogs
 - Asserts that `v4l-utils`, FFmpeg, and Vulkan build/runtime dependencies are declared.
 - Verifies provenance refresh after stripping.
 
-> **Note (Debian Packaging)**: Building the Debian package requires a Debian host or chroot (`sbuild`, `pbuilder`). `dh_shlibdeps` aborts on Fedora hosts due to missing shlibs databases. See `docs/build-and-deploy.md` for the chroot recipe.
+> **Note (Debian Packaging)**: Building the Debian package requires a Debian host or chroot (`sbuild`, `pbuilder`). `dh_shlibdeps` aborts on Fedora hosts due to missing shlibs databases. See `docs/development.md` for the chroot recipe.
 
 ---
 
@@ -96,7 +96,7 @@ Acceptance requires inspecting `chrome://media-internals` during playback:
   ./test/iris-concurrency-soak.sh dual-h264
   ./test/iris-concurrency-soak.sh mixed
   ```
-- **`test/iris-8k-gate.sh`**: 7680x4320 decode for all four qualified codecs. Asserts the granted CAPTURE pool is the memory-budgeted one (not the old fixed 32), exact framemd5 against a software baseline, terminal LAST and zero completion errors. See [docs/build-and-deploy.md](../docs/build-and-deploy.md#8k-geometry-and-two-client-gates) for the clip generation.
+- **`test/iris-8k-gate.sh`**: 7680x4320 decode for all four qualified codecs. Asserts the granted CAPTURE pool is the memory-budgeted one (not the old fixed 32), exact framemd5 against a software baseline, terminal LAST and zero completion errors. See [docs/development.md](../docs/development.md#8k-geometry-and-two-client-gates) for the clip generation.
 - **`test/iris-two-player-gate.sh`**: Two independent 1920x1080 ffmpeg processes with their own VA display and driver trace, both required to finish with exact pixels and no completion errors. Leaves `LIBVA_DRIVERS_PATH` unset to test the installed package.
 - **`test/iris-vp9-p2-gate.sh`**: VP9 Profile 2 (10-bit) decode. Generates its own `yuv420p10le` clip, requires `VAEntrypointVLD` to answer `VA_RT_FORMAT_YUV420_10` only, and checks that a client opening the config with no RT-format attribute still gets P010 surfaces byte-identical to a software decode. Pins the `createConfig` default and the `getConfigAttributes` answer tested by `test/unit/va-config-attributes-test.cc`.
 

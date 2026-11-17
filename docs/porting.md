@@ -63,7 +63,7 @@ policy may be advertised on a new SoC until its own hardware gate passes and
    Arch PKGBUILD comment names an `arch-xiaomi-sheng` image. The Debian
    package is built in a clean chroot: `libgbm-dev` is pinned to the distro's
    Mesa and is not safe to install over a vendor-patched stack. See
-   `docs/build-and-deploy.md` for the chroot recipe.
+   `docs/development.md` for the chroot recipe.
 7. **Validation records.** Every hardware result in `TEST-RESULTS.md` came
    from this target's installed package, driver hash, boot ID, resolved node,
    decoder name, frame/drop counts and kernel module. Those records do not

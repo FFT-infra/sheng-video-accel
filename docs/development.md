@@ -1,4 +1,6 @@
-# Build And Deploy
+# Development
+
+## Build
 
 The target-independent build is reproducible on the development host:
 
@@ -12,6 +14,8 @@ ldd -r build-local/src/v4l2_drv_video.so
 The last command must print no `undefined symbol` lines. A successful link is
 not enough for a VA-API driver: an unresolved relocation otherwise appears to
 clients as a silent software-decoder fallback.
+
+## Deploy to a target
 
 For a tablet or other V4L2 target, set `IRIS_REMOTE_HOST` to an SSH config
 host or address and run:
@@ -31,8 +35,8 @@ dot-relative, parent-relative, whitespace-containing and shell-active
 `IRIS_REMOTE_ROOT` values before the `rsync --delete` command can contact the
 target. The remote lab directory is durable and defaults to
 `$HOME/iris-vaapi-lab` (`IRIS_LAB_ROOT` overrides it); downloaded Fluster
-resources and Qualcomm test tools
-stay there rather than under a disposable scratch directory.
+resources and Qualcomm test tools stay there rather than under a disposable
+scratch directory.
 
 After the sync and before the rebuild, every tracked path is re-hashed on the
 target with `sha256sum -c` against the host's own listing. The digest the
@@ -95,152 +99,7 @@ The matrix requires exact software/VA frame MD5 equality and strict stateful
 EOS accounting. Fluster and native V4L2 suites are additional capability and
 firmware diagnostics; always record which decoder path was used.
 
-## Durable system and browser installation
-
-The remote deployment above intentionally runs from the build tree. Once that
-artifact has passed the codec matrix and soak gates, install it into libva's
-configured system driver directory together with the diagnostic commands:
-
-```sh
-cd "$HOME/iris-vaapi-lab/src"
-sudo ./scripts/install-system.sh build
-```
-
-`install-system.sh` obtains `driverdir` from `pkg-config libva` (falling back
-to libva's `libdir/dri` only when the package omits `driverdir`) and runs
-`ldd -r` before copying the shared object. It installs the diagnostic commands
-under `/usr/local/bin` and the node rule they share under
-`/usr/local/lib/iris-vaapi` by default. `IRIS_INSTALL_PREFIX` changes only that
-prefix; it does not redirect the VA driver away from libva's canonical driver
-directory. `DESTDIR` provides a non-root packaging/staging mode.
-
-The helper records an install manifest at
-`/usr/local/share/iris-vaapi/install-manifest.txt` (or the selected prefix).
-It includes the source commit, tracked-source digest, artifact hash, resolved
-driver path, and any pre-existing driver backup. To remove only that recorded
-installation and restore the previous driver, run
-`sudo ./scripts/uninstall-system.sh`; removal refuses to proceed if the
-installed artifact was modified after installation. A `DESTDIR` staging run
-is packaging evidence only and must not be described as a live system install.
-
-Package builders must refresh the manifest after any ELF post-processing. The
-Fedora spec runs the distribution brp strip hooks before
-`scripts/refresh-install-manifest.sh`; the Arch PKGBUILD disables makepkg's
-later implicit strip, strips explicitly, and runs the same refresh. This keeps
-the recorded artifact hash and size equal to the installed package payload.
-
-The node rule lives in one file, `scripts/lib/iris-node.sh`, installed as
-`<prefix>/lib/iris-vaapi/iris-node.sh`. It resolves `/dev/video*` on every
-call, requires an exact `iris_driver` match, and tells the decoder from the
-encoder by the card type, so the companion Iris encoder cannot be selected
-merely because its number happens to sort first. An explicit
-`LIBVA_V4L2_VIDEO_PATH` remains available for a checked diagnostic override.
-`v4l2-ctl` from v4l-utils is therefore a runtime dependency of the
-diagnostics.
-
-Three commands are installed, and none of them carries a second copy of the
-node rule: `iris-device-check` and `iris-verify` both source that file, so a
-boot that renumbers the nodes changes nothing in them. `iris-device-check` is
-read-only and reports
-the device-tree node, the bound driver, the module hash, the firmware, each
-queue's coded formats, which optional kernel controls are present, and whether
-libva opens the driver with no environment set. `iris-verify` generates its own
-clip and checks that a decode and an encode each move the Iris interrupt
-counter, that the encoded stream decodes, and that mpv reaches the native V4L2
-path. `iris-configure-clients` writes `hwdec=vaapi` and the Firefox VA pref into
-the invoking user's home only.
-
-Check the installed driver with nothing set at all. This is the property the
-package ships: libva resolves the driver through the `msm_drv_video.so` alias
-(`qcom_drv_video.so` is installed beside it for recipes naming the qcom driver),
-and the driver resolves its own node.
-
-```sh
-env -u LIBVA_DRIVERS_PATH -u LIBVA_DRIVER_NAME -u LIBVA_V4L2_VIDEO_PATH vainfo
-```
-
-Unset the variable; an empty `LIBVA_DRIVERS_PATH=` is not the same thing. libva
-takes the empty string as "search no directory" and `vaInitialize` fails with
-`unknown libva error` even though the installed driver is fine, which is how a
-probe lost its first run.
-
-There is no launcher and no desktop entry. An earlier revision shipped both,
-and the launcher exported `LIBVA_DRIVER_NAME`, both node paths, and an isolated
-`--user-data-dir`. A desktop start then behaved differently from a terminal
-start, and the isolated profile meant a user who clicked the entry got a
-browser with no bookmarks and no login state. Chrome needs none of it: measured
-on the qualified target with `LIBVA_DRIVER_NAME` and both node overrides
-removed, `--type=gpu-process` maps `/usr/lib64/dri/v4l2_drv_video.so` and holds
-the decoder node while a clip plays. `test/iris-browser-acceptance.sh` launches
-the browser directly and samples the holders during playback, so the same
-claim is re-checked on every run.
-
-### Browser acceptance gate
-
-Successful playback is not proof of hardware decoding. Use a high-resolution
-H.264 or HEVC sample, open `chrome://media-internals`, select the player by its
-exact URL, and require both:
-
-```text
-kVideoDecoderName = VaapiVideoDecoder
-kIsPlatformVideoDecoder = true
-```
-
-The qualified run reached this gate with the project driver mapped in the GPU
-process and a dynamically resolved Iris node, `VaapiVideoDecoder` and
-`kIsPlatformVideoDecoder=true`; its VA trace showed repeated
-`vaBeginPicture`/`vaEndPicture` and `stateful capture complete` events. A Fedora
-Chromium run is a separate native-V4L2 baseline and reports `V4L2VideoDecoder`;
-that result does not prove this driver.
-
-Also record decoded/dropped frame counts, confirm the Iris V4L2 context and
-OUTPUT/CAPTURE activity in a trace-enabled diagnostic run, and compare the
-device boot ID before and after. Small videos may fall below Chromium's
-hardware-decoder performance threshold, so a low-resolution
-`FFmpegVideoDecoder` result is not a release verdict. H.264, HEVC, VP9 and
-AV1 are the qualified VA profiles (each with its own caveat in the README).
-Validate Google Chrome; Fedora's Chromium decodes through its own native V4L2
-stack and its result says nothing about this driver.
-
-### Client setup
-
-The package installs the driver and the `msm_drv_video.so` alias, so a client
-needs no environment variable to find it. What each client still needs is its
-own setting. `iris-configure-clients` writes the mpv and Firefox ones into the
-invoking user's home; the rest are set in the client.
-
-| Client | Setting |
-| --- | --- |
-| mpv | `hwdec=vaapi` in `~/.config/mpv/mpv.conf`, or `--hwdec=vaapi` per run |
-| VLC | Preferences -> Input / Codecs -> Hardware-accelerated decoding: **VA-API video decoder via DRM** |
-| Sunshine | Encoder `h264_vaapi` or `hevc_vaapi` |
-| Firefox | `media.hardware-video-decoding.force-enabled` = `true` in `about:config` (or in `user.js`, which `iris-configure-clients` writes) |
-| Chrome | Nothing; confirm with the browser gate above |
-| GStreamer | `GST_VA_ALL_DRIVERS=1`, because the plugin filters drivers by vendor allowlist |
-
-FFmpeg decodes through the VA driver with its own flags; the input needs the
-raw-video geometry when it is not a container:
-
-```sh
-# decode, frames stay on the GPU
-ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -i input.mp4 -f null -
-
-# encode from raw NV12, 1280x720 at 30 fps
-ffmpeg -vaapi_device /dev/dri/renderD128 -f rawvideo -pix_fmt yuv420p \
-    -s 1280x720 -r 30 -i input.yuv -vf format=nv12,hwupload \
-    -c:v h264_vaapi -b:v 4M out.h264
-ffmpeg -vaapi_device /dev/dri/renderD128 -f rawvideo -pix_fmt yuv420p \
-    -s 1280x720 -r 30 -i input.yuv -vf format=nv12,hwupload \
-    -c:v hevc_vaapi -b:v 4M out.hevc
-```
-
-`h264_vaapi` and `hevc_vaapi` are the qualified encoders. B pictures are off
-unless `V4L2_VA_B_FRAMES` is set, and then the client needs three pictures in
-flight: `-bf 1 -async_depth 3`. At FFmpeg's default `-async_depth 2` a B
-picture session stops after the first pair, which is the firmware holding the
-newest picture rather than a driver defect.
-
-### Recording a target run
+## Record a target run
 
 A gate result means nothing without the boot, module and driver it ran
 against, and those were being copied out of the target by hand for every
@@ -250,7 +109,7 @@ status, the guard state and the source commit next to the command's output:
 
 ```sh
 IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh \
-    --out /tmp/iris-run-$$ \
+    --out "$HOME/iris-vaapi-lab/artifacts/gstreamer" \
     -- sh test/iris-gstreamer-gate.sh --clip CLIP
 ```
 
@@ -295,9 +154,10 @@ cmdline differs from the one that boots today is a different experiment.
 Flashing is a readback-verified write, not a blind `dd`:
 
 ```sh
-sudo dd if=~/Lab/Bridge/tmp/boot_734_sheng.img of=/dev/disk/by-partlabel/boot_b bs=1M conv=fsync
+sudo dd if=~/iris-vaapi-lab/rollback/boot_734_sheng.img \
+    of=/dev/disk/by-partlabel/boot_b bs=1M conv=fsync
 sudo dd if=/dev/disk/by-partlabel/boot_b bs=1M count=<image-size-in-MiB> \
-    | cmp - ~/Lab/Bridge/tmp/boot_734_sheng.img
+    | cmp - ~/iris-vaapi-lab/rollback/boot_734_sheng.img
 ```
 
 `cmp` must print nothing. Then set the slot active, reboot, and confirm
@@ -323,7 +183,7 @@ previous module, `depmod -a`, reboot. A boot that hangs after a kernel change
 is a failed experiment: revert first, then re-read the change. Never treat a
 boot that needed a manual restart as evidence about the kernel under test.
 
-## Distribution packaging
+## Packaging
 
 `scripts/install-system.sh` is enough for a lab target, but it needs a build
 tree, a checkout and root. For an image that should work on first boot, build
@@ -368,10 +228,10 @@ transpose, and two AV1 oracles against `libdav1d`. A machine that happens to
 have FFmpeg installed hides the missing build dependency until a clean build
 root runs the test stage and fails there.
 
-All three declare `v4l-utils` as a hard runtime dependency. The diagnostic commands
-resolve the decoder node by driver name because the number moves between boots
-on this device, and without `v4l2-ctl` they exit instead of falling back to a
-fixed `/dev/videoN` that may be a camera.
+All three declare `v4l-utils` as a hard runtime dependency. The diagnostic
+commands resolve the decoder node by driver name because the number moves
+between boots on this device, and without `v4l2-ctl` they exit instead of
+falling back to a fixed `/dev/videoN` that may be a camera.
 
 No browser is a dependency, and no browser is configured. The driver is useful
 to any VA-API client, and libva resolves it through the alias without help.
@@ -412,7 +272,7 @@ no user has to set `LIBVA_DRIVERS_PATH`. That path is not validated here: the
 qualified target in this repository is Fedora, and an Arch image needs its own
 `vainfo` and `media-internals` acceptance before its result may be claimed.
 
-## Dynamic resolution qualification
+## Target qualification
 
 The production/fallback/rejected codec boundary is machine-readable in
 `data/iris-codec-capabilities.json`; keep it in sync with source capability
@@ -442,6 +302,8 @@ line, and the firmware's own passive throttle band (90000/95000) is inside it.
 a record whose peak lands above 95000 must say so. A reset, a boot-ID change
 or a trip past the ceiling is a failed experiment, not evidence of codec
 support.
+
+### Dynamic resolution
 
 Run the dedicated H.264 reconfiguration gate on the target:
 
@@ -473,7 +335,7 @@ Development runs may shorten the matrix explicitly with
 `IRIS_DYNAMIC_SWITCHES` and `IRIS_DYNAMIC_FRAMES_PER_SEGMENT`; qualification
 results must retain the defaults.
 
-## Concurrent soak qualification
+### Concurrent soak
 
 The concurrent runner has separate dual-H.264 and mixed H.264+HEVC scenarios:
 
@@ -501,7 +363,7 @@ guard file records a running test; a later invocation refuses to hide an
 interrupted or rebooted soak until the operator inspects it and deliberately
 sets `IRIS_SOAK_ALLOW_STALE_GUARD=1`.
 
-## 8K geometry and two-client gates
+### 8K geometry and two-client gates
 
 The soak above uses 640x360 lanes. Two more target-only gates cover the
 geometry and client-count edges. Run both through `test/remote/gate.sh`: a
@@ -562,7 +424,7 @@ absolute build-tree path to gate a build instead. Neither gate is a Meson
 test: both need the Iris decoder node. A run whose boot ID changes, or that
 trips the thermal ceiling, is a failed experiment.
 
-### Real-clip media and the pin
+#### Real-clip media and the pin
 
 Two gates decide from a recorded publish count rather than from a whole-file
 comparison: `iris-real-clip-gate.sh` and `iris-av1-grain-gate.sh`. A count is

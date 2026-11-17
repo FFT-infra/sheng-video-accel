@@ -40,7 +40,7 @@ AV1 film grain 合成在用户态完成。客户端给出独立的 `current_disp
 
 输入为 NV12、P010、BGRA 或 RGBA，输出为 NV12 或 P010。
 
-视频处理由 Vulkan 计算内核完成，直接读写表面 DMA-BUF。构建中找到 Vulkan 即提供 `VAProfileNone` / `VAEntrypointVideoProc`，设 `V4L2_VA_VPP=0` 可关闭。细节见 [docs/architecture.md](docs/architecture.md)。
+视频处理由 Vulkan 计算内核完成，直接读写表面 DMA-BUF。构建中找到 Vulkan 即提供 `VAProfileNone` / `VAEntrypointVideoProc`，设 `V4L2_VA_VPP=0` 可关闭。细节见 `docs/architecture.md`。
 
 ## 运行环境
 
@@ -84,7 +84,7 @@ iris-device-check
 iris-verify
 ```
 
-`iris-device-check` 只读：节点、固件版本、绑定的驱动与队列格式。`iris-verify` 编解码一段样例，要求 Iris 中断计数增长。四种编码格式的完整像素比对用 `test/iris-matrix.sh`。浏览器会话只有在媒体表面给出解码器、解码帧数与丢帧数时才算走硬件，见 [docs/build-and-deploy.md](docs/build-and-deploy.md#browser-acceptance-gate)。
+`iris-device-check` 只读：节点、固件版本、绑定的驱动与队列格式。`iris-verify` 编解码一段样例，要求 Iris 中断计数增长。四种编码格式的完整像素比对用 `test/iris-matrix.sh`。浏览器会话只有在媒体表面给出解码器、解码帧数与丢帧数时才算走硬件，流程见 `docs/install.md`。
 
 ## 性能
 
@@ -95,7 +95,7 @@ HEVC Main 8-bit，FFmpeg 8.1.3。CPU 锁最高频，GPU 锁 680 MHz。解码不�
 | 解码 | 953 fps | 754 fps | 346 fps |
 | 编码 | 679 fps | 585 fps | 172 fps |
 
-这组数字来自已验收的 7.3.4 组合。吞吐主要跟 DVFS 走，不锁频测到的是调频策略。完整数据见 [TEST-RESULTS.md](TEST-RESULTS.md)。
+这组数字来自已验收的 7.3.4 组合。吞吐主要跟 DVFS 走，不锁频测到的是调频策略。完整数据见 `TEST-RESULTS.md`。
 
 1080p、4 Mbit/s 下，H.264 比 libx264 `veryfast` 快 4.4 倍，HEVC 比 libx265 快 15.2 倍，两种编码都能到 7680x4320（`test/iris-encode-baseline.sh`）。
 
@@ -141,11 +141,3 @@ HEVC Main 8-bit，FFmpeg 8.1.3。CPU 锁最高频，GPU 锁 680 MHz。解码不�
 | 源码包 | `libva-v4l2-iris-<version>.tar.gz` | `scripts/make-dist.sh`、`%autosetup -n` |
 | 软件包（RPM、deb、PKGBUILD） | `libva-v4l2-iris` | `packaging/` 与 `debian/` |
 | 运行时 VA 驱动 | `v4l2_drv_video.so`，`LIBVA_DRIVER_NAME=v4l2` | libva 的 `<name>_drv_video.so` 约定 |
-
-## 文档
-
-- 客户端配置与 FFmpeg 命令：[docs/build-and-deploy.md](docs/build-and-deploy.md#client-setup)
-- 测试、门禁与诊断：[test/README.md](test/README.md)
-- 内部设计与 trace 词表：[docs/architecture.md](docs/architecture.md)
-- 当前验收组合：[docs/STATE.md](docs/STATE.md)
-- 硬件证据：[TEST-RESULTS.md](TEST-RESULTS.md)

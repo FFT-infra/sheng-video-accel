@@ -1,6 +1,6 @@
 # Hardware evidence
 
-Current evidence for the qualified combination in `docs/STATE.md`. The
+Current evidence for the qualified combination in `README.md`. The
 machine-readable capability boundary is `data/iris-codec-capabilities.json`;
 this file records the runs behind it. Superseded baselines, refuted hypotheses
 and interrupted experiments are not kept here — they live in git history.

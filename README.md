@@ -55,8 +55,7 @@ Input is NV12, P010, BGRA or RGBA; output is NV12 or P010.
 
 Video processing uses pinned Vulkan compute kernels on surface DMA-BUFs. A build
 that found Vulkan exposes `VAProfileNone` / `VAEntrypointVideoProc`;
-`V4L2_VA_VPP=0` removes it. Details are in
-[docs/architecture.md](docs/architecture.md).
+`V4L2_VA_VPP=0` removes it. Details are in `docs/architecture.md`.
 
 ## Requirements
 
@@ -113,8 +112,8 @@ iris-verify
 queue formats. `iris-verify` decodes and encodes a sample clip and requires the
 Iris interrupt counters to move. The full four-codec pixel oracle is
 `test/iris-matrix.sh`. A browser session counts as hardware only when the media
-surface names the selected decoder and reports decoded and dropped frames; see
-[docs/build-and-deploy.md](docs/build-and-deploy.md#browser-acceptance-gate).
+surface names the selected decoder and reports decoded and dropped frames; the
+procedure is in `docs/install.md`.
 
 ## Performance
 
@@ -129,7 +128,7 @@ upload.
 
 These are the numbers on the qualified 7.3.4 combination. Throughput follows
 DVFS more than the driver, so an unpinned run measures the governor. Sweeps,
-power and method are in [TEST-RESULTS.md](TEST-RESULTS.md).
+power and method are in `TEST-RESULTS.md`.
 
 At 1080p and 4 Mbit/s, H.264 encodes 4.4x faster than libx264 `veryfast`, HEVC
 15.2x faster than libx265, and both reach 7680x4320
@@ -197,11 +196,3 @@ so renaming one does not rename the others:
 | Source archive | `libva-v4l2-iris-<version>.tar.gz` | `scripts/make-dist.sh`, `%autosetup -n` |
 | Package (RPM, deb, PKGBUILD) | `libva-v4l2-iris` | `packaging/` and `debian/` |
 | Runtime VA driver | `v4l2_drv_video.so`, `LIBVA_DRIVER_NAME=v4l2` | libva's `<name>_drv_video.so` convention |
-
-## Documentation
-
-- Client settings and FFmpeg commands: [docs/build-and-deploy.md](docs/build-and-deploy.md#client-setup)
-- Tests, gates and diagnostics: [test/README.md](test/README.md)
-- Internal design and trace vocabulary: [docs/architecture.md](docs/architecture.md)
-- Current qualified combination: [docs/STATE.md](docs/STATE.md)
-- Hardware evidence: [TEST-RESULTS.md](TEST-RESULTS.md)
