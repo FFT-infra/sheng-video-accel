@@ -35,6 +35,10 @@
 #   IRIS_ENCODE_8K            1 (default) also encodes one 7680x4320 lane per
 #                             codec; 0 skips it
 #   IRIS_ENCODE_8K_FRAMES     frames in the 8K lane (default 8)
+#   IRIS_ENCODE_EXTRA_GEOM    space-separated extra geometries between 4K and
+#                             the node ceiling, e.g. "5120x2880 4096x2160";
+#                             empty by default
+#   IRIS_ENCODE_EXTRA_FRAMES  frames per extra geometry (default 4)
 
 set -eu
 
@@ -242,8 +246,10 @@ done
 # match a software decode of the same bytes, and SSIM against the same
 # synthetic source must clear the floor. framemd5 replaces rawvideo here
 # because one 8K frame is 50 MiB and the target's free space is a few GiB.
-check_eightk() {
+check_large_lane() {
     codec=$1
+    lane_geometry=$2
+    lane_frames=$3
     case $codec in
         h264) ff_codec=h264_vaapi ;;
         hevc) ff_codec=hevc_vaapi ;;
@@ -251,36 +257,39 @@ check_eightk() {
     esac
     free_kb=$(df -Pk "$work" | awk 'NR == 2 { print $4 }')
     [ "${free_kb:-0}" -ge 524288 ] \
-        || fail "8K lane needs 512 MiB free in $work, found $(( ${free_kb:-0} / 1024 )) MiB"
-    stream=$work/$codec.8k.$codec
-    va_md5=$work/$codec.8k-va.md5
-    sw_md5=$work/$codec.8k-sw.md5
+        || fail "$codec $lane_geometry: needs 512 MiB free in $work, found $(( ${free_kb:-0} / 1024 )) MiB"
+    stream=$work/$codec.$lane_geometry.$codec
+    va_md5=$work/$codec.$lane_geometry-va.md5
+    sw_md5=$work/$codec.$lane_geometry-sw.md5
+    lane_w=${lane_geometry%x*}
+    lane_h=${lane_geometry#*x}
 
     irq_before=$(irq_count)
     LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH=$driver_path \
         ffmpeg -hide_banner -loglevel error -vaapi_device "$render" \
-        -f lavfi -i testsrc2=size=7680x4320:rate=30 -frames:v "$eightk_frames" \
-        -vf format=nv12,hwupload -c:v "$ff_codec" -g "$eightk_frames" -y "$stream" \
-        || fail "$codec 8K: the encode failed"
+        -f lavfi -i "testsrc2=size=$lane_geometry:rate=30" -frames:v "$lane_frames" \
+        -vf format=nv12,hwupload -c:v "$ff_codec" -g "$lane_frames" -y "$stream" \
+        || fail "$codec $lane_geometry: the encode failed"
     irq_after=$(irq_count)
     [ "$irq_after" -gt "$irq_before" ] \
-        || fail "$codec 8K: the encode did not move the Iris IRQ counter (before=$irq_before after=$irq_after)"
+        || fail "$codec $lane_geometry: the encode did not move the Iris IRQ counter (before=$irq_before after=$irq_after)"
 
     geometry=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height \
         -of csv=p=0 "$stream")
-    [ "$geometry" = 7680,4320 ] || fail "$codec 8K: the stream is $geometry, expected 7680x4320"
+    [ "$geometry" = "$lane_w,$lane_h" ] \
+        || fail "$codec $lane_geometry: the stream is $geometry, expected $lane_w x $lane_h"
     packets=$(ffprobe -v error -select_streams v:0 -count_packets \
         -show_entries stream=nb_read_packets -of csv=p=0 "$stream")
-    [ "$packets" -eq "$eightk_frames" ] \
-        || fail "$codec 8K: the stream has $packets pictures, expected $eightk_frames"
+    [ "$packets" -eq "$lane_frames" ] \
+        || fail "$codec $lane_geometry: the stream has $packets pictures, expected $lane_frames"
 
     ffmpeg -hide_banner -loglevel error -i "$stream" -f framemd5 -y "$sw_md5" \
-        || fail "$codec 8K: the stream does not decode in software"
+        || fail "$codec $lane_geometry: the stream does not decode in software"
     LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH=$driver_path V4L2_VA_TRACE=1 \
         ffmpeg -hide_banner -loglevel error -vaapi_device "$render" \
         -hwaccel vaapi -hwaccel_output_format vaapi -i "$stream" \
-        -vf 'hwdownload,format=nv12,format=yuv420p' -f framemd5 -y "$va_md5" 2>"$work/$codec.8k.trace" \
-        || fail "$codec 8K: the platform decode failed"
+        -vf 'hwdownload,format=nv12,format=yuv420p' -f framemd5 -y "$va_md5" 2>"$work/$codec.$lane_geometry.trace" \
+        || fail "$codec $lane_geometry: the platform decode failed"
     # The framemd5 headers carry the libavformat version, which differs
     # between the two writes; the frame hashes are what must agree.
     if ! awk '
@@ -288,11 +297,11 @@ check_eightk() {
         /^0,/ { if (++m > n || $0 != a[m]) bad = 1 }
         END { if (m != n || bad) exit 1 }
     ' "$va_md5" "$sw_md5"; then
-        fail "$codec 8K: the platform decode does not match the software decode"
+        fail "$codec $lane_geometry: the platform decode does not match the software decode"
     fi
     va_frames=$(grep -c '^0,' "$va_md5" || true)
-    [ "$va_frames" -eq "$eightk_frames" ] \
-        || fail "$codec 8K: the platform decode produced $va_frames frames, expected $eightk_frames"
+    [ "$va_frames" -eq "$lane_frames" ] \
+        || fail "$codec $lane_geometry: the platform decode produced $va_frames frames, expected $lane_frames"
 
     # The same synthetic pattern, generated a second time rather than read
     # back from disk. testsrc2 is a function of the frame index, so the two
@@ -303,21 +312,31 @@ check_eightk() {
     ssim=$(LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH="$driver_path" \
         ffmpeg -hide_banner -nostats -vaapi_device "$render" \
         -hwaccel vaapi -hwaccel_output_format vaapi -i "$stream" \
-        -f lavfi -i testsrc2=size=7680x4320:rate=30 -frames:v "$eightk_frames" \
+        -f lavfi -i "testsrc2=size=$lane_geometry:rate=30" -frames:v "$lane_frames" \
         -lavfi '[0:v]hwdownload,format=nv12,format=yuv420p[a];[a][1:v]ssim' \
         -f null - 2>&1 | sed -n 's/.*All:\([0-9.]*\).*/\1/p' | tail -1)
-    [ -n "$ssim" ] || fail "$codec 8K: could not compute SSIM"
+    [ -n "$ssim" ] || fail "$codec $lane_geometry: could not compute SSIM"
     awk -v s="$ssim" -v m="$ssim_min" 'BEGIN { exit !(s >= m) }' \
-        || fail "$codec 8K: SSIM $ssim is below the $ssim_min floor"
+        || fail "$codec $lane_geometry: SSIM $ssim is below the $ssim_min floor"
 
-    echo "PASS $codec 8K: frames=$va_frames geometry=7680x4320 ssim=$ssim irq=+$((irq_after - irq_before))"
-    rm -f "$stream" "$va_md5" "$sw_md5" "$work/$codec.8k.trace"
+    echo "PASS $codec $lane_geometry: frames=$va_frames ssim=$ssim irq=+$((irq_after - irq_before))"
+    rm -f "$stream" "$va_md5" "$sw_md5" "$work/$codec.$lane_geometry.trace"
 }
 
 if [ "$eightk" = 1 ]; then
     for codec in $codecs; do
-        check_eightk "$codec"
+        check_large_lane "$codec" 7680x4320 "$eightk_frames"
     done
 fi
+
+# Geometries between the qualified 4K and the node ceiling, so the 8192
+# MaxPicture claim is not backed by two endpoints alone. Space-separated, e.g.
+# IRIS_ENCODE_EXTRA_GEOM="5120x2880 4096x2160". Empty by default: each lane is
+# a full encode, software decode, platform decode and SSIM pass.
+for extra in ${IRIS_ENCODE_EXTRA_GEOM:-}; do
+    for codec in $codecs; do
+        check_large_lane "$codec" "$extra" "${IRIS_ENCODE_EXTRA_FRAMES:-4}"
+    done
+done
 
 echo "PASS encode-quality encoder=$encoder codecs='$codecs' frames=$frames size=$size ssim_min=$ssim_min eightk=$eightk"

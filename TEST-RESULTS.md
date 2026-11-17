@@ -9552,3 +9552,38 @@ non-empty child output: `iris-8k-gate.sh` (four codecs, 4/4 exact, `pool=8`,
 empty-output guard also caught a genuine slip during this set: an
 `IRIS_8K_DIR=... sh test/iris-8k-gate.sh` passed through `sh -c` lost its
 quoting and was refused rather than recorded green.
+
+## Encode geometries between 4K and 8K; VP9 2-14 as a reference mismatch (2026-11-17)
+
+`test/iris-encode-quality.sh` takes `IRIS_ENCODE_EXTRA_GEOM` (space-separated)
+and `IRIS_ENCODE_EXTRA_FRAMES` (default 4). Each extra geometry runs the same
+lane as 8K: IRQ, stream geometry and picture count, software/platform
+framemd5 agreement, and SSIM against a second instance of the source. The
+extra list is empty by default, so existing invocations are unchanged. On the
+same boot `fd0b90f4`, kernel, module and installed driver
+`35cdab55…d591` as the five-gate set above, with `IRIS_ENCODE_8K=0` and
+`guard=complete exit=0`:
+
+| geometry | H.264 | HEVC |
+| --- | --- | --- |
+| `4096x2160` | 4/4, ssim 0.992080, irq +17 | 4/4, ssim 0.991085, irq +15 |
+| `5120x2880` | 4/4, ssim 0.992741, irq +16 | 4/4, ssim 0.991188, irq +17 |
+
+The default invocation still passes with the 8K lane. These records were
+taken with the geometry test change uncommitted (`source_dirty=1`); the
+driver binary is unchanged, and the commit adds no driver code.
+
+Fluster's VA-API decoder classes leave `hw_output_format` empty and
+`hw_download` false, so the VP9 suite does not export a driver surface. A
+wrapper setting those attributes to the values the Vulkan/CUDA classes use
+(verified from the generated command: `-hwaccel_output_format vaapi` and
+`hwdownload,format=nv12`) ran the full suite at 175/305, with all 36
+`vp90-2-14` still failing against the corpus MD5s. The plain 176/305 differs
+only by a 30 s timeout on `vp90-2-22-svc_1280x720_3.ivf`.
+
+Against this machine's `libvpx-vp9` as the oracle, all 36 `vp90-2-14`
+vectors are byte-identical, both with the plain FFmpeg command and with an
+explicit `hwdownload,format=nv12,format=pix_fmts=yuv420p` filter (36/36 in
+each). Fluster's own software decoder fails the same family and scores
+242/305 here. The 176/305 figure is a reference-MD5 mismatch, not a
+decode-defect count; the 2-14 family must not be quoted as one.
