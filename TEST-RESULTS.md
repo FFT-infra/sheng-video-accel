@@ -157,6 +157,10 @@ change and 0016 in the working tree, decoder resolved by name:
   (`af805219…`, `8f8b9c18…`, `15fa16db…`): all four codecs granted `pool=15`
   and HEVC, whose 221 MiB contiguous bitstream buffer sets the ceiling,
   reached EOS with no internal-buffer allocation failure in `dmesg`.
+- GStreamer's VA plugin on the same boot: with `GST_VA_ALL_DRIVERS=1` it
+  registered seven elements, `vaav1dec` decoded the 120-frame clip
+  frame-identical to the software decode, and `vah264enc` and `vah265enc`
+  each returned 60/60 frames (`gates-gstreamer-sg2`).
 - 8K decode throughput, 30 frames per codec on that boot with the installed
   driver (`gates-sg-throughput2`, `gates-throughput-contig`): the automatic
   policy at `capture_sg=1` (Direct) decoded H.264 at 59.6 fps and HEVC at
