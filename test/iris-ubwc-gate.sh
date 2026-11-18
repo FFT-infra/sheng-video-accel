@@ -21,8 +21,9 @@
 # four-plane descriptor and the image-entry-point refusals come from the
 # public API. VP9 is the codec there because its whole frame is one slice
 # buffer, so the probe is a decode client without synthesising parameter
-# sets. It runs once with V4L2_VA_UBWC=1 and once without, where the same
-# list must be refused.
+# sets. It runs once with V4L2_VA_UBWC=1 and once without, where a list that
+# names only the compressed modifier must be refused and a list carrying a
+# LINEAR fallback must get LINEAR.
 #
 # Usage:
 #   sh test/iris-ubwc-gate.sh
@@ -171,13 +172,13 @@ esac
 driver_path=${LIBVA_DRIVERS_PATH:-$root/build/src}
 [ -f "$driver_path/v4l2_drv_video.so" ] || fail "no v4l2_drv_video.so in $driver_path"
 va_log="$out_base/va-probe.log"
-if ! LIBVA_DRIVERS_PATH="$driver_path" "$va_probe" "$render" "$media/vp9.ivf" "$width" "$height" \
+if ! LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH="$driver_path" "$va_probe" "$render" "$media/vp9.ivf" "$width" "$height" \
     >"$va_log" 2>&1; then
     echo 'FAIL va: the probe did not pass without the opt-in' >&2
     sed 's/^/  /' "$va_log" >&2
     fail 'the VA half failed'
 fi
-if ! V4L2_VA_UBWC=1 LIBVA_DRIVERS_PATH="$driver_path" "$va_probe" "$render" "$media/vp9.ivf" \
+if ! V4L2_VA_UBWC=1 LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH="$driver_path" "$va_probe" "$render" "$media/vp9.ivf" \
     "$width" "$height" >>"$va_log" 2>&1; then
     echo 'FAIL va: the probe did not pass with V4L2_VA_UBWC=1' >&2
     tail -20 "$va_log" >&2

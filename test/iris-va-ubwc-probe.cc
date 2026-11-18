@@ -15,10 +15,11 @@
 // With V4L2_VA_UBWC=1 in the environment the probe requires a
 // QCOM_COMPRESSED surface: four R8 layers at the kernel's Q08C offsets,
 // the modifier on the exported object, and the image entry points refusing
-// it. With the switch unset it requires the same list to be refused, so the
-// capability cannot appear without the opt-in. Either way it also requires
-// QCOM_COMPRESSED on a 10-bit RT format to be refused, and a linear surface
-// to keep the two-plane export.
+// it. With the switch unset a list that names only QCOM_COMPRESSED must be
+// refused, so the capability cannot appear without the opt-in, while a list
+// that carries a LINEAR fallback gets the fallback. Either way it also
+// requires QCOM_COMPRESSED on a 10-bit RT format to be refused, and a linear
+// surface to keep the two-plane export.
 //
 // Exit status: 0 when every check passes, 1 on a failed check, 2 on usage,
 // import or decode failure.
@@ -285,7 +286,12 @@ int main(int argc, char** argv)
             "a modifier list the driver cannot produce is refused");
     }
 
-    // 2. The UBWC list itself: granted with the switch, refused without it.
+    // 2. The UBWC list itself. A client lists the modifiers it can consume,
+    // most preferred first, and the driver grants the first it can make. With
+    // the switch that is QCOM_COMPRESSED; without it a list carrying a LINEAR
+    // fallback gets the fallback, while a list that names only
+    // QCOM_COMPRESSED is refused: the client never said it could read linear
+    // memory, so a silent downgrade would hand it a surface it cannot use.
     {
         ModifierList list;
         list.modifiers[0] = DRM_FORMAT_MOD_QCOM_COMPRESSED;
@@ -296,8 +302,25 @@ int main(int argc, char** argv)
         VASurfaceID ids[4] = { VA_INVALID_ID, VA_INVALID_ID, VA_INVALID_ID, VA_INVALID_ID };
         const VAStatus status = vaCreateSurfaces(display, VA_RT_FORMAT_YUV420, width, height, ids, 4, attributes, 2);
         if (!ubwc_expected) {
-            check(status == VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT,
-                "without V4L2_VA_UBWC the compressed modifier is refused");
+            ModifierList only;
+            only.modifiers[0] = DRM_FORMAT_MOD_QCOM_COMPRESSED;
+            only.list.num_modifiers = 1;
+            only.list.modifiers = only.modifiers;
+            VASurfaceAttrib only_attributes[] = { pixel_format_attribute(), modifier_attribute(only) };
+            VASurfaceID only_ids[1] = { VA_INVALID_ID };
+            check(vaCreateSurfaces(display, VA_RT_FORMAT_YUV420, width, height, only_ids, 1, only_attributes, 2)
+                    == VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT,
+                "without V4L2_VA_UBWC a compressed-only list is refused, not downgraded");
+            check(status == VA_STATUS_SUCCESS,
+                "a compressed list with a linear fallback falls back to linear");
+            if (status == VA_STATUS_SUCCESS) {
+                Export exported;
+                exported.status = vaExportSurfaceHandle(display, ids[0], VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                    VA_EXPORT_SURFACE_SEPARATE_LAYERS, &exported.descriptor);
+                check(exported.status == VA_STATUS_SUCCESS
+                        && exported.descriptor.objects[0].drm_format_modifier == DRM_FORMAT_MOD_LINEAR,
+                    "the fallback surface exports as LINEAR");
+            }
             if (failures)
                 return 1;
             std::printf("PASS UBWC surfaces stay off without the opt-in\n");
