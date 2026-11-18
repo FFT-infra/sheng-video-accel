@@ -11,6 +11,7 @@
 #include "../util/encode-params.h"
 #include "../util/error.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -37,8 +38,62 @@ struct EncodePicture {
     // Raw packed headers the client sent with this picture, in render order.
     // Each is one Annex-B NAL as the client wrote it, start code included.
     std::vector<std::vector<uint8_t>> packed_headers;
+    // The client's ROI regions (VAEncROI), copied out of the misc buffer that
+    // named them. The array that buffer points at is client memory, valid
+    // only until vaEndPicture, so the regions are copied when the picture is
+    // rendered and the buffer itself is not read again.
+    std::vector<VAEncROI> roi;
     unsigned surface_width = 0, surface_height = 0;
 };
+
+// The delta-QP range the encoder node's ROI control takes (min -31, max 30
+// in packaging/kernel/0017-*). VA's roi_value is an int8_t and a client may
+// name anything in that range, so a value outside the control's is clamped
+// rather than refused: the region still means "cheaper" or "dearer".
+constexpr int32_t kRoiMinDeltaQp = -31;
+constexpr int32_t kRoiMaxDeltaQp = 30;
+
+// Map the client's ROI rectangles onto the encoder's per-macroblock delta-QP
+// grid, one cell per LCU of `lcu` pixels (16 for H.264, 32 for HEVC) over the
+// surface's visible size. That is the grid the kernel builds from its own
+// unaligned OUTPUT format, so the two agree. A cell no region covers is 0, a
+// rectangle is clipped to the picture, and when two regions overlap the one
+// the client listed first wins — VA gives overlapping regions no meaning and
+// Intel's driver resolves them the same way. Returns an empty map when the
+// picture carries no regions.
+inline std::vector<int32_t> roi_map_of(const EncodePicture& picture, unsigned lcu)
+{
+    if (picture.roi.empty() || !picture.surface_width || !picture.surface_height || !lcu)
+        return {};
+    const unsigned columns = (picture.surface_width + lcu - 1) / lcu;
+    const unsigned rows = (picture.surface_height + lcu - 1) / lcu;
+    std::vector<int32_t> map(static_cast<size_t>(columns) * rows, 0);
+    std::vector<char> claimed(map.size(), 0);
+    for (const VAEncROI& region : picture.roi) {
+        const VARectangle& rect = region.roi_rectangle;
+        const int32_t left = std::max<int32_t>(0, rect.x);
+        const int32_t top = std::max<int32_t>(0, rect.y);
+        const int32_t right = std::min<int32_t>(picture.surface_width, static_cast<int32_t>(rect.x) + rect.width);
+        const int32_t bottom = std::min<int32_t>(picture.surface_height, static_cast<int32_t>(rect.y) + rect.height);
+        if (right <= left || bottom <= top)
+            continue;
+        const int32_t delta = std::clamp<int32_t>(region.roi_value, kRoiMinDeltaQp, kRoiMaxDeltaQp);
+        const unsigned first_column = static_cast<unsigned>(left) / lcu;
+        const unsigned first_row = static_cast<unsigned>(top) / lcu;
+        const unsigned last_column = (static_cast<unsigned>(right) + lcu - 1) / lcu;
+        const unsigned last_row = (static_cast<unsigned>(bottom) + lcu - 1) / lcu;
+        for (unsigned row = first_row; row < last_row; ++row) {
+            for (unsigned column = first_column; column < last_column; ++column) {
+                const size_t cell = static_cast<size_t>(row) * columns + column;
+                if (claimed[cell])
+                    continue;
+                claimed[cell] = 1;
+                map[cell] = delta;
+            }
+        }
+    }
+    return map;
+}
 
 // Payload of the first misc buffer of `type`, or nullptr. Every misc buffer
 // is a VAEncMiscParameterBuffer header followed by the typed payload.

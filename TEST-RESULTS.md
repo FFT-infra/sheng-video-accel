@@ -344,9 +344,10 @@ Before this change FFmpeg never requested B pictures: the driver answered
 FFmpeg reads as a P-only encoder however many l1 references are advertised,
 so the option fell back to intra and P pictures.
 
-HEVC B-frames, VP9/AV1 encode and packed headers are not available: the
-encoder node has no VP9/AV1 CAPTURE format, and the experimental HEVC B-frame
-build returned nine pictures at ~23 dB before an error completion.
+HEVC B-frames and VP9/AV1 encode are not available: the encoder node has no
+VP9/AV1 CAPTURE format, and the experimental HEVC B-frame build returned nine
+pictures at ~23 dB before an error completion. Packed headers are available
+on the HEVC lane only (below).
 
 HEVC Main 10 encode, 11-18: `test/iris-encode-main10-gate.sh` encoded 60
 frames of 640x480 from a 10-bit source through FFmpeg's `hevc_vaapi` with
@@ -380,6 +381,52 @@ work in the working tree, encoder node `/dev/video18` resolved by name. Gate
 record: `gate-temporal3`. The first attempt was refused by the driver itself
 (`unsupported encode misc parameter`); accepting the structure and bounding
 its layer count and ids is what the unit tests now cover.
+
+Packed headers, 11-19: `VAConfigAttribEncPackedHeaders` answers
+`VA_ENC_PACKED_HEADER_MISC` for HEVC encode and no type for H.264. With MISC
+advertised on both, FFmpeg 8.1.3's `h264_vaapi` failed every CBR/VBR encode
+at `SPS id 0 not available`: it writes a buffering-period SEI as a raw packed
+header that names the SPS by id, and the client only writes the SPS itself
+when the sequence packed-header type is advertised. HEVC advertises MISC for
+the HDR10 SEI (`test/iris-encode-hdr-sei-gate.sh` below); H.264 keeps the
+firmware's own headers. After the correction, 60 frames of 1080p at CBR
+2 Mbit/s encode for both codecs (H.264 490729 bytes, HEVC 541745 bytes)
+through the build-tree driver (artifact `2b897cdf…`, source commit `6c216ba`
+plus the working-tree changes).
+
+ROI metadata, 11-19: `test/iris-encode-roi-probe.cc` and FFmpeg `addroi`
+drive `VAConfigAttribEncROI` with the 0017 module. Run identity: boot
+`79f5d3e1-0b32-4f3c-ae95-7435870fb362`, kernel
+`7.3.4-sm8550-00104-g87ac0f2347eb`, module
+`1323d58a4c69177ccb7b887a4ecca384a2fb7d64e466bb2c8ded3eff4e6c66a5` (0008,
+0009, 0013, 0014, 0017) loaded by `modprobe` after the instrumented
+experiment module was replaced, encoder `/dev/video18` resolved by name,
+driver `2b897cdf…` as a `LIBVA_DRIVERS_PATH` build-tree override from source
+commit `6c216ba` plus the working-tree changes (the installed package was not
+rebuilt).
+
+- The encoder node registers `0x00990b92` (`V4L2_CID_CODEC_BASE + 658`) as a
+  dynamic s32 array. A 1920x1080 H.264 session writes 8160 cells; the
+  instrumented module received them unchanged (`a0=-31 … an=-31` for the
+  FFmpeg delta) and packed them as `0xa10`.
+- `HFI_CMD_DELIVERY_MODE` returns success before the session starts, the
+  metadata buffer is queued with its input (`queue meta … index=0 input=0`)
+  and completed by the firmware (`done`), with no error path.
+- The coded picture does not change. 60 frames of 1080p browser content with
+  `addroi=x=0:y=0:w=640:h=480:qoffset=-1` on every picture, H.264 and HEVC,
+  CBR: byte-identical to the run without regions (`e6106777…` H.264,
+  `3a167212…` HEVC). CQP and a full-frame delta −31 showed the same, and
+  neither the pre-start `HFI_PROP_ROI_INFO` property nor the payload size
+  with or without the extra 256 bytes changed the result.
+- With the opt-in off the client is told: `ROI side data on input frames
+  ignored due to lack of driver support.` and no map is written. With
+  `V4L2_VA_ROI=1` the trace shows `encode roi regions=1 cells=8160` on all 60
+  pictures and the stream is still byte-identical.
+
+The firmware accepts the metadata and ignores the map, so ROI stays opt-in
+and `VAConfigAttribEncROI` is not advertised by default. The module is kept
+as a packaging option: on a firmware that acts on the map, the driver path is
+complete.
 
 ## Throughput
 

@@ -937,6 +937,75 @@ void test_temporal_layers()
         "a layer id past the layer count is refused");
 }
 
+// The client's ROI rectangles become the kernel's per-macroblock delta-QP
+// map. The grid is one cell per LCU of the picture's visible size, the same
+// grid the kernel builds from its unaligned OUTPUT format.
+void test_roi_map()
+{
+    auto h264 = iris::codec::make_h264_encoder(VAProfileH264High, RateMode::Vbr);
+    const VAEncSequenceParameterBufferH264 sequence = h264_sequence();
+    const VAEncPictureParameterBufferH264 picture = h264_picture();
+
+    EncodePicture input = h264_input(sequence, picture);
+    check(h264->translate(input).roi_map.empty(), "a picture without regions has no map");
+
+    const unsigned h264_columns = (1920 + 15) / 16;
+    const unsigned h264_rows = (1080 + 15) / 16;
+    input.roi = { VAEncROI { VARectangle { 0, 0, 16, 16 }, -10 } };
+    iris::EncodeParams params = h264->translate(input);
+    check(params.roi_regions == 1, "one region reaches the parameters");
+    check(params.roi_map.size() == h264_columns * h264_rows, "H.264 maps one cell per 16x16 macroblock");
+    check(params.roi_map[0] == -10, "the covered macroblock carries the delta");
+    check(params.roi_map[1] == 0 && params.roi_map[h264_columns] == 0,
+        "macroblock 1 and the next row are outside the region");
+
+    // Unaligned height: 1080 is 67.5 macroblock rows, so the last row is a
+    // partial one and still a cell.
+    check(((1080 + 15) / 16) == 68 && params.roi_map.size() == 120u * 68u,
+        "a partial macroblock row still counts");
+
+    // A region covering the picture, then a smaller one on top of cell 0:
+    // the first one the client listed wins.
+    input.roi = { VAEncROI { VARectangle { 0, 0, 1920, 1080 }, 5 },
+        VAEncROI { VARectangle { 0, 0, 16, 16 }, -3 } };
+    params = h264->translate(input);
+    check(params.roi_regions == 2, "both regions reach the parameters");
+    check(params.roi_map[0] == 5 && params.roi_map.back() == 5,
+        "the first region wins where two overlap");
+
+    // A rectangle with a negative origin is clipped to the picture.
+    input.roi = { VAEncROI { VARectangle { -8, -8, 24, 24 }, 7 } };
+    params = h264->translate(input);
+    check(params.roi_map[0] == 7, "a clipped rectangle still covers its visible part");
+    check(params.roi_map[1] == 0, "and stops at its right edge");
+
+    // A region entirely off the picture claims nothing.
+    input.roi = { VAEncROI { VARectangle { 3000, 0, 16, 16 }, 7 } };
+    check(h264->translate(input).roi_map.size() == h264_columns * h264_rows,
+        "an off-picture region still sizes the map");
+    check(h264->translate(input).roi_map[0] == 0, "and covers no cell");
+
+    // VA's roi_value is an int8_t; the control takes -31..30, so both ends
+    // are clamped rather than refused.
+    input.roi = { VAEncROI { VARectangle { 0, 0, 1920, 1080 }, 100 } };
+    check(h264->translate(input).roi_map[0] == 30, "a delta above the control's range clamps to 30");
+    input.roi = { VAEncROI { VARectangle { 0, 0, 1920, 1080 }, -100 } };
+    check(h264->translate(input).roi_map[0] == -31, "a delta below it clamps to -31");
+
+    // HEVC is the same map on a 32x32 grid.
+    auto hevc = iris::codec::make_hevc_encoder(VAProfileHEVCMain, RateMode::Vbr);
+    const VAEncSequenceParameterBufferHEVC hevc_seq = hevc_sequence();
+    const VAEncPictureParameterBufferHEVC hevc_pic = hevc_picture();
+    EncodePicture hevc_in = hevc_input(hevc_seq, hevc_pic);
+    hevc_in.roi = { VAEncROI { VARectangle { 64, 32, 64, 32 }, -6 } };
+    const iris::EncodeParams hevc_params = hevc->translate(hevc_in);
+    const unsigned hevc_columns = (1920 + 31) / 32;
+    check(hevc_params.roi_map.size() == hevc_columns * ((1080 + 31) / 32),
+        "HEVC maps one cell per 32x32 coding tree block");
+    check(hevc_params.roi_map[1 * hevc_columns + 2] == -6, "the first covered CTB carries the delta");
+    check(hevc_params.roi_map[1 * hevc_columns + 1] == 0, "the CTB to its left does not");
+}
+
 int main()
 {
     test_h264_translation();
@@ -950,6 +1019,7 @@ int main()
     test_unimplemented_features();
     test_multi_slice();
     test_temporal_layers();
+    test_roi_map();
     if (failures) {
         std::cerr << failures << " encode parameter check(s) failed\n";
         return 1;

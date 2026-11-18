@@ -112,6 +112,17 @@ struct EncodeParams {
     // encoder session inserts these in front of the first coded-picture NAL
     // of the access unit. Empty leaves the stream untouched.
     std::vector<std::vector<uint8_t>> prefix_nals;
+    // The ROI delta-QP map for this picture, one signed delta per macroblock
+    // in raster order, already clipped to the delta-QP range. The firmware
+    // applies it to the picture whose raw buffer is queued after the map is
+    // written, so the session writes it per picture. Empty means the client
+    // rendered no regions; the session then writes an all-zero map for as
+    // long as the stream has used ROI, so a picture does not inherit the
+    // previous one's.
+    std::vector<int32_t> roi_map;
+    // Regions the client rendered, for the trace. Zero with a non-empty map
+    // cannot happen; it is kept so the record does not have to count cells.
+    unsigned roi_regions = 0;
 };
 
 } // namespace iris

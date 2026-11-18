@@ -107,6 +107,21 @@ bool FakeDevice::set_control(uint32_t id, int32_t value)
     return false;
 }
 
+std::optional<iris::ControlInfo> FakeDevice::query_control(uint32_t id)
+{
+    // The decoder node has no ROI control; the encoder node is the one that
+    // registers it. Answering here keeps the fake honest about which role it
+    // models.
+    (void)id;
+    return std::nullopt;
+}
+
+bool FakeDevice::set_control_array(uint32_t id, const int32_t*, size_t)
+{
+    (void)id;
+    return false;
+}
+
 unsigned FakeDevice::request_buffers(Queue queue, unsigned count, uint32_t memory)
 {
     note("REQBUFS " + std::string(queue == Queue::Output ? "OUTPUT" : "CAPTURE") + " " + std::to_string(count)

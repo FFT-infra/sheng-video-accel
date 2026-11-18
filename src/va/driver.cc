@@ -168,6 +168,18 @@ Capabilities probe_capabilities(const iris::Options& options)
         caps.encode_temporal_layers
             = encoder->get_control(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING).has_value()
             && encoder->get_control(V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_LAYER).has_value();
+        // The ROI map is the kernel patch's own control, written as a dynamic
+        // s32 array. A module without it answers no control, and a control of
+        // any other shape is not the one the session writes: advertising ROI
+        // then would fail at the first picture. Advertising also needs the
+        // opt-in: the qualified firmware completes the metadata buffer but
+        // codes the same picture either way, so a client would see regions
+        // accepted and ignored (TEST-RESULTS.md).
+        const auto roi = encoder->query_control(iris::kRoiDeltaQpControl);
+        if (options.roi && roi && roi->type == V4L2_CTRL_TYPE_INTEGER
+            && roi->elem_size == sizeof(int32_t) && (roi->flags & V4L2_CTRL_FLAG_DYNAMIC_ARRAY)
+            && roi->dims[0] > 0)
+            caps.encode_roi_regions = kMaxRoiRegions;
         for (uint32_t format : { V4L2_PIX_FMT_H264, V4L2_PIX_FMT_HEVC })
             if (encoder->format_supported(iris::Queue::Capture, format))
                 caps.encoder_formats.insert(format);

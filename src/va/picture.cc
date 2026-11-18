@@ -1053,6 +1053,7 @@ VAStatus beginPicture(VADriverContextP ctx, VAContextID id, VASurfaceID surface_
                 c->enc_picture.misc.clear();
                 c->enc_picture.slices.clear();
                 c->enc_picture.packed_headers.clear();
+                c->enc_picture.roi.clear();
                 c->enc_packed_pending = false;
                 c->enc_picture.surface_width = s->width;
                 c->enc_picture.surface_height = s->height;
@@ -1142,6 +1143,31 @@ VAStatus renderPicture(VADriverContextP ctx, VAContextID id, VABufferID* buffers
                                               header->data)->quality_level <= 1,
                                 "unsupported encoder quality level", VA_STATUS_ERROR_INVALID_PARAMETER);
                             break;
+                        case VAEncMiscParameterTypeROI: {
+                            // The kernel control takes a delta-QP per
+                            // macroblock and nothing else, so only that form
+                            // has a meaning here. The regions pointer in the
+                            // parameter buffer is client memory, valid only
+                            // until vaEndPicture: the rectangles are copied
+                            // now and the buffer is never read again.
+                            iris::require(d.capabilities.encode_roi_regions > 0, "ROI is not supported",
+                                VA_STATUS_ERROR_UNIMPLEMENTED);
+                            iris::require(b->size >= sizeof(VAEncMiscParameterBuffer)
+                                    + sizeof(VAEncMiscParameterBufferROI),
+                                "ROI buffer is too small", VA_STATUS_ERROR_INVALID_PARAMETER);
+                            const auto* roi = reinterpret_cast<const VAEncMiscParameterBufferROI*>(
+                                header->data);
+                            iris::require(roi->roi_flags.bits.roi_value_is_qp_delta,
+                                "only ROI delta QP is supported", VA_STATUS_ERROR_INVALID_PARAMETER);
+                            iris::require(c->enc_picture.roi.size() + roi->num_roi
+                                    <= d.capabilities.encode_roi_regions,
+                                "too many ROI regions", VA_STATUS_ERROR_INVALID_PARAMETER);
+                            iris::require(roi->num_roi == 0 || roi->roi != nullptr,
+                                "ROI regions were not sent", VA_STATUS_ERROR_INVALID_PARAMETER);
+                            for (uint32_t r = 0; r < roi->num_roi; ++r)
+                                c->enc_picture.roi.push_back(roi->roi[r]);
+                            break;
+                        }
                         case VAEncMiscParameterTypeHRD:
                             // The firmware owns the CPB; HRD is advisory.
                             break;

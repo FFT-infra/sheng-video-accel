@@ -42,6 +42,10 @@ constexpr unsigned kMaxEntrypoints = 2;
 // config-attribute range; a smaller number makes the driver look narrower
 // than it is to a client sizing its query array.
 constexpr unsigned kMaxAttributes = 16;
+// The most ROI regions one picture may carry, and the number
+// VAConfigAttribEncROI reports. The kernel control itself bounds only the
+// macroblock map; this is the client-facing region limit the driver enforces.
+constexpr unsigned kMaxRoiRegions = 8;
 // What vaMaxNumImageFormats reports, and therefore the largest list
 // queryImageFormats may fill: a client sizes its array from this number.
 // NV12 and P010 for the codecs, I420 as the planar form of the same 4:2:0
@@ -281,6 +285,10 @@ struct Capabilities {
     // They are part of the 7.3.4 node; the probe keeps the capability
     // honest on a kernel that does not register them.
     bool encode_temporal_layers = false;
+    // How many ROI regions the encoder node's per-macroblock delta-QP control
+    // takes. Zero when the module carries no ROI patch (packaging/kernel/0017-*),
+    // which is also what VAConfigAttribEncROI reports.
+    unsigned encode_roi_regions = 0;
     unsigned min_width = 96, min_height = 96, max_width = 8192, max_height = 8192;
     std::set<VAProfile> profiles; // decode
     std::set<VAProfile> encode_profiles;

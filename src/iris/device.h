@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -14,12 +15,34 @@
 #include <vector>
 
 extern "C" {
+#include <linux/v4l2-controls.h>
 #include <linux/videodev2.h>
 }
 
 namespace iris {
 
 enum class Queue { Output, Capture };
+
+// The encoder's per-macroblock ROI delta-QP control. No 7.3.4 UAPI id names
+// it, so the kernel module defines it locally as V4L2_CID_CODEC_BASE + 658
+// (packaging/kernel/0017-*), one past V4L2_CID_MPEG_VIDEO_AVERAGE_QP; this is
+// the same number on the user side. A module without that patch registers no
+// such control and every write is refused.
+constexpr uint32_t kRoiDeltaQpControl = V4L2_CID_CODEC_BASE + 658;
+
+// What VIDIOC_QUERY_EXT_CTRL reports. A control exists when query_control
+// returns a value at all; the fields describe the shape a caller has to
+// match before writing it.
+struct ControlInfo {
+    uint32_t type = 0; // V4L2_CTRL_TYPE_*
+    uint32_t flags = 0; // V4L2_CTRL_FLAG_*
+    uint32_t elems = 0; // current element count
+    uint32_t elem_size = 0;
+    uint32_t dims[V4L2_CTRL_MAX_DIMS] = {}; // maximum extent per dimension
+    int64_t minimum = 0;
+    int64_t maximum = 0;
+    int64_t step = 0;
+};
 
 // Iris exposes two M2M nodes with the same driver name: the decoder takes a
 // compressed OUTPUT format, the encoder produces a compressed CAPTURE one.
@@ -82,6 +105,13 @@ public:
     virtual std::optional<int32_t> get_control(uint32_t id) = 0;
     // Returns false if the control does not exist; throws on other errors.
     virtual bool set_control(uint32_t id, int32_t value) = 0;
+    // VIDIOC_QUERY_EXT_CTRL. nullopt when the node has no such control; the
+    // caller decides from `flags` and `dims` whether it can be written.
+    virtual std::optional<ControlInfo> query_control(uint32_t id) = 0;
+    // One write of a dynamic s32 array control. Returns false when the node
+    // has no such control; throws on any other error, including an array the
+    // control's dims refuse.
+    virtual bool set_control_array(uint32_t id, const int32_t* values, size_t count) = 0;
 
     // Buffers.
     // memory: V4L2_MEMORY_MMAP (driver-owned) or V4L2_MEMORY_DMABUF (client

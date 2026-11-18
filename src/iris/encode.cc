@@ -252,6 +252,13 @@ void EncoderSession::configure(
     // gets the intra-period lever instead.
     sync_frame_control_ = device_->set_control(V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME, 0);
     trace_("encode idr lever=%s", sync_frame_control_ ? "sync-frame" : "intra-period");
+    // The ROI control is a dynamic s32 array the module registers with the
+    // 0017 patch. Its dims bound the map; a context whose grid is larger than
+    // that is not encodable with ROI, and the picture is refused rather than
+    // written and failed by the kernel.
+    if (options_.roi)
+        if (const auto roi = device_->query_control(kRoiDeltaQpControl))
+            roi_capacity_ = roi->dims[0];
 
     // CAPTURE carries the frame rate the firmware rates against; OUTPUT
     // carries the operating rate, which only affects clocking. One rate is
@@ -319,6 +326,18 @@ void EncoderSession::configure(
         Queue::Capture, FormatInfo { config_.codec, config_.width, config_.height, 1, 0, 0 });
     require(coded.pixelformat == config_.codec, "encoder lost the codec after configuration",
         VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
+
+    // The kernel arms one ROI metadata buffer per control write and attaches
+    // it to the next queued picture. It builds the buffer and subscribes the
+    // firmware's metadata delivery while the session is starting, so the
+    // array must be in place before the queues stream; a client writes its
+    // first map with the picture it belongs to, which is later. Arm an
+    // all-zero map now, once, and every per-picture write replaces it.
+    if (roi_capacity_ > 0 && roi_cells() <= roi_capacity_) {
+        const std::vector<int32_t> zeros(roi_cells(), 0);
+        if (!device_->set_control_array(kRoiDeltaQpControl, zeros.data(), zeros.size()))
+            roi_capacity_ = 0;
+    }
 
     // Everything below touches kernel state. A failure halfway through must
     // leave nothing behind: configured_ stays false, so a retry runs this
@@ -503,6 +522,37 @@ void EncoderSession::apply_dynamic(const EncodeParams& params)
     }
 }
 
+size_t EncoderSession::roi_cells() const
+{
+    const unsigned lcu = config_.codec == V4L2_PIX_FMT_HEVC ? 32 : 16;
+    return static_cast<size_t>((config_.width + lcu - 1) / lcu) * ((config_.height + lcu - 1) / lcu);
+}
+
+void EncoderSession::apply_roi(const EncodeParams& params)
+{
+    if (params.roi_map.empty() && !roi_used_)
+        return;
+    require(roi_capacity_ > 0, "ROI needs the kernel ROI control (packaging/kernel/0017-*)",
+        VA_STATUS_ERROR_UNIMPLEMENTED);
+    const size_t cells = roi_cells();
+    require(cells <= roi_capacity_, "the ROI map is larger than the kernel control takes",
+        VA_STATUS_ERROR_INVALID_PARAMETER);
+    require(params.roi_map.empty() || params.roi_map.size() == cells,
+        "the ROI map does not match the encoder's macroblock grid", VA_STATUS_ERROR_INVALID_PARAMETER);
+    // A picture with no regions still gets a write once the stream has used
+    // ROI: the kernel arms one metadata buffer per write and attaches it to
+    // the next raw buffer, so skipping the write would let the firmware reuse
+    // the previous picture's map.
+    const std::vector<int32_t> zeros = params.roi_map.empty() ? std::vector<int32_t>(cells, 0)
+                                                              : std::vector<int32_t>();
+    const int32_t* map = params.roi_map.empty() ? zeros.data() : params.roi_map.data();
+    if (!device_->set_control_array(kRoiDeltaQpControl, map, cells))
+        throw Error(VA_STATUS_ERROR_OPERATION_FAILED, "encoder ROI control disappeared");
+    roi_used_ = true;
+    if (params.roi_regions)
+        trace_("encode roi regions=%u cells=%zu", params.roi_regions, cells);
+}
+
 std::optional<Dequeued> EncoderSession::wait_capture(Clock::time_point limit)
 {
     for (;;) {
@@ -677,6 +727,10 @@ void EncoderSession::queue_pending(Pending& picture)
     // is not the submission order, and a QP or a rate written at submission
     // time would land on the wrong picture.
     apply_dynamic(picture.params);
+    // The ROI map belongs to the raw buffer queued below: the kernel arms one
+    // metadata buffer per write and attaches it to the next QBUF. Written
+    // before the slot is taken so a refused map does not consume one.
+    apply_roi(picture.params);
     const Clock::time_point limit = deadline();
     take_output_slot(limit);
     const unsigned index = free_output_.front();

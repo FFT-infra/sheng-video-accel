@@ -43,6 +43,12 @@ struct Options {
     // session stalls at the first pair boundary. H.264 only; the firmware's
     // HEVC path fails outright.
     bool b_frames = false;
+    // Opt in to advertising ROI regions in the encoder. Off by default: the
+    // kernel module carries the metadata buffer and the firmware completes
+    // it, but the coded picture is unchanged on the qualified image, so a
+    // client that sets regions would get no effect and no error. The kernel
+    // control must exist either way; see TEST-RESULTS.md.
+    bool roi = false;
     // Directory to write each submitted access unit into; empty disables.
     std::string dump_dir;
 

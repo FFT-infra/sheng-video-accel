@@ -136,14 +136,24 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
                 : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribEncPackedHeaders:
-            // MISC, not NOT_SUPPORTED. The firmware writes SPS/PPS and the
-            // slice headers itself, so the only packed header this driver can
-            // carry is the client's raw one: FFmpeg's HEVC encoder turns MISC
-            // into VAEncPackedHeaderRawData for its SEI (mastering display,
-            // content light level, closed captions) and the session splices
-            // it into the access unit. "Not supported" tells a client the
-            // attribute is unknown and GStreamer's encoders refuse to open.
-            attributes[i].value = encode ? VA_ENC_PACKED_HEADER_MISC : VA_ATTRIB_NOT_SUPPORTED;
+            // MISC for HEVC, not NOT_SUPPORTED: the firmware writes SPS/PPS
+            // and the slice headers itself, so the only packed header this
+            // driver can carry is the client's raw one. FFmpeg's HEVC encoder
+            // turns MISC into VAEncPackedHeaderRawData for its SEI (mastering
+            // display, content light level, closed captions) and the session
+            // splices it into the access unit. "Not supported" tells a client
+            // the attribute is unknown and GStreamer's encoders refuse to
+            // open.
+            //
+            // H.264 answers no type. FFmpeg's h264_vaapi writes the buffering
+            // period SEI through the same raw-data path, and that SEI names
+            // the SPS by id; FFmpeg only writes the parameter sets themselves
+            // when the client advertises the SEQUENCE type, which this driver
+            // does not. With MISC alone the client cannot build that SEI and
+            // every CBR/VBR encode fails before it reaches the driver.
+            attributes[i].value = !encode ? VA_ATTRIB_NOT_SUPPORTED
+                : hevc_encode       ? VA_ENC_PACKED_HEADER_MISC
+                                    : VA_ENC_PACKED_HEADER_NONE;
             break;
         case VAConfigAttribEncMaxSlices:
             // GStreamer reads this and clamps its own slice count to it, so a
@@ -204,6 +214,23 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
             extended.bits.max_num_temporal_layers_minus1 = 5;
             extended.bits.temporal_layer_bitrate_control_flag = 0;
             attributes[i].value = extended.value;
+            break;
+        }
+        case VAConfigAttribEncROI: {
+            // The kernel's ROI control exists only in a module carrying
+            // packaging/kernel/0017-*. What it takes is a delta-QP per
+            // macroblock, so that is the one form advertised; a client that
+            // asks for priority (roi_value_is_qp_delta = 0) is refused rather
+            // than coded with a different meaning.
+            if (!encode || !d.capabilities.encode_roi_regions) {
+                attributes[i].value = VA_ATTRIB_NOT_SUPPORTED;
+                break;
+            }
+            VAConfigAttribValEncROI roi = {};
+            roi.bits.num_roi_regions = kMaxRoiRegions;
+            roi.bits.roi_rc_priority_support = 0;
+            roi.bits.roi_rc_qp_delta_support = 1;
+            attributes[i].value = roi.value;
             break;
         }
         case VAConfigAttribEncIntraRefresh:

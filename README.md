@@ -179,10 +179,14 @@ Q08C offsets under the `QCOM_COMPRESSED` modifier. Anything else returns
 - **Encode**: a client's slice list becomes a macroblock budget
   (`ceil(macroblocks / slices)`) under CBR or CQP, up to 60 fps and 4096x2160,
   and needs the 0013 kernel patch; without it every frame is one full-picture
-  slice and `VAConfigAttribEncMaxSlices` answers 1. Tiles and ROI return
-  `VA_STATUS_ERROR_UNIMPLEMENTED`. B pictures are opt-in with
-  `V4L2_VA_B_FRAMES`, H.264 only, and need at least three pictures in flight
-  (FFmpeg: `-bf 1 -async_depth 3`).
+  slice and `VAConfigAttribEncMaxSlices` answers 1. Tiles return
+  `VA_STATUS_ERROR_UNIMPLEMENTED`. ROI is opt-in with `V4L2_VA_ROI` and needs
+  the 0017 kernel patch: the module carries the per-macroblock delta-QP
+  metadata buffer and the firmware completes it, but on the qualified image
+  the coded picture is unchanged (CBR and CQP, H.264 and HEVC, byte-identical
+  streams), so the regions are not advertised by default. B pictures are
+  opt-in with `V4L2_VA_B_FRAMES`, H.264 only, and need at least three pictures
+  in flight (FFmpeg: `-bf 1 -async_depth 3`).
 - **Temporal layers**: a `VAEncMiscParameterTemporalLayerStructure` names 1-6
   layers and the firmware derives the membership from the count, so the
   client's ids are bounds-checked rather than followed. Per-layer bitrates are
@@ -192,12 +196,16 @@ Q08C offsets under the `QCOM_COMPRESSED` modifier. Anything else returns
   under CBR and refused under VBR/CQP. `ltr_count`, `frame_ltr_index` and
   `use_ltr_frames` are not advertised.
 - **Packed headers**: `VAConfigAttribEncPackedHeaders` answers
-  `VA_ENC_PACKED_HEADER_MISC`. The client's raw packed header
-  (`VAEncPackedHeaderRawData`) is spliced into the access unit behind the
-  parameter sets and in front of the first slice, which is how FFmpeg's
-  `hevc_vaapi` carries HDR10 mastering-display, content-light-level and
-  caption SEI. Sequence and slice packed headers stay unsupported because the
-  firmware writes them itself; parameter sets travel in-band.
+  `VA_ENC_PACKED_HEADER_MISC` for HEVC encode and nothing for H.264. The
+  client's raw packed header (`VAEncPackedHeaderRawData`) is spliced into the
+  access unit behind the parameter sets and in front of the first slice, which
+  is how FFmpeg's `hevc_vaapi` carries HDR10 mastering-display,
+  content-light-level and caption SEI. H.264 answers no type because
+  `h264_vaapi` writes its buffering-period SEI as a raw header that names the
+  SPS by id, and with only MISC advertised FFmpeg never writes the SPS
+  itself, so a CBR or VBR encode fails inside the client. Sequence and slice
+  packed headers stay unsupported because the firmware writes them itself;
+  parameter sets travel in-band.
 - **UBWC**: opt-in (`V4L2_VA_UBWC=1`), 8-bit Q08C only, and only through Direct
   or Import publication. The Copy path, `vaDeriveImage`/`vaGetImage`/
   `vaPutImage`, film grain, video processing and the encoder have no
@@ -216,6 +224,7 @@ Q08C offsets under the `QCOM_COMPRESSED` modifier. Anything else returns
 | `V4L2_VA_PUBLISH` | auto | Force publication mode (`auto`, `direct`, `import`, `copy`) |
 | `V4L2_VA_VPP` | on | Set to `0` to disable Vulkan video processing |
 | `V4L2_VA_B_FRAMES` | off | Opt in to B pictures in the H.264 encoder; needs three pictures in flight (FFmpeg: `-async_depth 3`) |
+| `V4L2_VA_ROI` | off | Opt in to advertising ROI regions; needs the 0017 kernel patch, and the qualified firmware ignores the map |
 | `V4L2_VA_UBWC` | off | Opt in to UBWC (Q08C) decode surfaces for clients that request the `QCOM_COMPRESSED` modifier |
 | `V4L2_VA_DUMP` | off | Directory path to dump submitted access units |
 

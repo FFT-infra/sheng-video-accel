@@ -76,6 +76,9 @@ constexpr uint32_t kPayload = 1024;
 // The reconstruction surface the first picture occupies; P pictures name it
 // as their reference and move to the next one.
 constexpr uint32_t kReconstruction = 0x1000;
+// The ROI control's maximum array extent, as the module registers it for an
+// 8192x4352 H.264 picture (480 * 272 macroblocks).
+constexpr uint32_t kRoiMaxCells = 139264;
 
 class FakeEncoderNode final : public iris::Device {
 public:
@@ -84,7 +87,8 @@ public:
     // the node is the running 7.2.6 shape, where the intra period is the
     // only way to request an IDR.
     explicit FakeEncoderNode(bool loop_filter_controls, bool sync_frame_control = false,
-        bool multi_slice_controls = false, bool temporal_layer_controls = false)
+        bool multi_slice_controls = false, bool temporal_layer_controls = false, bool roi_control = false)
+        : roi_(roi_control)
     {
         if (sync_frame_control)
             known_.insert(V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME);
@@ -142,6 +146,7 @@ public:
     }
     unsigned crop_width() const { return crop_width_; }
     unsigned crop_height() const { return crop_height_; }
+    const std::vector<std::vector<int32_t>>& roi_maps() const { return roi_maps_; }
 
     std::string path() const override { return "/dev/fake-encoder"; }
     int fd() const override { return -1; }
@@ -193,6 +198,35 @@ public:
             return false;
         written_[id] = value;
         ++writes_[id];
+        return true;
+    }
+
+    std::optional<iris::ControlInfo> query_control(uint32_t id) override
+    {
+        if (!roi_) {
+            // Without the ROI patch the node answers nothing for the id.
+            return std::nullopt;
+        }
+        if (id != iris::kRoiDeltaQpControl)
+            return known_.count(id) ? std::optional<iris::ControlInfo>(iris::ControlInfo {})
+                                    : std::nullopt;
+        iris::ControlInfo info;
+        info.type = V4L2_CTRL_TYPE_INTEGER;
+        info.flags = V4L2_CTRL_FLAG_DYNAMIC_ARRAY;
+        info.elems = 1;
+        info.elem_size = sizeof(int32_t);
+        info.dims[0] = kRoiMaxCells;
+        info.minimum = -31;
+        info.maximum = 30;
+        info.step = 1;
+        return info;
+    }
+
+    bool set_control_array(uint32_t id, const int32_t* values, size_t count) override
+    {
+        if (!roi_ || id != iris::kRoiDeltaQpControl)
+            return false;
+        roi_maps_.emplace_back(values, values + count);
         return true;
     }
 
@@ -353,6 +387,8 @@ private:
     unsigned hold_ = 0;
     unsigned withheld_ = 0;
     std::vector<uint64_t> held_outputs_;
+    bool roi_ = false;
+    std::vector<std::vector<int32_t>> roi_maps_;
 };
 
 std::unique_ptr<iris::EncoderSession> make_session(bool loop_filter_controls, uint32_t codec)
@@ -1076,6 +1112,107 @@ void test_temporal_layer_controls()
     session.finish();
 }
 
+// The ROI map is per picture: the kernel arms one metadata buffer per write
+// and attaches it to the raw buffer queued next, so every picture after the
+// first one that used ROI needs its own write, zeros included.
+void test_roi_controls()
+{
+    const size_t cells = ((1920 + 15) / 16) * ((1080 + 15) / 16);
+    iris::EncodeConfig config;
+    config.codec = V4L2_PIX_FMT_H264;
+    config.width = 1920;
+    config.height = 1080;
+
+    {
+        // A module without the 0017 patch: the picture is refused rather than
+        // coded with no ROI.
+        auto node = std::make_unique<FakeEncoderNode>(true);
+        FakeEncoderNode* raw = node.get();
+        iris::EncoderSession session(std::move(node), config, iris::Options {}, iris::Trace(false));
+        iris::EncodeParams with = params(0, 0, 0);
+        with.roi_map.assign(cells, 0);
+        with.roi_regions = 1;
+        check(status_of([&] { session.configure(params(0, 0, 0), 1920, 1080); }) == -1,
+            "the node configures without ROI");
+        const int fd = dmabuf();
+        check(fd >= 0, "memfd for the raw frame");
+        check(status_of([&] { session.encode(fd, kCaptureSlot, with); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
+            "ROI without the kernel control is refused");
+        check(raw->roi_maps().empty(), "and writes nothing");
+        session.finish();
+    }
+
+    {
+        // The control alone is not enough: advertising and honouring ROI is
+        // opt-in, so a default session neither arms a map nor takes regions.
+        auto node = std::make_unique<FakeEncoderNode>(true, false, false, false, true);
+        FakeEncoderNode* raw = node.get();
+        iris::EncoderSession session(std::move(node), config, iris::Options {}, iris::Trace(false));
+        check(status_of([&] { session.configure(params(0, 0, 0), 1920, 1080); }) == -1,
+            "a node with the ROI control configures without the opt-in");
+        check(raw->roi_maps().empty(), "and arms no map without the opt-in");
+        const int fd = dmabuf();
+        iris::EncodeParams with = params(0, 0, 0);
+        with.roi_map.assign(cells, 0);
+        with.roi_regions = 1;
+        check(status_of([&] { session.encode(fd, kCaptureSlot, with); })
+                == VA_STATUS_ERROR_UNIMPLEMENTED,
+            "ROI without the opt-in is refused");
+        check(raw->roi_maps().empty(), "and still writes nothing");
+        session.finish();
+    }
+
+    iris::Options roi_options;
+    roi_options.roi = true;
+    auto node = std::make_unique<FakeEncoderNode>(true, false, false, false, true);
+    FakeEncoderNode* raw = node.get();
+    iris::EncoderSession session(std::move(node), config, roi_options, iris::Trace(false));
+    check(status_of([&] { session.configure(params(0, 0, 0), 1920, 1080); }) == -1,
+        "an opted-in node with the ROI control configures");
+    // The kernel builds the metadata buffer and subscribes its delivery while
+    // the session starts, so the map has to be in place before the queues
+    // stream. Configure arms one all-zero map; per-picture writes replace it.
+    check(raw->roi_maps().size() == 1, "configure arms one map before the queues stream");
+    check(raw->roi_maps()[0].size() == cells, "covering the picture's macroblock grid");
+    bool pre_armed_zero = true;
+    for (int32_t delta : raw->roi_maps()[0])
+        pre_armed_zero = pre_armed_zero && delta == 0;
+    check(pre_armed_zero, "and it is all zeros");
+    const int fd = dmabuf();
+    check(fd >= 0, "memfd for the raw frame");
+
+    iris::EncodeParams first = params(0, 0, 0);
+    first.roi_map.assign(cells, 0);
+    first.roi_map[0] = -7;
+    first.roi_map[cells - 1] = 4;
+    first.roi_regions = 2;
+    check(status_of([&] { session.encode(fd, kCaptureSlot, first); }) == -1, "a picture with ROI encodes");
+    check(raw->roi_maps().size() == 2, "one more map was written for the picture");
+    check(raw->roi_maps()[1].size() == cells, "the map covers the picture's macroblock grid");
+    check(raw->roi_maps()[1][0] == -7 && raw->roi_maps()[1][cells - 1] == 4,
+        "the deltas reach the kernel unchanged");
+
+    // A picture with no regions inherits nothing.
+    iris::EncodeParams second = p_params();
+    check(status_of([&] { session.encode(fd, kCaptureSlot, second); }) == -1,
+        "a picture without regions encodes");
+    check(raw->roi_maps().size() == 3, "it still writes a map");
+    check(raw->roi_maps()[2].size() == cells, "of the same size");
+    bool all_zero = true;
+    for (int32_t delta : raw->roi_maps()[2])
+        all_zero = all_zero && delta == 0;
+    check(all_zero, "and the map is all zeros, so the previous picture's regions do not carry over");
+
+    // A map that does not match the grid is a caller bug, not a write.
+    iris::EncodeParams wrong = p_params(kReconstruction + 1, kReconstruction + 2);
+    wrong.roi_map.assign(16, 0);
+    wrong.roi_regions = 1;
+    check(status_of([&] { session.encode(fd, kCaptureSlot, wrong); }) == VA_STATUS_ERROR_INVALID_PARAMETER,
+        "a map of the wrong size is refused");
+    check(raw->roi_maps().size() == 3, "and nothing was written");
+    session.finish();
+}
+
 int main()
 {
     test_default_without_controls();
@@ -1092,6 +1229,7 @@ int main()
     test_coded_buffer_claim_contract();
     test_multi_slice_controls();
     test_temporal_layer_controls();
+    test_roi_controls();
     if (failures) {
         std::cerr << failures << " encode session check(s) failed\n";
         return 1;

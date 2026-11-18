@@ -138,6 +138,8 @@ public:
     bool format_supported(Queue, uint32_t) override { return true; }
     std::optional<int32_t> get_control(uint32_t id) override;
     bool set_control(uint32_t id, int32_t value) override;
+    std::optional<ControlInfo> query_control(uint32_t id) override;
+    bool set_control_array(uint32_t id, const int32_t* values, size_t count) override;
     unsigned request_buffers(Queue queue, unsigned count, uint32_t memory = V4L2_MEMORY_MMAP) override;
     BufferInfo query_buffer(Queue queue, unsigned index) override;
     int export_buffer(Queue queue, unsigned index) override;

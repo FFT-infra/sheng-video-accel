@@ -153,6 +153,51 @@ public:
         throw Error(VA_STATUS_ERROR_OPERATION_FAILED, std::string("S_CTRL: ") + std::strerror(errno));
     }
 
+    std::optional<ControlInfo> query_control(uint32_t id) override
+    {
+        v4l2_query_ext_ctrl query = {};
+        query.id = id;
+        if (call(fd_, VIDIOC_QUERY_EXT_CTRL, &query) < 0)
+            return std::nullopt;
+        ControlInfo info;
+        info.type = query.type;
+        info.flags = query.flags;
+        info.elems = query.elems;
+        info.elem_size = query.elem_size;
+        std::memcpy(info.dims, query.dims, sizeof(info.dims));
+        info.minimum = query.minimum;
+        info.maximum = query.maximum;
+        info.step = query.step;
+        return info;
+    }
+
+    bool set_control_array(uint32_t id, const int32_t* values, size_t count) override
+    {
+        // V4L2_CTRL_WHICH_CUR_VAL is the only selector a driver-side array
+        // write needs, and it is what a control without a request API takes.
+        // The union member is `ptr` rather than `p_s32`: the vendored UAPI
+        // headers this tree builds against predate the s32 pointer, and the
+        // ioctl only reads the address.
+        v4l2_ext_control control = {};
+        control.id = id;
+        control.size = static_cast<uint32_t>(count * sizeof(int32_t));
+        control.ptr = const_cast<int32_t*>(values);
+        v4l2_ext_controls controls = {};
+        controls.which = V4L2_CTRL_WHICH_CUR_VAL;
+        controls.count = 1;
+        controls.controls = &control;
+        if (call(fd_, VIDIOC_S_EXT_CTRLS, &controls) == 0)
+            return true;
+        // The control class is absent entirely: EINVAL from the id lookup or
+        // ENOTTY from a node without the control API.
+        if (errno == EINVAL || errno == ENOTTY)
+            return false;
+        // ENOSPC means the array is larger than the control's dims: the node
+        // has the control and refused this shape. That is a caller bug, not a
+        // missing capability.
+        throw Error(VA_STATUS_ERROR_OPERATION_FAILED, std::string("S_EXT_CTRLS: ") + std::strerror(errno));
+    }
+
     unsigned request_buffers(Queue queue, unsigned count, uint32_t memory = V4L2_MEMORY_MMAP) override
     {
         v4l2_requestbuffers request = {};

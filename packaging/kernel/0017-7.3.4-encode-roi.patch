@@ -1,0 +1,769 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: xinyang <xinyang@localhost>
+Date: Wed, 19 Nov 2026 12:00:00 +0800
+Subject: [PATCH] media: iris: per-macroblock ROI delta QP for the encoder (7.3.4)
+
+The encoder cannot vary a picture's QP by region. The firmware takes the
+variation as an HFI metadata buffer that carries a delta per macroblock and
+is queued together with the raw input frame, and this driver neither builds
+nor queues one.
+
+Adapt the ROI series posted upstream for HFI gen2 without touching v4l2-core
+or the UAPI. Upstream adds an S8 control type and a control id; this module
+keeps the same id (V4L2_CID_CODEC_BASE + 658) on the dynamic s32 array type,
+whose signed range and per-element validation carry the same values, so a
+module-only update can register it. The control takes one delta per
+macroblock in raster order over the encoder's raw OUTPUT geometry, which is
+the client's request before the 128x32 alignment: 16 pixels for H.264 and 32
+for HEVC. The setter narrows each value into the firmware's s16 form, bit 11
+set and bits 4..9 the delta, with every row aligned to 8 LCUs, and writes it
+into a metadata buffer whose header names HFI_PROP_ROI_INFO.
+
+A map belongs to one picture. The write arms the buffer; the QBUF that
+follows appends it to the same HFI command as the raw frame, under the same
+index, so the firmware pairs them while several pictures are in flight. The
+firmware returns it as HFI_BUFFER_METADATA, and the buffer is then reusable
+for the next map. Delivery mode is a session property, subscribed once before
+the first map that is armed while the queue is streaming.
+
+A setter that cannot arm the picture now fails the control ioctl. A map that
+does not match the macroblock grid, or a delivery-mode command the firmware
+refused, must not leave user space believing the frame carries regions.
+
+---
+diff --git a/drivers/media/platform/qcom/iris/iris_buffer.c b/drivers/media/platform/qcom/iris/iris_buffer.c
+index b03c07c..ba9c937 100644
+--- a/drivers/media/platform/qcom/iris/iris_buffer.c
++++ b/drivers/media/platform/qcom/iris/iris_buffer.c
+@@ -3,10 +3,12 @@
+  * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+  */
+ 
++#include <linux/slab.h>
+ #include <media/v4l2-event.h>
+ #include <media/v4l2-mem2mem.h>
+ 
+ #include "iris_buffer.h"
++#include "iris_hfi_gen2_defines.h"
+ #include "iris_instance.h"
+ #include "iris_power.h"
+ #include "iris_vpu_buffer.h"
+@@ -707,6 +709,20 @@ int iris_destroy_dequeued_internal_buffers(struct iris_inst *inst, u32 plane)
+ 	return iris_destroy_internal_buffers(inst, plane, false);
+ }
+ 
++int iris_destroy_roi_metadata_buffers(struct iris_inst *inst)
++{
++	struct iris_buffer *buf, *next;
++	struct iris_buffers *buffers;
++
++	if (inst->domain == ENCODER) {
++		buffers = &inst->buffers[BUF_ROIMB_DELTAQP];
++		list_for_each_entry_safe(buf, next, &buffers->list, list)
++			iris_destroy_internal_buffer(inst, buf);
++	}
++
++	return 0;
++}
++
+ static int iris_release_internal_buffers(struct iris_inst *inst,
+ 					 enum iris_buffer_type buffer_type)
+ {
+@@ -936,3 +952,115 @@ int iris_vb2_buffer_done(struct iris_inst *inst, struct iris_buffer *buf)
+ 
+ 	return 0;
+ }
++
++static u32 iris_roi_lcu_size(struct iris_inst *inst)
++{
++	return inst->codec == V4L2_PIX_FMT_HEVC ? 32 : 16;
++}
++
++/*
++ * Lay the client's per-macroblock delta QP array into the metadata buffer.
++ * The firmware wants s16 entries in a row of LCUs aligned to 8, with the
++ * delta in bits 4..9 and bit 11 set; the client's s32 array is row-major over
++ * the coded picture's LCU grid.
++ */
++static int iris_fill_roi_data(struct iris_inst *inst, struct iris_buffer *buffer)
++{
++	const s32 *p_array = inst->fw_caps[ROI_PARAMS].p_array;
++	u32 lcu_size = iris_roi_lcu_size(inst);
++	u32 lcu_width, lcu_height, row_size, array_size;
++	struct metapayload_header *payload_hdr;
++	struct metabuf_header *mbuf_hdr;
++	u32 payload_offset;
++	s16 *p16, *p_row;
++	u32 i, j;
++
++	if (!p_array)
++		return -EINVAL;
++
++	lcu_width = DIV_ROUND_UP(inst->enc_raw_width, lcu_size);
++	lcu_height = DIV_ROUND_UP(inst->enc_raw_height, lcu_size);
++	/* The firmware expects each row aligned to 8 LCUs. */
++	row_size = ALIGN(lcu_width, 8);
++	array_size = inst->fw_caps[ROI_PARAMS].elems;
++
++	/* A missed element would let the firmware read the previous frame's
++	 * values from a partly filled buffer. */
++	if (array_size != lcu_width * lcu_height)
++		return -EINVAL;
++
++	mbuf_hdr = buffer->kvaddr;
++	memset(mbuf_hdr, 0, sizeof(*mbuf_hdr) + sizeof(*payload_hdr));
++	mbuf_hdr->count = 1;
++	mbuf_hdr->size = sizeof(*mbuf_hdr) + sizeof(*payload_hdr);
++	mbuf_hdr->version = BIT(16);
++
++	payload_offset = sizeof(*mbuf_hdr) + sizeof(*payload_hdr);
++	payload_hdr = (struct metapayload_header *)((u8 *)mbuf_hdr + sizeof(*mbuf_hdr));
++	payload_hdr->type = HFI_PROP_ROI_INFO;
++	payload_hdr->version = BIT(16);
++	payload_hdr->offset = ALIGN(payload_offset, 256);
++	payload_hdr->size = row_size * lcu_height * sizeof(s16) + 256;
++
++	p16 = (s16 *)((u8 *)buffer->kvaddr + payload_hdr->offset);
++	for (j = 0; j < lcu_height; j++) {
++		p_row = p16 + j * row_size;
++		for (i = 0; i < lcu_width; i++)
++			p_row[i] = BIT(11) | ((p_array[j * lcu_width + i] & 0x3F) << 4);
++	}
++
++	return 0;
++}
++
++int iris_hfi_gen2_session_alloc_roi_metadata_buffer(struct iris_inst *inst)
++{
++	struct iris_buffers *buffers = &inst->buffers[BUF_ROIMB_DELTAQP];
++	struct iris_core *core = inst->core;
++	struct iris_buffer *buffer, *next;
++	bool found = false;
++	int ret;
++
++	if (!buffers->size)
++		return 0;
++
++	/*
++	 * The map for the next picture goes into a buffer the firmware has
++	 * finished with, or into a new one while every existing buffer is still
++	 * in flight. The chosen buffer is armed at the head of the list so
++	 * iris_queue_metadata_buffer() finds it for the QBUF that follows.
++	 */
++	list_for_each_entry_safe(buffer, next, &buffers->list, list) {
++		if (buffer->attr & BUF_ATTR_DEQUEUED) {
++			buffer->attr &= ~BUF_ATTR_DEQUEUED;
++			list_move(&buffer->list, &buffers->list);
++			found = true;
++			break;
++		}
++	}
++	if (!found) {
++		buffer = kzalloc_obj(*buffer);
++		if (!buffer)
++			return -ENOMEM;
++
++		INIT_LIST_HEAD(&buffer->list);
++		buffer->type = BUF_ROIMB_DELTAQP;
++		buffer->buffer_size = buffers->size;
++		buffer->dma_attrs = DMA_ATTR_WRITE_COMBINE;
++
++		buffer->kvaddr = dma_alloc_attrs(core->dev, buffer->buffer_size,
++						 &buffer->device_addr, GFP_KERNEL,
++						 buffer->dma_attrs);
++		if (!buffer->kvaddr) {
++			kfree(buffer);
++			return -ENOMEM;
++		}
++		list_add(&buffer->list, &buffers->list);
++	}
++
++	buffer = list_first_entry(&buffers->list, struct iris_buffer, list);
++	ret = iris_fill_roi_data(inst, buffer);
++	if (ret)
++		return ret;
++
++	return 0;
++}
+diff --git a/drivers/media/platform/qcom/iris/iris_buffer.h b/drivers/media/platform/qcom/iris/iris_buffer.h
+index ab8e5d9..3b6086d 100644
+--- a/drivers/media/platform/qcom/iris/iris_buffer.h
++++ b/drivers/media/platform/qcom/iris/iris_buffer.h
+@@ -28,6 +28,7 @@ struct iris_inst;
+  * @BUF_SCRATCH_2: buffer to store encoding context data for HW
+  * @BUF_VPSS: buffer to store VPSS context data for HW
+  * @BUF_PARTIAL: buffer for AV1 IBC data
++ * @BUF_ROIMB_DELTAQP: metadata buffer carrying the per-macroblock ROI delta QP
+  * @BUF_TYPE_MAX: max buffer types
+  */
+ enum iris_buffer_type {
+@@ -44,6 +45,7 @@ enum iris_buffer_type {
+ 	BUF_SCRATCH_2,
+ 	BUF_VPSS,
+ 	BUF_PARTIAL,
++	BUF_ROIMB_DELTAQP,
+ 	BUF_TYPE_MAX,
+ };
+ 
+@@ -122,4 +124,25 @@ int iris_queue_deferred_buffers(struct iris_inst *inst, enum iris_buffer_type bu
+ int iris_vb2_buffer_done(struct iris_inst *inst, struct iris_buffer *buf);
+ void iris_vb2_queue_error(struct iris_inst *inst);
+ 
++/* Metadata buffer header, as the firmware reads it. */
++struct metabuf_header {
++	u32 count;
++	u32 size;
++	u32 version;
++	u32 reserved[5];
++};
++
++/* Metadata buffer payload header, one per payload in the buffer. */
++struct metapayload_header {
++	u32 type;
++	u32 size;
++	u32 version;
++	u32 offset;
++	u32 flags;
++	u32 reserved[3];
++};
++
++int iris_hfi_gen2_session_alloc_roi_metadata_buffer(struct iris_inst *inst);
++int iris_destroy_roi_metadata_buffers(struct iris_inst *inst);
++
+ #endif
+diff --git a/drivers/media/platform/qcom/iris/iris_ctrls.c b/drivers/media/platform/qcom/iris/iris_ctrls.c
+index bf97101..0c111b7 100644
+--- a/drivers/media/platform/qcom/iris/iris_ctrls.c
++++ b/drivers/media/platform/qcom/iris/iris_ctrls.c
+@@ -15,6 +15,14 @@
+ #define CABAC_MAX_BITRATE 160000000
+ #define CAVLC_MAX_BITRATE 220000000
+ 
++/*
++ * ROI delta QP control. Upstream allocates this ID in the UAPI together with a
++ * new S8 control type. A module-only update cannot grow the UAPI, so the same
++ * numeric value is defined here and carried by the existing s32 dynamic array
++ * control type.
++ */
++#define V4L2_CID_MPEG_VIDEO_ROI_MB_DELTA_QP	(V4L2_CID_CODEC_BASE + 658)
++
+ static inline bool iris_valid_cap_id(enum platform_inst_fw_cap_type cap_id)
+ {
+ 	return cap_id >= 1 && cap_id < INST_FW_CAP_MAX;
+@@ -179,6 +187,8 @@ static enum platform_inst_fw_cap_type iris_get_cap_id(u32 id)
+ 		return SLICE_MAX_BYTES;
+ 	case V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_MB:
+ 		return SLICE_MAX_MB;
++	case V4L2_CID_MPEG_VIDEO_ROI_MB_DELTA_QP:
++		return ROI_PARAMS;
+ 	default:
+ 		return INST_FW_CAP_MAX;
+ 	}
+@@ -346,6 +356,8 @@ static u32 iris_get_v4l2_id(enum platform_inst_fw_cap_type cap_id)
+ 		return V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_BYTES;
+ 	case SLICE_MAX_MB:
+ 		return V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_MB;
++	case ROI_PARAMS:
++		return V4L2_CID_MPEG_VIDEO_ROI_MB_DELTA_QP;
+ 	default:
+ 		return 0;
+ 	}
+@@ -372,9 +384,20 @@ static int iris_op_s_ctrl(struct v4l2_ctrl *ctrl)
+ 
+ 	inst->fw_caps[cap_id].value = ctrl->val;
+ 
++	if (cap[cap_id].flags & CAP_FLAG_CUSTOM) {
++		cap[cap_id].p_array = ctrl->p_new.p;
++		cap[cap_id].elems = ctrl->new_elems;
++	}
++
+ 	if (vb2_is_streaming(q)) {
+-		if (cap[cap_id].set)
+-			cap[cap_id].set(inst, cap_id);
++		if (cap[cap_id].set) {
++			int ret = cap[cap_id].set(inst, cap_id);
++
++			/* A setter that could not arm the frame fails the ioctl
++			 * instead of leaving user space believing it did. */
++			if (ret)
++				return ret;
++		}
+ 	}
+ 
+ 	return 0;
+@@ -384,6 +407,20 @@ static const struct v4l2_ctrl_ops iris_ctrl_ops = {
+ 	.s_ctrl = iris_op_s_ctrl,
+ };
+ 
++static const struct v4l2_ctrl_config roi_mbqp_cfg = {
++	.ops = &iris_ctrl_ops,
++	.id = V4L2_CID_MPEG_VIDEO_ROI_MB_DELTA_QP,
++	.name = "Enc Mb ROI Delta QP",
++	.type = V4L2_CTRL_TYPE_INTEGER,
++	.dims = { 139264 }, /* Max MBPF = 8192 * 4352 / 256 */
++	.elem_size = sizeof(s32),
++	.min = -31,
++	.max = 30,
++	.def = 0,
++	.step = 1,
++	.flags = V4L2_CTRL_FLAG_DYNAMIC_ARRAY,
++};
++
+ int iris_ctrls_init(struct iris_inst *inst)
+ {
+ 	struct platform_inst_fw_cap *cap = &inst->fw_caps[0];
+@@ -424,6 +461,10 @@ int iris_ctrls_init(struct iris_inst *inst)
+ 						      cap[idx].max,
+ 						      ~(cap[idx].step_or_mask),
+ 						      cap[idx].value);
++		} else if (cap[idx].flags & CAP_FLAG_CUSTOM) {
++			if (cap[idx].cap_id == ROI_PARAMS)
++				ctrl = v4l2_ctrl_new_custom(&inst->ctrl_handler,
++							    &roi_mbqp_cfg, NULL);
+ 		} else {
+ 			ctrl = v4l2_ctrl_new_std(&inst->ctrl_handler,
+ 						 &iris_ctrl_ops,
+@@ -1694,6 +1735,70 @@ int iris_set_slice_count(struct iris_inst *inst, enum platform_inst_fw_cap_type
+ 					     &hfi_value, sizeof(u32));
+ }
+ 
++int iris_set_roi_params(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id)
++{
++	struct iris_buffers *buffers = &inst->buffers[BUF_ROIMB_DELTAQP];
++	struct platform_inst_fw_cap *cap = &inst->fw_caps[ROI_PARAMS];
++	u32 width = inst->enc_raw_width;
++	u32 height = inst->enc_raw_height;
++	u32 lcu_size = 16;
++	u32 lcu_width, lcu_height;
++	u32 size;
++	int ret;
++
++	/*
++	 * iris_set_properties() calls every cap setter at STREAMON, including
++	 * this one. No array means the client never set ROI, so there is
++	 * nothing to allocate.
++	 */
++	if (!cap->p_array)
++		return 0;
++
++	if (inst->codec == V4L2_PIX_FMT_HEVC)
++		lcu_size = 32;
++
++	lcu_width = DIV_ROUND_UP(width, lcu_size);
++	lcu_height = DIV_ROUND_UP(height, lcu_size);
++	size = ALIGN(lcu_width, 8) * lcu_height * sizeof(s16);
++	size += 256; /* metadata buffer and payload headers */
++	buffers->size = ALIGN(size, 4096);
++
++	/*
++	 * Delivery mode is a session property, not a per-frame one. A client
++	 * that sets the array before STREAMON subscribed there already; one
++	 * that writes it per picture, which is what a VA client does, reaches
++	 * this path while the queue is streaming, and the subscription has to
++	 * go out before the first map can be queued.
++	 */
++	if (!inst->roi_metadata_delivery) {
++		ret = inst->hfi_session_ops->session_subscribe_metadata_delivery(inst,
++							V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
++		if (ret)
++			return ret;
++
++		inst->roi_metadata_delivery = true;
++	}
++
++	return iris_hfi_gen2_session_alloc_roi_metadata_buffer(inst);
++}
++
++int iris_set_metadata_delivery(struct iris_inst *inst, u32 plane)
++{
++	const struct iris_hfi_session_ops *hfi_ops = inst->hfi_session_ops;
++
++	/* Subscribe only when the client has actually enabled ROI. */
++	if (!inst->fw_caps[ROI_PARAMS].p_array)
++		return 0;
++
++	/* ROI cannot work without metadata delivery, so refuse the stream. */
++	if (hfi_ops->session_subscribe_metadata_delivery(inst, plane))
++		return -EINVAL;
++
++	inst->roi_metadata_delivery = true;
++
++	return 0;
++}
++
+ int iris_set_properties(struct iris_inst *inst, u32 plane)
+ {
+ 	const struct iris_hfi_session_ops *hfi_ops = inst->hfi_session_ops;
+diff --git a/drivers/media/platform/qcom/iris/iris_ctrls.h b/drivers/media/platform/qcom/iris/iris_ctrls.h
+index 4553b2b..bae3da4 100644
+--- a/drivers/media/platform/qcom/iris/iris_ctrls.h
++++ b/drivers/media/platform/qcom/iris/iris_ctrls.h
+@@ -51,6 +51,8 @@ int iris_set_layer_count_gen2(struct iris_inst *inst, enum platform_inst_fw_cap_
+ int iris_set_layer_bitrate(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id);
+ int iris_set_req_sync_frame(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id);
+ int iris_set_time_delta_based_rc(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id);
++int iris_set_roi_params(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id);
++int iris_set_metadata_delivery(struct iris_inst *inst, u32 plane);
+ int iris_set_properties(struct iris_inst *inst, u32 plane);
+ 
+ #endif
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_common.h b/drivers/media/platform/qcom/iris/iris_hfi_common.h
+index a27447e..5692375 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_common.h
++++ b/drivers/media/platform/qcom/iris/iris_hfi_common.h
+@@ -131,6 +131,7 @@ struct iris_hfi_session_ops {
+ 	int (*session_drain)(struct iris_inst *inst, u32 plane);
+ 	int (*session_resume_drain)(struct iris_inst *inst, u32 plane);
+ 	int (*session_close)(struct iris_inst *inst);
++	int (*session_subscribe_metadata_delivery)(struct iris_inst *inst, u32 plane);
+ };
+ 
+ struct hfi_subscription_params {
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen2.c b/drivers/media/platform/qcom/iris/iris_hfi_gen2.c
+index 926f1c3..3f9c42d 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2.c
+@@ -1945,6 +1945,16 @@ static const struct platform_inst_fw_cap inst_fw_cap_sm8550_enc[] = {
+ 		.hfi_id = HFI_PROP_MULTI_SLICE_MB_COUNT,
+ 		.flags = CAP_FLAG_OUTPUT_PORT,
+ 	},
++	{
++		.cap_id = ROI_PARAMS,
++		.min = -31,
++		.max = 30,
++		.step_or_mask = 1,
++		.hfi_id = HFI_PROP_ROI_INFO,
++		.flags = CAP_FLAG_INPUT_PORT | CAP_FLAG_CUSTOM |
++			CAP_FLAG_DYNAMIC_ALLOWED,
++		.set = iris_set_roi_params,
++	},
+ };
+ 
+ const struct platform_inst_slice_caps iris_vpu2_vpu3x_slice_caps = {
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen2_command.c b/drivers/media/platform/qcom/iris/iris_hfi_gen2_command.c
+index 97183d5..56b3d5c 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2_command.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2_command.c
+@@ -134,6 +134,7 @@ static u32 iris_hfi_gen2_get_port_from_buf_type(struct iris_inst *inst,
+ 		switch (buffer_type) {
+ 		case BUF_INPUT:
+ 		case BUF_VPSS:
++		case BUF_ROIMB_DELTAQP:
+ 			return HFI_PORT_RAW;
+ 		case BUF_OUTPUT:
+ 		case BUF_BIN:
+@@ -1307,6 +1308,8 @@ static u32 iris_hfi_gen2_buf_type_from_driver(u32 domain, enum iris_buffer_type
+ 		return HFI_BUFFER_VPSS;
+ 	case BUF_PARTIAL:
+ 		return HFI_BUFFER_PARTIAL_DATA;
++	case BUF_ROIMB_DELTAQP:
++		return HFI_BUFFER_METADATA;
+ 	default:
+ 		return 0;
+ 	}
+@@ -1347,10 +1350,32 @@ static void iris_hfi_gen2_get_buffer(u32 domain, struct iris_buffer *buffer,
+ 	buf->timestamp = buffer->timestamp;
+ }
+ 
++static struct iris_buffer *iris_queue_metadata_buffer(struct iris_inst *inst,
++						      enum iris_buffer_type buffer_type,
++						      u32 index)
++{
++	struct iris_buffers *buffers = &inst->buffers[buffer_type];
++	struct iris_buffer *buffer;
++
++	if (list_empty(&buffers->list))
++		return NULL;
++
++	/* One metadata buffer in flight at a time. */
++	buffer = list_first_entry(&buffers->list, typeof(*buffer), list);
++	if (buffer->attr & (BUF_ATTR_QUEUED | BUF_ATTR_DEQUEUED))
++		return NULL;
++
++	buffer->index = index;
++
++	return buffer;
++}
++
+ static int iris_hfi_gen2_session_queue_buffer(struct iris_inst *inst, struct iris_buffer *buffer)
+ {
+ 	struct iris_inst_hfi_gen2 *inst_hfi_gen2 = to_iris_inst_hfi_gen2(inst);
++	struct iris_hfi_buffer hfi_meta_buffer;
+ 	struct iris_hfi_buffer hfi_buffer;
++	struct iris_buffer *meta;
+ 	u32 port;
+ 	int ret;
+ 
+@@ -1371,6 +1396,30 @@ static int iris_hfi_gen2_session_queue_buffer(struct iris_inst *inst, struct iri
+ 					     &hfi_buffer,
+ 					     sizeof(hfi_buffer));
+ 
++	/*
++	 * A raw input buffer carries the ROI delta QP map for that picture.
++	 * Append it to the same command under the same index, so the firmware
++	 * pairs them even when several pictures are in flight.
++	 */
++	if (port == HFI_PORT_RAW && buffer->type == BUF_INPUT) {
++		meta = iris_queue_metadata_buffer(inst, BUF_ROIMB_DELTAQP,
++						  buffer->index);
++		if (meta) {
++			iris_hfi_gen2_get_buffer(inst->domain, meta, &hfi_meta_buffer);
++			port = iris_hfi_gen2_get_port_from_buf_type(inst, meta->type);
++			iris_hfi_gen2_create_packet(inst_hfi_gen2->packet,
++						    HFI_CMD_BUFFER,
++						    HFI_HOST_FLAGS_INTR_REQUIRED,
++						    HFI_PAYLOAD_STRUCTURE,
++						    port,
++						    inst->core->packet_id++,
++						    &hfi_meta_buffer,
++						    sizeof(hfi_meta_buffer));
++			meta->attr |= BUF_ATTR_QUEUED;
++			meta->attr &= ~BUF_ATTR_DEQUEUED;
++		}
++	}
++
+ 	return iris_hfi_queue_cmd_write(inst->core, inst_hfi_gen2->packet,
+ 					inst_hfi_gen2->packet->size);
+ }
+@@ -1399,6 +1448,26 @@ static int iris_hfi_gen2_session_release_buffer(struct iris_inst *inst, struct i
+ 					inst_hfi_gen2->packet->size);
+ }
+ 
++static int iris_hfi_gen2_subscribe_metadata_delivery(struct iris_inst *inst, u32 plane)
++{
++	struct iris_inst_hfi_gen2 *inst_hfi_gen2 = to_iris_inst_hfi_gen2(inst);
++	u32 port = iris_hfi_gen2_get_port(inst, plane);
++	u32 payload[2] = { HFI_MODE_METADATA, HFI_PROP_ROI_INFO };
++
++	iris_hfi_gen2_packet_session_command(inst,
++					     HFI_CMD_DELIVERY_MODE,
++					     (HFI_HOST_FLAGS_RESPONSE_REQUIRED |
++					     HFI_HOST_FLAGS_INTR_REQUIRED),
++					     port,
++					     inst->session_id,
++					     HFI_PAYLOAD_U32_ARRAY,
++					     payload,
++					     sizeof(payload));
++
++	return iris_hfi_queue_cmd_write(inst->core, inst_hfi_gen2->packet,
++					inst_hfi_gen2->packet->size);
++}
++
+ static const struct iris_hfi_session_ops iris_hfi_gen2_session_ops = {
+ 	.session_open = iris_hfi_gen2_session_open,
+ 	.session_set_config_params = iris_hfi_gen2_session_set_config_params,
+@@ -1412,6 +1481,7 @@ static const struct iris_hfi_session_ops iris_hfi_gen2_session_ops = {
+ 	.session_drain = iris_hfi_gen2_session_drain,
+ 	.session_resume_drain = iris_hfi_gen2_session_resume_drain,
+ 	.session_close = iris_hfi_gen2_session_close,
++	.session_subscribe_metadata_delivery = iris_hfi_gen2_subscribe_metadata_delivery,
+ };
+ 
+ static struct iris_inst *iris_hfi_gen2_get_instance(void)
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen2_defines.h b/drivers/media/platform/qcom/iris/iris_hfi_gen2_defines.h
+index 04e5429..92dfab1 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2_defines.h
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2_defines.h
+@@ -20,6 +20,7 @@
+ #define HFI_CMD_DRAIN				0x01000007
+ #define HFI_CMD_RESUME				0x01000008
+ #define HFI_CMD_BUFFER				0x01000009
++#define HFI_CMD_DELIVERY_MODE			0x0100000A
+ #define HFI_CMD_SUBSCRIBE_MODE			0x0100000B
+ #define HFI_CMD_SETTINGS_CHANGE			0x0100000C
+ #define HFI_CMD_PAUSE				0x01000011
+@@ -144,6 +145,7 @@ enum hfi_flip {
+ #define HFI_PROP_DEC_START_FROM_RAP_FRAME	0x03000169
+ #define HFI_PROP_NO_OUTPUT			0x0300016a
+ #define HFI_PROP_BUFFER_MARK			0x0300016c
++#define HFI_PROP_ROI_INFO			0x03000173
+ #define HFI_PROP_WORST_COMPRESSION_RATIO	0x03000174
+ #define HFI_PROP_WORST_COMPLEXITY_FACTOR	0x03000175
+ #define HFI_PROP_RAW_RESOLUTION		0x03000178
+@@ -185,6 +187,7 @@ enum hfi_flip {
+ enum hfi_property_mode_type {
+ 	HFI_MODE_PORT_SETTINGS_CHANGE		= 0x00000001,
+ 	HFI_MODE_PROPERTY			= 0x00000002,
++	HFI_MODE_METADATA			= 0x00000004,
+ };
+ 
+ enum hfi_color_format {
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen2_packet.c b/drivers/media/platform/qcom/iris/iris_hfi_gen2_packet.c
+index 0d05dd2..aeb0426 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2_packet.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2_packet.c
+@@ -100,9 +100,9 @@ static void iris_hfi_gen2_create_header(struct iris_hfi_header *hdr,
+ 	hdr->num_packets = 0;
+ }
+ 
+-static void iris_hfi_gen2_create_packet(struct iris_hfi_header *hdr, u32 pkt_type,
+-					u32 pkt_flags, u32 payload_type, u32 port,
+-					u32 packet_id, void *payload, u32 payload_size)
++void iris_hfi_gen2_create_packet(struct iris_hfi_header *hdr, u32 pkt_type,
++				 u32 pkt_flags, u32 payload_type, u32 port,
++				 u32 packet_id, void *payload, u32 payload_size)
+ {
+ 	struct iris_hfi_packet *pkt = (struct iris_hfi_packet *)((u8 *)hdr + hdr->size);
+ 	u32 pkt_size = sizeof(*pkt) + payload_size;
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen2_packet.h b/drivers/media/platform/qcom/iris/iris_hfi_gen2_packet.h
+index 25b9582..613eb50 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2_packet.h
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2_packet.h
+@@ -121,5 +121,8 @@ void iris_hfi_gen2_packet_session_property(struct iris_inst *inst,
+ void iris_hfi_gen2_packet_sys_interframe_powercollapse(struct iris_core *core,
+ 						       struct iris_hfi_header *hdr);
+ void iris_hfi_gen2_packet_sys_pc_prep(struct iris_core *core, struct iris_hfi_header *hdr);
++void iris_hfi_gen2_create_packet(struct iris_hfi_header *hdr, u32 pkt_type,
++				 u32 pkt_flags, u32 payload_type, u32 port,
++				 u32 packet_id, void *payload, u32 payload_size);
+ 
+ #endif
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c b/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c
+index a80f41f..b93e99c 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c
+@@ -58,6 +58,8 @@ static u32 iris_hfi_gen2_buf_type_to_driver(struct iris_inst *inst,
+ 		return BUF_PARTIAL;
+ 	case HFI_BUFFER_VPSS:
+ 		return BUF_VPSS;
++	case HFI_BUFFER_METADATA:
++		return BUF_ROIMB_DELTAQP;
+ 	default:
+ 		return 0;
+ 	}
+@@ -77,6 +79,7 @@ static bool iris_hfi_gen2_is_valid_hfi_buffer_type(u32 buffer_type)
+ 	case HFI_BUFFER_PERSIST:
+ 	case HFI_BUFFER_VPSS:
+ 	case HFI_BUFFER_PARTIAL_DATA:
++	case HFI_BUFFER_METADATA:
+ 		return true;
+ 	default:
+ 		return false;
+@@ -452,6 +455,31 @@ static int iris_hfi_gen2_handle_release_internal_buffer(struct iris_inst *inst,
+ 	return 0;
+ }
+ 
++static int iris_hfi_gen2_handle_output_metadata_buffer(struct iris_inst *inst,
++						       struct iris_hfi_buffer *buffer)
++{
++	u32 buf_type = iris_hfi_gen2_buf_type_to_driver(inst, HFI_BUFFER_METADATA);
++	struct iris_buffers *buffers = &inst->buffers[buf_type];
++	struct iris_buffer *buf = NULL, *iter;
++	bool found = false;
++
++	list_for_each_entry(iter, &buffers->list, list) {
++		if (iter->device_addr == buffer->base_address) {
++			found = true;
++			buf = iter;
++			break;
++		}
++	}
++	if (!found)
++		return -EINVAL;
++
++	/* Make the map available for the next frame. */
++	buf->attr &= ~BUF_ATTR_QUEUED;
++	buf->attr |= BUF_ATTR_DEQUEUED;
++
++	return 0;
++}
++
+ static int iris_hfi_gen2_handle_session_stop(struct iris_inst *inst,
+ 					     struct iris_hfi_packet *pkt)
+ {
+@@ -499,6 +527,8 @@ static int iris_hfi_gen2_handle_session_buffer(struct iris_inst *inst,
+ 			return iris_hfi_gen2_handle_input_buffer(inst, buffer);
+ 		else if (buffer->type == HFI_BUFFER_BITSTREAM)
+ 			return iris_hfi_gen2_handle_output_buffer(inst, buffer);
++		else if (buffer->type == HFI_BUFFER_METADATA)
++			return iris_hfi_gen2_handle_output_metadata_buffer(inst, buffer);
+ 		else
+ 			return iris_hfi_gen2_handle_release_internal_buffer(inst, buffer);
+ 	}
+diff --git a/drivers/media/platform/qcom/iris/iris_instance.h b/drivers/media/platform/qcom/iris/iris_instance.h
+index a770331..6ad5fbd 100644
+--- a/drivers/media/platform/qcom/iris/iris_instance.h
++++ b/drivers/media/platform/qcom/iris/iris_instance.h
+@@ -78,6 +78,8 @@ enum iris_fmt_type_cap {
+  * @enc_scale_height: scale height for encoder instance
+  * @hfi_layer_type: hierarchical coding layer type
+  * @hfi_layer_count: hierarchical coding layer count
++ * @roi_metadata_delivery: the session subscribed the firmware's metadata
++ * delivery for the ROI delta QP map
+  */
+ 
+ struct iris_inst {
+@@ -125,6 +127,7 @@ struct iris_inst {
+ 	u32				enc_scale_height;
+ 	u32				hfi_layer_type;
+ 	u32				hfi_layer_count;
++	bool				roi_metadata_delivery;
+ };
+ 
+ #endif
+diff --git a/drivers/media/platform/qcom/iris/iris_platform_common.h b/drivers/media/platform/qcom/iris/iris_platform_common.h
+index 07fe486..ff319db 100644
+--- a/drivers/media/platform/qcom/iris/iris_platform_common.h
++++ b/drivers/media/platform/qcom/iris/iris_platform_common.h
+@@ -210,6 +210,7 @@ enum platform_inst_fw_cap_type {
+ 	SLICE_MODE,
+ 	SLICE_MAX_BYTES,
+ 	SLICE_MAX_MB,
++	ROI_PARAMS,
+ 	INST_FW_CAP_MAX,
+ };
+ 
+@@ -221,6 +222,7 @@ enum platform_inst_fw_cap_flags {
+ 	CAP_FLAG_CLIENT_SET		= BIT(4),
+ 	CAP_FLAG_BITMASK		= BIT(5),
+ 	CAP_FLAG_VOLATILE		= BIT(6),
++	CAP_FLAG_CUSTOM			= BIT(7),
+ };
+ 
+ struct platform_inst_fw_cap {
+@@ -230,6 +232,9 @@ struct platform_inst_fw_cap {
+ 	s64 step_or_mask;
+ 	s64 value;
+ 	u32 hfi_id;
++	/* A custom control's per-frame array and its element count. */
++	const void *p_array;
++	u32 elems;
+ 	enum platform_inst_fw_cap_flags flags;
+ 	int (*set)(struct iris_inst *inst,
+ 		   enum platform_inst_fw_cap_type cap_id);
+diff --git a/drivers/media/platform/qcom/iris/iris_venc.c b/drivers/media/platform/qcom/iris/iris_venc.c
+index 045ef50..8cc7d07 100644
+--- a/drivers/media/platform/qcom/iris/iris_venc.c
++++ b/drivers/media/platform/qcom/iris/iris_venc.c
+@@ -507,6 +507,11 @@ int iris_venc_streamon_output(struct iris_inst *inst)
+ 	if (ret)
+ 		goto error;
+ 
++	/* The map is delivered on the raw input port, the encoder's OUTPUT. */
++	ret = iris_set_metadata_delivery(inst, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
++	if (ret)
++		goto error;
++
+ 	ret = iris_alloc_and_queue_persist_bufs(inst, BUF_ARP);
+ 	if (ret)
+ 		return ret;
+diff --git a/drivers/media/platform/qcom/iris/iris_vidc.c b/drivers/media/platform/qcom/iris/iris_vidc.c
+index c491694..a93ba48 100644
+--- a/drivers/media/platform/qcom/iris/iris_vidc.c
++++ b/drivers/media/platform/qcom/iris/iris_vidc.c
+@@ -190,6 +190,7 @@ int iris_open(struct file *filp)
+ 	INIT_LIST_HEAD(&inst->buffers[BUF_SCRATCH_2].list);
+ 	INIT_LIST_HEAD(&inst->buffers[BUF_VPSS].list);
+ 	INIT_LIST_HEAD(&inst->buffers[BUF_PARTIAL].list);
++	INIT_LIST_HEAD(&inst->buffers[BUF_ROIMB_DELTAQP].list);
+ 	init_completion(&inst->completion);
+ 	init_completion(&inst->flush_completion);
+ 
+@@ -309,6 +310,7 @@ int iris_close(struct file *filp)
+ 	iris_destroy_all_internal_buffers(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+ 	iris_check_num_queued_internal_buffers(inst, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+ 	iris_check_num_queued_internal_buffers(inst, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
++	iris_destroy_roi_metadata_buffers(inst);
+ 	iris_remove_session(inst);
+ 	mutex_unlock(&inst->lock);
+ 	mutex_destroy(&inst->ctx_q_lock);

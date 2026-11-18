@@ -386,6 +386,9 @@ public:
             out.qp = qp;
         }
         out.prefix_nals = picture.packed_headers;
+        // The encoder node's ROI map is one delta per 16x16 macroblock.
+        out.roi_map = roi_map_of(picture, 16);
+        out.roi_regions = static_cast<unsigned>(picture.roi.size());
         return out;
     }
 

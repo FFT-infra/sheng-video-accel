@@ -60,16 +60,16 @@ if [ -n "$bad" ]; then
     fail "recorded hash does not match: $bad"
 fi
 
-# Only the sixteen patches may be listed, and every one of them must be.
-# 0001-0007 apply to sheng-7.2.6; 0008-0016 are the 7.3.4 set.
+# Only the seventeen patches may be listed, and every one of them must be.
+# 0001-0007 apply to sheng-7.2.6; 0008-0017 are the 7.3.4 set.
 listed=$(awk '{print $2}' "$sums")
-for name in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011 0012 0013 0014 0015 0016; do
+for name in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011 0012 0013 0014 0015 0016 0017; do
     printf '%s\n' "$listed" | grep -q "^$name-" \
         || fail "SHA256SUMS does not record $name"
 done
 count=$(printf '%s\n' "$listed" | grep -c '\.patch$' || true)
-[ "$count" -eq 16 ] \
-    || fail "SHA256SUMS must record exactly sixteen patches, found $count"
+[ "$count" -eq 17 ] \
+    || fail "SHA256SUMS must record exactly seventeen patches, found $count"
 for name in $(printf '%s\n' "$listed" | grep '\.patch$'); do
     [ -f "$kernel_dir/$name" ] || fail "SHA256SUMS records a file that is not there: $name"
 done
@@ -203,6 +203,20 @@ expect_marker "$kernel_dir/0016-7.3.4-capture-sg.patch" \
 expect_marker "$kernel_dir/0016-7.3.4-capture-sg.patch" \
     '+	select VIDEOBUF2_DMA_SG' 1
 
+# 0017 only works when the control, the payload and the delivery mark all
+# land: an s32 array alone fills nothing, a payload alone has no control to
+# arm it, and the firmware drops metadata for a session that never subscribed.
+# The exact-grid guard is load-bearing: a partly filled map would let the
+# firmware read the previous picture's values for the rest.
+expect_marker "$kernel_dir/0017-7.3.4-encode-roi.patch" \
+    '+		.cap_id = ROI_PARAMS,' 1
+expect_marker "$kernel_dir/0017-7.3.4-encode-roi.patch" \
+    '+	if (array_size != lcu_width * lcu_height)' 1
+expect_marker "$kernel_dir/0017-7.3.4-encode-roi.patch" \
+    '+	payload_hdr->type = HFI_PROP_ROI_INFO;' 1
+expect_marker "$kernel_dir/0017-7.3.4-encode-roi.patch" \
+    '+	u32 payload[2] = { HFI_MODE_METADATA, HFI_PROP_ROI_INFO };' 1
+
 # 0004's whole point is that the copy lands in the ERROR branch. Checking the
 # line order inside the hunk is what distinguishes that from a copy added to
 # the normal completion path, where the timestamp was already correct.
@@ -297,4 +311,4 @@ if [ "$failures" -ne 0 ]; then
     printf 'FAIL kernel patches: %d problem(s)\n' "$failures" >&2
     exit 1
 fi
-printf 'PASS kernel patches: sixteen files, recorded hashes, Iris-only paths\n'
+printf 'PASS kernel patches: seventeen files, recorded hashes, Iris-only paths\n'

@@ -114,10 +114,10 @@ HEVC Main 8-bit，FFmpeg 8.1.3。CPU 锁最高频，GPU 锁 680 MHz。解码不�
 
 - **AV1 分辨率切换**：上下文内切换后，继续按旧几何导出表面的客户端在这些帧上得到 GPU 拷贝。Chromium 播本地文件时可能选软件 AV1 解码器，是否走硬件以浏览器门禁为准。
 - **原版内核**：解码降级为 GPU 拷贝，IDR 请求改为移动 intra period。
-- **编码**：客户端给出的切片列表变成宏块预算（`ceil(宏块数 / 切片数)`），仅 CBR 或 CQP、≤60 fps、≤4096x2160，并需要 0013 内核补丁；没有补丁时每帧只有一整片，`VAConfigAttribEncMaxSlices` 答 1。分块与 ROI 返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。B 帧需 `V4L2_VA_B_FRAMES` 开启，仅 H.264，客户端需保持至少三帧在途（FFmpeg：`-bf 1 -async_depth 3`）。
+- **编码**：客户端给出的切片列表变成宏块预算（`ceil(宏块数 / 切片数)`），仅 CBR 或 CQP、≤60 fps、≤4096x2160，并需要 0013 内核补丁；没有补丁时每帧只有一整片，`VAConfigAttribEncMaxSlices` 答 1。分块返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。ROI 需 `V4L2_VA_ROI` 开启并安装 0017 内核补丁：模块会把每个宏块的 delta-QP 元数据缓冲区送进固件、固件也正常完成，但已验收镜像编出的图像没有任何变化（CBR 与 CQP、H.264 与 HEVC 都是逐字节相同），所以默认不声明区域。B 帧需 `V4L2_VA_B_FRAMES` 开启，仅 H.264，客户端需保持至少三帧在途（FFmpeg：`-bf 1 -async_depth 3`）。
 - **intra refresh**：滚动行请求（`VAEncMiscParameterRIR`）在 CBR 下生效，VBR/CQP 下拒绝。`ltr_count`/`frame_ltr_index`/`use_ltr_frames` 不声明。
 - **时域分层**：`VAEncMiscParameterTemporalLayerStructure` 给出 1-6 层，固件按层数自行推导成员关系，客户端给的层 id 只做越界检查；不支持逐层码率。节点注册了分层控件时通过 `VAConfigAttribEncRateControlExt` 声明。
-- **封装头**：`VAConfigAttribEncPackedHeaders` 答 `VA_ENC_PACKED_HEADER_MISC`。客户端给的原始封装头（`VAEncPackedHeaderRawData`）插在参数集之后、第一个 slice 之前；FFmpeg `hevc_vaapi` 的 HDR10 mastering display、content light level 和字幕 SEI 都走这条路。序列头与 slice 头仍不支持，固件自己写；参数集随码流带内传输。
+- **封装头**：`VAConfigAttribEncPackedHeaders` 在 HEVC 编码答 `VA_ENC_PACKED_HEADER_MISC`，H.264 答 0。客户端给的原始封装头（`VAEncPackedHeaderRawData`）插在参数集之后、第一个 slice 之前；FFmpeg `hevc_vaapi` 的 HDR10 mastering display、content light level 和字幕 SEI 都走这条路。H.264 不能答 MISC：`h264_vaapi` 的 buffering period SEI 按 id 引用 SPS，而只声明 MISC 时 FFmpeg 不会自己写 SPS，CBR/VBR 编码会在客户端内部失败。序列头与 slice 头仍不支持，固件自己写；参数集随码流带内传输。
 - **UBWC**：需显式开启（`V4L2_VA_UBWC=1`），只有 8 位 Q08C，且只能走 Direct 或 Import 发布。Copy 路径、`vaDeriveImage`/`vaGetImage`/`vaPutImage`、film grain、视频处理与编码器没有解压器，遇到压缩表面直接拒绝。Q10C 没有读取方，不提供；导入必须带修饰符和内核的四平面偏移。
 
 ## 环境变量
@@ -132,6 +132,7 @@ HEVC Main 8-bit，FFmpeg 8.1.3。CPU 锁最高频，GPU 锁 680 MHz。解码不�
 | `V4L2_VA_PUBLISH` | auto | 强制指定发布模式（`auto`、`direct`、`import`、`copy`） |
 | `V4L2_VA_VPP` | on | 设为 `0` 关闭 Vulkan 视频处理 |
 | `V4L2_VA_B_FRAMES` | off | 启用 H.264 编码器的 B 帧；需保持三帧以上在途（FFmpeg：`-async_depth 3`） |
+| `V4L2_VA_ROI` | off | 启用 ROI 区域声明；需 0017 内核补丁，已验收固件会忽略该图 |
 | `V4L2_VA_UBWC` | off | 启用 UBWC（Q08C）解码表面，仅对请求 `QCOM_COMPRESSED` 修饰符的客户端 |
 | `V4L2_VA_DUMP` | off | 提交的码流单元转储目录路径 |
 

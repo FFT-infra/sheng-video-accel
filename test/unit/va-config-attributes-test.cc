@@ -93,7 +93,14 @@ int main()
     // calling write_extra_header at all.
     check(query(p, VAProfileHEVCMain, enc, VAConfigAttribEncPackedHeaders).value
             == VA_ENC_PACKED_HEADER_MISC,
-        "encode advertises raw packed headers through MISC");
+        "HEVC encode advertises raw packed headers through MISC");
+    // H.264 must not. FFmpeg's h264_vaapi writes a buffering-period SEI as a
+    // raw packed header, and that SEI references the SPS by id; with only MISC
+    // advertised FFmpeg never writes the SPS itself, so a CBR/VBR encode fails
+    // inside the client. A zero mask keeps it on the firmware's own headers.
+    check(query(p, VAProfileH264High, enc, VAConfigAttribEncPackedHeaders).value
+            == VA_ENC_PACKED_HEADER_NONE,
+        "H.264 encode advertises no packed header type");
     check(query(p, VAProfileH264High, dec, VAConfigAttribEncPackedHeaders).value == VA_ATTRIB_NOT_SUPPORTED,
         "packed headers do not answer on decode");
     VAConfigID packed_id = 0;
@@ -122,6 +129,25 @@ int main()
             && extended.bits.temporal_layer_bitrate_control_flag == 0,
         "six temporal layers and no per-layer rate control");
     d.capabilities.encode_temporal_layers = false;
+
+    // ROI follows the kernel control: a module without the 0017 patch has
+    // none, and the attribute must not promise regions the session cannot
+    // write.
+    check(query(p, VAProfileH264High, enc, VAConfigAttribEncROI).value == VA_ATTRIB_NOT_SUPPORTED,
+        "ROI is not advertised without the kernel control");
+    d.capabilities.encode_roi_regions = va::kMaxRoiRegions;
+    VAConfigAttribValEncROI roi;
+    roi.value = query(p, VAProfileHEVCMain, enc, VAConfigAttribEncROI).value;
+    check(roi.bits.num_roi_regions == va::kMaxRoiRegions && roi.bits.roi_rc_qp_delta_support == 1
+            && roi.bits.roi_rc_priority_support == 0,
+        "ROI advertises eight regions and delta QP only");
+    check(query(p, VAProfileH264High, dec, VAConfigAttribEncROI).value == VA_ATTRIB_NOT_SUPPORTED,
+        "ROI does not answer on decode");
+    VAConfigID roi_id = 0;
+    VAConfigAttrib roi_ok[] = { { VAConfigAttribEncROI, roi.value } };
+    check(va::createConfig(p, VAProfileH264High, enc, roi_ok, 1, &roi_id) == VA_STATUS_SUCCESS,
+        "a client that echoes the ROI attribute opens a config");
+    d.capabilities.encode_roi_regions = 0;
 
     // VP9 Profile 2 has no legal 8-bit stream; answer 10-bit only. HEVC
     // Main10 and AV1 Profile0 decode both depths and keep both bits.

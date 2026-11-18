@@ -66,6 +66,19 @@ if va_drm_dep.found()
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
 
+# Hardware probe, built but not registered as a meson test: a VA client's ROI
+# map. The host tests cover the attribute, the rectangle-to-macroblock mapping
+# and the kernel control write; only the firmware can say whether it honours
+# the per-macroblock delta QP, and the kernel module carries the protocol only
+# with packaging/kernel/0017 applied.
+if va_drm_dep.found()
+  executable(
+    'iris-encode-roi-probe',
+    'iris-encode-roi-probe.cc',
+    dependencies: [va_drm_dep],
+    cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+endif
+
 # Hardware probe, built but not registered as a meson test: a VA client's
 # slice count. The unit tests prove the translation and the control writes;
 # only the firmware can say whether it splits the picture, and this counts the
@@ -344,8 +357,10 @@ test('va-config-attributes', va_config_attributes_test)
 # run-static-checks.sh is the same entry point CI uses, so `meson test` and CI
 # cannot drift apart. The individual checks stay registered as well to keep
 # failures attributable without reading the aggregate output.
+# The aggregate runs every checker in the tree; on a workstation that is
+# about a minute, which is past meson's 30 s default.
 test('static-checks', find_program('run-static-checks.sh'),
-     args: [meson.project_source_root()])
+     args: [meson.project_source_root()], timeout: 180)
 test('iris-source-invariants', find_program('iris-source-invariants.sh'),
      args: [meson.project_source_root()])
 test('iris-env-doc-check', find_program('iris-env-doc-check.sh'),
