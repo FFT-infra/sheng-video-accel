@@ -258,6 +258,10 @@ struct Capabilities {
     // falls back to Copy for anything else.
     std::set<uint32_t> import_formats;
     bool nv12 = false, p010 = false;
+    // The encoder node carries the kernel's multi-slice controls. It is a
+    // property of the module, not of a codec: the controls exist for the
+    // node and the rate-control restriction applies to both codecs.
+    bool encode_multi_slice = false;
     unsigned min_width = 96, min_height = 96, max_width = 8192, max_height = 8192;
     std::set<VAProfile> profiles; // decode
     std::set<VAProfile> encode_profiles;

@@ -36,6 +36,13 @@ struct EncodeParams {
     int min_qp = -1; // < 0 leaves the firmware default
     int max_qp = -1;
     bool cabac = true; // H.264 only; HEVC is always CABAC
+    // The slice count the client asked for in this picture, and the largest
+    // 16x16-macroblock budget one slice may cover. The firmware splits a
+    // picture itself, so the count becomes an equal-share budget; both are
+    // per-context controls and the session refuses a change mid-stream.
+    // 1 / 0 leaves the firmware's single full-picture slice alone.
+    unsigned slices = 1;
+    unsigned slice_mb = 0;
     // Deblocking, in the numbering both codecs share: 0 filtering enabled,
     // 1 disabled, 2 disabled across slice boundaries. VA carries these in
     // the slice header and V4L2 in a per-context control, so only the first

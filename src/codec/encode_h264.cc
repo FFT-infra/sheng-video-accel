@@ -249,20 +249,45 @@ public:
             "chroma QP offsets are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
         require(params->num_ref_idx_l0_active_minus1 == 0 && params->num_ref_idx_l1_active_minus1 == 0,
             "multiple reference indexes are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
-        require(picture.slices.size() <= 1, "multi-slice encode is not supported",
-            VA_STATUS_ERROR_UNIMPLEMENTED);
         if (slice != nullptr) {
             require(slice->cabac_init_idc == 0, "a CABAC initialisation index is not supported",
                 VA_STATUS_ERROR_UNIMPLEMENTED);
             require(slice->num_ref_idx_l0_active_minus1 == 0 && slice->num_ref_idx_l1_active_minus1 == 0,
                 "multiple reference indexes are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
-            // One slice has to cover the whole picture: the firmware decides
-            // the slice layout, and a partial slice would code a partial
-            // frame.
-            require(slice->macroblock_address == 0
-                    && slice->num_macroblocks
-                        == unsigned(sequence->picture_width_in_mbs) * sequence->picture_height_in_mbs,
-                "only one full-picture slice is supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+            // The first slice starts at the top of the picture, and every
+            // slice of one picture is coded alike: the picture's type,
+            // deblocking and QP are per-context controls, so slices that
+            // disagreed could not be expressed. The boundaries themselves
+            // are the firmware's: it splits the picture into equal shares
+            // from the count, and the client's addresses are its expectation
+            // rather than an instruction.
+            require(slice->macroblock_address == 0 && slice->num_macroblocks != 0,
+                "invalid slice geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
+            for (const void* raw : picture.slices) {
+                const auto* other = static_cast<const VAEncSliceParameterBufferH264*>(raw);
+                require(other->slice_type == slice->slice_type
+                        && other->disable_deblocking_filter_idc == slice->disable_deblocking_filter_idc
+                        && other->slice_alpha_c0_offset_div2 == slice->slice_alpha_c0_offset_div2
+                        && other->slice_beta_offset_div2 == slice->slice_beta_offset_div2
+                        && other->slice_qp_delta == slice->slice_qp_delta,
+                    "slices of one picture disagree", VA_STATUS_ERROR_INVALID_PARAMETER);
+                require(other->num_macroblocks != 0, "a slice covers no macroblocks",
+                    VA_STATUS_ERROR_INVALID_PARAMETER);
+            }
+            const unsigned slices = static_cast<unsigned>(picture.slices.size());
+            require(slices <= 128, "more than 128 slices in a picture", VA_STATUS_ERROR_UNIMPLEMENTED);
+            out.slices = slices;
+            const unsigned total_mb
+                = unsigned(sequence->picture_width_in_mbs) * sequence->picture_height_in_mbs;
+            if (slices == 1) {
+                // One slice has to cover the whole picture: the firmware
+                // decides the slice layout, and a partial slice would code a
+                // partial frame.
+                require(slice->num_macroblocks == total_mb,
+                    "a single slice has to cover the whole picture", VA_STATUS_ERROR_UNIMPLEMENTED);
+            } else {
+                out.slice_mb = (total_mb + slices - 1) / slices;
+            }
             require(intra_slice(slice->slice_type) || p_slice(slice->slice_type)
                     || b_slice(slice->slice_type),
                 "only I, P and B slices are supported", VA_STATUS_ERROR_UNIMPLEMENTED);

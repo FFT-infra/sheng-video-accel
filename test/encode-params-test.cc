@@ -652,7 +652,7 @@ void test_reference_and_slice_shape()
     offset.macroblock_address = 1;
     EncodePicture offset_picture = h264_input(sequence, picture);
     offset_picture.slices = { &offset };
-    check(status_of([&] { h264->translate(offset_picture); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
+    check(status_of([&] { h264->translate(offset_picture); }) == VA_STATUS_ERROR_INVALID_PARAMETER,
         "a slice that starts past macroblock zero is refused");
 
     // A B slice in a sequence that asked for no B pictures is the client
@@ -752,7 +752,7 @@ void test_reference_and_slice_shape()
     VAEncPictureParameterBufferHEVC partial_hevc_picture = hevc_picture();
     EncodePicture hpartial = hevc_input(hsequence, partial_hevc_picture);
     hpartial.slices = { &partial_hevc };
-    check(status_of([&] { hevc->translate(hpartial); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
+    check(status_of([&] { hevc->translate(hpartial); }) == VA_STATUS_ERROR_INVALID_PARAMETER,
         "an HEVC slice that starts past CTU zero is refused");
 }
 
@@ -786,13 +786,6 @@ void test_unimplemented_features()
     slice.cabac_init_idc = 1;
     check(status_of([&] { h264->translate(one); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
         "a CABAC initialisation index is refused");
-
-    VAEncSliceParameterBufferH264 second = h264_slice(sequence, true);
-    VAEncPictureParameterBufferH264 many_picture = h264_picture();
-    EncodePicture many = h264_input(sequence, many_picture);
-    many.slices = { &slice, &second };
-    check(status_of([&] { h264->translate(many); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
-        "two slices are refused");
 
     auto hevc = iris::codec::make_hevc_encoder(VAProfileHEVCMain, RateMode::Vbr);
     VAEncSequenceParameterBufferHEVC hsequence = hevc_sequence();
@@ -838,12 +831,62 @@ void test_unimplemented_features()
     hslice.slice_fields.bits.dependent_slice_segment_flag = 1;
     check(status_of([&] { hevc->translate(hinput); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
         "dependent slice segments are refused");
+}
 
-    VAEncSliceParameterBufferHEVC hsecond = base_slice;
-    hslice = base_slice;
-    hinput.slices = { &hslice, &hsecond };
-    check(status_of([&] { hevc->translate(hinput); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
-        "two HEVC slices are refused");
+// A picture the client splits is translated into the one thing the firmware
+// takes: an equal share of 16x16 macroblocks. The firmware chooses the
+// boundaries, so the count is what the client's request becomes.
+void test_multi_slice()
+{
+    auto h264 = iris::codec::make_h264_encoder(VAProfileH264High, RateMode::Cbr);
+    const VAEncSequenceParameterBufferH264 sequence = h264_sequence();
+    const VAEncPictureParameterBufferH264 picture = h264_picture();
+    VAEncSliceParameterBufferH264 first = h264_slice(sequence, true);
+    VAEncSliceParameterBufferH264 second = h264_slice(sequence, true);
+    second.macroblock_address = first.num_macroblocks / 2;
+    second.num_macroblocks = first.num_macroblocks - second.macroblock_address;
+    EncodePicture input = h264_input(sequence, picture);
+    const iris::EncodeParams single = h264->translate(input);
+    check(single.slices == 1 && single.slice_mb == 0,
+        "one H.264 slice leaves the firmware's layout alone");
+
+    input.slices = { &first, &second };
+    const iris::EncodeParams two = h264->translate(input);
+    check(two.slices == 2, "two H.264 slices are accepted");
+    check(two.slice_mb == 4080, "two H.264 slices split 8160 macroblocks evenly");
+
+    VAEncSliceParameterBufferH264 third = second;
+    third.slice_qp_delta = 2;
+    input.slices = { &first, &second, &third };
+    check(status_of([&] { h264->translate(input); }) == VA_STATUS_ERROR_INVALID_PARAMETER,
+        "H.264 slices that disagree on QP are refused");
+
+    auto hevc = iris::codec::make_hevc_encoder(VAProfileHEVCMain, RateMode::Cbr);
+    const VAEncSequenceParameterBufferHEVC hsequence = hevc_sequence();
+    VAEncPictureParameterBufferHEVC hpicture = hevc_picture();
+    VAEncSliceParameterBufferHEVC hfirst = {};
+    hfirst.slice_type = 2;
+    hfirst.num_ctu_in_slice = 1;
+    VAEncSliceParameterBufferHEVC hsecond = hfirst;
+    hsecond.slice_segment_address = 30;
+    EncodePicture hinput;
+    hinput.sequence = &hsequence;
+    hinput.picture = &hpicture;
+    hinput.surface_width = 1920;
+    hinput.surface_height = 1080;
+    hinput.slices = { &hfirst };
+    const iris::EncodeParams hsingle = hevc->translate(hinput);
+    check(hsingle.slices == 1 && hsingle.slice_mb == 0,
+        "one HEVC slice leaves the firmware's layout alone");
+
+    hinput.slices = { &hfirst, &hsecond };
+    const iris::EncodeParams htwo = hevc->translate(hinput);
+    check(htwo.slices == 2, "two HEVC slices are accepted");
+    check(htwo.slice_mb == 4080, "two HEVC slices split 8160 macroblocks evenly");
+
+    hsecond.slice_fields.bits.slice_loop_filter_across_slices_enabled_flag = 1;
+    check(status_of([&] { hevc->translate(hinput); }) == VA_STATUS_ERROR_INVALID_PARAMETER,
+        "HEVC slices that disagree on deblocking are refused");
 }
 } // namespace
 
@@ -858,6 +901,7 @@ int main()
     test_intra_refresh();
     test_reference_and_slice_shape();
     test_unimplemented_features();
+    test_multi_slice();
     if (failures) {
         std::cerr << failures << " encode parameter check(s) failed\n";
         return 1;

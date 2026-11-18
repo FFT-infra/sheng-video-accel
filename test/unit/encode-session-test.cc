@@ -83,10 +83,16 @@ public:
     // and therefore exposes V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME; without it
     // the node is the running 7.2.6 shape, where the intra period is the
     // only way to request an IDR.
-    explicit FakeEncoderNode(bool loop_filter_controls, bool sync_frame_control = false)
+    explicit FakeEncoderNode(
+        bool loop_filter_controls, bool sync_frame_control = false, bool multi_slice_controls = false)
     {
         if (sync_frame_control)
             known_.insert(V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME);
+        if (multi_slice_controls) {
+            for (uint32_t id : { V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE,
+                     V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_BYTES, V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_MB })
+                known_.insert(id);
+        }
         for (uint32_t id : { V4L2_CID_MPEG_VIDEO_H264_PROFILE, V4L2_CID_MPEG_VIDEO_H264_LEVEL,
                  V4L2_CID_MPEG_VIDEO_H264_ENTROPY_MODE, V4L2_CID_MPEG_VIDEO_HEVC_PROFILE,
                  V4L2_CID_MPEG_VIDEO_HEVC_LEVEL, V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE,
@@ -939,6 +945,73 @@ void test_zero_timeout_does_not_drain()
     session.finish();
 }
 
+// The multi-slice controls are per-context and written once, before the
+// stream starts. The firmware takes a slice budget only under CBR or with
+// rate control off, so a client asking for slices under VBR is refused here
+// rather than by a control write that fails halfway through configure().
+void test_multi_slice_controls()
+{
+    {
+        auto node = std::make_unique<FakeEncoderNode>(true, false, true);
+        FakeEncoderNode* raw = node.get();
+        iris::EncodeConfig config;
+        config.codec = V4L2_PIX_FMT_H264;
+        config.width = 1920;
+        config.height = 1080;
+        iris::EncoderSession session(std::move(node), config, iris::Options {}, iris::Trace(false));
+        iris::EncodeParams one = params(0, 0, 0);
+        one.rate_mode = iris::RateMode::Cbr;
+        check(status_of([&] { session.configure(one, 1920, 1080); }) == -1,
+            "a single-slice picture configures");
+        check(!raw->wrote(V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE),
+            "a single slice leaves the firmware's layout alone");
+        session.finish();
+
+        auto split_node = std::make_unique<FakeEncoderNode>(true, false, true);
+        FakeEncoderNode* split = split_node.get();
+        iris::EncoderSession split_session(
+            std::move(split_node), config, iris::Options {}, iris::Trace(false));
+        iris::EncodeParams two = params(0, 0, 0);
+        two.rate_mode = iris::RateMode::Cbr;
+        two.slices = 2;
+        two.slice_mb = 4080;
+        check(status_of([&] { split_session.configure(two, 1920, 1080); }) == -1,
+            "two slices configure under CBR");
+        check(split->value(V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE)
+                == V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_MAX_MB,
+            "the slice mode names the macroblock budget");
+        check(split->value(V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_MB) == 4080,
+            "the slice budget reaches the kernel");
+        check(split->writes(V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE) == 1,
+            "the slice mode is written once");
+
+        const int fd = dmabuf();
+        check(fd >= 0, "memfd for the raw frame");
+        check(status_of([&] { split_session.encode(fd, kCaptureSlot, two); }) == -1,
+            "a sliced picture encodes");
+        iris::EncodeParams four = two;
+        four.slices = 4;
+        four.slice_mb = 2040;
+        check(status_of([&] { split_session.encode(fd, kCaptureSlot, four); })
+                == VA_STATUS_ERROR_UNIMPLEMENTED,
+            "changing the slice count mid-context is refused");
+        split_session.finish();
+    }
+
+    auto vbr_node = std::make_unique<FakeEncoderNode>(true, false, true);
+    iris::EncodeConfig config;
+    config.codec = V4L2_PIX_FMT_H264;
+    config.width = 1920;
+    config.height = 1080;
+    iris::EncoderSession vbr_session(std::move(vbr_node), config, iris::Options {}, iris::Trace(false));
+    iris::EncodeParams vbr = params(0, 0, 0);
+    vbr.slices = 2;
+    vbr.slice_mb = 4080;
+    check(status_of([&] { vbr_session.configure(vbr, 1920, 1080); })
+            == VA_STATUS_ERROR_INVALID_PARAMETER,
+        "slices under VBR are refused");
+}
+
 int main()
 {
     test_default_without_controls();
@@ -953,6 +1026,7 @@ int main()
     test_input_release_is_not_the_access_unit();
     test_drain_resolves_outstanding_pictures();
     test_coded_buffer_claim_contract();
+    test_multi_slice_controls();
     if (failures) {
         std::cerr << failures << " encode session check(s) failed\n";
         return 1;

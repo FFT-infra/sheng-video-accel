@@ -253,6 +253,30 @@ void EncoderSession::configure(
     device_->set_frame_rate(Queue::Capture, rate_num_, rate_den_);
     device_->set_frame_rate(Queue::Output, rate_num_, rate_den_);
 
+    // Multi-slice. The kernel turns the macroblock budget into the firmware's
+    // slice count, and it accepts one only under CBR or with rate control
+    // off, at 60 fps or less, within the codec's slice geometry. Both are
+    // per-context controls, so the count is fixed here; apply_dynamic()
+    // refuses a later picture that changes it.
+    if (params.slices > 1) {
+        // The kernel's frame rate is the denominator over the numerator,
+        // truncated, which is what its own slice check compares.
+        const unsigned fps = rate_num_ ? rate_den_ / rate_num_ : 0;
+        require(params.rate_mode != RateMode::Vbr,
+            "multi-slice encode needs CBR or CQP; the firmware refuses it under VBR",
+            VA_STATUS_ERROR_INVALID_PARAMETER);
+        require(fps <= 60, "multi-slice encode is limited to 60 fps", VA_STATUS_ERROR_INVALID_PARAMETER);
+        require(config_.width >= (hevc ? 384u : 192u) && config_.height >= 128
+                && config_.width <= 4096 && config_.height <= 2160,
+            "multi-slice encode is limited to 4096x2160 and the codec's smallest slice shape",
+            VA_STATUS_ERROR_INVALID_PARAMETER);
+        const unsigned slice_mb = std::max<unsigned>(1, params.slice_mb);
+        set_control(V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE, V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_MAX_MB,
+            "multi-slice mode");
+        set_control(V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_MB, static_cast<int32_t>(slice_mb), "multi-slice mb");
+        trace_("encode slices=%u mode=max_mb mb=%u", params.slices, slice_mb);
+    }
+
     // Iris sizes coded buffers from the current rate-control controls. A
     // format set before them keeps the buffered-RC size, and queueing then
     // fails EINVAL; re-derive it now that the controls are final and before
@@ -405,6 +429,11 @@ void EncoderSession::apply_dynamic(const EncodeParams& params)
     // coded against the old one.
     require(params.b_frames == applied_.b_frames,
         "changing the B picture count requires a new context", VA_STATUS_ERROR_UNIMPLEMENTED);
+    // The slice budget is written into a per-context control too, and a
+    // change would split the pictures already coded against the old one
+    // differently from the rest of the stream.
+    require(params.slices == applied_.slices && params.slice_mb == applied_.slice_mb,
+        "changing the slice count requires a new context", VA_STATUS_ERROR_UNIMPLEMENTED);
     // The refresh period is per-context in V4L2. The kernel marks it dynamic
     // only for a random period, and this driver writes the cyclic one, so a
     // change needs a new context rather than a write the kernel refuses.

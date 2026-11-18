@@ -144,10 +144,12 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
             attributes[i].value = encode ? VA_ENC_PACKED_HEADER_NONE : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribEncMaxSlices:
-            // One slice per picture: the firmware decides the slice layout.
             // GStreamer reads this and clamps its own slice count to it, so a
-            // NOT_SUPPORTED answer makes it compute -1.
-            attributes[i].value = encode ? 1 : VA_ATTRIB_NOT_SUPPORTED;
+            // NOT_SUPPORTED answer makes it compute -1. 128 is the kernel's
+            // slice ceiling; without the multi-slice controls the firmware
+            // writes one full-picture slice and nothing else is accepted.
+            attributes[i].value = encode ? (d.capabilities.encode_multi_slice ? 128u : 1u)
+                                         : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribEncInterlaced:
             // The firmware writes progressive parameter sets only. NONE is
@@ -156,10 +158,14 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
             attributes[i].value = encode ? VA_ENC_INTERLACED_NONE : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribEncSliceStructure:
-            // One full-picture slice, which the EQUAL_ROWS shape describes as
-            // closely as VA can express: there is no per-row independent
-            // slice, just one slice covering all rows.
-            attributes[i].value = encode ? VA_ENC_SLICE_STRUCTURE_EQUAL_ROWS : VA_ATTRIB_NOT_SUPPORTED;
+            // The firmware splits a picture every N macroblocks, so a slice
+            // may begin at any macroblock. With the multi-slice controls
+            // absent there is only one full-picture slice, which the
+            // EQUAL_ROWS shape describes as closely as VA can express.
+            attributes[i].value = encode
+                ? (d.capabilities.encode_multi_slice ? VA_ENC_SLICE_STRUCTURE_ARBITRARY_MACROBLOCKS
+                                                     : VA_ENC_SLICE_STRUCTURE_EQUAL_ROWS)
+                : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribEncQualityRange:
             // One quality level. The firmware has no speed/quality knob, so

@@ -205,8 +205,6 @@ public:
             "chroma QP offsets are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
         require(params->num_ref_idx_l0_default_active_minus1 == 0 && !params->ctu_max_bitsize_allowed,
             "reference indexes and CTU bit limits are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
-        require(picture.slices.size() <= 1, "multi-slice encode is not supported",
-            VA_STATUS_ERROR_UNIMPLEMENTED);
         if (slice != nullptr) {
             require(slice->slice_cb_qp_offset == 0 && slice->slice_cr_qp_offset == 0,
                 "chroma QP offsets are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
@@ -220,7 +218,33 @@ public:
             // and the firmware decides the slice layout from the picture
             // parameters. Zero describes no slice at all, so it is refused.
             require(slice->slice_segment_address == 0 && slice->num_ctu_in_slice != 0,
-                "only one full-picture slice is supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+                "invalid slice geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
+            // Every slice of one picture is coded alike: the picture type,
+            // deblocking and QP are per-context controls, so slices that
+            // disagreed could not be expressed.
+            for (const void* raw : picture.slices) {
+                const auto* other = static_cast<const VAEncSliceParameterBufferHEVC*>(raw);
+                require(other->slice_type == slice->slice_type
+                        && other->slice_qp_delta == slice->slice_qp_delta
+                        && other->slice_fields.bits.slice_deblocking_filter_disabled_flag
+                            == slice->slice_fields.bits.slice_deblocking_filter_disabled_flag
+                        && other->slice_fields.bits.slice_loop_filter_across_slices_enabled_flag
+                            == slice->slice_fields.bits.slice_loop_filter_across_slices_enabled_flag
+                        && other->slice_tc_offset_div2 == slice->slice_tc_offset_div2
+                        && other->slice_beta_offset_div2 == slice->slice_beta_offset_div2,
+                    "slices of one picture disagree", VA_STATUS_ERROR_INVALID_PARAMETER);
+                require(other->num_ctu_in_slice != 0, "a slice covers no CTUs",
+                    VA_STATUS_ERROR_INVALID_PARAMETER);
+            }
+            const unsigned slices = static_cast<unsigned>(picture.slices.size());
+            require(slices <= 128, "more than 128 slices in a picture", VA_STATUS_ERROR_UNIMPLEMENTED);
+            out.slices = slices;
+            if (slices > 1) {
+                // The firmware's budget is counted in 16x16 macroblocks, so
+                // round the coded picture to the MB grid before dividing.
+                const unsigned total_mb = ((coded_width + 15) / 16) * ((coded_height + 15) / 16);
+                out.slice_mb = (total_mb + slices - 1) / slices;
+            }
             // HEVC slice types are B = 0, P = 1, I = 2.
             const bool b_slice = slice->slice_type == 0;
             require(slice->slice_type <= 2, "only I, P and B slices are supported",

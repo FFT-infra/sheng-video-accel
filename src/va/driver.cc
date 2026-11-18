@@ -127,6 +127,11 @@ Capabilities probe_capabilities(const iris::Options& options)
         auto encoder = iris::open_device(options.encoder_path, iris::NodeRole::Encoder);
         caps.encoder_node = encoder->path();
         const bool encoder_nv12 = encoder->format_supported(iris::Queue::Output, V4L2_PIX_FMT_NV12);
+        // The multi-slice controls arrive with the kernel patch. Probing the
+        // menu is enough: all three are registered together, and a module
+        // without the patch answers no control at all.
+        caps.encode_multi_slice
+            = encoder->get_control(V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE).has_value();
         for (uint32_t format : { V4L2_PIX_FMT_H264, V4L2_PIX_FMT_HEVC })
             if (encoder->format_supported(iris::Queue::Capture, format))
                 caps.encoder_formats.insert(format);

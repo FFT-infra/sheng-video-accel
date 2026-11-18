@@ -684,6 +684,11 @@ encode intra-refresh period=<n>                        (pictures one rolling
                                                        under CBR only)
 encode idr lever=sync-frame|intra-period               (which requested-IDR
                                                        lever this kernel has)
+encode slices=<n> mode=max_mb mb=<n>                   (the client's slice
+                                                       count as the firmware's
+                                                       macroblock budget; the
+                                                       firmware picks the
+                                                       boundaries)
 encode drain result=complete
 encode drain result=timeout outstanding=<n>
 encode drain marker
