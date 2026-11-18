@@ -123,6 +123,11 @@ private:
         // into the access unit, and it rises in queue order rather than in
         // ticket order, which is what the firmware checks.
         uint64_t queue_us = 0;
+        // When the client submitted the picture (`vaEndPicture` returned).
+        // The completion trace reports the difference, which is the latency
+        // a client can act on; the firmware has no low-latency switch, so
+        // this measurement is the evidence that submission is immediate.
+        std::chrono::steady_clock::time_point submitted_at;
     };
 
     using Clock = std::chrono::steady_clock;

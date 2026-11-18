@@ -695,6 +695,7 @@ EncodeTicket EncoderSession::submit(int dmabuf_fd, unsigned dmabuf_length, const
     submitted.force_idr = force_idr;
     submitted.dmabuf_fd = dmabuf_fd;
     submitted.dmabuf_length = dmabuf_length;
+    submitted.submitted_at = Clock::now();
 
     if (applied_.b_frames == 0) {
         queue_pending(submitted);
@@ -850,9 +851,17 @@ bool EncoderSession::complete_one()
     }
     // No picture type here: the SM8550 encoder firmware does not send frame
     // info, so V4L2_BUF_FLAG_KEYFRAME is always clear. The bitstream is the
-    // evidence (an IDR NAL at every GOP boundary).
-    trace_("encode frame index=%u bytes=%zu idr=%d promoted=%d", frames_++, result.bytes.size(),
-        picture.params.keyframe ? 1 : 0, picture.params.promoted ? 1 : 0);
+    // evidence (an IDR NAL at every GOP boundary). The latency is measured
+    // from the client's submission, so it includes any queueing the client
+    // asked for; `first` marks the session's first picture, whose firmware
+    // bring-up is not representative.
+    const unsigned index = frames_++;
+    const long long latency_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        Clock::now() - picture.submitted_at)
+                                     .count();
+    trace_("encode frame index=%u bytes=%zu idr=%d promoted=%d latency_us=%lld first=%d", index,
+        result.bytes.size(), picture.params.keyframe ? 1 : 0, picture.params.promoted ? 1 : 0, latency_us,
+        index == 0 ? 1 : 0);
     completed_.emplace(picture.ticket.timestamp_us, std::move(result));
 
     if (!done->last())

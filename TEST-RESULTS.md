@@ -469,6 +469,23 @@ changes and resolves the encoder node itself by `iris_driver` QUERYCAP name.
 The kernel and firmware support LTR end to end. There is still no VA interface
 and no client, so the driver advertises none; the capability table says so.
 
+Encode latency, 11-19: `test/iris-encode-latency.sh` runs 300 frames of
+1920x1080 at CBR 8 Mbit/s with `-async_depth 1`, so the client keeps one
+picture in flight and the number is the firmware's, not a queue it built.
+Run identity: same boot and 0017 module as the ROI run; build-tree driver
+`8c85f87d…` from source commit `4070031` plus the working-tree changes;
+render node `/dev/dri/renderD128`.
+
+| Codec | First picture | p50 | p95 |
+| --- | --- | --- | --- |
+| H.264 | 4335 us | 4211 us | 5497 us |
+| HEVC | 4625 us | 3529 us | 4974 us |
+
+Both runs moved the IRQ counter by 608 and both outputs decode 300 frames.
+The encoder has no low-latency firmware switch: the session submits each
+picture immediately and hands completions back as they arrive, so these are
+the steady-state costs of one picture through the firmware.
+
 ## Throughput
 
 CPU policies in `performance` at their maximum (2016/2803/2956 MHz), GPU in

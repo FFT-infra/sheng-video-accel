@@ -332,6 +332,15 @@ The encoder operates as a secondary V4L2 M2M node with a dedicated execution mod
 
 This decoupling enables asynchronous submission in clients such as FFmpeg.
 
+Low latency is not a firmware switch here. The encoder side of Qualcomm's
+open driver has no low-latency HFI property (only its CBR path sets one
+implicitly), and this session already submits every picture as it arrives,
+holds none for batching, and hands each completion to the client as soon as
+the CAPTURE queue reports it. What remains is the client's own pipeline depth
+(`-async_depth`), so the measurable quantity is submission-to-completion
+time: `encode frame … latency_us=` reports it, and
+`test/iris-encode-latency.sh` records the first picture, p50 and p95.
+
 #### State Transitions
 
 ```
@@ -724,14 +733,25 @@ encode open node=<path> codec=<fourcc> raw=<fourcc> depth=<8|10> <w>x<h>
                                                        (raw is the format the
                                                        raw port accepted: NV12
                                                        or P010)
-encode frame index=<n> bytes=<n> idr=0|1 promoted=0|1    (idr=1 covers both the
+encode frame index=<n> bytes=<n> idr=0|1 promoted=0|1 latency_us=<n> first=0|1
+                                                       (idr=1 covers both the
                                                        client's idr_pic_flag and
                                                        an intra picture without
                                                        it; promoted=1 marks the
                                                        second case, which is the
                                                        only record that the
                                                        request was rewritten
-                                                       rather than honoured)
+                                                       rather than honoured;
+                                                       latency_us runs from the
+                                                       client's vaEndPicture to
+                                                       the access unit, so it
+                                                       includes the pipeline
+                                                       depth the client asked
+                                                       for, and first=1 marks
+                                                       the session's first
+                                                       picture, whose firmware
+                                                       bring-up is not
+                                                       representative)
 encode packed header bytes=<n> count=<n>                (the client's raw
                                                        packed headers, spliced
                                                        into the access unit
