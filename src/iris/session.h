@@ -123,6 +123,15 @@ public:
     // Whether an Import target can still be honoured: decode-order output,
     // and the CAPTURE pool (if built) is in Import memory.
     bool supports_import() const;
+    // Whether a Direct target can be published. Direct pins one CAPTURE
+    // frame per decoded picture the client has not consumed yet, and the
+    // driver cannot see that queue, so the pool must have headroom over the
+    // firmware's own minimum. False at a geometry where the memory budget
+    // leaves none: Copy releases the slot at the completion instead.
+    bool can_publish_direct() const
+    {
+        return pool_.capture_count() == 0 || pool_.capture_count() >= direct_min_pool_;
+    }
     // Scripted tests only: pretend the codec is not in the capability table.
     void set_import_allowed_for_test(bool allowed)
     {
@@ -210,6 +219,9 @@ private:
     CopyEngine* copier_;
     Trace trace_;
     SlotPool pool_;
+    // Pool size below which a Direct target would starve the firmware; see
+    // can_publish_direct(). 0 before the CAPTURE pool is sized.
+    unsigned direct_min_pool_ = 0;
     SessionMode mode_ = SessionMode::DisplayOrder;
     SessionState state_ = SessionState::Configured;
     SessionStats stats_;

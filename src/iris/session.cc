@@ -37,6 +37,15 @@ constexpr int kOutputDrainMs = 500;
 // large geometry turn a fixed count into an unbounded allocation.
 constexpr uint64_t kCaptureMemoryBudget = 384ull << 20;
 
+// Decoded pictures a client can hold between completion and consumption.
+// The driver cannot see that queue: FFmpeg's hwdownload filter backlog held
+// eight 8K pictures between the last capture and the sync that waited for the
+// ninth. A Direct target pins one CAPTURE frame for every one of them, so a
+// pool with less headroom than this over the firmware's minimum can be pinned
+// completely while access units are still queued, and neither side can move.
+// At 8K the budget leaves exactly the firmware minimum plus one.
+constexpr unsigned kDirectHeadroom = 8;
+
 // Compressed AU capacity when the caller has no better estimate: Chromium
 // and GStreamer both size the OUTPUT plane from the coded area with a floor.
 unsigned default_au_capacity(unsigned width, unsigned height)
@@ -274,6 +283,7 @@ void Session::configure_capture()
     if (minimum && *minimum > 0)
         wanted = std::max(wanted, static_cast<unsigned>(*minimum));
     wanted = capture_pool_count(wanted, layout.size, minimum ? *minimum : 0);
+    direct_min_pool_ = (minimum && *minimum > 0 ? static_cast<unsigned>(*minimum) : 0) + kDirectHeadroom;
     pool_.allocate_capture(wanted, layout, memory);
     trace_("capture configure %ux%u stride=%u size=%u visible=%ux%u pool=%u memory=%s firmware-min=%d",
         granted.width, granted.height, granted.bytesperline, granted.sizeimage, visible_.width, visible_.height,

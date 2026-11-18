@@ -140,7 +140,13 @@ When a CAPTURE completion arrives with a token that has a pending Surface:
 - **Direct**: the surface takes the `shared_ptr<Frame>`. Zero copies. This
   is the policy for clients that export or map a surface only after it has
   been decoded (FFmpeg, GStreamer, mpv, `vaGetImage` users). Every export
-  after this point hands out the slot's own DMA-BUF.
+  after this point hands out the slot's own DMA-BUF. Direct pins one CAPTURE
+  frame per decoded picture the client has not consumed, and the driver
+  cannot see that queue; the automatic policy therefore offers it only when
+  the pool has headroom over the firmware minimum (eight pictures, the
+  FFmpeg filter backlog measured at 8K). At a geometry where the memory
+  budget leaves less, the completion uses the Copy policy instead, which
+  releases the slot immediately.
 - **Copy**: the surface already owns a `StableBuffer` because the client
   exported it *before* its first decode (Chrome pre-exports its whole
   NativePixmap pool and caches the fd for the surface's lifetime). The

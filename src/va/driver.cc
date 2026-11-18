@@ -42,8 +42,14 @@ iris::Publish publish_policy(const DriverData& d, const Surface& surface, const 
     case iris::PublishOverride::Auto:
         break;
     }
-    if (!surface.persistent_export)
-        return iris::Publish::Direct;
+    if (!surface.persistent_export) {
+        // Direct pins a CAPTURE frame until the client consumes the picture.
+        // Where the memory budget leaves the pool no headroom over the
+        // firmware minimum, a client whose consumer lags can pin every slot
+        // and stall the session (8K, FFmpeg's hwdownload backlog); Copy
+        // releases the slot at the completion.
+        return session.can_publish_direct() ? iris::Publish::Direct : iris::Publish::Copy;
+    }
     // A pre-exporting client (Chrome) gets its own buffer decoded into when
     // the kernel and the session allow it, and the GPU copy otherwise.
     return session.supports_import() ? iris::Publish::Import : iris::Publish::Copy;

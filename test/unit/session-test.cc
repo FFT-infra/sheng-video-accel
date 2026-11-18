@@ -177,6 +177,28 @@ void test_pool_sizing_respects_memory_budget()
     CHECK(h.session->state() == SessionState::Streaming);
 }
 
+void test_direct_publish_needs_headroom_over_the_firmware_minimum()
+{
+    // Direct pins one CAPTURE frame per decoded picture the client holds. The
+    // 8K budget pool is the firmware minimum plus one, so a client whose
+    // consumer lags can pin every slot while AUs are still queued; the policy
+    // must fall back to Copy there.
+    FakeConfig fc;
+    fc.coded_width = 7680;
+    fc.coded_height = 4320;
+    fc.visible_width = 7680;
+    fc.visible_height = 4320;
+    fc.stride = 7680;
+    fc.firmware_min_capture = 7;
+    Harness h(fc, fast_options(), config(16));
+    // No pool yet: the policy has no size to judge and Direct is offered.
+    CHECK(h.session->can_publish_direct());
+    auto t = make_target();
+    h.submit(t);
+    CHECK(h.fake->capture_allocated() == 8);
+    CHECK(!h.session->can_publish_direct());
+}
+
 void test_pool_sizing_keeps_small_geometry_at_the_full_pool()
 {
     // 1920x1088 NV12 is 3 MiB per frame; the whole 32-frame pool is 96 MiB,
@@ -1190,6 +1212,8 @@ int main()
         { "pool sizing respects kernel max", test_pool_sizing_respects_kernel_max },
         { "pool sizing respects memory budget", test_pool_sizing_respects_memory_budget },
         { "pool sizing keeps small geometry at the full pool", test_pool_sizing_keeps_small_geometry_at_the_full_pool },
+        { "direct publish needs headroom over the firmware minimum",
+            test_direct_publish_needs_headroom_over_the_firmware_minimum },
         { "direct publish holds slot until release", test_direct_publish_holds_slot_until_release },
         { "copy publish releases slot immediately", test_copy_publish_releases_slot_immediately },
         { "late completion after release is dropped", test_late_completion_after_release_is_dropped },
