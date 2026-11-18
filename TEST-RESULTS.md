@@ -137,9 +137,34 @@ change and 0016 in the working tree, decoder resolved by name:
 - Further coverage under `capture_sg=1` on the installed driver: UBWC Q08C
   read back through Turnip for all four codecs (`gate-ubwc-sg`), VP9
   Profile 2 P010 30/30 under Import (`gate-vp9p2-sg`), and two concurrent
-  1080p H.264 clients 60/60 each (`gate-twoplayer-sg`). Not yet run with
-  `capture_sg=1`: AV1 film grain (8- and 10-bit), in-context resolution
-  change, and the Vulkan video-processing gates.
+  1080p H.264 clients 60/60 each (`gate-twoplayer-sg`).
+- The memory-sensitive paths on the same boot and driver: AV1 film grain
+  `grain8` 20/20 and `grain10` 2/2 byte-exact against libdav1d
+  (`gates-sg-grain`), H.264 resolution change across 101 contexts and 100
+  in-stream transitions with `drops=0 timeouts=0` (`gates-sg-drc`), and the
+  VA video processor's eight scale ratios and three P010 cases byte-exact
+  against swscale (`gates-sg-vpp`).
+- The one-segment guard in `iris_vb2_buf_prepare` refuses a CAPTURE buffer
+  whose DMA mapping is not one segment, so a device tree without `iommus`
+  cannot make the firmware write past a truncated address. On a later boot
+  (module `d65b745e…`, boot `8f8b9c18…`) the automatic policy granted
+  `pool=15 memory=mmap` and published Direct on all 30 H.264 frames, and
+  `V4L2_VA_PUBLISH=import` decoded 30/30 with `memory=import`. A driver-
+  allocated mmap buffer and a client DMA-BUF both map as one segment on this
+  node. The refusal itself has no target test: it needs a board whose
+  mappings are not one segment.
+- The 720 MiB budget held across three boots with `capture_sg=1`
+  (`af805219…`, `8f8b9c18…`, `15fa16db…`): all four codecs granted `pool=15`
+  and HEVC, whose 221 MiB contiguous bitstream buffer sets the ceiling,
+  reached EOS with no internal-buffer allocation failure in `dmesg`.
+- 8K decode throughput, 30 frames per codec on that boot with the installed
+  driver (`gates-sg-throughput2`, `gates-throughput-contig`): the automatic
+  policy at `capture_sg=1` (Direct) decoded H.264 at 59.6 fps and HEVC at
+  52.1, against 32.3 and 30.8 with the contiguous pool (Copy). The native
+  v4l2m2m path, which copies every frame out under either allocator,
+  measured 37.5 against 36.7 fps on H.264, so the gain is Direct publication,
+  not the allocator itself. Native HEVC at 8K fails with ENOMEM during packet
+  submission on both allocators.
 
 The parameter defaults off and is not part of the qualified module, so a
 stock boot keeps the contiguous pool and Copy publication at 8K.
