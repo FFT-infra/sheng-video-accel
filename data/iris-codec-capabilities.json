@@ -118,7 +118,7 @@
           "CQP"
         ],
         "rejected": [
-          "B-frames (the encoder does not advertise them for HEVC: an experimental build that did got nine pictures out of the firmware before an error completion, and those nine decode at about 23 dB)",
+          "B-frames (the encoder does not advertise them for HEVC. With the VA-layer gates relaxed under VBR and -async_depth 3, the session submits 14 pictures, then waits the full 2 s sync bound for a completion, marks the encoder drained and ends with an 11-picture stream whose reference sets do not decode; adding the HEVC hierarchical-B layer type and count the kernel accepts under VBR-CFR shortens the run to two pictures before the same stall. The kernel sets V4L2_BUF_FLAG_{P,B,KEY}FRAME only on completions and reads none from QBUF, so the schedule is the firmware's own and this firmware does not finish it. TEST-RESULTS.md records the run.)",
           "deblocking other than the firmware default on a kernel without the loop-filter controls (the stock SM8550 module; packaging/kernel/0002-* adds them)",
           "tiles and wavefront coding",
           "weighted prediction, scaling lists, chroma QP offsets and CTU bit limits",

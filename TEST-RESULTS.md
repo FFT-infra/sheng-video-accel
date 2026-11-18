@@ -428,6 +428,27 @@ and `VAConfigAttribEncROI` is not advertised by default. The module is kept
 as a packaging option: on a firmware that acts on the map, the driver path is
 complete.
 
+HEVC B isolation, 11-19: a scratch build of the same driver relaxed the two
+HEVC gates (the future-direction/l1 advertisement and `configure()`'s
+H.264-only check) and ran FFmpeg `hevc_vaapi -bf 1 -async_depth 3` at
+1080p under VBR. Run identity: same boot, kernel and 0017 module as the ROI
+run above; the scratch driver was built from a copy of the deployed source
+in `~/Lab/Bridge/tmp/hevc-b/exp-src` and loaded through `LIBVA_DRIVERS_PATH`.
+
+- The session submitted 14 pictures, then waited the full 2000 ms sync bound,
+  marked the encoder drained and failed the next `vaEndPicture`. The stream
+  holds 11 pictures and does not decode: `Could not find ref with POC 11` /
+  `Error constructing the frame RPS`.
+- Adding the explicit HEVC hierarchical B layer type and layer count, the
+  shape the kernel's `iris_set_layer_type()` accepts under VBR-CFR, shortened
+  the run to two pictures in the stream before the same 2 s stall.
+- `V4L2_BUF_FLAG_{P,B,KEY}FRAME` is set by the kernel only on completions;
+  nothing reads the flags from QBUF, so a client cannot direct the picture
+  schedule through the buffer API. The schedule is the firmware's own.
+
+HEVC B stays refused in `configure()` and unadvertised; the capability table
+records the boundary.
+
 ## Throughput
 
 CPU policies in `performance` at their maximum (2016/2803/2956 MHz), GPU in
