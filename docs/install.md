@@ -141,8 +141,9 @@ ffmpeg -vaapi_device /dev/dri/renderD128 -f rawvideo -pix_fmt yuv420p \
     -c:v hevc_vaapi -b:v 4M out.hevc
 ```
 
-`h264_vaapi` and `hevc_vaapi` are the qualified encoders. B pictures are off
-unless `V4L2_VA_B_FRAMES` is set, and then the client needs three pictures in
-flight: `-bf 1 -async_depth 3`. At FFmpeg's default `-async_depth 2` a B
-picture session stops after the first pair, which is the firmware holding the
-newest picture rather than a driver defect.
+`h264_vaapi` and `hevc_vaapi` are the qualified encoders. B pictures in the
+H.264 encoder are off unless `V4L2_VA_B_FRAMES` is set, and then the client
+needs three pictures in flight: `-bf 1 -async_depth 3`. At FFmpeg's default
+`-async_depth 2` a B picture session stops after the first pair, which is the
+firmware holding the newest picture rather than a driver defect. HEVC has no
+B-picture option: this firmware stalls a reordered stream (TEST-RESULTS.md).
