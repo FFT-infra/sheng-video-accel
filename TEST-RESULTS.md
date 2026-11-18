@@ -382,10 +382,11 @@ against 463.0), `iris-encode-baseline.sh` (H.264 458.6 against libx264 120.6
 fps, HEVC 540.0 against libx265 36.4), `iris-encode-quality.sh` with
 `IRIS_ENCODE_8K=0` (SSIM 0.998596 and 0.996808, as in the table above), and
 `iris-power-sampler.sh` (1080p decode 1.24 W against 6.05 W software; H.264
-encode 2.58 W against 4.86 W). The two-player lanes used two copies of the
-same 1920x1080 clip with software baselines generated for this run. The
-browser gates and the 8K lane were not rerun: one needs an interactive
-session, the other its 8K media, which is not on the target.
+encode 2.58 W against 4.86 W), and `iris-8k-gate.sh` 30 pictures per codec
+with `pool=8` against firmware minima of 7 (H.264, HEVC) and 4 (VP9, AV1).
+The two-player lanes used two copies of the same 1920x1080 clip with software
+baselines generated for this run. The browser gates were not rerun: they need
+an interactive session.
 
 A compressed surface publishes Direct or Import only. Copy publication, the
 image entry points, film grain, video processing and the encoder refuse it with
