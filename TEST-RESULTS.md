@@ -358,6 +358,15 @@ Kernel patch 0015 is not needed. The plan reserved it to widen the module's
 AV1-only UBWC stride/scanline property if H.264, HEVC or VP9 did not decode
 into Q08C. All four codecs read back exactly on the unpatched module.
 
+The linear path did not regress behind the series. On the same build-tree
+driver: `iris-matrix.sh` 48/48 for each codec with `drops=0 timeouts=0`,
+`iris-real-clip-gate.sh` plain 120/120 with `import=120 invisible=15`,
+`iris-av1-grain-gate.sh` grain8 20/20 and grain10 2/2, and
+`iris-dynamic-resolution.sh` 101 contexts over 100 transitions with
+`drops=0`. Each run is `guard=complete exit=0` on driver `246e1c21…770c`; the
+tree moved only through test and documentation commits between the runs
+(`ffb3105` and `7645dc6`), and the driver hash is identical at both.
+
 A compressed surface publishes Direct or Import only. Copy publication, the
 image entry points, film grain, video processing and the encoder refuse it with
 `VA_STATUS_ERROR_UNIMPLEMENTED`, and a completion that would have to degrade to
