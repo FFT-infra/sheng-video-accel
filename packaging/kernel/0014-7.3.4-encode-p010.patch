@@ -1,0 +1,181 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: xinyang <xinyang@localhost>
+Date: Tue, 18 Nov 2026 12:00:00 +0800
+Subject: [PATCH] media: iris: accept P010 input for HEVC Main 10 encode (7.3.4)
+
+The firmware codes 10-bit HEVC from P010 and its encoder capabilities name
+color format P010, but the 7.3.4 driver lists no P010 formula on the
+encoder's raw queue: every S_FMT falls back to NV12, the color format sent
+to the firmware is derived from NV12/QC08C only, the bit depth property is
+never sent for an encoder, and the line, scratch and VPSS buffers are sized
+for 8 bits.
+
+Add P010 to the encoder's output format table with a byte pitch aligned to
+256, size the raw input buffer with the same helper the decoder uses for
+P010, map P010 and QC10C to their HFI color formats, report the input depth
+through HFI_PROP_LUMA_CHROMA_BIT_DEPTH, and pass the 10-bit flag to the
+internal buffer size helpers. The decoder still takes its depth from the
+stream.
+
+The profile and level controls already carry the Main 10 values, so a
+client that sets them and feeds P010 gets a Main 10 stream.
+---
+--- a/drivers/media/platform/qcom/iris/iris_buffer.c	2026-11-18 13:03:47.993136577 +0800
++++ b/drivers/media/platform/qcom/iris/iris_buffer.c	2026-11-18 13:02:54.225786052 +0800
+@@ -473,6 +473,8 @@
+ 		case BUF_INPUT:
+ 			if (inst->fmt_src->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_QC08C)
+ 				return iris_yuv_buffer_size_qc08c(inst);
++			else if (inst->fmt_src->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_P010)
++				return iris_yuv_buffer_size_p010(inst);
+ 			else
+ 				return iris_yuv_buffer_size_nv12(inst);
+ 		case BUF_OUTPUT:
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2.c	2026-11-18 13:03:47.986136913 +0800
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2.c	2026-11-18 13:03:24.855259552 +0800
+@@ -1970,6 +1970,7 @@
+ 	HFI_PROP_RAW_RESOLUTION,
+ 	HFI_PROP_CROP_OFFSETS,
+ 	HFI_PROP_LINEAR_STRIDE_SCANLINE,
++	HFI_PROP_LUMA_CHROMA_BIT_DEPTH,
+ 	HFI_PROP_SIGNAL_COLOR_INFO,
+ };
+ 
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2_command.c	2026-11-18 13:03:47.986136913 +0800
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2_command.c	2026-11-18 13:03:24.855259552 +0800
+@@ -288,6 +288,14 @@
+ 	u32 port = iris_hfi_gen2_get_port(inst, plane);
+ 	u32 bitdepth = BIT_DEPTH_8;
+ 
++	/* The encoder explains its raw input through this property; the
++	 * firmware writes the sequence headers from it. The decoder takes the
++	 * depth from the stream instead, so this is the encoder's only use.
++	 */
++	if (inst->domain == ENCODER &&
++	    iris_fmt_is_10bit(inst->fmt_src->fmt.pix_mp.pixelformat))
++		bitdepth = BIT_DEPTH_10;
++
+ 	inst_hfi_gen2->src_subcr_params.bit_depth = bitdepth;
+ 
+ 	return iris_hfi_gen2_session_set_property(inst,
+@@ -496,8 +504,22 @@
+ 		}
+ 	} else {
+ 		pixelformat = inst->fmt_src->fmt.pix_mp.pixelformat;
+-		hfi_colorformat = pixelformat == V4L2_PIX_FMT_NV12 ?
+-			HFI_COLOR_FMT_NV12 : HFI_COLOR_FMT_NV12_UBWC;
++		switch (pixelformat) {
++		case V4L2_PIX_FMT_NV12:
++			hfi_colorformat = HFI_COLOR_FMT_NV12;
++			break;
++		case V4L2_PIX_FMT_P010:
++			hfi_colorformat = HFI_COLOR_FMT_P010;
++			break;
++		case V4L2_PIX_FMT_QC08C:
++			hfi_colorformat = HFI_COLOR_FMT_NV12_UBWC;
++			break;
++		case V4L2_PIX_FMT_QC10C:
++			hfi_colorformat = HFI_COLOR_FMT_TP10_UBWC;
++			break;
++		default:
++			return -EINVAL;
++		}
+ 	}
+ 
+ 	return iris_hfi_gen2_session_set_property(inst,
+--- a/drivers/media/platform/qcom/iris/iris_venc.c	2026-11-18 13:03:45.298266083 +0800
++++ b/drivers/media/platform/qcom/iris/iris_venc.c	2026-11-18 13:02:54.224786102 +0800
+@@ -87,6 +87,7 @@
+ static const u32 iris_venc_formats_out[] = {
+ 	[IRIS_FMT_NV12] = V4L2_PIX_FMT_NV12,
+ 	[IRIS_FMT_QC08C] = V4L2_PIX_FMT_QC08C,
++	[IRIS_FMT_TP10] = V4L2_PIX_FMT_P010,
+ };
+ 
+ static bool check_format(struct iris_inst *inst, u32 pixfmt, u32 type)
+@@ -267,7 +268,15 @@
+ 	fmt->fmt.pix_mp.height = ALIGN(f->fmt.pix_mp.height, 32);
+ 	fmt->fmt.pix_mp.num_planes = 1;
+ 	fmt->fmt.pix_mp.pixelformat = f->fmt.pix_mp.pixelformat;
+-	fmt->fmt.pix_mp.plane_fmt[0].bytesperline = ALIGN(f->fmt.pix_mp.width, 128);
++	/* P010's pitch is a byte count and the buffer layout aligns it to 256;
++	 * NV12's is one byte per sample aligned to 128.
++	 */
++	if (f->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_P010)
++		fmt->fmt.pix_mp.plane_fmt[0].bytesperline =
++			ALIGN(f->fmt.pix_mp.width * 2, 256);
++	else
++		fmt->fmt.pix_mp.plane_fmt[0].bytesperline =
++			ALIGN(f->fmt.pix_mp.width, 128);
+ 	fmt->fmt.pix_mp.plane_fmt[0].sizeimage = iris_get_buffer_size(inst, BUF_INPUT);
+ 
+ 	fmt->fmt.pix_mp.colorspace = f->fmt.pix_mp.colorspace;
+--- a/drivers/media/platform/qcom/iris/iris_vpu_buffer.c	2026-11-18 13:03:45.299266035 +0800
++++ b/drivers/media/platform/qcom/iris/iris_vpu_buffer.c	2026-11-18 13:03:24.855259552 +0800
+@@ -1402,14 +1402,15 @@
+ 	u32 height = iris_vpu_enc_get_bitstream_height(inst);
+ 	u32 width = iris_vpu_enc_get_bitstream_width(inst);
+ 	u32 lcu_size = 16;
++	bool ten_bit = iris_fmt_is_10bit(inst->fmt_src->fmt.pix_mp.pixelformat);
+ 
+ 	if (inst->codec == V4L2_PIX_FMT_HEVC) {
+ 		lcu_size = 32;
+-		return hfi_buffer_line_enc(width, height, 0, num_vpp_pipes,
++		return hfi_buffer_line_enc(width, height, ten_bit, num_vpp_pipes,
+ 					   lcu_size, HFI_CODEC_ENCODE_HEVC);
+ 	}
+ 
+-	return hfi_buffer_line_enc(width, height, 0, num_vpp_pipes,
++	return hfi_buffer_line_enc(width, height, ten_bit, num_vpp_pipes,
+ 				   lcu_size, HFI_CODEC_ENCODE_AVC);
+ }
+ 
+@@ -1419,14 +1420,15 @@
+ 	u32 height = iris_vpu_enc_get_bitstream_height(inst);
+ 	u32 width = iris_vpu_enc_get_bitstream_width(inst);
+ 	u32 lcu_size = 16;
++	bool ten_bit = iris_fmt_is_10bit(inst->fmt_src->fmt.pix_mp.pixelformat);
+ 
+ 	if (inst->codec == V4L2_PIX_FMT_HEVC) {
+ 		lcu_size = 32;
+-		return hfi_buffer_line_enc_vpu33(width, height, 0, num_vpp_pipes,
++		return hfi_buffer_line_enc_vpu33(width, height, ten_bit, num_vpp_pipes,
+ 						 lcu_size, HFI_CODEC_ENCODE_HEVC);
+ 	}
+ 
+-	return hfi_buffer_line_enc_vpu33(width, height, 0, num_vpp_pipes,
++	return hfi_buffer_line_enc_vpu33(width, height, ten_bit, num_vpp_pipes,
+ 					 lcu_size, HFI_CODEC_ENCODE_AVC);
+ }
+ 
+@@ -1655,7 +1657,9 @@
+ 	}
+ 
+ 	return hfi_buffer_scratch1_enc(frame_width, frame_height, lcu_size,
+-				       num_ref, false, num_vpp_pipes, is_h265);
++				       num_ref,
++				       iris_fmt_is_10bit(inst->fmt_src->fmt.pix_mp.pixelformat),
++				       num_vpp_pipes, is_h265);
+ }
+ 
+ static inline u32 ubwc_metadata_plane_stride(u32 width,
+@@ -1739,7 +1743,8 @@
+ 	u32 frame_width = iris_vpu_enc_get_bitstream_width(inst);
+ 	u32 num_ref = hfi_buffer_get_recon_count(inst);
+ 
+-	return hfi_buffer_scratch2_enc(frame_width, frame_height, num_ref, false);
++	return hfi_buffer_scratch2_enc(frame_width, frame_height, num_ref,
++				      iris_fmt_is_10bit(inst->fmt_src->fmt.pix_mp.pixelformat));
+ }
+ 
+ static u32 iris_vpu_enc_vpss_size(struct iris_inst *inst)
+@@ -1749,7 +1754,8 @@
+ 	u32 height = f->fmt.pix_mp.height;
+ 	u32 width = f->fmt.pix_mp.width;
+ 
+-	return hfi_buffer_vpss_enc(width, height, ds_enable, 0, 0);
++	return hfi_buffer_vpss_enc(width, height, ds_enable, 0,
++				   iris_fmt_is_10bit(inst->fmt_src->fmt.pix_mp.pixelformat));
+ }
+ 
+ static inline u32 size_dpb_opb(u32 height, u32 lcu_size)

@@ -19,7 +19,6 @@ The firmware accepts slices only for CBR at frame rates up to 60 and
 within the geometry bounds carried in platform_inst_slice_caps; the setter
 rejects anything else instead of silently encoding one slice.
 ---
-diff -ruN ref/drivers/media/platform/qcom/iris/iris_ctrls.c base/drivers/media/platform/qcom/iris/iris_ctrls.c
 --- a/drivers/media/platform/qcom/iris/iris_ctrls.c	2026-11-18 12:56:57.536003757 +0800
 +++ b/drivers/media/platform/qcom/iris/iris_ctrls.c	2026-11-18 12:56:37.569562268 +0800
 @@ -3,6 +3,7 @@
@@ -133,7 +132,6 @@ diff -ruN ref/drivers/media/platform/qcom/iris/iris_ctrls.c base/drivers/media/p
  int iris_set_properties(struct iris_inst *inst, u32 plane)
  {
  	const struct iris_hfi_session_ops *hfi_ops = inst->hfi_session_ops;
-diff -ruN ref/drivers/media/platform/qcom/iris/iris_ctrls.h base/drivers/media/platform/qcom/iris/iris_ctrls.h
 --- a/drivers/media/platform/qcom/iris/iris_ctrls.h	2026-11-18 12:56:57.536003757 +0800
 +++ b/drivers/media/platform/qcom/iris/iris_ctrls.h	2026-11-18 12:56:06.354084912 +0800
 @@ -17,6 +17,7 @@
@@ -144,7 +142,6 @@ diff -ruN ref/drivers/media/platform/qcom/iris/iris_ctrls.h base/drivers/media/p
  int iris_set_profile(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id);
  int iris_set_level(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id);
  int iris_set_profile_level_gen1(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id);
-diff -ruN ref/drivers/media/platform/qcom/iris/iris_hfi_gen2.c base/drivers/media/platform/qcom/iris/iris_hfi_gen2.c
 --- a/drivers/media/platform/qcom/iris/iris_hfi_gen2.c	2026-11-18 12:56:57.536003757 +0800
 +++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2.c	2026-11-18 12:56:06.354084912 +0800
 @@ -13,6 +13,8 @@
@@ -204,7 +201,6 @@ diff -ruN ref/drivers/media/platform/qcom/iris/iris_hfi_gen2.c base/drivers/medi
  };
  
  static const u32 sm8550_vdec_input_config_params_default[] = {
-diff -ruN ref/drivers/media/platform/qcom/iris/iris_hfi_gen2_defines.h base/drivers/media/platform/qcom/iris/iris_hfi_gen2_defines.h
 --- a/drivers/media/platform/qcom/iris/iris_hfi_gen2_defines.h	2026-11-18 12:56:57.537003680 +0800
 +++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2_defines.h	2026-11-18 12:56:06.355084830 +0800
 @@ -80,6 +80,8 @@
@@ -216,7 +212,6 @@ diff -ruN ref/drivers/media/platform/qcom/iris/iris_hfi_gen2_defines.h base/driv
  #define HFI_PROP_LTR_COUNT			0x03000134
  #define HFI_PROP_LTR_MARK			0x03000135
  #define HFI_PROP_LTR_USE			0x03000136
-diff -ruN ref/drivers/media/platform/qcom/iris/iris_platform_common.h base/drivers/media/platform/qcom/iris/iris_platform_common.h
 --- a/drivers/media/platform/qcom/iris/iris_platform_common.h	2026-11-18 12:56:57.537003680 +0800
 +++ b/drivers/media/platform/qcom/iris/iris_platform_common.h	2026-11-18 12:56:37.570562189 +0800
 @@ -53,6 +53,7 @@
@@ -264,7 +259,6 @@ diff -ruN ref/drivers/media/platform/qcom/iris/iris_platform_common.h base/drive
  	const struct tz_cp_config *tz_cp_config_data;
  	u32 tz_cp_config_data_size;
  	u32 num_vpp_pipe;
-diff -ruN ref/drivers/media/platform/qcom/iris/iris_platform_vpu3x.c base/drivers/media/platform/qcom/iris/iris_platform_vpu3x.c
 --- a/drivers/media/platform/qcom/iris/iris_platform_vpu3x.c	2026-11-18 12:56:54.182262624 +0800
 +++ b/drivers/media/platform/qcom/iris/iris_platform_vpu3x.c	2026-11-18 12:56:06.355084830 +0800
 @@ -139,6 +139,7 @@

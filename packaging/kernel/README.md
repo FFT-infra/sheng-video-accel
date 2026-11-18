@@ -2,11 +2,12 @@
 
 Two patch sets live here. 0001-0007 target `sheng-7.2.6`
 (`42f3b40c702a`): four qualified patches, plus three experimental ones.
-0008-0013 target `sheng-7.3.4` (`87ac0f2347eb`), whose in-tree driver already
+0008-0014 target `sheng-7.3.4` (`87ac0f2347eb`), whose in-tree driver already
 carries the request-sync-frame control and the stability fixes that 7.2.6
 needs patches for, so the 7.3.4 set is smaller. 0008-0009 are qualified;
 0010-0012 are drain and IRQ backports with one target run each, recorded in
-`TEST-RESULTS.md`. 0013 adds the encoder multi-slice controls.
+`TEST-RESULTS.md`. 0013 adds the encoder multi-slice controls, and 0014 adds
+P010 input for HEVC Main 10 encode.
 
 Only 0001-0004 make up the 7.2.6 module; on 7.3.4 the qualified set is
 0008-0009. `TEST-RESULTS.md` records the hardware evidence for the qualified
@@ -35,7 +36,8 @@ at runtime and degrades gracefully on stock kernels.
 | `0010-7.3.4-complete-drain-on-error-last.patch` | Project SunUEFI media patch | Records `V4L2_BUF_FLAG_LAST` before the error return in `iris_vb2_buffer_done()` | **Experimental, one target run 11-18.** Built with 0008-0011 and run on the DRC clip and at stream end: the drain stopped, the visible output matched the software decode byte for byte (`84/84`, `drops=0`), and the encoder drained cleanly. The run does not isolate this patch from 0011, so the result is "no regression", not a demonstrated fix. Not part of the qualified baseline. |
 | `0011-7.3.4-psc-last-is-not-an-error.patch` | Project SunUEFI media patch | Exempts `HFI_BUF_FW_FLAG_PSC_LAST` from the zero-payload error rule | **Experimental, one target run 11-18.** On the DRC clip the sequence-change completion carried `V4L2_BUF_FLAG_ERROR` on the qualified module (`flags=0x104040`) and none with this patch (`0x104000`). Visible output stayed byte-identical to the software decode, `submitted=84 completed=84 drops=0`, and the native `v4l2av1dec` client decoded the same clip without an error. The boundary hidden completion is no longer published as a NOSHOW reference, so this patch changes this driver's own invisible accounting; that is why it stays experimental. |
 | `0012-7.3.4-quiesce-irq-before-core-lock.patch` | Project SunUEFI media patch | Disables the Iris IRQ around the `core->lock` section in `iris_core_deinit()` | **Experimental, one target run 11-18.** On the qualified module `modprobe -r qcom_iris` hung in `D` state with the module in `Unloading`, its stack at `disable_irq -> __synchronize_irq` from `iris_core_deinit`. With this patch the same unload and a following reload each completed in under a second and both nodes re-probed. Not part of the qualified baseline. |
-| `0013-7.3.4-multi-slice.patch` | this repository | Exposes `V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE`, `..._MAX_BYTES` and `..._MAX_MB` on the 7.3.4 encoder and maps the selected mode to `HFI_PROP_MULTI_SLICE_MB_COUNT` / `..._BYTES_COUNT` | **New, target run pending.** Adds the three controls and a setter that rejects anything the firmware does not take: only CBR, up to 60 fps, within the slice geometry bounds. Without it every encoded frame is one slice and `VAConfigAttribEncMaxSlices` can only answer 1. |
+| `0013-7.3.4-multi-slice.patch` | this repository | Exposes `V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE`, `..._MAX_BYTES` and `..._MAX_MB` on the 7.3.4 encoder and maps the selected mode to `HFI_PROP_MULTI_SLICE_MB_COUNT` / `..._BYTES_COUNT` | **Experimental, one target run 11-18.** The controls appear on the encoder node, and `test/iris-encode-slice-probe` through the build-tree driver coded 4 slices per picture for H.264 and HEVC at 640x480, with `max_slices=128` and the arbitrary-macroblock structure advertised (TEST-RESULTS.md, Encode). The setter rejects anything the firmware does not take: only CBR or CQP, up to 60 fps, within the slice geometry bounds. Without it every encoded frame is one slice and `VAConfigAttribEncMaxSlices` can only answer 1. |
+| `0014-7.3.4-encode-p010.patch` | this repository | Lists `V4L2_PIX_FMT_P010` on the 7.3.4 encoder's raw queue with a 256-aligned byte pitch, sizes the input with `iris_yuv_buffer_size_p010()`, maps P010/QC10C to their HFI color formats, sends `HFI_PROP_LUMA_CHROMA_BIT_DEPTH` for an encoder and passes the 10-bit flag to the line/scratch/VPSS helpers | **Experimental, one target run 11-18.** Applies after 0013. FFmpeg's `hevc_vaapi -profile:v main10` encoded 60 frames through P010 at SSIM 0.9995 mean (0.9973 worst), the stream reports Main 10 / yuv420p10le, and the 8-bit lane still passes in the same run (TEST-RESULTS.md, Encode). Without it the encoder's raw queue accepts NV12 only, so no VA client can feed a 10-bit picture and `VAProfileHEVCMain10` is not advertised. |
 ## Integrity
 
 `SHA256SUMS` records the authoritative hash for each patch file. Integrity is checked automatically via:
@@ -67,6 +69,9 @@ sh packaging/kernel/build-module.sh --source linux --patch 0008 --patch 0009
 # Experimental only: add the drain and IRQ backports.
 sh packaging/kernel/build-module.sh --source linux \
     --patch 0008 --patch 0009 --patch 0010 --patch 0011 --patch 0012
+# Experimental only: encoder multi-slice controls and P010 input (apply in order).
+sh packaging/kernel/build-module.sh --source linux \
+    --patch 0008 --patch 0009 --patch 0013 --patch 0014
 ```
 
 On 7.3.4, `CONFIG_LOCALVERSION_AUTO` appends `-g<sha>` to the release, so a
@@ -117,7 +122,7 @@ The `[5] optional kernel controls` section resolves both nodes by the
 `iris_driver` name and reports `display_delay`, `min_number_of_capture_buffers`,
 `force_key_frame` and the loop-filter controls.
 
-The twelve patch files are kernel fragments targeting GPL-2.0-only sources under
+The fourteen patch files are kernel fragments targeting GPL-2.0-only sources under
 `drivers/media/platform/qcom/iris/`. They are not compiled into the MIT driver
 package, so they have no SPDX header of their own; the patched files keep the
 kernel's own identifier. `SHA256SUMS` pins each patch for the downstream

@@ -60,16 +60,16 @@ if [ -n "$bad" ]; then
     fail "recorded hash does not match: $bad"
 fi
 
-# Only the thirteen patches may be listed, and every one of them must be.
-# 0001-0007 apply to sheng-7.2.6; 0008-0013 are the 7.3.4 set.
+# Only the fourteen patches may be listed, and every one of them must be.
+# 0001-0007 apply to sheng-7.2.6; 0008-0014 are the 7.3.4 set.
 listed=$(awk '{print $2}' "$sums")
 for name in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011 0012 0013; do
     printf '%s\n' "$listed" | grep -q "^$name-" \
         || fail "SHA256SUMS does not record $name"
 done
 count=$(printf '%s\n' "$listed" | grep -c '\.patch$' || true)
-[ "$count" -eq 13 ] \
-    || fail "SHA256SUMS must record exactly thirteen patches, found $count"
+[ "$count" -eq 14 ] \
+    || fail "SHA256SUMS must record exactly fourteen patches, found $count"
 for name in $(printf '%s\n' "$listed" | grep '\.patch$'); do
     [ -f "$kernel_dir/$name" ] || fail "SHA256SUMS records a file that is not there: $name"
 done
@@ -166,6 +166,18 @@ expect_marker "$kernel_dir/0013-7.3.4-multi-slice.patch" \
 expect_marker "$kernel_dir/0013-7.3.4-multi-slice.patch" \
     '+int iris_set_slice_count(' 2
 
+# 0014 has to reach all four places at once: the raw format table, the
+# buffer size, the firmware color format and the bit-depth property. The
+# format table alone would size a P010 buffer as 8-bit.
+expect_marker "$kernel_dir/0014-7.3.4-encode-p010.patch" \
+    '+	[IRIS_FMT_TP10] = V4L2_PIX_FMT_P010,' 1
+expect_marker "$kernel_dir/0014-7.3.4-encode-p010.patch" \
+    '+				return iris_yuv_buffer_size_p010(inst);' 1
+expect_marker "$kernel_dir/0014-7.3.4-encode-p010.patch" \
+    '+			hfi_colorformat = HFI_COLOR_FMT_P010;' 1
+expect_marker "$kernel_dir/0014-7.3.4-encode-p010.patch" \
+    '+	HFI_PROP_LUMA_CHROMA_BIT_DEPTH,' 1
+
 # 0004's whole point is that the copy lands in the ERROR branch. Checking the
 # line order inside the hunk is what distinguishes that from a copy added to
 # the normal completion path, where the timestamp was already correct.
@@ -192,7 +204,10 @@ fi
 # which is also the cheapest way to prove the file is still a patch.
 if command -v git >/dev/null 2>&1; then
     for patch in "$kernel_dir"/0*.patch; do
-        if ! paths=$(git apply --numstat "$patch" 2>&1); then
+        # Parse from the repository root: `git apply` reports the paths of a
+        # plain unified diff relative to the caller's directory, so running
+        # this from a build tree would prefix every path with it.
+        if ! paths=$(git -C "$root" apply --numstat "$patch" 2>&1); then
             fail "${patch##*/}: git cannot read it as a patch"
             continue
         fi
@@ -257,4 +272,4 @@ if [ "$failures" -ne 0 ]; then
     printf 'FAIL kernel patches: %d problem(s)\n' "$failures" >&2
     exit 1
 fi
-printf 'PASS kernel patches: thirteen files, recorded hashes, Iris-only paths\n'
+printf 'PASS kernel patches: fourteen files, recorded hashes, Iris-only paths\n'
