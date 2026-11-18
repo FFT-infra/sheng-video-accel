@@ -336,7 +336,7 @@ after the run.
 
 A surface is UBWC (`QCOM_COMPRESSED`, four-plane Q08C) only when a client lists
 the modifier and `V4L2_VA_UBWC=1`. `test/iris-ubwc-gate.sh` is the gate. This
-run is source `ffb3105`, `source_dirty=0`, `guard=complete exit=0`, on boot
+run is source `8561d10`, `source_dirty=0`, `guard=complete exit=0`, on boot
 `edd37f6a-cb04-42b0-b9b7-96360172a5ca`, kernel
 `7.3.4-sm8550-00104-g87ac0f2347eb`, the module installed on this boot
 (`a3732c1c…10608`; the UBWC series adds no kernel patch, and the patch set is
