@@ -90,6 +90,16 @@ if va_drm_dep.found()
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
 
+# Hardware probe, built but not registered as a meson test: one elementary
+# stream straight into the node through the driver's session, with a chosen
+# CAPTURE format. The VA layer refuses a profile before a stream is parsed,
+# so only the node can say whether the firmware itself accepts the stream.
+executable(
+  'iris-decode-stream-probe',
+  'iris-decode-stream-probe.cc',
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+
 # Hardware probe, built but not registered as a meson test: the upload half of
 # the image API. vaPutImage and the derived-image write path are what put
 # client pixels into a surface; vaGetImage reads them back. No decode is
