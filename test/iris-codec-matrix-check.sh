@@ -49,6 +49,14 @@ for codec, item in entries.items():
     assert ("intra_refresh" in enc) == (enc["production"] == "supported"), codec
     if enc["production"] == "supported":
         assert "CBR" in enc["intra_refresh"], codec
+    # ROI stays a rejection until a hardware run shows the firmware changing
+    # the picture; an entry that claims it has to bring that evidence.
+    assert "roi" not in enc, codec
+# Packed headers are a separate claim from HDR metadata: HEVC answers the raw
+# SEI type, H.264 answers none so FFmpeg keeps the firmware's headers. The
+# driver's advertisement and these strings move together.
+assert "VA_ENC_PACKED_HEADER_MISC" in entries["hevc"]["encode"]["packed_headers"]
+assert "VA_ENC_PACKED_HEADER_NONE" in entries["h264"]["encode"]["packed_headers"]
 assert entries["vp9"]["encode"]["production"] == "absent"
 assert entries["av1"]["encode"]["production"] == "absent"
 # The driver decides the publish policy from its own import table; it must
