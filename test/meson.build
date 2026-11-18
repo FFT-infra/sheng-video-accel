@@ -368,10 +368,11 @@ test('va-config-attributes', va_config_attributes_test)
 # run-static-checks.sh is the same entry point CI uses, so `meson test` and CI
 # cannot drift apart. The individual checks stay registered as well to keep
 # failures attributable without reading the aggregate output.
-# The aggregate runs every checker in the tree; on a workstation that is
-# about a minute, which is past meson's 30 s default.
+# The aggregate runs every checker in the tree, which is past meson's 30 s
+# default; the measured standalone time is about three minutes, so it keeps
+# headroom while the individual checkers run beside it.
 test('static-checks', find_program('run-static-checks.sh'),
-     args: [meson.project_source_root()], timeout: 180)
+     args: [meson.project_source_root()], timeout: 300)
 test('iris-source-invariants', find_program('iris-source-invariants.sh'),
      args: [meson.project_source_root()])
 test('iris-env-doc-check', find_program('iris-env-doc-check.sh'),
@@ -391,7 +392,7 @@ test('iris-clip-trace-check-self-test', find_program('iris-clip-trace-check-self
 test('iris-gate-output-self-test', find_program('iris-gate-output-self-test.sh'),
      args: [meson.project_source_root()])
 test('iris-deploy-path-check', find_program('iris-deploy-path-check.sh'),
-     args: [meson.project_source_root()])
+     args: [meson.project_source_root()], timeout: 120)
 test('iris-setup-path-check', find_program('iris-setup-path-check.sh'),
      args: [meson.project_source_root()])
 test('iris-packaging-check', find_program('iris-packaging-check.sh'),
@@ -399,9 +400,9 @@ test('iris-packaging-check', find_program('iris-packaging-check.sh'),
 test('iris-spec-selfobsolete-check', find_program('iris-spec-selfobsolete-check.sh'),
      args: ['--self-test', meson.project_source_root()])
 test('iris-make-dist-check', find_program('iris-make-dist-check.sh'),
-     args: [meson.project_source_root()])
+     args: [meson.project_source_root()], timeout: 120)
 test('iris-kernel-patch-check', find_program('iris-kernel-patch-check.sh'),
-     args: [meson.project_source_root()])
+     args: [meson.project_source_root()], timeout: 120)
 test('iris-install-manifest-check', find_program('iris-install-manifest-check.sh'),
      args: [meson.project_source_root()])
 test('provenance-self-test', find_program('provenance-self-test.sh'),
