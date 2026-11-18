@@ -134,6 +134,12 @@ change and 0016 in the working tree, decoder resolved by name:
 - The same 8K gate on the installed package (`/usr/lib64/dri`, driver
   `d15ff198…`, no `LIBVA_*` override): all four codecs at `pool=15`, 30/30
   H.264, `publish=direct` (record `gate-8k-installed2`).
+- Further coverage under `capture_sg=1` on the installed driver: UBWC Q08C
+  read back through Turnip for all four codecs (`gate-ubwc-sg`), VP9
+  Profile 2 P010 30/30 under Import (`gate-vp9p2-sg`), and two concurrent
+  1080p H.264 clients 60/60 each (`gate-twoplayer-sg`). Not yet run with
+  `capture_sg=1`: AV1 film grain (8- and 10-bit), in-context resolution
+  change, and the Vulkan video-processing gates.
 
 The parameter defaults off and is not part of the qualified module, so a
 stock boot keeps the contiguous pool and Copy publication at 8K.
