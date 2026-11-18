@@ -27,7 +27,7 @@ count.
 
 UBWC surfaces are opt-in (`V4L2_VA_UBWC=1`). A client that lists
 `DRM_FORMAT_MOD_QCOM_COMPRESSED` in `VASurfaceAttribDRMFormatModifiers` gets a
-Q08C surface — the node's four-plane compressed allocation — and
+Q08C surface, the node's four-plane compressed allocation, and
 `vaExportSurfaceHandle` reports the modifier with one R8 layer per plane. Such
 a surface publishes Direct or Import only: Copy, the image entry points, film
 grain, video processing and the encoder return `VA_STATUS_ERROR_UNIMPLEMENTED`,

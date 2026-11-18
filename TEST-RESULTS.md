@@ -334,66 +334,61 @@ after the run.
 
 ## UBWC surfaces
 
-A surface is UBWC (`QCOM_COMPRESSED`, four-plane Q08C) only when a client lists
-the modifier and `V4L2_VA_UBWC=1`. `test/iris-ubwc-gate.sh` is the gate. This
-run is source `8561d10`, `source_dirty=0`, `guard=complete exit=0`, on boot
+Opt-in (`V4L2_VA_UBWC=1`); gate `test/iris-ubwc-gate.sh`. Run identity: source
+`8561d10`, `source_dirty=0`, `guard=complete exit=0`, boot
 `edd37f6a-cb04-42b0-b9b7-96360172a5ca`, kernel
-`7.3.4-sm8550-00104-g87ac0f2347eb`, the module installed on this boot
-(`a3732c1c…10608`; the UBWC series adds no kernel patch, and the patch set is
-unchanged from the rest of the tree), and the decoder `/dev/video17` resolved by
-`iris_driver`. The first run is a build-tree override: the probes loaded
-`~/iris-vaapi-lab/src/build/src/v4l2_drv_video.so`, hash `246e1c21…770c`,
-while the installed file was still `35cdab55…d591`. `scripts/install-system.sh`
-then installed the same build over `/usr/lib64/dri/v4l2_drv_video.so` (hash
-now `246e1c21…770c`; the previous file is kept under
-`~/iris-vaapi-lab/rollback/`), and the gate was rerun with
-`LIBVA_DRIVERS_PATH=/usr/lib64/dri`: the same four codecs read back the same
-counts and the VA probe passes 21/21.
+`7.3.4-sm8550-00104-g87ac0f2347eb`, module `a3732c1c…10608` (the series adds
+no kernel patch and the patch set is unchanged), decoder `/dev/video17`
+resolved by `iris_driver`. The first pass loaded the build tree
+(`246e1c21…770c`); `scripts/install-system.sh` then put the same build at
+`/usr/lib64/dri/v4l2_drv_video.so` (the previous file is under
+`~/iris-vaapi-lab/rollback/`) and the gate was rerun there with the same
+results.
 
 | Gate | Result |
 | --- | --- |
 | `iris-decode-stream-probe` into Q08C, 640x480, H.264/HEVC/VP9/AV1 | CAPTURE `fourcc=0x3231564e modifier=0x500000000000001 planes=4 size=479232`; Y meta `offset=0 pitch=64 rows=64`, Y `4096/640/480`, UV meta `311296/64/32`, UV `315392/640/256` |
-| `vk-ubwc-read`, frames 0 and 11 of each codec | Q08C reads back `luma=0/307200 chroma=0/153600` differing samples against the linear decode |
-| linear control, same frames | `luma=0/307200 chroma=0/153600` — the read-back path reproduces a linear image plane for plane before it is trusted |
-| `iris-va-ubwc-probe`, `V4L2_VA_UBWC=1` | 21/21: the grant, 12 frames decoded into four UBWC surfaces, an export of four R8 layers at the Q08C offsets carrying the modifier, and `vaDeriveImage`/`vaGetImage`/`vaPutImage` returning `VA_STATUS_ERROR_UNIMPLEMENTED` |
+| `vk-ubwc-read`, frames 0 and 11 of each codec | Q08C `luma=0/307200 chroma=0/153600` differing samples against the linear decode |
+| linear control, same frames | `luma=0/307200 chroma=0/153600`; the control goes through the identical copy first, so a Q08C mismatch would be the modifier's |
+| `iris-va-ubwc-probe`, `V4L2_VA_UBWC=1` | 21/21: the grant, 12 frames decoded into four UBWC surfaces, four R8 layers exported at the Q08C offsets with the modifier, and `vaDeriveImage`/`vaGetImage`/`vaPutImage` answered with `VA_STATUS_ERROR_UNIMPLEMENTED` |
 | `iris-va-ubwc-probe`, switch unset | a compressed-only list is refused (`VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT`); a list with a `LINEAR` fallback creates a surface and exports `DRM_FORMAT_MOD_LINEAR` |
 
-Kernel patch 0015 is not needed. The plan reserved it to widen the module's
-AV1-only UBWC stride/scanline property if H.264, HEVC or VP9 did not decode
-into Q08C. All four codecs read back exactly on the unpatched module.
+The module applies its UBWC stride/scanline property only to AV1 decodes; the
+other three codecs read back exactly without it, so no kernel patch is needed
+for this.
 
-The linear path did not regress behind the series. On the same build-tree
-driver: `iris-matrix.sh` 48/48 for each codec with `drops=0 timeouts=0`,
-`iris-real-clip-gate.sh` plain 120/120 with `import=120 invisible=15`,
+The linear path is unchanged by these commits, on the same build-tree driver:
+`iris-matrix.sh` 48/48 per codec (`drops=0 timeouts=0`),
+`iris-real-clip-gate.sh` plain 120/120 (`import=120 invisible=15`),
 `iris-av1-grain-gate.sh` grain8 20/20 and grain10 2/2, and
-`iris-dynamic-resolution.sh` 101 contexts over 100 transitions with
-`drops=0`. Each run is `guard=complete exit=0` on driver `246e1c21…770c`; the
-tree moved only through test and documentation commits between the runs
-(`ffb3105` and `7645dc6`), and the driver hash is identical at both.
+`iris-dynamic-resolution.sh` 101 contexts over 100 transitions (`drops=0`).
+Each is `guard=complete exit=0`; the tree moved only through test and
+documentation commits (`ffb3105` to `7645dc6`), and the driver hash is the
+same at both.
 
-With that build installed as the package file, the rest of the target gates
-also pass, all at source `4b0d63e`, `source_dirty=0`, `guard=complete exit=0`:
-`iris-ubwc-gate.sh` as above, `iris-vp9-p2-gate.sh` 30/30 P010 surfaces,
-`iris-zero-copy-suite.sh` 24 Direct, `iris-two-player-gate.sh` 450 frames per
-lane with exact framemd5 and a terminal LAST, `iris-gstreamer-gate.sh` 48/48
-decode and 60/60 through both encoder elements, `iris-encode-main10-gate.sh`,
-`iris-throughput.sh` (H.264 1080p 705.9 fps against 522.6 native, HEVC 589.4
-against 463.0), `iris-encode-baseline.sh` (H.264 458.6 against libx264 120.6
-fps, HEVC 540.0 against libx265 36.4), `iris-encode-quality.sh` with
-`IRIS_ENCODE_8K=0` (SSIM 0.998596 and 0.996808, as in the table above), and
-`iris-power-sampler.sh` (1080p decode 1.24 W against 6.05 W software; H.264
-encode 2.58 W against 4.86 W), and `iris-8k-gate.sh` 30 pictures per codec
-with `pool=8` against firmware minima of 7 (H.264, HEVC) and 4 (VP9, AV1).
-The two-player lanes used two copies of the same 1920x1080 clip with software
-baselines generated for this run. The browser gates were not rerun: they need
-an interactive session.
+Installed as the package file, the rest of the target gates pass at source
+`4b0d63e`, `source_dirty=0`, `guard=complete exit=0`:
 
-A compressed surface publishes Direct or Import only. Copy publication, the
-image entry points, film grain, video processing and the encoder refuse it with
-`VA_STATUS_ERROR_UNIMPLEMENTED`, and a completion that would have to degrade to
-Copy is refused and traced (`publish=ubwc-copy-refused`). Q10C is refused on a
-10-bit RT format: the node enumerates it, but nothing on this stack advertises
-`QCOM_COMPRESSED` for P010, so no reader exists.
+| Gate | Result |
+| --- | --- |
+| `iris-vp9-p2-gate.sh` | 30/30, 12 P010 surfaces |
+| `iris-zero-copy-suite.sh` | 24 Direct |
+| `iris-two-player-gate.sh` | 450 frames per lane, exact framemd5, terminal LAST (two copies of one 1080p clip, baselines generated for the run) |
+| `iris-gstreamer-gate.sh` | 48/48 decode, 60/60 through `vah264enc` and `vah265enc` |
+| `iris-encode-main10-gate.sh` | Main 10, SSIM 0.999480 |
+| `iris-throughput.sh` | H.264 1080p 705.9 fps against 522.6 native; HEVC 589.4 against 463.0 |
+| `iris-encode-baseline.sh` | H.264 458.6 against libx264 120.6 fps; HEVC 540.0 against libx265 36.4 |
+| `iris-encode-quality.sh`, `IRIS_ENCODE_8K=0` | SSIM 0.998596 and 0.996808, as above |
+| `iris-power-sampler.sh` | 1080p decode 1.24 W against 6.05 W software; H.264 encode 2.58 W against 4.86 W |
+| `iris-8k-gate.sh` | 30 pictures per codec, `pool=8`, firmware minima 7 (H.264, HEVC) and 4 (VP9, AV1) |
+
+The browser gates were not rerun; they need an interactive session.
+
+A compressed surface publishes Direct or Import only. Copy, the image entry
+points, film grain, video processing and the encoder answer
+`VA_STATUS_ERROR_UNIMPLEMENTED`, a completion that would degrade to Copy fails
+with `publish=ubwc-copy-refused`, and Q10C is refused because nothing on this
+stack advertises `QCOM_COMPRESSED` for P010.
 
 ## Boundaries
 
