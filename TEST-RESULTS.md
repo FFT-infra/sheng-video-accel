@@ -58,18 +58,41 @@ Firefox 158 reports hardware AV1 on local and live YouTube/Bilibili streams.
 A browser decode counts as hardware only when a media surface reports the
 selected decoder with frame and drop evidence.
 
-At 7680x4320, `test/iris-8k-gate.sh` decodes one finite clip per qualified
-codec with a software framemd5 oracle: 4/4 exact frames each, granted CAPTURE
-pool 8 under the 384 MiB memory budget, `errors=0 last=1 drain=1`. Import at
-8K gives `mem=import pool=8 frames=4 md5=exact err=0` for H.264 and HEVC;
-`direct`, `import` and `copy` decode the same four frames to the same hashes.
-`test/iris-two-player-gate.sh` runs two independent 1920x1080 H.264 clients
-with their own VA display and trace, a and b 90/90 exact, `errors=0 last=1`.
-Both gates are short exact-pixel checks, not throughput or thermal results.
+At 7680x4320, `test/iris-8k-gate.sh` decodes 30-picture clips, one per
+qualified codec, with a software framemd5 oracle: 30/30 exact frames each,
+granted CAPTURE pool 8 under the 384 MiB memory budget, `errors=0 last=1
+drain=1`. Run identity: boot `edd37f6a-cb04-42b0-b9b7-96360172a5ca`, module
+`a3732c1c…`, driver `0d816eda…` as a `LIBVA_DRIVERS_PATH` build-tree
+override, source `0e5e82c` with the Direct publish fix in the working tree,
+decoder node resolved by name. Gate record `gate-8k30b`.
+
+The 30-picture clip found a publish-policy defect the 4-picture run could
+not: Direct publish pins one CAPTURE frame per decoded picture the client
+has not consumed, and the 8K pool is the firmware minimum plus one (8), so
+FFmpeg's hwdownload backlog held every slot and the session stopped at 26 of
+30 pictures (`held=8 queued=0`, `sync timeout token=27`). The same clip
+completes 30/30 under Import and under Copy, and 4K keeps the full 32-frame
+pool and Direct. The automatic policy now offers Direct only when the pool
+covers the firmware minimum plus eight pictures and publishes Copy
+otherwise; `V4L2_VA_PUBLISH=direct` still forces the old behaviour and still
+stalls at 26/30, which is what made the mechanism attributable.
 
 VP9 12-bit and AV1 12-bit are refused at profile selection; 4:4:4 and
 large-scale tile are outside the advertised profiles or cleanly refused by
 the translators. The capability table names each rejection.
+
+The 12-bit refusal no longer rests on this driver's profile check alone:
+`test/iris-decode-stream-probe` feeds the elementary stream to the node
+through the session, which passes compressed data through untouched. A
+10-bit Profile 2 control stream decodes 20/20 pictures into P010 (stride
+1280, fourcc `P010`) on driver `0d816eda…`, while the 12-bit Profile 2
+stream never raises SOURCE_CHANGE, on either the P010 or the NV12 lane, so
+the node itself refuses it before a picture exists. The node has no 12-bit
+CAPTURE format to offer (NV12, Q08C, P010, Q10C).
+
+`test/iris-two-player-gate.sh` runs two independent 1920x1080 H.264 clients
+with their own VA display and trace, a and b 90/90 exact, `errors=0 last=1`.
+These gates are short exact-pixel checks, not throughput or thermal results.
 
 ## Conformance corpora
 
@@ -130,9 +153,16 @@ default.
 | Geometry | H.264 | HEVC |
 | --- | --- | --- |
 | 1080p, 120 frames | SSIM 0.998596 (worst 0.9985), decode-to-encode 0.997654 | SSIM 0.996808 (worst 0.9963), decode-to-encode 0.995067 |
-| 7680x4320, 8 frames | 8/8, SSIM 0.995885, IRQ +23 | 8/8, SSIM 0.994700, IRQ +23 |
+| 7680x4320, 30 frames | 30/30, SSIM 0.997926, IRQ +68 | 30/30, SSIM 0.997392, IRQ +67 |
 | 4096x2160, 4 frames | 4/4, SSIM 0.992080, IRQ +17 | 4/4, SSIM 0.991085, IRQ +15 |
 | 5120x2880, 4 frames | 4/4, SSIM 0.992741, IRQ +16 | 4/4, SSIM 0.991188, IRQ +17 |
+
+The 8K lane was extended from 8 to 30 pictures on the same boot and module
+as the decode run above, with driver `0d816eda…` as a build-tree override
+(source `0e5e82c` plus the working-tree fix); the platform decode of each
+30-picture 8K stream is byte-identical to the software decode, and the lane
+now exercises 30 frames end to end instead of the first few. Run record
+`gate-enc8k30`.
 
 A blank control scores 0.000034 against the 0.90 floor. H.264 VBR at a
 4 Mbit/s target produced 4007485 bit/s over 300 1080p pictures, HEVC
