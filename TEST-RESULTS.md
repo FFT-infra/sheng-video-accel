@@ -584,24 +584,31 @@ sample was 93.9 °C, below the 100 °C guard, with no firmware reset. This
 1800 s window is the current long-window record (guard profile `SHORTENED`).
 
 The same scenario scales to more clients at 1080p. `IRIS_SOAK_SESSIONS` was
-set to 4 and then 8 with `IRIS_SOAK_SIZE=1920x1080`, 120 s each, run directly
-from the deployed build tree. Run identity: source `aa51a0d`,
-`source_dirty=0`, build-tree driver `8c85f87d…0d9`, boot
+set to 4 and then 8 with `IRIS_SOAK_SIZE=1920x1080`, first for 120 s and then
+for 300 s, all four runs directly from the deployed build tree and all
+`profile=SHORTENED`. Run identity: source `aa51a0d`, `source_dirty=0`,
+build-tree driver `8c85f87d…0d9`, boot
 `79f5d3e1-0b32-4f3c-ae95-7435870fb362`, kernel
 `7.3.4-sm8550-00104-g87ac0f2347eb`, module `1323d58a…66a5` (the 0017 set),
 decoder `/dev/video0` resolved by `iris_driver`.
 
-| Sessions | Clients | Frames each | Preflight | Teardown | Peak `video-thermal` |
-| ---: | --- | ---: | --- | --- | ---: |
-| 4 | 2 H.264 + 2 HEVC | 2880 | exact framemd5, both codecs | `timeouts=0`, terminal LAST, all four | 63.8 °C |
-| 8 | 4 H.264 + 4 HEVC | 2880 | exact framemd5, both codecs | `timeouts=0`, terminal LAST, all eight | 67.4 °C |
+| Window | Sessions | Clients | Frames each | Preflight | Teardown | Peak `video-thermal` |
+| ---: | ---: | --- | ---: | --- | --- | ---: |
+| 120 s | 4 | 2 H.264 + 2 HEVC | 2880 | exact framemd5, both codecs | `timeouts=0`, terminal LAST, all four | 63.8 °C |
+| 120 s | 8 | 4 H.264 + 4 HEVC | 2880 | exact framemd5, both codecs | `timeouts=0`, terminal LAST, all eight | 67.4 °C |
+| 300 s | 4 | 2 H.264 + 2 HEVC | 7200 | exact framemd5, both codecs | `timeouts=0`, terminal LAST, all four | 67.0 °C |
+| 300 s | 8 | 4 H.264 + 4 HEVC | 7200 | exact framemd5, both codecs | `timeouts=0`, terminal LAST, all eight | 70.9 °C |
 
 Every client held the 24 fps schedule for the full window. No trace carried
 `publish=drop`, `publish=error`, `publish=misplaced`, `capture error index=`,
 `sync timeout token=` or `session failed`; the boot ID did not change, the
-thermal guard never fired, and the pack went 73 % -> 72 % across both runs.
-Eight simultaneous 1080p sessions therefore stay under the firmware's session
-ceiling; the runs do not probe how many sessions exist above eight.
+thermal guard never fired, and the pack went 73 % -> 72 % across the two
+120 s runs and read 68 % after the 4-session 300 s run and 67 % after the
+8-session one. The 300 s clients
+finished with `submitted=7209 completed=7209 errors=0 drops=0 timeouts=0
+drains=1`. Eight simultaneous 1080p sessions therefore stay under the
+firmware's session ceiling; the runs do not probe how many sessions exist
+above eight.
 
 ## Video processing
 
