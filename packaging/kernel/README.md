@@ -96,6 +96,25 @@ tree that has the patches applied as uncommitted changes produces a vermagic
 the running kernel does not accept. Commit the applied patches in the scratch
 clone, or drop `LOCALVERSION_AUTO` from `.config`, before building.
 
+Never resolve a failed `git apply` by hand or with a relaxed context: the
+7.3.4 set adds enum members next to `INST_FW_CAP_MAX` in
+`enum platform_inst_fw_cap_type`, and a fuzzy hunk that instead lands them in
+the following `enum platform_inst_fw_cap_flags` redefines the flag bits. Every
+capability table entry below that point then carries a wrong `flags` value and
+answers the wrong control, with no build error. After applying patches, check
+where they landed:
+
+```sh
+grep -n -B12 '^enum platform_inst_fw_cap_flags' \
+    drivers/media/platform/qcom/iris/iris_platform_common.h | \
+    grep -E 'DISPLAY_DELAY|SLICE_MODE|SLICE_MAX'
+```
+
+Every hit must be above the `enum platform_inst_fw_cap_flags` line. The
+same rule covers `HFI_PROP_*` definitions in
+`iris_hfi_gen2_defines.h`: a fuzzy hunk that parks one on a neighbouring
+`#define` gives a control that registers and then reaches the wrong property.
+
 The script takes `.config` from `/proc/config.gz` rather than a
 `/boot/config-*` file: on `sheng`, those two files have different hashes and
 there is no config named after the `-iris1` release. It derives `localversion`

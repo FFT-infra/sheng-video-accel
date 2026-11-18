@@ -125,7 +125,7 @@ Video post-processing runs via pinned Vulkan compute shaders (`VAEntrypointVideo
 
 Target-compiled diagnostic probe binaries:
 
-- **`test/iris-import-probe.cc`**: Acceptance binary for client-owned CAPTURE DMA-BUFs (validates that picture $k$ lands in the $k$-th queued DMA-BUF).
+- **`test/iris-import-probe.cc`**: Acceptance binary for client-owned CAPTURE DMA-BUFs. With one client buffer in flight (`surfaces=1`) it requires picture $k$ to land in the DMA-BUF queued for it; with several (`surfaces=8`) it measures the firmware's own completion order, which is not QBUF order and is why the Import policy queues one picture at a time.
 - **`test/iris-va-import-probe.cc`**: Validates `DRM_PRIME_2` and `PRIME_1` import through `vaCreateSurfaces2`.
 - **`test/iris-va-image-gate.sh` / `iris-va-image-probe.cc`**: Upload/download testing for `vaPutImage` and `vaGetImage`.
 - **`test/iris-gstreamer-gate.sh`**: Validates GStreamer integration (`vaav1dec`, `vah264enc`, `vah265enc`) and allowlist behavior.

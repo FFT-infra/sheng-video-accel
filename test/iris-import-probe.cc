@@ -13,6 +13,15 @@
 // grey in its buffer is a misplacement. `skip=` punches holes: AUs that
 // get no client buffer, modelling a client that released the surface.
 //
+// The association check is only meaningful with one client buffer in flight
+// (`surfaces=1`). With several buffers queued, the firmware completes them in
+// its own order, not QBUF order: on sheng with 12 access units and 16 slots,
+// the driver dequeued slots 15,13,12,14,11,10,9,8,7,6,4,5 against a QBUF
+// order of 15,14,13,12,11,10,9,8,7,6,5,4 (strace round, 2026-11-19), while
+// every buffer still held the picture its timestamp named. That is the
+// property the Import policy avoids by queueing exactly one picture at a
+// time; `surfaces>1` measures the firmware's order rather than asserting it.
+//
 // Usage: iris-import-probe <node> <stream.264> [surfaces=N] [skip=K1,K2]
 //        [expect=FILE]   one expected grey per access unit, in decode order
 //                        (compute with ffprobe packet order); without it the

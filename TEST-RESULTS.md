@@ -49,14 +49,25 @@ oracle.
 | `iris-gstreamer-gate.sh` | `GST_VA_ALL_DRIVERS=1` registers 7 elements; `vaav1dec` 120/120 hashes equal to software; `vah264enc`/`vah265enc` encode 60 frames that decode back |
 
 Import keeps one client buffer in flight and never skips a submitted picture.
-The VP9 alt-ref clip (`lag720.webm`, 480 frames) reports
+The bare-V4L2 probe states the same rule from the other side: with 12 access
+units and `surfaces=1` the client buffer queued for picture $k$ receives
+picture $k$, 12/12, while `surfaces=16` completes the twelve DMA-BUFs in
+slots 15,13,12,14,11,10,9,8,7,6,4,5 against a QBUF order of
+15,14,13,12,11,10,9,8,7,6,5,4 (strace, 2026-11-19). Every buffer held the
+picture its timestamp named, so the pixel content is right and only the
+positional association fails; that is why the policy queues one picture at a
+time. The VP9 alt-ref clip (`lag720.webm`, 480 frames) reports
 `submitted=515 completed=515 errors=0 drops=0 misplaced=0` with framemd5
 equal to software. Chrome 156 reported `VaapiVideoDecoder` with
 `kIsPlatformVideoDecoder=true` and `submitted=1705 completed=1705 drops=0
 retained=1161` in one guarded window and `1588/1588 drops=0` in another;
 Firefox 158 reports hardware AV1 on local and live YouTube/Bilibili streams.
 A browser decode counts as hardware only when a media surface reports the
-selected decoder with frame and drop evidence.
+selected decoder with frame and drop evidence. Chrome 156 HEVC seeking was
+checked on 2026-11-19 on a 720p clip: a backwards seek from ~6.7 s to 5 s
+continued decoding (160 -> 278 frames, `dropped=0`, no media error), with and
+without `--disable-features=ExtendedVideoBitstreamValidation`, so this driver
+needs no seek workaround on that browser.
 
 At 7680x4320, `test/iris-8k-gate.sh` decodes 30-picture clips, one per
 qualified codec, with a software framemd5 oracle: 30/30 exact frames each,
@@ -120,6 +131,9 @@ change and 0016 in the working tree, decoder resolved by name:
 - Regression on the same boot: the four-codec 48-frame matrix
   (`gate-matrix-sg`) and `iris-encode-quality.sh` including its 8K encode lane
   (`gate-encode-sg`) both pass.
+- The same 8K gate on the installed package (`/usr/lib64/dri`, driver
+  `d15ff198…`, no `LIBVA_*` override): all four codecs at `pool=15`, 30/30
+  H.264, `publish=direct` (record `gate-8k-installed2`).
 
 The parameter defaults off and is not part of the qualified module, so a
 stock boot keeps the contiguous pool and Copy publication at 8K.
