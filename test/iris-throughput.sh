@@ -12,11 +12,13 @@
 # the same boot, not two machines.
 #
 # Usage:
-#   test/iris-throughput.sh [--sizes 720,1080,4k] [--frames N]
+#   test/iris-throughput.sh [--sizes 720,1080,4k,8k] [--frames N]
 #                           [--codecs h264,hevc] [--driver PATH]
 #
 # Defaults: 720p and 1080p, 300 frames per codec, H.264 and HEVC.
-# 4k adds a memory cost of a few hundred megabytes per process.
+# 4k adds a memory cost of a few hundred megabytes per process; 8k needs the
+# capture_sg module parameter to grant a pool large enough for Direct and is
+# meant for a short --frames run.
 
 set -eu
 
@@ -66,6 +68,7 @@ size_args() {
         720) echo 1280x720 ;;
         1080) echo 1920x1080 ;;
         4k) echo 3840x2160 ;;
+        8k) echo 7680x4320 ;;
         *) fail "unknown size: $1" ;;
     esac
 }
