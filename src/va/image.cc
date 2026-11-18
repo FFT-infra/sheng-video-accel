@@ -147,6 +147,7 @@ void view_image(VAImage& image, uint32_t fourcc, unsigned width, unsigned height
 void copy_pixels(DriverData& d, Surface& s, const VAImage& image, uint8_t* destination)
 {
     iris::require(s.has_pixels(), "surface has no decoded pixels", VA_STATUS_ERROR_OPERATION_FAILED);
+    require_linear(d, s, "vaGetImage");
     const uint8_t* source = nullptr;
     iris::Layout layout;
     int fd = -1;
@@ -296,6 +297,7 @@ VAStatus deriveImage(VADriverContextP ctx, VASurfaceID id, VAImage* image)
         }
         if (producing(d, *s))
             syncSurface(ctx, id);
+        require_linear(d, *s, "vaDeriveImage");
         // A view, not a copy. FFmpeg's encode upload maps the derived image
         // and writes straight into it, then unmaps without ever calling
         // vaPutImage; anything else silently drops the frame.
@@ -420,6 +422,7 @@ VAStatus putImage(VADriverContextP ctx, VASurfaceID id, VAImageID image_id, int 
             VA_STATUS_ERROR_INVALID_IMAGE_FORMAT);
         if (producing(d, *s))
             syncSurface(ctx, id);
+        require_linear(d, *s, "vaPutImage");
 
         uint8_t* destination = nullptr;
         iris::Layout layout;

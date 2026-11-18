@@ -58,7 +58,49 @@ void check_size(const PlaneLayout& layout, uint64_t claimed, uint64_t allocation
     require(layout.size <= 0xffffffffu, "imported surface is too large", VA_STATUS_ERROR_INVALID_PARAMETER);
 }
 
+unsigned align_up(unsigned value, unsigned alignment)
+{
+    return (value + alignment - 1) & ~(alignment - 1);
+}
+
+unsigned div_round_up(unsigned value, unsigned divisor)
+{
+    return (value + divisor - 1) / divisor;
+}
+
 } // namespace
+
+PlaneLayout ubwc_layout(unsigned width, unsigned height)
+{
+    // iris_yuv_buffer_size_qc08c(): four planes, each rounded to 4 KiB:
+    // Y meta (width/32 by height/8), Y, UV meta (width/64 by height/16),
+    // UV. Pitch and scanlines follow the same alignments as the GPU's.
+    require(width && height, "surface geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
+    PlaneLayout layout;
+    layout.modifier = DRM_FORMAT_MOD_QCOM_COMPRESSED;
+    layout.plane_count = 4;
+    const unsigned y_meta_pitch = align_up(div_round_up(width, 32), 64);
+    const unsigned y_meta_rows = align_up(div_round_up(height, 8), 16);
+    const unsigned y_meta = align_up(y_meta_pitch * y_meta_rows, 4096);
+    const unsigned y_pitch = align_up(width, 128);
+    const unsigned y_rows = align_up(height, 32);
+    const unsigned y_plane = align_up(y_pitch * y_rows, 4096);
+    const unsigned uv_meta_pitch = align_up(div_round_up(width / 2, 16), 64);
+    const unsigned uv_meta_rows = align_up(div_round_up(height / 2, 8), 16);
+    const unsigned uv_meta = align_up(uv_meta_pitch * uv_meta_rows, 4096);
+    const unsigned uv_pitch = align_up(width, 128);
+    const unsigned uv_rows = align_up(height / 2, 32);
+    const unsigned uv_plane = align_up(uv_pitch * uv_rows, 4096);
+    layout.planes[0] = { 0, y_meta_pitch, y_meta_rows };
+    layout.planes[1] = { y_meta, y_pitch, y_rows };
+    layout.planes[2] = { y_meta + y_plane, uv_meta_pitch, uv_meta_rows };
+    layout.planes[3] = { y_meta + y_plane + uv_meta, uv_pitch, uv_rows };
+    const uint64_t total = static_cast<uint64_t>(y_meta) + y_plane + uv_meta + uv_plane;
+    const uint64_t rounded = (total + 4095) & ~static_cast<uint64_t>(4095);
+    require(rounded <= 0xffffffffu, "surface geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
+    layout.size = static_cast<unsigned>(rounded);
+    return layout;
+}
 
 PlaneLayout plane_layout(uint32_t fourcc, unsigned width, unsigned height)
 {
@@ -89,8 +131,28 @@ PlaneLayout validate_prime2(const VADRMPRIMESurfaceDescriptor& descriptor, unsig
         "the imported descriptor does not match the requested format and size", VA_STATUS_ERROR_INVALID_PARAMETER);
     require(descriptor.num_objects == 1 && descriptor.objects[0].fd >= 0,
         "import requires exactly one DMA-BUF object", VA_STATUS_ERROR_INVALID_PARAMETER);
-    require(descriptor.objects[0].drm_format_modifier == DRM_FORMAT_MOD_LINEAR,
-        "import requires a linear DMA-BUF", VA_STATUS_ERROR_INVALID_PARAMETER);
+    require(descriptor.objects[0].drm_format_modifier == DRM_FORMAT_MOD_LINEAR
+            || descriptor.objects[0].drm_format_modifier == DRM_FORMAT_MOD_QCOM_COMPRESSED,
+        "import requires a linear or QCOM-compressed DMA-BUF", VA_STATUS_ERROR_INVALID_PARAMETER);
+    if (descriptor.objects[0].drm_format_modifier == DRM_FORMAT_MOD_QCOM_COMPRESSED) {
+        // UBWC NV12: the buffer holds the four Q08C planes in the kernel's
+        // order, each described by its own layer. A client that lays them out
+        // differently would hand the firmware the wrong memory.
+        require(fourcc == VA_FOURCC_NV12, "only NV12 has a UBWC layout", VA_STATUS_ERROR_INVALID_PARAMETER);
+        const PlaneLayout layout = ubwc_layout(width, height);
+        require(descriptor.num_layers == 4, "a UBWC surface has four planes",
+            VA_STATUS_ERROR_INVALID_PARAMETER);
+        for (unsigned i = 0; i < 4; ++i) {
+            const auto& layer = descriptor.layers[i];
+            require(layer.drm_format == DRM_FORMAT_R8 && layer.num_planes == 1
+                    && layer.object_index[0] == 0 && layer.pitch[0] == layout.planes[i].pitch
+                    && layer.offset[0] == layout.planes[i].offset,
+                "the UBWC layers must be the Q08C meta/luma planes at the kernel offsets",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
+        }
+        check_size(layout, descriptor.objects[0].size, allocation);
+        return layout;
+    }
 
     unsigned pitches[2] = {};
     unsigned offsets[2] = {};

@@ -100,6 +100,18 @@ executable(
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 
+# Hardware probe, built but not registered as a meson test: the only reader of
+# UBWC in this tree is the GPU, through VK_EXT_image_drm_format_modifier, and
+# only a build with Vulkan can build the reader. test/iris-ubwc-gate.sh runs it
+# over the frames iris-decode-stream-probe dumps.
+if have_vulkan_vpp
+  executable(
+    'vk-ubwc-read',
+    'vk-ubwc-read.cc',
+    dependencies: [iris_core_dep, vulkan_dep],
+    cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+endif
+
 # Hardware probe, built but not registered as a meson test: the upload half of
 # the image API. vaPutImage and the derived-image write path are what put
 # client pixels into a surface; vaGetImage reads them back. No decode is

@@ -7,6 +7,7 @@
 
 #include "../iris/vpp/scale.h"
 #include "../util/error.h"
+#include "../util/prime.h"
 
 #include <algorithm>
 #include <cstdarg>
@@ -32,6 +33,12 @@ bool p010_decode_profile(VAProfile profile)
 
 iris::Publish publish_policy(const DriverData& d, const Surface& surface, const iris::Session& session)
 {
+    // A UBWC surface is compressed memory: only Direct (the surface takes the
+    // slot) and Import (the client's own compressed buffer) have a reader.
+    // Copy would have to decompress, which no engine here does.
+    if (surface.modifier == DRM_FORMAT_MOD_QCOM_COMPRESSED)
+        return session.supports_import() && surface.persistent_export ? iris::Publish::Import
+                                                                      : iris::Publish::Direct;
     switch (d.options.publish) {
     case iris::PublishOverride::Copy:
         return iris::Publish::Copy;
@@ -60,10 +67,24 @@ bool vpp_available(const DriverData& d)
     return d.options.vpp_enabled && iris::vpp::compiled_in();
 }
 
+void require_linear(DriverData& d, const Surface& surface, const char* operation)
+{
+    if (surface.modifier != DRM_FORMAT_MOD_QCOM_COMPRESSED)
+        return;
+    d.trace("va ubwc refused operation=%s", operation);
+    throw iris::Error(VA_STATUS_ERROR_UNIMPLEMENTED,
+        std::string("a UBWC surface has no linear pixels for ") + operation);
+}
+
 iris::StableBuffer& ensure_stable(DriverData& d, Surface& surface)
 {
-    if (!surface.stable)
+    // An imported UBWC surface already owns its buffer: the client's
+    // compressed memory, which Import publish decodes into. Only the
+    // allocation is refused — there is no linear layout to allocate.
+    if (!surface.stable) {
+        require_linear(d, surface, "the stable buffer");
         surface.stable = iris::allocate_stable(d.render_fd, iris::stable_layout(surface.fourcc, surface.width, surface.height));
+    }
     return *surface.stable;
 }
 
@@ -77,6 +98,9 @@ Capabilities probe_capabilities(const iris::Options& options)
             caps.output_formats.insert(format);
     caps.nv12 = device->format_supported(iris::Queue::Capture, V4L2_PIX_FMT_NV12);
     caps.p010 = device->format_supported(iris::Queue::Capture, V4L2_PIX_FMT_P010);
+    // UBWC is opt-in and only offered when the node can actually be asked for
+    // the Q08C CAPTURE format.
+    caps.ubwc = options.ubwc && device->format_supported(iris::Queue::Capture, V4L2_PIX_FMT_QC08C);
 
     // Profiles: every entry here is qualified in
     // data/iris-codec-capabilities.json; a codec is advertised only after its

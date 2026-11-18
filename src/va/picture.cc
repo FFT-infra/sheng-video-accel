@@ -84,6 +84,7 @@ void submit(DriverData& d, Context& c, Surface& s, const iris::codec::AccessUnit
     s.target->width = s.width;
     s.target->height = s.height;
     s.target->fourcc = s.fourcc;
+    s.target->modifier = s.modifier;
     s.target->hidden = au.hidden;
     s.target->completions = au.completions;
     s.failed = false;
@@ -523,6 +524,10 @@ VAStatus run_vpp(DriverData& d, Context& c, VAContextID ctx_id, VASurfaceID dst_
         wait_for_pixels(layer.surface, layer.session);
     {
         std::lock_guard<std::recursive_mutex> lock(d.mutex);
+        require_linear(d, *source, "video processing");
+        require_linear(d, *target, "video processing");
+        for (Layer& layer : layers)
+            require_linear(d, *layer.surface, "video processing");
         src = pixels_of(d, *source);
         dst = pixels_of(d, *target);
         for (Layer& layer : layers)
@@ -856,6 +861,19 @@ VAStatus createContext(VADriverContextP ctx, VAConfigID config, int width, int h
         sc.height = c->height;
         sc.surface_count = static_cast<unsigned>(std::max(count, 0));
         sc.import_allowed = d.capabilities.import_formats.count(sc.codec_pixelformat) != 0;
+        // UBWC is a property of the surfaces the context decodes into: every
+        // render target has to carry the same modifier, and a compressed
+        // target turns the session's CAPTURE format into Q08C.
+        for (int i = 0; i < count; ++i) {
+            auto it = d.surfaces.find(render_targets[i]);
+            if (it == d.surfaces.end())
+                continue;
+            if (i == 0)
+                sc.capture_modifier = it->second->modifier;
+            iris::require(it->second->modifier == sc.capture_modifier,
+                "every render target of a context must carry the same DRM modifier",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
+        }
         // Opening the node and OUTPUT STREAMON happen here, outside the
         // table lock. SOURCE_CHANGE and CAPTURE follow the first AU.
         c->session = std::make_shared<iris::Session>(iris::open_device(d.options.video_path), sc, d.options,
@@ -1228,6 +1246,7 @@ VAStatus endPicture(VADriverContextP ctx, VAContextID id)
             Pixels pixels;
             {
                 std::lock_guard<std::recursive_mutex> lock(d.mutex);
+                require_linear(d, *s, "the encoder");
                 pixels = pixels_of(d, *s);
                 s->pixels_session.reset();
             }

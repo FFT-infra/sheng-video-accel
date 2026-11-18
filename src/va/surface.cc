@@ -162,6 +162,10 @@ std::unique_ptr<iris::StableBuffer> import_stable(int fd, uint64_t allocation, c
     layout.storage_height = planes.storage_height;
     layout.data_offset = 0;
     layout.size = planes.size;
+    layout.modifier = planes.modifier;
+    layout.plane_count = planes.plane_count;
+    for (unsigned i = 0; i < planes.plane_count; ++i)
+        layout.planes[i] = { planes.planes[i].offset, planes.planes[i].pitch, planes.planes[i].rows };
     const unsigned size = allocation >= planes.size ? static_cast<unsigned>(allocation) : planes.size;
     return std::make_unique<iris::StableBuffer>(copy, size, iris::MemoryOrigin::Imported, layout);
 }
@@ -190,8 +194,10 @@ std::shared_ptr<Surface::GrainJob> queue_grain(DriverData& d, Context& c,
         VA_STATUS_ERROR_INVALID_PARAMETER);
     const unsigned depth = picture.bit_depth_idx ? 10 : 8;
 
+    require_linear(d, *decoded, "film grain");
     std::lock_guard<std::recursive_mutex> lock(d.mutex);
     auto display = surface(d, display_id);
+    require_linear(d, *display, "film grain");
     iris::require(display->width == decoded->width && display->height == decoded->height
             && display->fourcc == decoded->fourcc
             && display->fourcc == (depth == 10 ? VA_FOURCC_P010 : VA_FOURCC_NV12),
@@ -261,6 +267,8 @@ VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, 
         uint32_t fourcc = fourcc_for(format);
         unsigned memory_type = VA_SURFACE_ATTRIB_MEM_TYPE_VA;
         const void* external = nullptr;
+        uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
+        const VADRMFormatModifierList* modifier_list = nullptr;
         for (unsigned i = 0; i < attribute_count; ++i) {
             const auto& attribute = attributes[i];
             if (!(attribute.flags & VA_SURFACE_ATTRIB_SETTABLE))
@@ -288,11 +296,46 @@ VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, 
                     "null external buffer descriptor", VA_STATUS_ERROR_INVALID_PARAMETER);
                 external = attribute.value.value.p;
                 break;
+            case VASurfaceAttribDRMFormatModifiers: {
+                // Resolved after the loop: the list is a preference order,
+                // and the answer depends on the final pixel format, which a
+                // client may name before or after this attribute.
+                iris::require(attribute.value.type == VAGenericValueTypePointer && attribute.value.value.p,
+                    "null DRM format modifier list", VA_STATUS_ERROR_INVALID_PARAMETER);
+                modifier_list = static_cast<const VADRMFormatModifierList*>(attribute.value.value.p);
+                iris::require(modifier_list->modifiers != nullptr, "empty DRM format modifier list",
+                    VA_STATUS_ERROR_INVALID_PARAMETER);
+                break;
+            }
             case VASurfaceAttribUsageHint:
                 break;
             default:
                 throw iris::Error(VA_STATUS_ERROR_ATTR_NOT_SUPPORTED, "unsupported surface attribute");
             }
+        }
+        if (modifier_list) {
+            // A client asking for a UBWC surface (Chrome, a Wayland
+            // compositor) lists the modifiers it can consume, most preferred
+            // first; the driver grants the first it can produce. Only
+            // QCOM_COMPRESSED on 8-bit NV12 exists here, and only with the
+            // opt-in switch. A list that names it but not LINEAR is refused
+            // rather than downgraded: the client never said it could read
+            // linear memory.
+            const bool ubwc_supported = d.capabilities.ubwc && format == VA_RT_FORMAT_YUV420
+                && fourcc == VA_FOURCC_NV12;
+            bool granted = false;
+            for (uint32_t m = 0; m < modifier_list->num_modifiers && !granted; ++m) {
+                if (modifier_list->modifiers[m] == DRM_FORMAT_MOD_QCOM_COMPRESSED && ubwc_supported) {
+                    modifier = DRM_FORMAT_MOD_QCOM_COMPRESSED;
+                    granted = true;
+                } else if (modifier_list->modifiers[m] == DRM_FORMAT_MOD_LINEAR) {
+                    modifier = DRM_FORMAT_MOD_LINEAR;
+                    granted = true;
+                }
+            }
+            iris::require(granted,
+                "the client's DRM modifier list is neither linear nor a UBWC surface this driver can make",
+                VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
         }
         // Client memory (architecture §3.3): the surface is created as a view
         // over one linear DMA-BUF in the CAPTURE layout, and every later
@@ -312,8 +355,9 @@ VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, 
             // would move before the descriptor is refused.
             const int fd = descriptor.num_objects == 1 ? descriptor.objects[0].fd : -1;
             const uint64_t allocation = fd >= 0 ? allocation_size(fd) : 0;
-            imported = import_stable(fd, allocation,
-                iris::validate_prime2(descriptor, width, height, fourcc, allocation), fourcc, width, height);
+            const iris::PlaneLayout planes = iris::validate_prime2(descriptor, width, height, fourcc, allocation);
+            modifier = planes.modifier;
+            imported = import_stable(fd, allocation, planes, fourcc, width, height);
         } else if (memory_type == VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME) {
             iris::require(external != nullptr, "DRM_PRIME import needs a buffer table",
                 VA_STATUS_ERROR_INVALID_PARAMETER);
@@ -337,6 +381,7 @@ VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, 
             s->width = width;
             s->height = height;
             s->fourcc = fourcc;
+            s->modifier = modifier;
             if (imported) {
                 s->stable = std::move(imported);
                 s->persistent_export = true;
@@ -344,8 +389,13 @@ VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, 
             ids[i] = d.next_id++;
             d.surfaces[ids[i]] = s;
         }
-        d.trace("va create_surfaces count=%u %ux%u fourcc=%.4s imported=%d fd=%d", count, width, height,
-            reinterpret_cast<const char*>(&fourcc), import_fd >= 0 ? 1 : 0, import_fd);
+        if (modifier == DRM_FORMAT_MOD_QCOM_COMPRESSED)
+            d.trace("va create_surfaces count=%u %ux%u fourcc=%.4s imported=%d fd=%d modifier=qcom_compressed",
+                count, width, height, reinterpret_cast<const char*>(&fourcc), import_fd >= 0 ? 1 : 0,
+                import_fd);
+        else
+            d.trace("va create_surfaces count=%u %ux%u fourcc=%.4s imported=%d fd=%d", count, width, height,
+                reinterpret_cast<const char*>(&fourcc), import_fd >= 0 ? 1 : 0, import_fd);
         return VA_STATUS_SUCCESS;
     });
 }
@@ -625,9 +675,23 @@ VAStatus exportSurfaceHandle(VADriverContextP ctx, VASurfaceID id, uint32_t mem_
         desc.objects[0].fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
         iris::require(desc.objects[0].fd >= 0, "duplicate DMA-BUF fd");
         desc.objects[0].size = layout.size;
-        desc.objects[0].drm_format_modifier = DRM_FORMAT_MOD_LINEAR;
+        desc.objects[0].drm_format_modifier = layout.compressed() ? layout.modifier : DRM_FORMAT_MOD_LINEAR;
         const bool p010 = layout.fourcc == VA_FOURCC_P010;
-        if (flags & VA_EXPORT_SURFACE_COMPOSED_LAYERS) {
+        if (layout.compressed()) {
+            // UBWC: one R8 layer per Q08C plane, at the kernel's offsets.
+            // The composed-layer form has no meaning for compressed memory
+            // and is refused rather than described wrongly.
+            iris::require(!(flags & VA_EXPORT_SURFACE_COMPOSED_LAYERS),
+                "a UBWC surface exports separate planes", VA_STATUS_ERROR_INVALID_PARAMETER);
+            desc.num_layers = layout.plane_count;
+            for (unsigned i = 0; i < layout.plane_count; ++i) {
+                desc.layers[i].drm_format = DRM_FORMAT_R8;
+                desc.layers[i].num_planes = 1;
+                desc.layers[i].object_index[0] = 0;
+                desc.layers[i].pitch[0] = layout.planes[i].pitch;
+                desc.layers[i].offset[0] = layout.planes[i].offset;
+            }
+        } else if (flags & VA_EXPORT_SURFACE_COMPOSED_LAYERS) {
             desc.num_layers = 1;
             desc.layers[0].drm_format = p010 ? DRM_FORMAT_P010 : DRM_FORMAT_NV12;
             desc.layers[0].num_planes = 2;
@@ -647,8 +711,13 @@ VAStatus exportSurfaceHandle(VADriverContextP ctx, VASurfaceID id, uint32_t mem_
                 desc.layers[i].offset[0] = i ? layout.chroma_offset() : layout.data_offset;
             }
         }
-        d.trace("va export_surface id=%u persistent=%d source=%s fd=%d pitch=%u", id, persistent ? 1 : 0,
-            s->target->frame ? "frame" : "stable", desc.objects[0].fd, layout.stride);
+        if (layout.compressed())
+            d.trace("va export_surface id=%u persistent=%d source=%s fd=%d modifier=qcom_compressed planes=%u",
+                id, persistent ? 1 : 0, s->target->frame ? "frame" : "stable", desc.objects[0].fd,
+                layout.plane_count);
+        else
+            d.trace("va export_surface id=%u persistent=%d source=%s fd=%d pitch=%u", id, persistent ? 1 : 0,
+                s->target->frame ? "frame" : "stable", desc.objects[0].fd, layout.stride);
         return VA_STATUS_SUCCESS;
     });
 }

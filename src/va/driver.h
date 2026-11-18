@@ -61,6 +61,10 @@ struct Config {
 struct Surface {
     unsigned width = 0, height = 0;
     uint32_t fourcc = VA_FOURCC_NV12;
+    // DRM_FORMAT_MOD_LINEAR, or DRM_FORMAT_MOD_QCOM_COMPRESSED when the
+    // client asked for a UBWC surface. UBWC surfaces decode into the Q08C
+    // CAPTURE format and publish Direct or Import only.
+    uint64_t modifier = 0;
     VAContextID owner = VA_INVALID_ID;
     // Session-side state: token, held frame, completion. Shared with the
     // session, which may outlive the surface through a retained Import
@@ -258,6 +262,9 @@ struct Capabilities {
     // falls back to Copy for anything else.
     std::set<uint32_t> import_formats;
     bool nv12 = false, p010 = false;
+    // The client asked for UBWC surfaces (V4L2_VA_UBWC=1) and the node
+    // enumerates the Q08C CAPTURE format.
+    bool ubwc = false;
     // The encoder node carries the kernel's multi-slice controls. It is a
     // property of the module, not of a codec: the controls exist for the
     // node and the rate-control restriction applies to both codecs.
@@ -363,6 +370,14 @@ bool producing(DriverData& d, const Surface& surface);
 iris::Publish publish_policy(const DriverData& d, const Surface& surface, const iris::Session& session);
 // Allocate the surface's stable buffer if it has none.
 iris::StableBuffer& ensure_stable(DriverData& d, Surface& surface);
+
+// Every path that reads or writes linear pixels — the Copy publish, the
+// image entry points, film grain, VideoProc and the encoder — must call this
+// first. UBWC memory has no linear pixels to hand out, and nothing in this
+// driver decompresses it; only vaExportSurfaceHandle and a Direct/Import
+// decode can reach those bytes. `operation` names the entry point in the
+// trace record.
+void require_linear(DriverData& d, const Surface& surface, const char* operation);
 
 // Probe the node once at init.
 Capabilities probe_capabilities(const iris::Options& options);

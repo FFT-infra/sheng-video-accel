@@ -172,6 +172,19 @@ When a CAPTURE completion arrives with a token that has a pending Surface:
   never stalls waiting for somewhere to put the second half. Measured scope
   and failures: TEST-RESULTS.md.
 
+**UBWC surfaces** put the same three policies on a compressed buffer. The
+CAPTURE format is Q08C and the surface carries its own four-plane `Layout`
+(§3.4); only Direct (the surface takes the slot) and Import (the client's
+compressed buffer is queued) have a reader. Copy would have to decompress, so
+an Import request that degrades to Copy fails the picture with
+`publish=ubwc-copy-refused` in the trace instead of copying compressed bytes
+into a different allocation. Every other path that expects linear pixels —
+`vaDeriveImage`, `vaGetImage`, `vaPutImage`, film grain, the video processor,
+the encoder, and the stable-buffer allocation behind them — answers
+`VA_STATUS_ERROR_UNIMPLEMENTED` before touching memory (§8 `va ubwc refused`).
+A context's surfaces must all carry the same modifier, and it cannot change
+while the context lives.
+
 `persistent_export` is set by `vaExportSurfaceHandle`, `vaAcquireBufferHandle`
 or a `DRM_PRIME_2` import when the surface has no token yet. It is never set
 by an environment variable. `V4L2_VA_PUBLISH=copy|direct|import` exists only
@@ -204,15 +217,25 @@ walks all three rungs on the target by running `iris-alloc-probe` under
 resulting `MemoryOrigin` and the exact sequence of attempts, and refuses to
 run an injected mode without the shim.
 
+A surface created with the `QCOM_COMPRESSED` modifier allocates the node's
+Q08C buffer instead: `iris_yuv_buffer_size_qc08c()`'s four 4 KiB-rounded
+planes, Y meta, Y, UV meta and UV, which `src/util/prime.cc` computes and
+`configure_capture` compares against the node's `sizeimage`. A disagreement is
+`VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT`, not a pool of the wrong size.
+`vaExportSurfaceHandle` describes the four planes as R8 layers at the kernel's
+offsets together with the modifier, and refuses the composed-layer form. There
+is no compressor in this stack, so nothing fills one as an encode input.
+
 A surface created over client memory (`vaCreateSurfaces2` with
 `VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2` or the older `_DRM_PRIME`) does not
 allocate. `src/util/prime.cc` checks the descriptor against this layout and
 the resulting `StableBuffer` is a duplicate of the client's fd, marked
 `persistent_export`, so Import and Copy act on it unchanged and it works as
-an encode input too. A buffer in any other geometry, modifier or object count
-is `VA_STATUS_ERROR_INVALID_PARAMETER` at creation: the firmware would write
-its own layout into it and neither side would notice until the picture was
-wrong.
+an encode input too. A QCOM_COMPRESSED descriptor must name the same four
+planes and offsets the driver would export. A buffer in any other geometry,
+modifier or object count is `VA_STATUS_ERROR_INVALID_PARAMETER` at creation:
+the firmware would write its own layout into it and neither side would notice
+until the picture was wrong.
 
 ### 3.5 What is gone
 
@@ -579,6 +602,12 @@ capture noshow token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu|
                                                                       timestamp when the kernel keeps
                                                                       one, else by decode order)
 capture token=<n> index=<i> flags=<hex> publish=drop                 (released target; not published)
+capture token=<n> index=<i> flags=<hex> publish=ubwc-copy-refused  (UBWC picture whose Import
+                                                                     request degraded to Copy — the
+                                                                     client's layout differed from the
+                                                                     node's. The picture fails instead of
+                                                                     copying compressed bytes into a
+                                                                     different allocation)
 capture token=<n> index=<i> flags=<hex> publish=invisible            (VP9 alt-ref or AV1 hidden install: first of two completions under one token, ERROR with no picture-type bit and no payload; Target::invisible counts it so the second NOSHOW half still publishes the client picture. A released target leaves this completion orphaned; it is still invisible, not a decode error. A visible payload completion reports the drop; if both halves were NOSHOW, neither does, so drops stays 0 for that abandoned picture)
 capture index=<i> flags=<hex> publish=invisible                     (unnamed NOSHOW LAST marker at a DRC boundary; no picture of its own)
 capture token=<n> index=<i> flags=<hex> publish=misplaced slot_token=<n>
@@ -636,6 +665,18 @@ import rejected: <why> (client stride=<n> chroma=<n> size=<n>; capture stride=<n
 import fence token=<n> fd=<n> waited=<n>ms          (only when the wait exceeds 20 ms)
 import token=<n> failed: no client buffer
 va create_surfaces count=<n> <w>x<h> fourcc=<fourcc> imported=0|1 fd=<n>
+                                                     (a UBWC surface appends
+                                                     modifier=qcom_compressed)
+va ubwc refused operation=<name>                     (a linear-pixel path met a
+                                                     compressed surface and
+                                                     answered
+                                                     VA_STATUS_ERROR_UNIMPLEMENTED;
+                                                     <name> is the entry point:
+                                                     vaDeriveImage, vaGetImage,
+                                                     vaPutImage, film grain,
+                                                     video processing, the
+                                                     encoder, or the stable-buffer
+                                                     allocation)
 va create_context id=<n> profile=<id> <w>x<h> targets=<n> mode=<name>
 va create_context id=<n> profile=<id> <w>x<h> entrypoint=encslice codec=<fourcc>
 va create_context id=<n> profile=-1 <w>x<h> entrypoint=videoproc
@@ -715,6 +756,10 @@ encode control missing name=<control> id=<hex>        (optional control absent;
                                                        the session continues;
                                                        prepend-spspps-to-idr has no id)
 va export_surface id=<n> persistent=0|1 source=frame|stable fd=<n> pitch=<n>
+                                                     (a UBWC surface replaces
+                                                     the pitch with
+                                                     modifier=qcom_compressed
+                                                     planes=<n>)
 va grain <w>x<h> source=frame|stable                   (a grained AV1 display
                                                       surface's blend ran;
                                                       `source` names where
@@ -752,6 +797,15 @@ QBUF order when it has several buffers to choose from, so the session queues
 exactly one client picture at a time and never skips a submitted picture (one
 picture in flight, no holes). A completion whose token does not match its
 buffer's token fails both surfaces and is never published.
+
+The UBWC surface is gated the same way. `test/iris-ubwc-gate.sh` decodes its
+own stream per codec twice, into Q08C and into NV12, and `test/vk-ubwc-read`
+imports the exported compressed buffer through
+`VK_EXT_image_drm_format_modifier` and requires every luma and chroma sample to
+equal the linear decode's. A linear image built from the same reference runs
+through the identical plane copy first, so a mismatch cannot be blamed on the
+read-back path; the gate also requires the session's CAPTURE layout to be Q08C
+with the kernel's four planes and their pitches.
 
 Client memory entering through `vaCreateSurfaces2` (DRM_PRIME_2 or PRIME_1,
 §3.4) is the same policy reached from the API. Its gates are `prime-import`
@@ -912,11 +966,13 @@ regenerated from the pinned modules and compared by `test/run-static-checks.sh`.
     clients send the frame rate only with IDR pictures, and a timestamp
     derived per picture therefore went backwards after every GOP boundary,
     which stopped the firmware returning access units.
-16. A surface created over client memory is a view of exactly one linear
-    DMA-BUF in the CAPTURE layout; the driver owns a duplicate of the fd and
-    the client may close its own. Any other geometry, modifier or object
-    count is `VA_STATUS_ERROR_INVALID_PARAMETER` at creation, never a picture
-    decoded into the wrong pixels.
+16. A surface created over client memory is a view of exactly one DMA-BUF in
+    the CAPTURE layout — linear with a pitched luma/chroma pair, or
+    QCOM_COMPRESSED with the four Q08C planes at the kernel's offsets; the
+    driver owns a duplicate of the fd and the client may close its own. Any
+    other geometry, modifier or object count is
+    `VA_STATUS_ERROR_INVALID_PARAMETER` at creation, never a picture decoded
+    into the wrong pixels.
 17. An AV1 picture is submitted at `vaEndPicture`. The internal eight-slot
     DPB assigns refresh slots itself and rewrites `ref_frame_idx[]` to those
     slot numbers, so no successor is needed to name refreshed slots. When all

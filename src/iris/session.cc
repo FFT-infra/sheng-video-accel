@@ -5,6 +5,7 @@
 #include "session_internal.h"
 
 #include "../util/error.h"
+#include "../util/prime.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -154,6 +155,16 @@ bool Session::import_compatible(const Layout& client, const Layout& capture)
     // The firmware writes with the CAPTURE pitch and puts chroma after
     // storage_height luma rows; the client's exported offsets are fixed, so
     // both must agree exactly and the buffer must hold the whole plane set.
+    if (capture.compressed()) {
+        if (client.fourcc != capture.fourcc || client.modifier != capture.modifier
+            || client.plane_count != capture.plane_count || client.size < capture.size)
+            return false;
+        for (unsigned i = 0; i < capture.plane_count; ++i)
+            if (client.planes[i].offset != capture.planes[i].offset
+                || client.planes[i].pitch != capture.planes[i].pitch)
+                return false;
+        return true;
+    }
     return client.fourcc == capture.fourcc && client.stride == capture.stride
         && client.chroma_offset() == capture.chroma_offset() && client.size >= capture.size;
 }
@@ -208,7 +219,10 @@ void Session::configure_capture()
     // answer is not the one the client needs (a P010 surface against an NV12
     // default, an Import layout). G_FMT first, exactly as the Capture Setup
     // sequence in dev-decoder.rst prescribes.
-    const uint32_t pixelformat = config_.capture_fourcc == VA_FOURCC_P010 ? V4L2_PIX_FMT_P010 : V4L2_PIX_FMT_NV12;
+    const bool ubwc = config_.capture_modifier == DRM_FORMAT_MOD_QCOM_COMPRESSED;
+    const uint32_t pixelformat = ubwc ? V4L2_PIX_FMT_QC08C
+                                      : (config_.capture_fourcc == VA_FOURCC_P010 ? V4L2_PIX_FMT_P010
+                                                                                  : V4L2_PIX_FMT_NV12);
     FormatInfo current = device_->get_format(Queue::Capture);
     FormatInfo granted = current;
     if (current.pixelformat != pixelformat) {
@@ -240,11 +254,24 @@ void Session::configure_capture()
     layout.fourcc = config_.capture_fourcc;
     layout.width = granted.width;
     layout.height = granted.height;
-    layout.stride = granted.bytesperline;
-    // iris_buffer.c: luma scanlines aligned to 32, chroma directly after.
-    layout.storage_height = (granted.height + 31) & ~31u;
     layout.data_offset = 0;
     layout.size = granted.sizeimage;
+    if (ubwc) {
+        // The kernel's Q08C allocation: four 4 KiB-rounded planes. The
+        // kernel's sizeimage is the one the pool must hold; a disagreement
+        // means the two layouts were derived differently.
+        const PlaneLayout ubwc = iris::ubwc_layout(granted.width, granted.height);
+        require(ubwc.size == granted.sizeimage, "the UBWC layout disagrees with the node's sizeimage",
+            VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+        layout.modifier = ubwc.modifier;
+        layout.plane_count = ubwc.plane_count;
+        for (unsigned i = 0; i < ubwc.plane_count; ++i)
+            layout.planes[i] = { ubwc.planes[i].offset, ubwc.planes[i].pitch, ubwc.planes[i].rows };
+    } else {
+        layout.stride = granted.bytesperline;
+        // iris_buffer.c: luma scanlines aligned to 32, chroma directly after.
+        layout.storage_height = (granted.height + 31) & ~31u;
+    }
 
     // Import memory when the first picture asks for it and the contract
     // holds (docs/architecture.md §3.3): decode-order output, and the

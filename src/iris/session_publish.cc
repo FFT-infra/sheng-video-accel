@@ -324,7 +324,18 @@ void Session::publish(Target& target, FrameRef frame, const Dequeued& completion
         target.frame.reset();
     } else if (target.publish == Publish::Import) {
         // Asked for Import, got an Mmap pool: the client buffer exists, so
-        // fill it the Copy way. supports_import() tells the caller.
+        // fill it the Copy way. supports_import() tells the caller. UBWC has
+        // no linear copy: the slot's bytes are compressed and the client's
+        // buffer is a different allocation, so degrading would hand out
+        // garbage. A layout mismatch is the session's only way here.
+        if (frame->layout().compressed()) {
+            trace_("%s token=%llu index=%u flags=%#x publish=ubwc-copy-refused", event ? event : "capture",
+                static_cast<unsigned long long>(completion.timestamp_us), completion.index, completion.flags);
+            target.pending = false;
+            target.error = true;
+            ++stats_.errors;
+            throw Error(VA_STATUS_ERROR_UNIMPLEMENTED, "a UBWC picture cannot fall back to Copy");
+        }
         target.publish = Publish::Copy;
     }
     if (target.publish == Publish::Copy) {

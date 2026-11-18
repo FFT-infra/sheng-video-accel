@@ -38,6 +38,12 @@ struct FakeConfig {
     unsigned visible_width = 1920, visible_height = 1080;
     unsigned stride = 1920;
     unsigned au_capacity = 2u << 20;
+    // The CAPTURE format the node reports and grants. QC08C models a node
+    // that allocates the four-plane UBWC layout (kernel sizeimage).
+    uint32_t capture_pixelformat = V4L2_PIX_FMT_NV12;
+    // Off: a QC08C node whose sizeimage is the linear one — the session must
+    // notice that the two layouts disagree instead of trusting the format.
+    bool ubwc_sizeimage = true;
 };
 
 class FakeDevice final : public Device {

@@ -84,6 +84,9 @@ struct Target {
     // config without an RT format attribute and declare 10-bit only through
     // its surfaces (FFmpeg does).
     uint32_t fourcc = 0;
+    // The surface's DRM modifier; QCOM_COMPRESSED makes the CAPTURE format
+    // Q08C and restricts publishing to Direct and Import.
+    uint64_t modifier = 0;
 };
 
 // The session, the surface and this driver's own retained copy each hold the
@@ -94,6 +97,9 @@ using TargetPtr = std::shared_ptr<Target>;
 struct SessionConfig {
     uint32_t codec_pixelformat = 0; // V4L2_PIX_FMT_H264 / HEVC / VP9 / AV1
     uint32_t capture_fourcc = 0; // VA_FOURCC_NV12 or P010
+    // DRM_FORMAT_MOD_LINEAR, or DRM_FORMAT_MOD_QCOM_COMPRESSED when the
+    // client's surfaces are UBWC (Q08C CAPTURE).
+    uint64_t capture_modifier = 0;
     unsigned width = 0, height = 0;
     unsigned surface_count = 0; // the client's pool size, for CAPTURE sizing
     unsigned output_slots = 4;

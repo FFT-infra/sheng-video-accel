@@ -19,6 +19,10 @@ for codec, item in entries.items():
     assert isinstance(item["va_profiles"], list), codec
     assert isinstance(item["v4l2_output_formats"], list), codec
     assert isinstance(item["capture_formats"], list), codec
+    # UBWC (Q08C) is offered for every codec this driver decodes, so the
+    # modifier has to appear exactly where a codec is claimed.
+    assert isinstance(item["capture_modifiers"], list), codec
+    assert ("QCOM_COMPRESSED" in item["capture_modifiers"]) == (item["production"] == "supported"), codec
     assert item["fallback"] in {"software", "native-v4l2-or-software"}, codec
     assert isinstance(item["rejected"], list) and item["rejected"], codec
     assert isinstance(item["experimental"], list), codec

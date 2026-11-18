@@ -25,6 +25,17 @@ per-build regressions; `TEST-RESULTS.md` classifies every failing vector. The
 VP9 reference MD5s predate this machine's libvpx; 176/305 is not a decode-defect
 count.
 
+UBWC surfaces are opt-in (`V4L2_VA_UBWC=1`). A client that lists
+`DRM_FORMAT_MOD_QCOM_COMPRESSED` in `VASurfaceAttribDRMFormatModifiers` gets a
+Q08C surface — the node's four-plane compressed allocation — and
+`vaExportSurfaceHandle` reports the modifier with one R8 layer per plane. Such
+a surface publishes Direct or Import only: Copy, the image entry points, film
+grain, video processing and the encoder return `VA_STATUS_ERROR_UNIMPLEMENTED`,
+because nothing here decompresses UBWC. Q10C is not offered.
+`test/iris-ubwc-gate.sh` decodes all four codecs into Q08C and requires a GPU
+read-back (`test/vk-ubwc-read`, Turnip) to reproduce the linear decode's luma
+and chroma byte for byte.
+
 Decode is qualified up to 7680x4320 for all four codecs, and for two concurrent
 1080p clients.
 
@@ -148,7 +159,8 @@ At 1080p and 4 Mbit/s, H.264 encodes 4.4x faster than libx264 `veryfast`, HEVC
   AV1 resolution change.
 
 Imported DMA-BUFs must match the native CAPTURE layout: one linear object with a
-128-byte aligned pitch. Anything else returns
+128-byte aligned pitch. A UBWC surface imports four R8 layers at the kernel's
+Q08C offsets under the `QCOM_COMPRESSED` modifier. Anything else returns
 `VA_STATUS_ERROR_INVALID_PARAMETER`.
 
 ## Known limits
@@ -176,11 +188,11 @@ Imported DMA-BUFs must match the native CAPTURE layout: one linear object with a
   `use_ltr_frames` are not advertised.
 - **Packed headers**: extradata reports `VA_ENC_PACKED_HEADER_NONE`; parameter
   sets travel in-band.
-- **UBWC**: the node enumerates `Q08C`/`Q10C` and the firmware writes real UBWC.
-  Turnip decodes Q08C byte-exactly, but EGL (the Copy path and
-  `vaGetImage`/`vaPutImage`) does not, and P010 has no compressed format. No VA
-  client asks for one. Surfaces stay `NV12`/`P010`; imports must be
-  `DRM_FORMAT_MOD_LINEAR` planes.
+- **UBWC**: opt-in (`V4L2_VA_UBWC=1`), 8-bit Q08C only, and only through Direct
+  or Import publication. The Copy path, `vaDeriveImage`/`vaGetImage`/
+  `vaPutImage`, film grain, video processing and the encoder have no
+  decompressor and refuse a compressed surface. Q10C has no reader and is not
+  offered; imports must carry the modifier and the kernel's four-plane offsets.
 
 ## Environment variables
 
@@ -194,6 +206,7 @@ Imported DMA-BUFs must match the native CAPTURE layout: one linear object with a
 | `V4L2_VA_PUBLISH` | auto | Force publication mode (`auto`, `direct`, `import`, `copy`) |
 | `V4L2_VA_VPP` | on | Set to `0` to disable Vulkan video processing |
 | `V4L2_VA_B_FRAMES` | off | Opt in to B pictures in the H.264 encoder; needs three pictures in flight (FFmpeg: `-async_depth 3`) |
+| `V4L2_VA_UBWC` | off | Opt in to UBWC (Q08C) decode surfaces for clients that request the `QCOM_COMPRESSED` modifier |
 | `V4L2_VA_DUMP` | off | Directory path to dump submitted access units |
 
 ## Naming

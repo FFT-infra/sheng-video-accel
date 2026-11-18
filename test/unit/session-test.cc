@@ -7,6 +7,7 @@
 
 #include "../../src/iris/session.h"
 #include "../../src/util/error.h"
+#include "../../src/util/prime.h"
 
 #include <cstdio>
 #include <cstring>
@@ -1198,6 +1199,121 @@ void test_import_altref_does_not_stall_the_next_picture()
 }
 
 
+// ---- UBWC (Q08C CAPTURE) ----
+
+SessionConfig ubwc_config(unsigned surfaces = 16)
+{
+    SessionConfig c = config(surfaces);
+    c.capture_modifier = DRM_FORMAT_MOD_QCOM_COMPRESSED;
+    return c;
+}
+
+// The VA layer stamps every render target with its surface's modifier
+// (src/va/picture.cc); a target without it is a different CAPTURE format.
+TargetPtr make_ubwc_target(Publish publish = Publish::Direct)
+{
+    auto t = make_target();
+    t->modifier = DRM_FORMAT_MOD_QCOM_COMPRESSED;
+    t->publish = publish;
+    return t;
+}
+
+Layout ubwc_client_layout(unsigned width, unsigned height)
+{
+    const PlaneLayout planes = ubwc_layout(width, height);
+    Layout layout;
+    layout.fourcc = VA_FOURCC_NV12;
+    layout.width = width;
+    layout.height = height;
+    layout.size = planes.size;
+    layout.modifier = planes.modifier;
+    layout.plane_count = planes.plane_count;
+    for (unsigned i = 0; i < planes.plane_count; ++i)
+        layout.planes[i] = { planes.planes[i].offset, planes.planes[i].pitch, planes.planes[i].rows };
+    return layout;
+}
+
+void test_ubwc_capture_uses_the_q08c_layout()
+{
+    FakeConfig fc;
+    fc.capture_pixelformat = V4L2_PIX_FMT_QC08C;
+    Harness h(fc, fast_options(), ubwc_config());
+    auto t = make_ubwc_target();
+    h.submit(t);
+    CHECK(h.session->state() == SessionState::Streaming);
+    CHECK(h.fake->capture_allocated() == 32);
+    // Direct hands out the compressed slot itself.
+    h.session->wait(t);
+    CHECK(t->completed && !t->error && t->frame);
+    CHECK(t->frame && t->frame->layout().compressed());
+}
+
+void test_ubwc_capture_layout_mismatch_is_refused()
+{
+    // A node that grants the format but allocates the linear sizeimage is
+    // not the node the driver thinks it is; taking its buffer would put the
+    // firmware's planes where the client's exports do not expect them.
+    FakeConfig fc;
+    fc.capture_pixelformat = V4L2_PIX_FMT_QC08C;
+    fc.ubwc_sizeimage = false;
+    Harness h(fc, fast_options(), ubwc_config());
+    auto t = make_ubwc_target();
+    CHECK_THROWS(h.submit(t), VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+    CHECK(h.session->state() == SessionState::Failed);
+}
+
+void test_ubwc_import_is_zero_copy()
+{
+    FakeConfig fc;
+    fc.capture_pixelformat = V4L2_PIX_FMT_QC08C;
+    Harness h(fc, fast_options(), ubwc_config());
+    ClientBuffer a(ubwc_client_layout(fc.coded_width, fc.coded_height));
+    auto t = make_ubwc_target(Publish::Import);
+    t->destination = a.stable.get();
+    h.submit(t);
+    CHECK(h.session->capture_memory() == CaptureMemory::Import);
+    h.session->wait(t);
+    CHECK(t->completed && !t->error && t->frame == nullptr);
+    CHECK(same_buffer(h.fake->capture_fd(0), a.fd));
+}
+
+void test_ubwc_import_mismatch_fails_instead_of_copying()
+{
+    // A linear client buffer against a compressed capture: Import cannot be
+    // honoured and Copy would write compressed slot bytes into the client's
+    // buffer. The picture must fail.
+    FakeConfig fc;
+    fc.capture_pixelformat = V4L2_PIX_FMT_QC08C;
+    Harness h(fc, fast_options(), ubwc_config());
+    ClientBuffer a(stable_layout(VA_FOURCC_NV12, fc.coded_width, fc.coded_height));
+    auto t = make_ubwc_target(Publish::Import);
+    t->destination = a.stable.get();
+    h.submit(t);
+    CHECK(h.session->capture_memory() == CaptureMemory::Mmap);
+    CHECK_THROWS(h.session->wait(t), VA_STATUS_ERROR_UNIMPLEMENTED);
+    CHECK(t->error);
+}
+
+void test_ubwc_copy_publish_is_refused()
+{
+    FakeConfig fc;
+    fc.capture_pixelformat = V4L2_PIX_FMT_QC08C;
+    Harness h(fc, fast_options(), ubwc_config());
+    auto t = make_ubwc_target(Publish::Copy);
+    CHECK_THROWS(h.submit(t), VA_STATUS_ERROR_UNIMPLEMENTED);
+}
+
+void test_ubwc_modifier_cannot_change_inside_a_context()
+{
+    FakeConfig fc;
+    fc.capture_pixelformat = V4L2_PIX_FMT_QC08C;
+    Harness h(fc, fast_options(), ubwc_config());
+    auto t = make_ubwc_target();
+    h.submit(t);
+    auto second = make_target(); // a linear surface in a compressed context
+    CHECK_THROWS(h.submit(second), VA_STATUS_ERROR_INVALID_PARAMETER);
+}
+
 } // namespace
 
 int main()
@@ -1256,6 +1372,13 @@ int main()
         { "import install hidden frame lends one buffer twice",
             test_import_install_hidden_frame_lends_one_buffer_twice },
         { "import alt-ref does not stall the next picture", test_import_altref_does_not_stall_the_next_picture },
+        { "UBWC capture uses the Q08C layout", test_ubwc_capture_uses_the_q08c_layout },
+        { "UBWC capture layout mismatch is refused", test_ubwc_capture_layout_mismatch_is_refused },
+        { "UBWC import is zero copy", test_ubwc_import_is_zero_copy },
+        { "UBWC import mismatch fails instead of copying", test_ubwc_import_mismatch_fails_instead_of_copying },
+        { "UBWC copy publish is refused", test_ubwc_copy_publish_is_refused },
+        { "UBWC modifier cannot change inside a context",
+            test_ubwc_modifier_cannot_change_inside_a_context },
     };
     int ran = 0;
     for (const auto& c : cases) {

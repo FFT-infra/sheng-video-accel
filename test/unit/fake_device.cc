@@ -3,6 +3,7 @@
 #include "fake_device.h"
 
 #include "../../src/util/error.h"
+#include "../../src/util/prime.h"
 
 #include <cstring>
 #include <numeric>
@@ -35,12 +36,19 @@ FormatInfo FakeDevice::current_format(Queue queue)
         info.num_planes = 1;
         info.sizeimage = config_.au_capacity;
     } else {
-        info.pixelformat = V4L2_PIX_FMT_NV12;
+        info.pixelformat = config_.capture_pixelformat;
         info.width = config_.coded_width;
         info.height = config_.coded_height;
         info.num_planes = 1;
         info.bytesperline = config_.stride;
         info.sizeimage = config_.stride * config_.coded_height * 3 / 2;
+        if (info.pixelformat == V4L2_PIX_FMT_QC08C) {
+            // iris_vdec.c CAPTURE S_FMT: luma pitch aligned to 128 and the
+            // buffer holding the four-plane UBWC layout.
+            info.bytesperline = (config_.coded_width + 127) & ~127u;
+            if (config_.ubwc_sizeimage)
+                info.sizeimage = iris::ubwc_layout(config_.coded_width, config_.coded_height).size;
+        }
     }
     return info;
 }

@@ -10,22 +10,37 @@
 // reports what the node does: whether SOURCE_CHANGE arrives, what CAPTURE
 // format the pool gets, and which pictures complete with an error.
 //
-// The input is an IVF file, one access unit per frame record (VP9 / AV1).
+// The input is an IVF file, one access unit per frame record (VP9 / AV1), or
+// an Annex-B stream with one access unit delimiter per picture.
 //
-// Usage: iris-decode-stream-probe <node> <stream.ivf> [capture=NV12|P010]
+// Usage: iris-decode-stream-probe <node> <stream> [capture=NV12|P010|Q08C]
+//                                  [h264|hevc <width> <height>]
+//
+// Q08C asks the node for the four-plane UBWC CAPTURE format. Set
+// IRIS_PROBE_DUMP=<dir> to write every completed frame's bytes there: the
+// gate's UBWC read-back compares the compressed dump against a linear decode
+// of the same stream.
+//
+// The AV1 path here feeds raw temporal units: the driver's AV1 internal-DPB
+// translator lives at the VA layer, so a stream whose frames reference hidden
+// pictures fails at the raw-AU level for the linear and compressed captures
+// alike. An all-intra stream exercises the same CAPTURE path.
 //
 // Exit status: 0 when every access unit completed without an error, 1 when
 // one failed or the session refused the stream, 2 on usage or open failure.
 
+#include "../src/codec/annexb.h"
 #include "../src/iris/session.h"
 
 #include "../src/util/error.h"
 #include "../src/util/fourcc.h" // V4L2_PIX_FMT_AV1 on headers that predate it
 #include "../src/util/options.h"
+#include "../src/util/prime.h"
 #include "../src/util/trace.h"
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -35,6 +50,7 @@ extern "C" {
 #include <va/va.h>
 
 #include <fcntl.h>
+#include <linux/dma-buf.h>
 #include <unistd.h>
 }
 
@@ -107,23 +123,85 @@ bool parse_ivf(const std::vector<uint8_t>& bytes, std::vector<Frame>& frames, un
     return !frames.empty();
 }
 
+// Annex-B: a new access unit starts at an access unit delimiter, so the gate
+// streams must carry one (ffmpeg's h264_metadata/hevc_metadata with
+// aud=insert). A stream without delimiters is refused rather than guessed
+// at: splitting on slice headers would need the parameter sets parsed.
+bool parse_annexb(const std::vector<uint8_t>& bytes, iris::codec::Codec which,
+    std::vector<std::vector<uint8_t>>& owned, std::vector<Frame>& frames)
+{
+    const auto units = iris::codec::split_annexb(bytes.data(), bytes.size(), which);
+    const uint8_t aud = which == iris::codec::Codec::H264 ? 9 : 35;
+    std::vector<uint8_t> leading; // parameter sets before the first delimiter
+    bool any_aud = false;
+    for (const auto& unit : units) {
+        if (unit.type == aud) {
+            owned.emplace_back(leading);
+            owned.back().insert(owned.back().end(), unit.bytes.begin(), unit.bytes.end());
+            leading.clear();
+            any_aud = true;
+            continue;
+        }
+        if (owned.empty())
+            leading.insert(leading.end(), unit.bytes.begin(), unit.bytes.end());
+        else
+            owned.back().insert(owned.back().end(), unit.bytes.begin(), unit.bytes.end());
+    }
+    if (!any_aud || owned.empty())
+        return false;
+    frames.reserve(owned.size());
+    for (const auto& unit : owned)
+        frames.push_back({ unit.data(), unit.size() });
+    return true;
+}
+
+// The whole DMA-BUF, as the firmware wrote it. A compressed dump is the four
+// Q08C planes; a linear one is the CAPTURE layout (pitch-aligned rows).
+bool dump_frame(const char* dir, size_t index, iris::Frame& frame)
+{
+    const std::string path = std::string(dir) + "/frame-" + std::to_string(index) + ".bin";
+    FILE* file = std::fopen(path.c_str(), "wb");
+    if (!file) {
+        std::perror("dump frame");
+        return false;
+    }
+    // The CPU view of the CAPTURE slot: dma-buf fds on this kernel do not
+    // take pread, and the mmap is the same one the CPU copy engine uses. The
+    // sync is load-bearing — without it the CPU reads lines the firmware's
+    // writes never invalidated, and a compressed dump comes back half stale.
+    const unsigned size = frame.layout().size;
+    const uint8_t* bytes = frame.map();
+    iris::dma_buf_cpu_sync(frame.fd(), DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ);
+    const size_t written = bytes ? std::fwrite(bytes, 1, size, file) : 0;
+    iris::dma_buf_cpu_sync(frame.fd(), DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
+    std::fclose(file);
+    const bool ok = written == size;
+    std::printf("INFO dump=%s bytes=%u ok=%d\n", path.c_str(), size, ok ? 1 : 0);
+    return ok;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
 {
     if (argc < 3) {
-        std::fprintf(stderr, "usage: %s <node> <stream.ivf> [capture=NV12|P010]\n", argv[0]);
+        std::fprintf(stderr,
+            "usage: %s <node> <stream> [capture=NV12|P010|Q08C] [h264|hevc <width> <height>]\n", argv[0]);
         return 2;
     }
     uint32_t capture_fourcc = VA_FOURCC_P010;
+    uint64_t capture_modifier = DRM_FORMAT_MOD_LINEAR;
     if (argc > 3) {
         const std::string capture = argv[3];
         if (capture == "NV12")
             capture_fourcc = VA_FOURCC_NV12;
         else if (capture == "P010")
             capture_fourcc = VA_FOURCC_P010;
-        else {
-            std::fprintf(stderr, "capture must be NV12 or P010\n");
+        else if (capture == "Q08C") {
+            capture_fourcc = VA_FOURCC_NV12;
+            capture_modifier = DRM_FORMAT_MOD_QCOM_COMPRESSED;
+        } else {
+            std::fprintf(stderr, "capture must be NV12, P010 or Q08C\n");
             return 2;
         }
     }
@@ -137,7 +215,28 @@ int main(int argc, char** argv)
     unsigned width = 0;
     unsigned height = 0;
     std::string codec;
-    if (!parse_ivf(bytes, frames, width, height, codec)) {
+    uint32_t codec_pixelformat = V4L2_PIX_FMT_VP9;
+    std::vector<std::vector<uint8_t>> owned; // Annex-B access units
+    if (argc > 4) {
+        const std::string annexb = argv[4];
+        if (annexb != "h264" && annexb != "hevc") {
+            std::fprintf(stderr, "the Annex-B codec is h264 or hevc\n");
+            return 2;
+        }
+        if (argc < 7) {
+            std::fprintf(stderr, "an Annex-B stream needs the coded width and height\n");
+            return 2;
+        }
+        codec = annexb == "h264" ? "H264" : "HEVC";
+        codec_pixelformat = annexb == "h264" ? V4L2_PIX_FMT_H264 : V4L2_PIX_FMT_HEVC;
+        width = static_cast<unsigned>(std::strtoul(argv[5], nullptr, 10));
+        height = static_cast<unsigned>(std::strtoul(argv[6], nullptr, 10));
+        const auto which = annexb == "h264" ? iris::codec::Codec::H264 : iris::codec::Codec::Hevc;
+        if (!parse_annexb(bytes, which, owned, frames)) {
+            std::fprintf(stderr, "%s has no Annex-B access unit delimiters\n", argv[2]);
+            return 2;
+        }
+    } else if (!parse_ivf(bytes, frames, width, height, codec)) {
         std::fprintf(stderr, "%s is not an IVF file with frames\n", argv[2]);
         return 2;
     }
@@ -154,17 +253,21 @@ int main(int argc, char** argv)
     }
     std::printf("INFO node=%s codec=%s %ux%u frames=%zu capture=%s\n", device->path().c_str(),
         codec.c_str(), width, height, frames.size(),
-        capture_fourcc == VA_FOURCC_P010 ? "P010" : "NV12");
+        capture_modifier == DRM_FORMAT_MOD_QCOM_COMPRESSED ? "Q08C"
+                                                           : (capture_fourcc == VA_FOURCC_P010 ? "P010" : "NV12"));
 
     iris::SessionConfig config;
-    config.codec_pixelformat = V4L2_PIX_FMT_VP9;
+    config.codec_pixelformat = codec_pixelformat;
     if (codec == "AV01")
         config.codec_pixelformat = V4L2_PIX_FMT_AV1;
     config.capture_fourcc = capture_fourcc;
+    config.capture_modifier = capture_modifier;
     config.width = width;
     config.height = height;
     config.surface_count = 8;
     config.output_slots = 4;
+
+    const char* dump_dir = std::getenv("IRIS_PROBE_DUMP");
 
     bool all_ok = true;
     try {
@@ -173,6 +276,7 @@ int main(int argc, char** argv)
             auto target = std::make_shared<iris::Target>();
             target->publish = iris::Publish::Direct;
             target->fourcc = capture_fourcc;
+            target->modifier = capture_modifier;
             target->width = width;
             target->height = height;
             try {
@@ -181,6 +285,8 @@ int main(int argc, char** argv)
                 std::printf("INFO frame=%zu completed=1 error=%d\n", i, target->error ? 1 : 0);
                 if (target->error)
                     all_ok = false;
+                if (dump_dir && target->frame && !target->error)
+                    dump_frame(dump_dir, i, *target->frame);
             } catch (const iris::Error& error) {
                 std::printf("INFO frame=%zu failed=%s\n", i, error.what());
                 all_ok = false;
@@ -190,8 +296,16 @@ int main(int argc, char** argv)
             session.release(target);
             if (i == 0) {
                 const iris::Layout& layout = session.capture_layout();
-                std::printf("INFO capture fourcc=%#x stride=%u size=%u\n", layout.fourcc, layout.stride,
-                    layout.size);
+                if (layout.compressed()) {
+                    std::printf("INFO capture fourcc=%#x modifier=%#llx planes=%u size=%u\n", layout.fourcc,
+                        static_cast<unsigned long long>(layout.modifier), layout.plane_count, layout.size);
+                    for (unsigned p = 0; p < layout.plane_count; ++p)
+                        std::printf("INFO plane=%u offset=%u pitch=%u rows=%u\n", p, layout.planes[p].offset,
+                            layout.planes[p].pitch, layout.planes[p].rows);
+                } else {
+                    std::printf("INFO capture fourcc=%#x stride=%u size=%u\n", layout.fourcc, layout.stride,
+                        layout.size);
+                }
             }
         }
         session.finish();
