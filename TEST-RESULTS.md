@@ -161,6 +161,13 @@ change and 0016 in the working tree, decoder resolved by name:
   registered seven elements, `vaav1dec` decoded the 120-frame clip
   frame-identical to the software decode, and `vah264enc` and `vah265enc`
   each returned 60/60 frames (`gates-gstreamer-sg2`).
+- Chrome on boot `af805219…`, whose 8K gates recorded `pool=15` with module
+  `ca7aa394…`: Chrome 156 selected `VaapiVideoDecoder` with
+  `kIsPlatformVideoDecoder=true` from the installed driver `d15ff198…`,
+  decoded 357 frames in a 15-second window with 0 dropped frames of an HEVC
+  clip, and its GPU process held the resolved decoder node
+  (`browser-acceptance/hevc-probe-20261119-013622`). The browser path is
+  therefore covered under `capture_sg=1` as well.
 - 8K decode throughput, 30 frames per codec on that boot with the installed
   driver (`gates-sg-throughput2`, `gates-throughput-contig`): the automatic
   policy at `capture_sg=1` (Direct) decoded H.264 at 59.6 fps and HEVC at
