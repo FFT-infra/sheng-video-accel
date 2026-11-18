@@ -171,6 +171,17 @@ executable(
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 
+# Hardware probe, built but not registered as a meson test: long-term
+# references have no VA-side field, so the probe drives the V4L2 encoder node
+# itself and writes the three kernel controls. Two otherwise identical
+# sessions, one marking and using an LTR frame, say whether the firmware acts
+# on the request: byte-identical streams mean it ignores it.
+executable(
+  'iris-encode-ltr-probe',
+  'iris-encode-ltr-probe.cc',
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+
 # Hardware probe, built but not registered as a meson test: an encode misc
 # parameter buffer can arrive with an element too small for its header. The
 # host unit tests cannot open an encoder context, so this drives the refusal

@@ -449,6 +449,26 @@ in `~/Lab/Bridge/tmp/hevc-b/exp-src` and loaded through `LIBVA_DRIVERS_PATH`.
 HEVC B stays refused in `configure()` and unadvertised; the capability table
 records the boundary.
 
+Long-term references, 11-19: `test/iris-encode-ltr-probe` drives the encoder
+node directly, because VA 2.23 has no encode-side LTR field and this driver
+exposes none. Run identity: same boot, kernel and 0017 module as the ROI run
+above; the probe was built from source commit `421c716` plus the working-tree
+changes and resolves the encoder node itself by `iris_driver` QUERYCAP name.
+
+- The node registers `V4L2_CID_MPEG_VIDEO_LTR_COUNT`,
+  `..._FRAME_LTR_INDEX` and `..._USE_LTR_FRAMES`, and accepts `LTR_COUNT` only
+  with a non-CBR rate mode; the probe runs VBR at 2 Mbit/s, 640x480, GOP 30.
+- Three otherwise identical 60-picture sessions: one writes neither control,
+  one marks picture 10 as the LTR frame, one also tells picture 12 to predict
+  from it. The mark alone changes the coded pictures (`d54d5825…` against
+  `ce22f5a8…`), and the reference request changes them again
+  (`5f7a9b89…`), with the first differing picture at 10 and picture 12 among
+  the 49 that differ.
+- All three streams decode to 60 frames with no error.
+
+The kernel and firmware support LTR end to end. There is still no VA interface
+and no client, so the driver advertises none; the capability table says so.
+
 ## Throughput
 
 CPU policies in `performance` at their maximum (2016/2803/2956 MHz), GPU in
