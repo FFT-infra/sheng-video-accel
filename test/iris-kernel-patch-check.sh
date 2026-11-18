@@ -60,16 +60,16 @@ if [ -n "$bad" ]; then
     fail "recorded hash does not match: $bad"
 fi
 
-# Only the fourteen patches may be listed, and every one of them must be.
-# 0001-0007 apply to sheng-7.2.6; 0008-0014 are the 7.3.4 set.
+# Only the fifteen patches may be listed, and every one of them must be.
+# 0001-0007 apply to sheng-7.2.6; 0008-0015 are the 7.3.4 set.
 listed=$(awk '{print $2}' "$sums")
-for name in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011 0012 0013; do
+for name in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011 0012 0013 0014 0015; do
     printf '%s\n' "$listed" | grep -q "^$name-" \
         || fail "SHA256SUMS does not record $name"
 done
 count=$(printf '%s\n' "$listed" | grep -c '\.patch$' || true)
-[ "$count" -eq 14 ] \
-    || fail "SHA256SUMS must record exactly fourteen patches, found $count"
+[ "$count" -eq 15 ] \
+    || fail "SHA256SUMS must record exactly fifteen patches, found $count"
 for name in $(printf '%s\n' "$listed" | grep '\.patch$'); do
     [ -f "$kernel_dir/$name" ] || fail "SHA256SUMS records a file that is not there: $name"
 done
@@ -178,6 +178,15 @@ expect_marker "$kernel_dir/0014-7.3.4-encode-p010.patch" \
 expect_marker "$kernel_dir/0014-7.3.4-encode-p010.patch" \
     '+	HFI_PROP_LUMA_CHROMA_BIT_DEPTH,' 1
 
+# 0015 is only useful if the codec id and the two caps all land: an id alone
+# reaches no profile control, and a cap alone has nothing to select it.
+expect_marker "$kernel_dir/0015-7.3.4-mpeg2-decode.patch" \
+    '+	HFI_CODEC_DECODE_MPEG2			= 6,' 1
+expect_marker "$kernel_dir/0015-7.3.4-mpeg2-decode.patch" \
+    '+		.cap_id = PROFILE_MPEG2,' 1
+expect_marker "$kernel_dir/0015-7.3.4-mpeg2-decode.patch" \
+    '+		.cap_id = LEVEL_MPEG2,' 1
+
 # 0004's whole point is that the copy lands in the ERROR branch. Checking the
 # line order inside the hunk is what distinguishes that from a copy added to
 # the normal completion path, where the timestamp was already correct.
@@ -272,4 +281,4 @@ if [ "$failures" -ne 0 ]; then
     printf 'FAIL kernel patches: %d problem(s)\n' "$failures" >&2
     exit 1
 fi
-printf 'PASS kernel patches: fourteen files, recorded hashes, Iris-only paths\n'
+printf 'PASS kernel patches: fifteen files, recorded hashes, Iris-only paths\n'

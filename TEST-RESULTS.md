@@ -77,6 +77,26 @@ covers the firmware minimum plus eight pictures and publishes Copy
 otherwise; `V4L2_VA_PUBLISH=direct` still forces the old behaviour and still
 stalls at 26/30, which is what made the mechanism attributable.
 
+Import works at this geometry: `V4L2_VA_PUBLISH=import` decodes all four
+codecs 30/30 framemd5-exact with `pool=8 memory=import` and `errors=0 last=1
+drain=1` (record `gate-8k-import-1118b`), and a 120-picture H.264 clip
+completes 120/120 exact under Import (`gate-8k120-import`) and under the
+automatic policy (`gate-8k120-auto`, which publishes Copy at this pool). Run
+identity for the three: boot `edd37f6a-cb04-42b0-b9b7-96360172a5ca`, module
+`a3732c1c…`, driver `821bf2a8…` as a `LIBVA_DRIVERS_PATH` build-tree
+override, source commit `249a650` with the attribute work in the working
+tree, decoder node resolved by name.
+
+Direct cannot fit at 8K on this device. The policy asks for the firmware
+minimum plus eight held pictures, 15 for H.264 and HEVC, and an 8K NV12
+frame is 47.5 MiB, so that pool alone is about 713 MiB. The mainline
+`sm8550.dtsi` iris node has no `iommus` property and the driver's queues use
+`vb2_dma_contig_memops`, so the CAPTURE pool is contiguous DMA memory from
+the 768 MiB CMA carve-out (`CmaTotal` 786432 kB on this boot). The memory
+budget grants the 8-frame, 380 MiB pool instead. Growing it is a boot-image
+change (IOMMU or a larger carve-out), not a module or driver change, and
+`V4L2_VA_PUBLISH=direct` still stalls at 26/30 as recorded above.
+
 VP9 12-bit and AV1 12-bit are refused at profile selection; 4:4:4 and
 large-scale tile are outside the advertised profiles or cleanly refused by
 the translators. The capability table names each rejection.
@@ -89,6 +109,25 @@ through the session, which passes compressed data through untouched. A
 stream never raises SOURCE_CHANGE, on either the P010 or the NV12 lane, so
 the node itself refuses it before a picture exists. The node has no 12-bit
 CAPTURE format to offer (NV12, Q08C, P010, Q10C).
+
+MPEG-2 is not available from this firmware. The SM8550 video firmware blob
+contains the MPEG-2 decoder (it names `mpeg2Dec_SessionSetBuffers` and the
+`MPEG2Decoder` queues), and HFI codec 6 is `HFI_CODEC_DECODE_MPEG2` in the
+vendor headers, so `packaging/kernel/0015-*` registers `V4L2_PIX_FMT_MPEG2`
+on the decoder, sends codec 6 and carries the MPEG-2 profile and level
+tables. On the target the node then enumerates `MPG2` and registers
+`mpeg2_profile` and `mpeg2_level` (Main default), but a session that starts
+an MPEG-2 stream never produces a CAPTURE frame: the firmware answers
+`received system error of type 0x5000003` while the core is opening the
+session, the core moves to its error state and the firmware reloads. A
+known-good H.264 stream decodes to EOS on the same module afterwards. The
+driver's side of the experiment works, so the firmware's codec allow-list is
+what excludes MPEG-2; MPEG-2 runs in software. Run identity: boot
+`770e5fea-096c-491d-ae8f-ab28d0aaf1f1`, kernel
+`7.3.4-sm8550-00104-g87ac0f2347eb`, module `9885d2b4…` installed in
+`/lib/modules` (patches 0008, 0009, 0013, 0014, 0015), decoder node
+`/dev/video17` resolved by the `iris_driver` name, client GStreamer
+`v4l2mpeg2dec` on a 30-frame 320x240 MPEG-2 elementary stream.
 
 `test/iris-two-player-gate.sh` runs two independent 1920x1080 H.264 clients
 with their own VA display and trace, a and b 90/90 exact, `errors=0 last=1`.

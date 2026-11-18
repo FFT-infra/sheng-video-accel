@@ -2,12 +2,12 @@
 
 Two patch sets live here. 0001-0007 target `sheng-7.2.6`
 (`42f3b40c702a`): four qualified patches, plus three experimental ones.
-0008-0014 target `sheng-7.3.4` (`87ac0f2347eb`), whose in-tree driver already
+0008-0015 target `sheng-7.3.4` (`87ac0f2347eb`), whose in-tree driver already
 carries the request-sync-frame control and the stability fixes that 7.2.6
 needs patches for, so the 7.3.4 set is smaller. 0008-0009 are qualified;
 0010-0012 are drain and IRQ backports with one target run each, recorded in
-`TEST-RESULTS.md`. 0013 adds the encoder multi-slice controls, and 0014 adds
-P010 input for HEVC Main 10 encode.
+`TEST-RESULTS.md`. 0013 adds the encoder multi-slice controls, 0014 adds
+P010 input for HEVC Main 10 encode, and 0015 is an MPEG-2 decode experiment.
 
 Only 0001-0004 make up the 7.2.6 module; on 7.3.4 the qualified set is
 0008-0009. `TEST-RESULTS.md` records the hardware evidence for the qualified
@@ -38,6 +38,7 @@ at runtime and degrades gracefully on stock kernels.
 | `0012-7.3.4-quiesce-irq-before-core-lock.patch` | Project SunUEFI media patch | Disables the Iris IRQ around the `core->lock` section in `iris_core_deinit()` | **Experimental, one target run 11-18.** On the qualified module `modprobe -r qcom_iris` hung in `D` state with the module in `Unloading`, its stack at `disable_irq -> __synchronize_irq` from `iris_core_deinit`. With this patch the same unload and a following reload each completed in under a second and both nodes re-probed. Not part of the qualified baseline. |
 | `0013-7.3.4-multi-slice.patch` | this repository | Exposes `V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE`, `..._MAX_BYTES` and `..._MAX_MB` on the 7.3.4 encoder and maps the selected mode to `HFI_PROP_MULTI_SLICE_MB_COUNT` / `..._BYTES_COUNT` | **Experimental, one target run 11-18.** The controls appear on the encoder node, and `test/iris-encode-slice-probe` through the build-tree driver coded 4 slices per picture for H.264 and HEVC at 640x480, with `max_slices=128` and the arbitrary-macroblock structure advertised (TEST-RESULTS.md, Encode). The setter rejects anything the firmware does not take: only CBR or CQP, up to 60 fps, within the slice geometry bounds. Without it every encoded frame is one slice and `VAConfigAttribEncMaxSlices` can only answer 1. |
 | `0014-7.3.4-encode-p010.patch` | this repository | Lists `V4L2_PIX_FMT_P010` on the 7.3.4 encoder's raw queue with a 256-aligned byte pitch, sizes the input with `iris_yuv_buffer_size_p010()`, maps P010/QC10C to their HFI color formats, sends `HFI_PROP_LUMA_CHROMA_BIT_DEPTH` for an encoder and passes the 10-bit flag to the line/scratch/VPSS helpers | **Experimental, one target run 11-18.** Applies after 0013. FFmpeg's `hevc_vaapi -profile:v main10` encoded 60 frames through P010 at SSIM 0.9995 mean (0.9973 worst), the stream reports Main 10 / yuv420p10le, and the 8-bit lane still passes in the same run (TEST-RESULTS.md, Encode). Without it the encoder's raw queue accepts NV12 only, so no VA client can feed a 10-bit picture and `VAProfileHEVCMain10` is not advertised. |
+| `0015-7.3.4-mpeg2-decode.patch` | this repository | Registers `V4L2_PIX_FMT_MPEG2` on the SM8550 decoder, maps it to HFI codec 6, and adds the MPEG-2 profile/level caps, port-settings-change list, output subscription and response mapping; internal buffers reuse the H.264 sizes | **Experimental.** Applies after 0014. The SM8550 firmware blob contains MPEG-2 decoder code and Qualcomm's platform data for this HFI generation lists the MPEG-2 tables, but the SM8550 vendor driver has no MPEG-2 codec, so the codec allow-list of this firmware build is unknown. **One target run 11-18: refused by the firmware.** The node enumerates `MPG2` and the profile/level controls appear, but opening a session with codec 6 raises `received system error of type 0x5000003`, the core goes to its error state and the firmware reloads; MPEG-2 is not enabled in this firmware build, and no codec, profile or format is claimed. TEST-RESULTS.md records the run. |
 
 ## Integrity
 
@@ -73,6 +74,9 @@ sh packaging/kernel/build-module.sh --source linux \
 # Experimental only: encoder multi-slice controls and P010 input (apply in order).
 sh packaging/kernel/build-module.sh --source linux \
     --patch 0008 --patch 0009 --patch 0013 --patch 0014
+# Experimental only: MPEG-2 decode, on top of the set above.
+sh packaging/kernel/build-module.sh --source linux \
+    --patch 0008 --patch 0009 --patch 0013 --patch 0014 --patch 0015
 ```
 
 On 7.3.4, `CONFIG_LOCALVERSION_AUTO` appends `-g<sha>` to the release, so a
@@ -123,7 +127,7 @@ The `[5] optional kernel controls` section resolves both nodes by the
 `iris_driver` name and reports `display_delay`, `min_number_of_capture_buffers`,
 `force_key_frame` and the loop-filter controls.
 
-The fourteen patch files are kernel fragments targeting GPL-2.0-only sources under
+The fifteen patch files are kernel fragments targeting GPL-2.0-only sources under
 `drivers/media/platform/qcom/iris/`. They are not compiled into the MIT driver
 package, so they have no SPDX header of their own; the patched files keep the
 kernel's own identifier. `SHA256SUMS` pins each patch for the downstream
