@@ -611,6 +611,13 @@ void test_reference_and_slice_shape()
     check(p_params.reconstruction == picture.CurrPic.picture_id,
         "the reconstruction surface comes from CurrPic");
 
+    // The client's raw packed headers travel with the picture unchanged: the
+    // session splices them into the access unit, so the translator must not
+    // drop or rewrite them.
+    p_picture.packed_headers = { { 0, 0, 1, 0x06, 0x05, 0x01 } };
+    check(h264->translate(p_picture).prefix_nals == p_picture.packed_headers,
+        "raw packed headers pass through the translator");
+
     // An intra picture needs no reference, even if the slice list carries a
     // stale one.
     VAEncSliceParameterBufferH264 i_slice = h264_slice(sequence, true);

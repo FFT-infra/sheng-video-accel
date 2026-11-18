@@ -178,6 +178,11 @@ struct Context {
     // keeps the bytes valid even after vaDestroyBuffer removed it from the
     // table; the parameters still describe the stream.
     std::shared_ptr<Buffer> enc_sequence;
+    // A packed-header parameter buffer that has arrived without its data
+    // buffer yet. VA renders the two as an ordered pair; the data buffer
+    // completes it and becomes one prefix NAL on the picture.
+    bool enc_packed_pending = false;
+    uint32_t enc_packed_bits = 0;
     uint64_t enc_frames = 0;
     // The picture most recently submitted from each input surface. A client
     // that syncs the surface instead of the coded buffer (VA's older

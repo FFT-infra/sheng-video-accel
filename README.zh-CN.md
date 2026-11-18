@@ -117,7 +117,7 @@ HEVC Main 8-bit，FFmpeg 8.1.3。CPU 锁最高频，GPU 锁 680 MHz。解码不�
 - **编码**：客户端给出的切片列表变成宏块预算（`ceil(宏块数 / 切片数)`），仅 CBR 或 CQP、≤60 fps、≤4096x2160，并需要 0013 内核补丁；没有补丁时每帧只有一整片，`VAConfigAttribEncMaxSlices` 答 1。分块与 ROI 返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。B 帧需 `V4L2_VA_B_FRAMES` 开启，仅 H.264，客户端需保持至少三帧在途（FFmpeg：`-bf 1 -async_depth 3`）。
 - **intra refresh**：滚动行请求（`VAEncMiscParameterRIR`）在 CBR 下生效，VBR/CQP 下拒绝。`ltr_count`/`frame_ltr_index`/`use_ltr_frames` 不声明。
 - **时域分层**：`VAEncMiscParameterTemporalLayerStructure` 给出 1-6 层，固件按层数自行推导成员关系，客户端给的层 id 只做越界检查；不支持逐层码率。节点注册了分层控件时通过 `VAConfigAttribEncRateControlExt` 声明。
-- **封装头**：extradata 报告 `VA_ENC_PACKED_HEADER_NONE`，参数集随码流带内传输。
+- **封装头**：`VAConfigAttribEncPackedHeaders` 答 `VA_ENC_PACKED_HEADER_MISC`。客户端给的原始封装头（`VAEncPackedHeaderRawData`）插在参数集之后、第一个 slice 之前；FFmpeg `hevc_vaapi` 的 HDR10 mastering display、content light level 和字幕 SEI 都走这条路。序列头与 slice 头仍不支持，固件自己写；参数集随码流带内传输。
 - **UBWC**：需显式开启（`V4L2_VA_UBWC=1`），只有 8 位 Q08C，且只能走 Direct 或 Import 发布。Copy 路径、`vaDeriveImage`/`vaGetImage`/`vaPutImage`、film grain、视频处理与编码器没有解压器，遇到压缩表面直接拒绝。Q10C 没有读取方，不提供；导入必须带修饰符和内核的四平面偏移。
 
 ## 环境变量

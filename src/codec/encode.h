@@ -34,6 +34,9 @@ struct EncodePicture {
     // VAEncSliceParameterBuffer<Codec>. The firmware owns the slice layout,
     // but CQP takes the picture QP from the first slice's delta.
     std::vector<const void*> slices;
+    // Raw packed headers the client sent with this picture, in render order.
+    // Each is one Annex-B NAL as the client wrote it, start code included.
+    std::vector<std::vector<uint8_t>> packed_headers;
     unsigned surface_width = 0, surface_height = 0;
 };
 

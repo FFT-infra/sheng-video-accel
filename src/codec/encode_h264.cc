@@ -385,6 +385,7 @@ public:
             require(qp >= 1 && qp <= 51, "encode QP is out of range", VA_STATUS_ERROR_INVALID_PARAMETER);
             out.qp = qp;
         }
+        out.prefix_nals = picture.packed_headers;
         return out;
     }
 

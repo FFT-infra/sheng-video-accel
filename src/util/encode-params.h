@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 namespace iris {
 
@@ -105,6 +106,12 @@ struct EncodeParams {
     // not include va.h.
     uint32_t reconstruction = 0;
     uint32_t reference = 0;
+    // The raw packed headers the client rendered with this picture, each an
+    // Annex-B NAL with its start code (VAEncPackedHeaderRawData). The
+    // firmware writes the parameter sets itself but has no SEI input, so the
+    // encoder session inserts these in front of the first coded-picture NAL
+    // of the access unit. Empty leaves the stream untouched.
+    std::vector<std::vector<uint8_t>> prefix_nals;
 };
 
 } // namespace iris

@@ -191,8 +191,13 @@ Q08C offsets under the `QCOM_COMPRESSED` modifier. Anything else returns
 - **Intra refresh**: rolling-row requests (`VAEncMiscParameterRIR`) are honoured
   under CBR and refused under VBR/CQP. `ltr_count`, `frame_ltr_index` and
   `use_ltr_frames` are not advertised.
-- **Packed headers**: extradata reports `VA_ENC_PACKED_HEADER_NONE`; parameter
-  sets travel in-band.
+- **Packed headers**: `VAConfigAttribEncPackedHeaders` answers
+  `VA_ENC_PACKED_HEADER_MISC`. The client's raw packed header
+  (`VAEncPackedHeaderRawData`) is spliced into the access unit behind the
+  parameter sets and in front of the first slice, which is how FFmpeg's
+  `hevc_vaapi` carries HDR10 mastering-display, content-light-level and
+  caption SEI. Sequence and slice packed headers stay unsupported because the
+  firmware writes them itself; parameter sets travel in-band.
 - **UBWC**: opt-in (`V4L2_VA_UBWC=1`), 8-bit Q08C only, and only through Direct
   or Import publication. The Copy path, `vaDeriveImage`/`vaGetImage`/
   `vaPutImage`, film grain, video processing and the encoder have no

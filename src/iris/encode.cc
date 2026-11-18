@@ -781,6 +781,19 @@ bool EncoderSession::complete_one()
     // decode. Prefix the ones the last access unit carried.
     if (picture.force_idr && prepare_)
         result.bytes = prepare_(result.bytes, parameter_sets_);
+    // The client's raw packed headers (SEI) travel in front of the coded
+    // picture. The firmware wrote the parameter sets itself, so inserting
+    // them before the first slice puts them after those sets, where a
+    // decoder expects a prefix SEI.
+    if (!picture.params.prefix_nals.empty()) {
+        const codec::Codec codec = config_.codec == V4L2_PIX_FMT_H264 ? codec::Codec::H264 : codec::Codec::Hevc;
+        size_t bytes = 0;
+        for (const std::vector<uint8_t>& nal : picture.params.prefix_nals) {
+            result.bytes = codec::insert_before_vcl(result.bytes, nal, codec);
+            bytes += nal.size();
+        }
+        trace_("encode packed header bytes=%zu count=%zu", bytes, picture.params.prefix_nals.size());
+    }
     // No picture type here: the SM8550 encoder firmware does not send frame
     // info, so V4L2_BUF_FLAG_KEYFRAME is always clear. The bitstream is the
     // evidence (an IDR NAL at every GOP boundary).

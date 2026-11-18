@@ -136,13 +136,14 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
                 : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribEncPackedHeaders:
-            // NONE, not NOT_SUPPORTED. The firmware writes SPS/PPS itself, so
-            // there is no packed header to accept, but "not supported" tells a
-            // client the attribute is unknown and GStreamer's vah264enc /
-            // vah265enc refuse to open a driver that answers that way. Value
-            // zero means "known, and no packed header is supported", which is
-            // exactly the truth.
-            attributes[i].value = encode ? VA_ENC_PACKED_HEADER_NONE : VA_ATTRIB_NOT_SUPPORTED;
+            // MISC, not NOT_SUPPORTED. The firmware writes SPS/PPS and the
+            // slice headers itself, so the only packed header this driver can
+            // carry is the client's raw one: FFmpeg's HEVC encoder turns MISC
+            // into VAEncPackedHeaderRawData for its SEI (mastering display,
+            // content light level, closed captions) and the session splices
+            // it into the access unit. "Not supported" tells a client the
+            // attribute is unknown and GStreamer's encoders refuse to open.
+            attributes[i].value = encode ? VA_ENC_PACKED_HEADER_MISC : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribEncMaxSlices:
             // GStreamer reads this and clamps its own slice count to it, so a

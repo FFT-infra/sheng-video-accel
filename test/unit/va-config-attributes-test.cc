@@ -88,6 +88,22 @@ int main()
     check(query(p, VAProfileH264High, enc, VAConfigAttribEncIntraRefresh).value
             == VA_ENC_INTRA_REFRESH_ROLLING_ROW,
         "rolling-row intra refresh stays advertised");
+    // A raw packed header is the one the driver can carry: FFmpeg's HEVC
+    // encoder sends its SEI that way, and MISC is the bit it checks before
+    // calling write_extra_header at all.
+    check(query(p, VAProfileHEVCMain, enc, VAConfigAttribEncPackedHeaders).value
+            == VA_ENC_PACKED_HEADER_MISC,
+        "encode advertises raw packed headers through MISC");
+    check(query(p, VAProfileH264High, dec, VAConfigAttribEncPackedHeaders).value == VA_ATTRIB_NOT_SUPPORTED,
+        "packed headers do not answer on decode");
+    VAConfigID packed_id = 0;
+    VAConfigAttrib packed_ok[] = { { VAConfigAttribEncPackedHeaders, VA_ENC_PACKED_HEADER_MISC } };
+    check(va::createConfig(p, VAProfileHEVCMain, enc, packed_ok, 1, &packed_id) == VA_STATUS_SUCCESS,
+        "a client that sends the advertised MISC bit opens a config");
+    VAConfigAttrib packed_bad[] = { { VAConfigAttribEncPackedHeaders, VA_ENC_PACKED_HEADER_RAW_DATA } };
+    check(va::createConfig(p, VAProfileHEVCMain, enc, packed_bad, 1, &packed_id)
+            == VA_STATUS_ERROR_ATTR_NOT_SUPPORTED,
+        "the RAW_DATA bit is not the one this driver advertises");
     check(query(p, VAProfileAV1Profile0, dec, VAConfigAttribDecAV1Features).value == 0,
         "AV1 features are known; large-scale tiles are not supported");
     check(query(p, VAProfileH264High, dec, VAConfigAttribDecAV1Features).value == VA_ATTRIB_NOT_SUPPORTED,

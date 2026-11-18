@@ -29,6 +29,15 @@ VAStatus guarded(VADriverContextP ctx, const char* where, auto&& body)
     }
 }
 
+// A raw packed header is concatenated onto the firmware's Annex-B stream as
+// it stands, so it has to begin a NAL of its own.
+bool starts_with_start_code(const uint8_t* data, size_t size)
+{
+    if (size >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1)
+        return true;
+    return size >= 3 && data[0] == 0 && data[1] == 0 && data[2] == 1;
+}
+
 std::unique_ptr<iris::codec::Translator> make_translator(VAProfile profile)
 {
     switch (profile) {
@@ -1043,6 +1052,8 @@ VAStatus beginPicture(VADriverContextP ctx, VAContextID id, VASurfaceID surface_
                 c->enc_picture.picture = nullptr;
                 c->enc_picture.misc.clear();
                 c->enc_picture.slices.clear();
+                c->enc_picture.packed_headers.clear();
+                c->enc_packed_pending = false;
                 c->enc_picture.surface_width = s->width;
                 c->enc_picture.surface_height = s->height;
             } else if (c->video_proc()) {
@@ -1149,10 +1160,40 @@ VAStatus renderPicture(VADriverContextP ctx, VAContextID id, VABufferID* buffers
                         c->enc_picture.slices.push_back(b->data.data() + static_cast<size_t>(k) * b->size);
                     break;
                 case VAEncPackedHeaderParameterBufferType:
-                case VAEncPackedHeaderDataBufferType:
-                    // Packed headers are not advertised. A client that
-                    // sends them anyway must not lose the picture.
+                    // VA pairs one parameter buffer with the data buffer that
+                    // follows it, and the pair becomes one NAL in front of
+                    // the access unit. Only a raw header has a meaning here:
+                    // the firmware writes the parameter sets and the slice
+                    // headers itself, and a client-supplied sequence header
+                    // would contradict the stream it actually coded.
+                    for (unsigned k = 0; k < b->count; ++k) {
+                        iris::require(b->size >= sizeof(VAEncPackedHeaderParameterBuffer),
+                            "packed header parameter buffer is too small", VA_STATUS_ERROR_INVALID_PARAMETER);
+                        const auto* parameter = reinterpret_cast<const VAEncPackedHeaderParameterBuffer*>(
+                            b->data.data() + static_cast<size_t>(k) * b->size);
+                        iris::require(!c->enc_packed_pending,
+                            "packed header parameter without a data buffer", VA_STATUS_ERROR_INVALID_PARAMETER);
+                        iris::require(parameter->type == VAEncPackedHeaderRawData,
+                            "only raw packed headers are accepted", VA_STATUS_ERROR_INVALID_PARAMETER);
+                        iris::require(parameter->bit_length > 0, "empty packed header",
+                            VA_STATUS_ERROR_INVALID_PARAMETER);
+                        c->enc_packed_pending = true;
+                        c->enc_packed_bits = parameter->bit_length;
+                    }
                     break;
+                case VAEncPackedHeaderDataBufferType: {
+                    iris::require(c->enc_packed_pending,
+                        "packed header data without its parameter buffer", VA_STATUS_ERROR_INVALID_PARAMETER);
+                    const size_t bytes = (static_cast<size_t>(c->enc_packed_bits) + 7) / 8;
+                    iris::require(bytes <= static_cast<size_t>(b->size) * b->count,
+                        "packed header data is shorter than its bit length", VA_STATUS_ERROR_INVALID_PARAMETER);
+                    const uint8_t* data = b->data.data();
+                    iris::require(starts_with_start_code(data, bytes), "packed header is not Annex-B",
+                        VA_STATUS_ERROR_INVALID_PARAMETER);
+                    c->enc_picture.packed_headers.emplace_back(data, data + bytes);
+                    c->enc_packed_pending = false;
+                    break;
+                }
                 default:
                     throw iris::Error(VA_STATUS_ERROR_UNSUPPORTED_BUFFERTYPE,
                         "buffer type not accepted by an encode renderPicture");
@@ -1223,6 +1264,10 @@ VAStatus endPicture(VADriverContextP ctx, VAContextID id)
             iris::require(c->enc_picture.sequence != nullptr, "encode picture has no sequence parameters",
                 VA_STATUS_ERROR_INVALID_PARAMETER);
             iris::require(c->enc_picture.picture != nullptr, "encode picture has no picture parameters",
+                VA_STATUS_ERROR_INVALID_PARAMETER);
+            // A parameter buffer with no data buffer describes a header the
+            // client never sent; the picture would silently lose it.
+            iris::require(!c->enc_packed_pending, "packed header parameter has no data buffer",
                 VA_STATUS_ERROR_INVALID_PARAMETER);
             const VABufferID coded_id = c->encoder->coded_buf(c->enc_picture);
             std::shared_ptr<Buffer> coded;
