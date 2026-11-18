@@ -190,12 +190,16 @@ expect_marker "$kernel_dir/0015-7.3.4-mpeg2-decode.patch" \
 # 0016 only works when the allocator, the address and the Kconfig select all
 # move: sg memops alone queue buffers with a zero device address, and the
 # address alone is read from a contiguous mapping that does not exist. The
-# parameter must stay decoder-only: the encoder's CAPTURE queue was never
-# measured with system memory.
+# one-segment guard is load-bearing: the firmware gets a single address, so a
+# mapping split across segments must fail at QBUF instead of writing past the
+# first one. The parameter must stay decoder-only: the encoder's CAPTURE queue
+# was never measured with system memory.
 expect_marker "$kernel_dir/0016-7.3.4-capture-sg.patch" \
     '+	dst_vq->mem_ops = capture_sg && inst->domain == DECODER ?' 1
 expect_marker "$kernel_dir/0016-7.3.4-capture-sg.patch" \
-    '+		buf->device_addr = sgt ? sg_dma_address(sgt->sgl) : 0;' 1
+    '+		if (!sgt || sgt->nents != 1)' 1
+expect_marker "$kernel_dir/0016-7.3.4-capture-sg.patch" \
+    '+		buf->device_addr = sg_dma_address(sgt->sgl);' 1
 expect_marker "$kernel_dir/0016-7.3.4-capture-sg.patch" \
     '+	select VIDEOBUF2_DMA_SG' 1
 

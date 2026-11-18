@@ -15,13 +15,93 @@ addresses for every internal buffer, so the physical layout of a CAPTURE frame
 does not have to be contiguous. Add a capture_sg module parameter that selects
 vb2_dma_sg_memops for the decoder's CAPTURE queue; the buffer's device address
 is then taken from the mapped scatter list when the buffer is queued, because
-the scatter-gather allocator only has one after the DMA mapping. The encoder's
-queues, the OUTPUT queue and every internal buffer keep the contiguous
-allocator.
+the scatter-gather allocator only has one after the DMA mapping. A mapping
+the IOMMU could not express as one segment is refused when the buffer is
+prepared, because the firmware is handed a single address and would write
+past it. The encoder's queues, the OUTPUT queue and every internal buffer
+keep the contiguous allocator.
 
 Default off: the parameter is an experiment until a target run decodes at 8K
 from system memory and the memory-budget policy that goes with it is settled.
 ---
+diff --git a/drivers/media/platform/qcom/iris/Kconfig b/drivers/media/platform/qcom/iris/Kconfig
+index 0996213..156700a 100644
+--- a/drivers/media/platform/qcom/iris/Kconfig
++++ b/drivers/media/platform/qcom/iris/Kconfig
+@@ -9,6 +9,7 @@ config VIDEO_QCOM_IRIS
+ 	select QCOM_PAS
+ 	select QCOM_UBWC_CONFIG if ARCH_QCOM && QCOM_SMEM
+ 	select VIDEOBUF2_DMA_CONTIG
++	select VIDEOBUF2_DMA_SG
+ 	help
+ 	  This is a V4L2 driver for Qualcomm iris video accelerator
+ 	  hardware. It accelerates decoding operations on various
+diff --git a/drivers/media/platform/qcom/iris/iris_vb2.c b/drivers/media/platform/qcom/iris/iris_vb2.c
+index a2ea2d6..52a0d9b 100644
+--- a/drivers/media/platform/qcom/iris/iris_vb2.c
++++ b/drivers/media/platform/qcom/iris/iris_vb2.c
+@@ -3,7 +3,9 @@
+  * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+  */
+ 
++#include <linux/scatterlist.h>
+ #include <media/videobuf2-dma-contig.h>
++#include <media/videobuf2-dma-sg.h>
+ #include <media/v4l2-event.h>
+ #include <media/v4l2-mem2mem.h>
+ 
+@@ -90,7 +92,11 @@ int iris_vb2_buf_init(struct vb2_buffer *vb2)
+ 	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb2);
+ 	struct iris_buffer *buf = to_iris_buffer(vbuf);
+ 
+-	buf->device_addr = vb2_dma_contig_plane_dma_addr(vb2, 0);
++	/* The scatter-gather allocator has no address until the buffer is
++	 * queued, so its address is taken in iris_vb2_buf_queue.
++	 */
++	if (vb2->vb2_queue->mem_ops != &vb2_dma_sg_memops)
++		buf->device_addr = vb2_dma_contig_plane_dma_addr(vb2, 0);
+ 
+ 	return 0;
+ }
+@@ -272,6 +278,15 @@ int iris_vb2_buf_prepare(struct vb2_buffer *vb)
+ 		    vb2_plane_size(vb, 0) < iris_get_buffer_size(inst, BUF_INPUT))
+ 			return -EINVAL;
+ 	}
++	if (vb->vb2_queue->mem_ops == &vb2_dma_sg_memops) {
++		struct sg_table *sgt = vb2_dma_sg_plane_desc(vb, 0);
++
++		/* The firmware is given one address, so a mapping the IOMMU
++		 * split into several segments is refused, not truncated.
++		 */
++		if (!sgt || sgt->nents != 1)
++			return -EINVAL;
++	}
+ 	return 0;
+ }
+ 
+@@ -288,6 +303,7 @@ void iris_vb2_buf_queue(struct vb2_buffer *vb2)
+ {
+ 	static const struct v4l2_event eos = { .type = V4L2_EVENT_EOS };
+ 	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb2);
++	struct iris_buffer *buf = to_iris_buffer(vbuf);
+ 	struct v4l2_m2m_ctx *m2m_ctx;
+ 	struct iris_inst *inst;
+ 	int ret = 0;
+@@ -303,6 +319,12 @@ void iris_vb2_buf_queue(struct vb2_buffer *vb2)
+ 	if (vbuf->field == V4L2_FIELD_ANY)
+ 		vbuf->field = V4L2_FIELD_NONE;
+ 
++	if (vb2->vb2_queue->mem_ops == &vb2_dma_sg_memops) {
++		struct sg_table *sgt = vb2_dma_sg_plane_desc(vb2, 0);
++
++		buf->device_addr = sg_dma_address(sgt->sgl);
++	}
++
+ 	m2m_ctx = inst->m2m_ctx;
+ 
+ 	if (!vb2->planes[0].bytesused && V4L2_TYPE_IS_OUTPUT(vb2->type)) {
+diff --git a/drivers/media/platform/qcom/iris/iris_vidc.c b/drivers/media/platform/qcom/iris/iris_vidc.c
+index a936aae..c491694 100644
 --- a/drivers/media/platform/qcom/iris/iris_vidc.c
 +++ b/drivers/media/platform/qcom/iris/iris_vidc.c
 @@ -8,6 +8,7 @@
@@ -44,7 +124,7 @@ from system memory and the memory-budget policy that goes with it is settled.
  static void iris_v4l2_fh_init(struct iris_inst *inst, struct file *filp)
  {
  	if (inst->domain == ENCODER)
-@@ -118,7 +124,8 @@
+@@ -118,7 +124,8 @@ iris_m2m_queue_init(void *priv, struct vb2_queue *src_vq, struct vb2_queue *dst_
  	dst_vq->io_modes = VB2_MMAP | VB2_DMABUF;
  	dst_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
  	dst_vq->ops = inst->core->iris_vb2_ops;
@@ -54,59 +134,3 @@ from system memory and the memory-budget policy that goes with it is settled.
  	dst_vq->drv_priv = inst;
  	dst_vq->buf_struct_size = sizeof(struct iris_buffer);
  	dst_vq->min_reqbufs_allocation = MIN_BUFFERS;
---- a/drivers/media/platform/qcom/iris/iris_vb2.c
-+++ b/drivers/media/platform/qcom/iris/iris_vb2.c
-@@ -3,7 +3,9 @@
-  * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
-  */
- 
-+#include <linux/scatterlist.h>
- #include <media/videobuf2-dma-contig.h>
-+#include <media/videobuf2-dma-sg.h>
- #include <media/v4l2-event.h>
- #include <media/v4l2-mem2mem.h>
- 
-@@ -90,7 +92,11 @@
- 	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb2);
- 	struct iris_buffer *buf = to_iris_buffer(vbuf);
- 
--	buf->device_addr = vb2_dma_contig_plane_dma_addr(vb2, 0);
-+	/* The scatter-gather allocator has no address until the buffer is
-+	 * queued, so its address is taken in iris_vb2_buf_queue.
-+	 */
-+	if (vb2->vb2_queue->mem_ops != &vb2_dma_sg_memops)
-+		buf->device_addr = vb2_dma_contig_plane_dma_addr(vb2, 0);
- 
- 	return 0;
- }
-@@ -288,6 +294,7 @@
- {
- 	static const struct v4l2_event eos = { .type = V4L2_EVENT_EOS };
- 	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb2);
-+	struct iris_buffer *buf = to_iris_buffer(vbuf);
- 	struct v4l2_m2m_ctx *m2m_ctx;
- 	struct iris_inst *inst;
- 	int ret = 0;
-@@ -303,6 +310,12 @@
- 	if (vbuf->field == V4L2_FIELD_ANY)
- 		vbuf->field = V4L2_FIELD_NONE;
- 
-+	if (vb2->vb2_queue->mem_ops == &vb2_dma_sg_memops) {
-+		struct sg_table *sgt = vb2_dma_sg_plane_desc(vb2, 0);
-+
-+		buf->device_addr = sgt ? sg_dma_address(sgt->sgl) : 0;
-+	}
-+
- 	m2m_ctx = inst->m2m_ctx;
- 
- 	if (!vb2->planes[0].bytesused && V4L2_TYPE_IS_OUTPUT(vb2->type)) {
---- a/drivers/media/platform/qcom/iris/Kconfig
-+++ b/drivers/media/platform/qcom/iris/Kconfig
-@@ -9,6 +9,7 @@
- 	select QCOM_PAS
- 	select QCOM_UBWC_CONFIG if ARCH_QCOM && QCOM_SMEM
- 	select VIDEOBUF2_DMA_CONTIG
-+	select VIDEOBUF2_DMA_SG
- 	help
- 	  This is a V4L2 driver for Qualcomm iris video accelerator
- 	  hardware. It accelerates decoding operations on various
