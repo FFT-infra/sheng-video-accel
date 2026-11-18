@@ -177,6 +177,51 @@ change and 0016 in the working tree, decoder resolved by name:
   not the allocator itself. Native HEVC at 8K fails with ENOMEM during packet
   submission on both allocators.
 
+Sixty-frame 8K clips then measured the frame rate over a longer window, not
+just the pool. Run identity: source `9db1fb5`, `source_dirty=0`, build-tree
+driver `8c85f87d…0d9`, boot `79f5d3e1-0b32-4f3c-ae95-7435870fb362`, kernel
+`7.3.4-sm8550-00104-g87ac0f2347eb`, module `1323d58a…66a5` loaded with
+`capture_sg=1`, decoder `/dev/video0` resolved by `iris_driver`. The
+four-frame gate on the same driver and module passed all four codecs with
+`pool=15`, exact framemd5, `errors=0 last=1 drain=1` (record
+`8k-gate-sg-1119`). Each clip is
+60 frames of `testsrc2` at 24 fps: H.264 `libx264 -preset ultrafast -tune
+zerolatency`, HEVC `libx265 -preset ultrafast -x265-params
+keyint=60:min-keyint=60:scenecut=0`, VP9 `libvpx-vp9 -b:v 8M -deadline
+realtime -cpu-used 8 -g 60`, AV1 `libsvtav1 -preset 12 -g 60`. The throughput
+client leaves frames on the VA surfaces (`-f null`), three rounds per codec;
+the AV1 number comes from the downloading lane because the no-download client
+releases its AV1 surfaces before the show-existing completions are published
+(27 of 60 dropped, the same at 1080p), while the download lane publishes 60
+direct and 13 invisible completions with no drop and exact pixels.
+
+| Codec | Frames | fps, three rounds | Drops / errors | LAST |
+| --- | ---: | --- | --- | --- |
+| H.264 | 60 | 65.4 / 65.7 / 66.3 | 0 / 0 | yes |
+| HEVC | 60 | 66.5 / 65.9 / 63.8 | 0 / 0 | yes |
+| VP9 | 60 | 70.3 / 71.9 / 67.9 | 0 / 0 | yes |
+| AV1 | 60 | 39.5 (downloading lane, 1.520 s) | 0 / 0 | yes |
+
+H.264, HEVC and VP9 therefore sustain 8K60 on this boot; AV1 decodes all 60
+frames but stays below 60 fps, so it is recorded as a measured value, not an
+8K60 claim. The whole-run figure includes client startup, as the throughput
+table above does. The guarded fps run peaked at 38.6 °C and the pack went from
+73 % to 70 %.
+
+A 60-frame run through the downloading client exposed one drain edge under
+the experimental allocator. When every picture has completed before the
+client destroys its context (`pending=0`, as the download lane produces),
+HEVC and VP9 never receive the terminal LAST while the driver waits: the
+firmware's drain-last message is processed only once the next command
+(STREAMOFF) reaches the queue, so the session reports `session failed: no
+LAST after STOP` after its 2 s bound, and a 6 s bound does not change it. The
+pictures are unaffected: the same 60-frame gate run reported
+`frames=60 framemd5=exact` and `submitted=60 completed=60 errors=0 drops=0`
+for both codecs, and only the LAST check failed. H.264 and AV1 drain
+normally, and the same HEVC stream on the contiguous allocator
+(`capture_sg=0`, `pool=8`, Copy) reaches LAST with `pending=0`. The parameter
+is experimental and off by default, so the qualified path is unaffected.
+
 The parameter defaults off and is not part of the qualified module, so a
 stock boot keeps the contiguous pool and Copy publication at 8K.
 
