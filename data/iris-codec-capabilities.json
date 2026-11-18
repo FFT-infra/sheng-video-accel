@@ -57,6 +57,7 @@
           "packed headers (Annex-B output only)",
           "deblocking other than the firmware default on a kernel without the loop-filter controls (the stock SM8550 module; packaging/kernel/0002-* adds them)",
           "weighted prediction, scaling lists and chroma QP offsets",
+          "ROI and HDR metadata (VAEncROI, VAEncMiscParameterTypeHDRMetaData): VAConfigAttribEncROI answers zero regions and the node registers no ROI control, so FFmpeg's vaapi encoders ignore AVRegionOfInterest side data, and a client that sends either misc buffer anyway gets VA_STATUS_ERROR_UNIMPLEMENTED at renderPicture. The 7.3.4 driver sends no ROI property.",
           "more than one reference index",
           "10-bit or non-4:2:0",
           "intra refresh forms other than rolling-row, and a per-picture insertion location: the firmware takes one period and decides the sweep itself. Long-term references (ltr_count/frame_ltr_index/use_ltr_frames): VA has no encode-side long-term-reference field at all, so no VA client can ask for one and the driver advertises none.",
@@ -120,6 +121,7 @@
           "deblocking other than the firmware default on a kernel without the loop-filter controls (the stock SM8550 module; packaging/kernel/0002-* adds them)",
           "tiles and wavefront coding",
           "weighted prediction, scaling lists, chroma QP offsets and CTU bit limits",
+          "ROI and HDR metadata (VAEncROI, VAEncMiscParameterTypeHDRMetaData): VAConfigAttribEncROI answers zero regions and the node registers no ROI control, so FFmpeg's vaapi encoders ignore AVRegionOfInterest side data, and a client that sends either misc buffer anyway gets VA_STATUS_ERROR_UNIMPLEMENTED at renderPicture. The 7.3.4 driver sends no ROI property.",
           "intra refresh forms other than rolling-row, and a per-picture insertion location: the firmware takes one period and decides the sweep itself. Long-term references (ltr_count/frame_ltr_index/use_ltr_frames): VA has no encode-side long-term-reference field at all, so no VA client can ask for one and the driver advertises none.",
           "UBWC-compressed encode input (Q08C): the encoder node accepts Q08C on its raw OUTPUT queue, but nothing on this stack compresses a frame into it. Turnip decompresses UBWC and can render into a QCOM_COMPRESSED image, yet no VA client supplies compressed input and the driver has no compressor to fill the format itself. NV12 and P010 stay the only raw formats. TEST-RESULTS.md records the measurement."
         ],
