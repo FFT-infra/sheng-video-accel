@@ -66,6 +66,18 @@ if va_drm_dep.found()
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
 
+# Hardware probe, built but not registered as a meson test: a VA client's
+# slice count. The unit tests prove the translation and the control writes;
+# only the firmware can say whether it splits the picture, and this counts the
+# coded slice NAL units a client receives.
+if va_drm_dep.found()
+  executable(
+    'iris-encode-slice-probe',
+    'iris-encode-slice-probe.cc',
+    dependencies: [va_drm_dep],
+    cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+endif
+
 # Hardware probe, built but not registered as a meson test: the upload half of
 # the image API. vaPutImage and the derived-image write path are what put
 # client pixels into a surface; vaGetImage reads them back. No decode is
