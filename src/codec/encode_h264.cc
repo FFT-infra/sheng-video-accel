@@ -367,6 +367,11 @@ public:
         // refresh buffer with one picture only, so every picture carries the
         // value the client last configured. Reading a later picture as "no
         // refresh" would fail the change check in apply_dynamic().
+        // The layer count is also per context and is sent with the first
+        // picture, so every picture repeats the last structure the client
+        // gave, like the refresh period above.
+        temporal_layers_ = temporal_layers_of(picture.misc, temporal_layers_);
+        out.temporal_layers = temporal_layers_;
         out.intra_refresh_period = intra_refresh_period_;
         require(out.rate_mode != RateMode::Cbr || out.bitrate > 0, "CBR needs a bitrate",
             VA_STATUS_ERROR_INVALID_PARAMETER);
@@ -396,6 +401,8 @@ private:
     // The sweep period the client configured most recently, for the same
     // reason as the two rates above.
     unsigned intra_refresh_period_ = 0;
+    // The temporal layer count the client last configured.
+    unsigned temporal_layers_ = 0;
 };
 
 } // namespace

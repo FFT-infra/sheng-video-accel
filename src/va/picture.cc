@@ -1092,6 +1092,15 @@ VAStatus renderPicture(VADriverContextP ctx, VAContextID id, VABufferID* buffers
                         case VAEncMiscParameterTypeFrameRate:
                         case VAEncMiscParameterTypeRIR:
                             break;
+                        case VAEncMiscParameterTypeTemporalLayerStructure:
+                            // Read by the codec translator, which bounds the
+                            // layer count and every id. The element has to
+                            // hold the whole structure here because that read
+                            // happens after this check.
+                            iris::require(b->size >= sizeof(VAEncMiscParameterBuffer)
+                                    + sizeof(VAEncMiscParameterTemporalLayerStructure),
+                                "temporal layer buffer is too small", VA_STATUS_ERROR_INVALID_PARAMETER);
+                            break;
                         case VAEncMiscParameterTypeQualityLevel:
                             // One advertised level. The firmware has no
                             // quality knob, so a client asking for more must

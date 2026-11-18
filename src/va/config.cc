@@ -185,6 +185,21 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
             attributes[i].value = (decode && profile == VAProfileAV1Profile0)
                 ? 0 : VA_ATTRIB_NOT_SUPPORTED;
             break;
+        case VAConfigAttribEncRateControlExt: {
+            // Six layers, and no per-layer bitrate control: the firmware
+            // takes the layer count and ignores the per-layer rates while a
+            // total bitrate is set. The attribute is a value, not a mask; a
+            // client that sends it gets the same number back.
+            if (!encode || !d.capabilities.encode_temporal_layers) {
+                attributes[i].value = VA_ATTRIB_NOT_SUPPORTED;
+                break;
+            }
+            VAConfigAttribValEncRateControlExt extended = {};
+            extended.bits.max_num_temporal_layers_minus1 = 5;
+            extended.bits.temporal_layer_bitrate_control_flag = 0;
+            attributes[i].value = extended.value;
+            break;
+        }
         case VAConfigAttribEncIntraRefresh:
             // The firmware sweeps one band of rows per picture, so the
             // rolling-row form is the one it can express; the column form,

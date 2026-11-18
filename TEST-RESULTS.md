@@ -194,6 +194,20 @@ under the run directory. The first attempt failed at `createConfig` because
 FFmpeg opens a probe config with no attributes and the driver defaulted a
 Main 10 profile to 8 bits; the default now follows the profile.
 
+Temporal layers, 11-18: `test/iris-encode-temporal-probe` encoded one GOP of
+16 HEVC pictures through one CBR context, the first an IDR and the rest P,
+with a `VAEncMiscParameterTemporalLayerStructure` of 3 layers rendered once
+with the first picture. The driver answers `VAConfigAttribEncRateControlExt`
+with six layers and no per-layer rate control, and the stream's VCL NALs
+carry temporal ids 0, 1 and 2 (4, 4 and 8 pictures), so the structure reaches
+the firmware and it codes a hierarchy. Run identity: boot
+`edd37f6a-cb04-42b0-b9b7-96360172a5ca`, module `a3732c1c…`, driver `4016e6de…`
+as a build-tree override, source commit `2a10c5d` with the temporal layer
+work in the working tree, encoder node `/dev/video18` resolved by name. Gate
+record: `gate-temporal3`. The first attempt was refused by the driver itself
+(`unsupported encode misc parameter`); accepting the structure and bounding
+its layer count and ids is what the unit tests now cover.
+
 ## Throughput
 
 CPU policies in `performance` at their maximum (2016/2803/2956 MHz), GPU in

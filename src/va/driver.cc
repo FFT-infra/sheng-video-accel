@@ -133,6 +133,11 @@ Capabilities probe_capabilities(const iris::Options& options)
         caps.encode_multi_slice
             = encoder->get_control(V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE).has_value();
         caps.encode_p010 = encoder->format_supported(iris::Queue::Output, V4L2_PIX_FMT_P010);
+        // The hierarchical controls are one set; the H.264 enable and the
+        // HEVC layer count are the two switches the session writes.
+        caps.encode_temporal_layers
+            = encoder->get_control(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING).has_value()
+            && encoder->get_control(V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_LAYER).has_value();
         for (uint32_t format : { V4L2_PIX_FMT_H264, V4L2_PIX_FMT_HEVC })
             if (encoder->format_supported(iris::Queue::Capture, format))
                 caps.encoder_formats.insert(format);

@@ -46,6 +46,10 @@ struct EncodeParams {
     // Sample depth of the raw input, 8 or 10. Ten selects P010 and the
     // firmware's 10-bit path; it is fixed per context.
     unsigned bit_depth = 8;
+    // Temporal layer count from the client's structure, 0 or 1 when it asked
+    // for none. The firmware derives the membership from the count, which is
+    // a per-context control, so it is fixed in configure().
+    unsigned temporal_layers = 0;
     // Deblocking, in the numbering both codecs share: 0 filtering enabled,
     // 1 disabled, 2 disabled across slice boundaries. VA carries these in
     // the slice header and V4L2 in a per-context control, so only the first

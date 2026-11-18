@@ -265,6 +265,10 @@ struct Capabilities {
     // The encoder node takes P010 on its raw port, which is what makes HEVC
     // Main 10 encodable; without it the profile is not advertised.
     bool encode_p010 = false;
+    // The encoder node carries the hierarchical (temporal layer) controls.
+    // They are part of the 7.3.4 node; the probe keeps the capability
+    // honest on a kernel that does not register them.
+    bool encode_temporal_layers = false;
     unsigned min_width = 96, min_height = 96, max_width = 8192, max_height = 8192;
     std::set<VAProfile> profiles; // decode
     std::set<VAProfile> encode_profiles;

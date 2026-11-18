@@ -166,6 +166,11 @@ Imported DMA-BUFs must match the native CAPTURE layout: one linear object with a
   `VA_STATUS_ERROR_UNIMPLEMENTED`. B pictures are opt-in with
   `V4L2_VA_B_FRAMES`, H.264 only, and need at least three pictures in flight
   (FFmpeg: `-bf 1 -async_depth 3`).
+- **Temporal layers**: a `VAEncMiscParameterTemporalLayerStructure` names 1-6
+  layers and the firmware derives the membership from the count, so the
+  client's ids are bounds-checked rather than followed. Per-layer bitrates are
+  not honoured. Advertised through `VAConfigAttribEncRateControlExt` when the
+  node registers the hierarchical controls.
 - **Intra refresh**: rolling-row requests (`VAEncMiscParameterRIR`) are honoured
   under CBR and refused under VBR/CQP. `ltr_count`, `frame_ltr_index` and
   `use_ltr_frames` are not advertised.

@@ -114,6 +114,7 @@ HEVC Main 8-bit，FFmpeg 8.1.3。CPU 锁最高频，GPU 锁 680 MHz。解码不�
 - **原版内核**：解码降级为 GPU 拷贝，IDR 请求改为移动 intra period。
 - **编码**：客户端给出的切片列表变成宏块预算（`ceil(宏块数 / 切片数)`），仅 CBR 或 CQP、≤60 fps、≤4096x2160，并需要 0013 内核补丁；没有补丁时每帧只有一整片，`VAConfigAttribEncMaxSlices` 答 1。分块与 ROI 返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。B 帧需 `V4L2_VA_B_FRAMES` 开启，仅 H.264，客户端需保持至少三帧在途（FFmpeg：`-bf 1 -async_depth 3`）。
 - **intra refresh**：滚动行请求（`VAEncMiscParameterRIR`）在 CBR 下生效，VBR/CQP 下拒绝。`ltr_count`/`frame_ltr_index`/`use_ltr_frames` 不声明。
+- **时域分层**：`VAEncMiscParameterTemporalLayerStructure` 给出 1-6 层，固件按层数自行推导成员关系，客户端给的层 id 只做越界检查；不支持逐层码率。节点注册了分层控件时通过 `VAConfigAttribEncRateControlExt` 声明。
 - **封装头**：extradata 报告 `VA_ENC_PACKED_HEADER_NONE`，参数集随码流带内传输。
 - **UBWC**：节点列出 `Q08C`/`Q10C`，固件确实写出 UBWC。Turnip 能逐字节解 Q08C，EGL（Copy 路径与 `vaGetImage`/`vaPutImage`）不能，P010 也没有压缩格式。没有客户端请求压缩表面，表面保持 `NV12`/`P010`，导入必须是 `DRM_FORMAT_MOD_LINEAR` 平面。
 

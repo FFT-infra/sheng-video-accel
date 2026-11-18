@@ -692,6 +692,10 @@ encode slices=<n> mode=max_mb mb=<n>                   (the client's slice
                                                        macroblock budget; the
                                                        firmware picks the
                                                        boundaries)
+encode temporal layers=<n>                            (the client's temporal
+                                                       layer count; the
+                                                       firmware derives the
+                                                       membership)
 encode drain result=complete
 encode drain result=timeout outstanding=<n>
 encode drain marker

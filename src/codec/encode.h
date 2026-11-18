@@ -9,6 +9,7 @@
 #include "annexb.h"
 
 #include "../util/encode-params.h"
+#include "../util/error.h"
 
 #include <cstdint>
 #include <memory>
@@ -46,6 +47,32 @@ inline const void* find_misc(const std::vector<const void*>& misc, VAEncMiscPara
             return buffer->data;
     }
     return nullptr;
+}
+
+// The temporal layer count from a VAEncMiscParameterTemporalLayerStructure,
+// or `current` when this picture carries none. The structure belongs to a
+// coded sequence: a client sends it with the first picture, so the count is
+// remembered and repeated like the rate-control parameters. The firmware
+// derives layer membership from the count alone, so a structure whose
+// pattern cannot follow that hierarchy is refused instead of silently
+// coded with a different membership.
+inline unsigned temporal_layers_of(const std::vector<const void*>& misc, unsigned current)
+{
+    const auto* structure = static_cast<const VAEncMiscParameterTemporalLayerStructure*>(
+        find_misc(misc, VAEncMiscParameterTypeTemporalLayerStructure));
+    if (!structure)
+        return current;
+    require(structure->number_of_layers >= 1 && structure->number_of_layers <= 6,
+        "temporal layers must be between 1 and 6", VA_STATUS_ERROR_INVALID_PARAMETER);
+    require(structure->periodicity >= 1 && structure->periodicity <= 32,
+        "temporal layer periodicity must be between 1 and 32", VA_STATUS_ERROR_INVALID_PARAMETER);
+    for (uint32_t i = 0; i < structure->periodicity; ++i)
+        require(structure->layer_id[i] < structure->number_of_layers,
+            "a temporal layer id exceeds the layer count", VA_STATUS_ERROR_INVALID_PARAMETER);
+    // The firmware derives membership from the count, and the advertised
+    // attribute says per-layer bitrate control is off, so the client's
+    // pattern is advisory here; the count is what is honoured.
+    return structure->number_of_layers;
 }
 
 class Encoder {

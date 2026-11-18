@@ -78,6 +78,18 @@ if va_drm_dep.found()
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
 
+# Hardware probe, built but not registered as a meson test: a VA client's
+# temporal layer structure. The unit tests cover the translation and the
+# control writes; only the firmware can say whether it codes more than one
+# layer, and this reads the temporal ids out of the stream it produces.
+if va_drm_dep.found()
+  executable(
+    'iris-encode-temporal-probe',
+    'iris-encode-temporal-probe.cc',
+    dependencies: [va_drm_dep],
+    cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+endif
+
 # Hardware probe, built but not registered as a meson test: the upload half of
 # the image API. vaPutImage and the derived-image write path are what put
 # client pixels into a surface; vaGetImage reads them back. No decode is

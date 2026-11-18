@@ -890,6 +890,46 @@ void test_multi_slice()
 }
 } // namespace
 
+// The temporal layer structure belongs to a coded sequence: the client sends
+// it with the first picture, and every later picture must carry the same
+// count or the session's change check fires. A count or id the firmware
+// cannot express is refused here, before a context is opened.
+void test_temporal_layers()
+{
+    const VAEncSequenceParameterBufferH264 sequence = h264_sequence();
+    const VAEncPictureParameterBufferH264 picture = h264_picture();
+    auto encoder = iris::codec::make_h264_encoder(VAProfileH264High, RateMode::Cbr);
+
+    VAEncMiscParameterTemporalLayerStructure three = {};
+    three.number_of_layers = 3;
+    three.periodicity = 4;
+    const uint32_t ids[4] = { 2, 1, 2, 0 };
+    for (int i = 0; i < 4; ++i)
+        three.layer_id[i] = ids[i];
+    std::vector<uint32_t> storage = misc(VAEncMiscParameterTypeTemporalLayerStructure, three);
+    const EncodePicture with = h264_input(sequence, picture, { storage.data() });
+    check(encoder->translate(with).temporal_layers == 3, "the layer count reaches the parameters");
+
+    const EncodePicture later = h264_input(sequence, picture);
+    check(encoder->translate(later).temporal_layers == 3,
+        "a later picture keeps the layer count the client configured");
+
+    VAEncMiscParameterTemporalLayerStructure too_many = three;
+    too_many.number_of_layers = 7;
+    std::vector<uint32_t> too_many_storage
+        = misc(VAEncMiscParameterTypeTemporalLayerStructure, too_many);
+    const EncodePicture too_many_input = h264_input(sequence, picture, { too_many_storage.data() });
+    check(status_of([&] { encoder->translate(too_many_input); }) == VA_STATUS_ERROR_INVALID_PARAMETER,
+        "seven temporal layers are refused");
+
+    VAEncMiscParameterTemporalLayerStructure bad_id = three;
+    bad_id.layer_id[0] = 3;
+    std::vector<uint32_t> bad_id_storage = misc(VAEncMiscParameterTypeTemporalLayerStructure, bad_id);
+    const EncodePicture bad_id_input = h264_input(sequence, picture, { bad_id_storage.data() });
+    check(status_of([&] { encoder->translate(bad_id_input); }) == VA_STATUS_ERROR_INVALID_PARAMETER,
+        "a layer id past the layer count is refused");
+}
+
 int main()
 {
     test_h264_translation();
@@ -902,6 +942,7 @@ int main()
     test_reference_and_slice_shape();
     test_unimplemented_features();
     test_multi_slice();
+    test_temporal_layers();
     if (failures) {
         std::cerr << failures << " encode parameter check(s) failed\n";
         return 1;

@@ -79,6 +79,18 @@ int main()
         "AV1 features do not answer on H.264 decode");
     check(query(p, VAProfileH264High, dec, VAConfigAttribEncQualityRange).value == VA_ATTRIB_NOT_SUPPORTED,
         "encode attributes do not answer on decode");
+    // Temporal layers follow the node's hierarchical controls; without them
+    // the attribute must not promise a hierarchy the session cannot write.
+    check(query(p, VAProfileH264High, enc, VAConfigAttribEncRateControlExt).value
+            == VA_ATTRIB_NOT_SUPPORTED,
+        "temporal layers are not advertised without the hierarchical controls");
+    d.capabilities.encode_temporal_layers = true;
+    VAConfigAttribValEncRateControlExt extended;
+    extended.value = query(p, VAProfileH264High, enc, VAConfigAttribEncRateControlExt).value;
+    check(extended.bits.max_num_temporal_layers_minus1 == 5
+            && extended.bits.temporal_layer_bitrate_control_flag == 0,
+        "six temporal layers and no per-layer rate control");
+    d.capabilities.encode_temporal_layers = false;
 
     // VP9 Profile 2 has no legal 8-bit stream; answer 10-bit only. HEVC
     // Main10 and AV1 Profile0 decode both depths and keep both bits.

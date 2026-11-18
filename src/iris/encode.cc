@@ -286,6 +286,29 @@ void EncoderSession::configure(
         trace_("encode slices=%u mode=max_mb mb=%u", params.slices, slice_mb);
     }
 
+    // Temporal layers. The firmware derives the layer membership from the
+    // count, so that is all the node takes; H.264 has an explicit enable and
+    // HEVC's layer count is its own switch. Per-layer bitrates are not
+    // written: the advertised attribute says per-layer rate control is off,
+    // and the firmware ignores them while a total bitrate is set.
+    if (params.temporal_layers > 1) {
+        require(params.temporal_layers <= 6, "temporal layers must be between 1 and 6",
+            VA_STATUS_ERROR_INVALID_PARAMETER);
+        if (h264) {
+            set_control(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_TYPE,
+                V4L2_MPEG_VIDEO_H264_HIERARCHICAL_CODING_P, "hierarchical coding type");
+            set_control(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_LAYER,
+                static_cast<int32_t>(params.temporal_layers - 1), "hierarchical coding layers");
+            set_control(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING, 1, "hierarchical coding");
+        } else {
+            set_control(V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_TYPE,
+                V4L2_MPEG_VIDEO_HEVC_HIERARCHICAL_CODING_P, "hierarchical coding type");
+            set_control(V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_LAYER,
+                static_cast<int32_t>(params.temporal_layers - 1), "hierarchical coding layers");
+        }
+        trace_("encode temporal layers=%u", params.temporal_layers);
+    }
+
     // Iris sizes coded buffers from the current rate-control controls. A
     // format set before them keeps the buffered-RC size, and queueing then
     // fails EINVAL; re-derive it now that the controls are final and before
@@ -448,6 +471,10 @@ void EncoderSession::apply_dynamic(const EncodeParams& params)
     // usable transition between NV12 and P010 on a streaming output queue.
     require(params.bit_depth == applied_.bit_depth,
         "changing the encode bit depth requires a new context", VA_STATUS_ERROR_UNIMPLEMENTED);
+    // The layer count is a per-context control too: the pictures already
+    // coded belong to the old hierarchy.
+    require(params.temporal_layers == applied_.temporal_layers,
+        "changing the temporal layer count requires a new context", VA_STATUS_ERROR_UNIMPLEMENTED);
     // The refresh period is per-context in V4L2. The kernel marks it dynamic
     // only for a random period, and this driver writes the cyclic one, so a
     // change needs a new context rather than a write the kernel refuses.

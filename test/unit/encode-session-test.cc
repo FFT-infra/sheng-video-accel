@@ -83,14 +83,22 @@ public:
     // and therefore exposes V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME; without it
     // the node is the running 7.2.6 shape, where the intra period is the
     // only way to request an IDR.
-    explicit FakeEncoderNode(
-        bool loop_filter_controls, bool sync_frame_control = false, bool multi_slice_controls = false)
+    explicit FakeEncoderNode(bool loop_filter_controls, bool sync_frame_control = false,
+        bool multi_slice_controls = false, bool temporal_layer_controls = false)
     {
         if (sync_frame_control)
             known_.insert(V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME);
         if (multi_slice_controls) {
             for (uint32_t id : { V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE,
                      V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_BYTES, V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_MB })
+                known_.insert(id);
+        }
+        if (temporal_layer_controls) {
+            for (uint32_t id : { V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING,
+                     V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_TYPE,
+                     V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_LAYER,
+                     V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_TYPE,
+                     V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_LAYER })
                 known_.insert(id);
         }
         for (uint32_t id : { V4L2_CID_MPEG_VIDEO_H264_PROFILE, V4L2_CID_MPEG_VIDEO_H264_LEVEL,
@@ -1012,6 +1020,62 @@ void test_multi_slice_controls()
         "slices under VBR are refused");
 }
 
+// The layer count is a per-context control, like the slice budget: written
+// once in configure(), and a later picture that changes it is refused rather
+// than coded into a hierarchy the earlier pictures do not belong to.
+void test_temporal_layer_controls()
+{
+    {
+        auto node = std::make_unique<FakeEncoderNode>(true, false, false, true);
+        FakeEncoderNode* raw = node.get();
+        iris::EncodeConfig config;
+        config.codec = V4L2_PIX_FMT_HEVC;
+        config.width = 1920;
+        config.height = 1080;
+        iris::EncoderSession session(std::move(node), config, iris::Options {}, iris::Trace(false));
+        iris::EncodeParams three = params(0, 0, 0);
+        three.rate_mode = iris::RateMode::Cbr;
+        three.temporal_layers = 3;
+        check(status_of([&] { session.configure(three, 1920, 1080); }) == -1,
+            "three temporal layers configure");
+        check(raw->value(V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_LAYER) == 2,
+            "the HEVC layer count reaches the kernel as count minus one");
+        check(raw->value(V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_TYPE)
+                == V4L2_MPEG_VIDEO_HEVC_HIERARCHICAL_CODING_P,
+            "the HEVC hierarchy is P");
+        check(raw->writes(V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_LAYER) == 1,
+            "the layer count is written once");
+
+        const int fd = dmabuf();
+        check(fd >= 0, "memfd for the raw frame");
+        check(status_of([&] { session.encode(fd, kCaptureSlot, three); }) == -1,
+            "a layered picture encodes");
+        iris::EncodeParams four = three;
+        four.temporal_layers = 4;
+        check(status_of([&] { session.encode(fd, kCaptureSlot, four); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
+            "changing the layer count mid-context is refused");
+        session.finish();
+    }
+
+    auto node = std::make_unique<FakeEncoderNode>(true, false, false, true);
+    FakeEncoderNode* raw = node.get();
+    iris::EncodeConfig config;
+    config.codec = V4L2_PIX_FMT_H264;
+    config.width = 1920;
+    config.height = 1080;
+    iris::EncoderSession session(std::move(node), config, iris::Options {}, iris::Trace(false));
+    iris::EncodeParams two = params(0, 0, 0);
+    two.rate_mode = iris::RateMode::Cbr;
+    two.temporal_layers = 2;
+    check(status_of([&] { session.configure(two, 1920, 1080); }) == -1,
+        "two H.264 temporal layers configure");
+    check(raw->value(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING) == 1,
+        "H.264 enables hierarchical coding");
+    check(raw->value(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_LAYER) == 1,
+        "the H.264 layer count reaches the kernel as count minus one");
+    session.finish();
+}
+
 int main()
 {
     test_default_without_controls();
@@ -1027,6 +1091,7 @@ int main()
     test_drain_resolves_outstanding_pictures();
     test_coded_buffer_claim_contract();
     test_multi_slice_controls();
+    test_temporal_layer_controls();
     if (failures) {
         std::cerr << failures << " encode session check(s) failed\n";
         return 1;

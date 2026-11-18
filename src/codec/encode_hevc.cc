@@ -312,6 +312,11 @@ public:
         // Per-context control, and the client may render the refresh buffer
         // with one picture only; every picture carries what it last
         // configured, or apply_dynamic() reads the next one as a change.
+        // The layer count is also per context and is sent with the first
+        // picture, so every picture repeats the last structure the client
+        // gave, like the refresh period above.
+        temporal_layers_ = temporal_layers_of(picture.misc, temporal_layers_);
+        out.temporal_layers = temporal_layers_;
         out.intra_refresh_period = intra_refresh_period_;
         // With one B per P nothing predicts from that B, so a client marks it
         // non-reference. The firmware owns the structure and the flag does not
@@ -357,6 +362,8 @@ private:
     // The sweep period the client configured most recently, for the same
     // reason as the two rates above.
     unsigned intra_refresh_period_ = 0;
+    // The temporal layer count the client last configured.
+    unsigned temporal_layers_ = 0;
 };
 
 } // namespace
