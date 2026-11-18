@@ -16,6 +16,14 @@
 # then runs test/iris-decode-stream-probe twice per codec and
 # test/vk-ubwc-read over the dumps.
 #
+# The VP9 stream also feeds test/iris-va-ubwc-probe, which asks for the
+# modifier through vaCreateSurfaces2, decodes, and exports: the grant, the
+# four-plane descriptor and the image-entry-point refusals come from the
+# public API. VP9 is the codec there because its whole frame is one slice
+# buffer, so the probe is a decode client without synthesising parameter
+# sets. It runs once with V4L2_VA_UBWC=1 and once without, where the same
+# list must be refused.
+#
 # Usage:
 #   sh test/iris-ubwc-gate.sh
 #
@@ -26,6 +34,7 @@
 #   IRIS_UBWC_FRAMES  frames per stream (default 12)
 #   IRIS_UBWC_OUT     artifact directory (default <lab>/artifacts/ubwc-gate)
 #   IRIS_UBWC_DUMP    dump every frame instead of the first and the last
+#   IRIS_RENDER_NODE  DRM render node for the VA half (default /dev/dri/renderD128)
 #
 # V4L2_VA_UBWC does not apply: this probe drives the session directly, the way
 # the VA layer does once a client asks for the modifier, and the switch only
@@ -149,4 +158,35 @@ done
 if [ "$failures" -ne 0 ]; then
     fail "$failures codec(s) failed; logs in $out_base"
 fi
-echo "PASS ubwc-gate: $codecs"
+
+# The VA half: the API a browser or compositor calls.
+va_probe="$root/build/test/iris-va-ubwc-probe"
+render=${IRIS_RENDER_NODE:-/dev/dri/renderD128}
+[ -x "$va_probe" ] || fail "build test/iris-va-ubwc-probe first (needs libva-drm)"
+case " $codecs " in
+*" vp9 "*) ;;
+*) fail 'the VA half needs vp9 in IRIS_UBWC_CODECS' ;;
+esac
+[ -c "$render" ] || fail "no render node $render"
+driver_path=${LIBVA_DRIVERS_PATH:-$root/build/src}
+[ -f "$driver_path/v4l2_drv_video.so" ] || fail "no v4l2_drv_video.so in $driver_path"
+va_log="$out_base/va-probe.log"
+if ! LIBVA_DRIVERS_PATH="$driver_path" "$va_probe" "$render" "$media/vp9.ivf" "$width" "$height" \
+    >"$va_log" 2>&1; then
+    echo 'FAIL va: the probe did not pass without the opt-in' >&2
+    sed 's/^/  /' "$va_log" >&2
+    fail 'the VA half failed'
+fi
+if ! V4L2_VA_UBWC=1 LIBVA_DRIVERS_PATH="$driver_path" "$va_probe" "$render" "$media/vp9.ivf" \
+    "$width" "$height" >>"$va_log" 2>&1; then
+    echo 'FAIL va: the probe did not pass with V4L2_VA_UBWC=1' >&2
+    tail -20 "$va_log" >&2
+    fail 'the VA half failed'
+fi
+if ! grep -q 'PASS the VA layer grants and exports a UBWC surface' "$va_log"; then
+    echo 'FAIL va: the opt-in run did not reach its PASS line' >&2
+    tail -20 "$va_log" >&2
+    fail 'the VA half failed'
+fi
+
+echo "PASS ubwc-gate: $codecs va=pass"

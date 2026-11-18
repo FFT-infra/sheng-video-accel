@@ -112,6 +112,18 @@ if have_vulkan_vpp
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
 
+# Hardware probe, built but not registered as a meson test: the VA half of a
+# UBWC surface. test/iris-ubwc-gate.sh runs it with and without V4L2_VA_UBWC,
+# so the grant, the exported four-plane descriptor and the image-entry-point
+# refusals all come from the public API rather than from a unit test.
+if va_drm_dep.found()
+  executable(
+    'iris-va-ubwc-probe',
+    'iris-va-ubwc-probe.cc',
+    dependencies: [iris_core_dep, va_drm_dep],
+    cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+endif
+
 # Hardware probe, built but not registered as a meson test: the upload half of
 # the image API. vaPutImage and the derived-image write path are what put
 # client pixels into a surface; vaGetImage reads them back. No decode is
