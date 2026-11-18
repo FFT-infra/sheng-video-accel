@@ -341,10 +341,14 @@ run is source `8561d10`, `source_dirty=0`, `guard=complete exit=0`, on boot
 `7.3.4-sm8550-00104-g87ac0f2347eb`, the module installed on this boot
 (`a3732c1c…10608`; the UBWC series adds no kernel patch, and the patch set is
 unchanged from the rest of the tree), and the decoder `/dev/video17` resolved by
-`iris_driver`. This is a build-tree override: the probes loaded
-`~/iris-vaapi-lab/src/build/src/v4l2_drv_video.so`, hash `246e1c21…770c`.
-The installed package driver on this boot is still `35cdab55…d591`, which
-predates the UBWC series; nothing in this section was measured through it.
+`iris_driver`. The first run is a build-tree override: the probes loaded
+`~/iris-vaapi-lab/src/build/src/v4l2_drv_video.so`, hash `246e1c21…770c`,
+while the installed file was still `35cdab55…d591`. `scripts/install-system.sh`
+then installed the same build over `/usr/lib64/dri/v4l2_drv_video.so` (hash
+now `246e1c21…770c`; the previous file is kept under
+`~/iris-vaapi-lab/rollback/`), and the gate was rerun with
+`LIBVA_DRIVERS_PATH=/usr/lib64/dri`: the same four codecs read back the same
+counts and the VA probe passes 21/21.
 
 | Gate | Result |
 | --- | --- |
@@ -366,6 +370,22 @@ driver: `iris-matrix.sh` 48/48 for each codec with `drops=0 timeouts=0`,
 `drops=0`. Each run is `guard=complete exit=0` on driver `246e1c21…770c`; the
 tree moved only through test and documentation commits between the runs
 (`ffb3105` and `7645dc6`), and the driver hash is identical at both.
+
+With that build installed as the package file, the rest of the target gates
+also pass, all at source `4b0d63e`, `source_dirty=0`, `guard=complete exit=0`:
+`iris-ubwc-gate.sh` as above, `iris-vp9-p2-gate.sh` 30/30 P010 surfaces,
+`iris-zero-copy-suite.sh` 24 Direct, `iris-two-player-gate.sh` 450 frames per
+lane with exact framemd5 and a terminal LAST, `iris-gstreamer-gate.sh` 48/48
+decode and 60/60 through both encoder elements, `iris-encode-main10-gate.sh`,
+`iris-throughput.sh` (H.264 1080p 705.9 fps against 522.6 native, HEVC 589.4
+against 463.0), `iris-encode-baseline.sh` (H.264 458.6 against libx264 120.6
+fps, HEVC 540.0 against libx265 36.4), `iris-encode-quality.sh` with
+`IRIS_ENCODE_8K=0` (SSIM 0.998596 and 0.996808, as in the table above), and
+`iris-power-sampler.sh` (1080p decode 1.24 W against 6.05 W software; H.264
+encode 2.58 W against 4.86 W). The two-player lanes used two copies of the
+same 1920x1080 clip with software baselines generated for this run. The
+browser gates and the 8K lane were not rerun: one needs an interactive
+session, the other its 8K media, which is not on the target.
 
 A compressed surface publishes Direct or Import only. Copy publication, the
 image entry points, film grain, video processing and the encoder refuse it with
