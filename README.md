@@ -171,6 +171,11 @@ Q08C offsets under the `QCOM_COMPRESSED` modifier. Anything else returns
   decides what ran.
 - **Stock kernel**: decode degrades to GPU copy, and IDR requests move the intra
   period instead of forcing a frame.
+- **8K Direct**: the kernel patch set's `capture_sg=1` module parameter
+  allocates the decoder's CAPTURE pool from system memory through the SMMU and
+  is what makes a 15-frame 8K pool (713 MiB) fit. Without it the contiguous
+  budget grants eight 8K frames, and the automatic policy publishes Copy at
+  that geometry. See `packaging/kernel/README.md`.
 - **Encode**: a client's slice list becomes a macroblock budget
   (`ceil(macroblocks / slices)`) under CBR or CQP, up to 60 fps and 4096x2160,
   and needs the 0013 kernel patch; without it every frame is one full-picture

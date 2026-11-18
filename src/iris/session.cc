@@ -38,6 +38,12 @@ constexpr int kOutputDrainMs = 500;
 // large geometry turn a fixed count into an unbounded allocation.
 constexpr uint64_t kCaptureMemoryBudget = 384ull << 20;
 
+// The same pool when the kernel allocates CAPTURE from system memory and maps
+// it through the IOMMU (capture_sg). 720 MiB is the 15 8K frames a Direct
+// target needs: the firmware minimum of seven plus the eight-picture headroom.
+// A larger pool fragmented the memory the HEVC bitstream buffer asks for.
+constexpr uint64_t kSystemCaptureMemoryBudget = 720ull << 20;
+
 // Decoded pictures a client can hold between completion and consumption.
 // The driver cannot see that queue: FFmpeg's hwdownload filter backlog held
 // eight 8K pictures between the last capture and the sync that waited for the
@@ -58,14 +64,14 @@ unsigned default_au_capacity(unsigned width, unsigned height)
     return 2u << 20;
 }
 
-unsigned capture_pool_count(unsigned wanted, uint64_t frame_size, int firmware_min)
+unsigned capture_pool_count(unsigned wanted, uint64_t frame_size, int firmware_min, uint64_t budget)
 {
     if (frame_size == 0)
         return wanted;
     // The firmware's minimum is not negotiable: it needs that many slots to
     // run at all, even when the budget would prefer fewer.
     const unsigned floor = firmware_min > 0 ? static_cast<unsigned>(firmware_min) : 1u;
-    const uint64_t affordable = std::max<uint64_t>(floor, kCaptureMemoryBudget / frame_size);
+    const uint64_t affordable = std::max<uint64_t>(floor, budget / frame_size);
     return std::min(wanted, static_cast<unsigned>(std::min<uint64_t>(affordable, kMaxCapturePool)));
 }
 
@@ -309,7 +315,8 @@ void Session::configure_capture()
     unsigned wanted = std::clamp(config_.surface_count + 4, kMinCapturePool, kMaxCapturePool);
     if (minimum && *minimum > 0)
         wanted = std::max(wanted, static_cast<unsigned>(*minimum));
-    wanted = capture_pool_count(wanted, layout.size, minimum ? *minimum : 0);
+    const uint64_t budget = device_->capture_from_system() ? kSystemCaptureMemoryBudget : kCaptureMemoryBudget;
+    wanted = capture_pool_count(wanted, layout.size, minimum ? *minimum : 0, budget);
     direct_min_pool_ = (minimum && *minimum > 0 ? static_cast<unsigned>(*minimum) : 0) + kDirectHeadroom;
     pool_.allocate_capture(wanted, layout, memory);
     trace_("capture configure %ux%u stride=%u size=%u visible=%ux%u pool=%u memory=%s firmware-min=%d",

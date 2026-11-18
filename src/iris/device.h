@@ -64,6 +64,11 @@ public:
     virtual std::string path() const = 0;
     virtual int fd() const = 0;
 
+    // True when the kernel allocates the CAPTURE queue from system memory and
+    // maps it through the IOMMU (the driver's capture_sg module parameter).
+    // The contiguous carve-out no longer bounds the pool then.
+    virtual bool capture_from_system() const { return false; }
+
     // Format negotiation.
     virtual FormatInfo get_format(Queue queue) = 0;
     virtual FormatInfo set_format(Queue queue, const FormatInfo& request) = 0;

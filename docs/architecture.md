@@ -100,7 +100,9 @@ chosen per surface from observed client behaviour.
 Session (one per VA context, one fd)
   owns  OUTPUT pool   : 4 MMAP slots, one access unit each
   owns  CAPTURE pool  : N slots, N = min(clamp(surfaces + 4, 32, kernel max),
-                        max(firmware min, 384 MiB / frame size)).
+                        max(firmware min, budget / frame size)), budget =
+                        384 MiB contiguous, or 720 MiB when the kernel
+                        allocates CAPTURE from system memory (capture_sg).
                         MMAP (default): every slot EXPBUF'd once -> Frame.
                         DMABUF (Import): slot i carries the client buffer
                         queued for one picture; nothing is pre-queued and
@@ -146,7 +148,11 @@ When a CAPTURE completion arrives with a token that has a pending Surface:
   the pool has headroom over the firmware minimum (eight pictures, the
   FFmpeg filter backlog measured at 8K). At a geometry where the memory
   budget leaves less, the completion uses the Copy policy instead, which
-  releases the slot immediately.
+  releases the slot immediately. At 8K that is the whole difference between
+  the policies: the 384 MiB contiguous budget grants eight frames, which is
+  the firmware minimum plus one, so Auto publishes Copy; with the patched
+  kernel's `capture_sg=1` the same pool is 720 MiB and fifteen frames, and
+  Auto publishes Direct.
 - **Copy**: the surface already owns a `StableBuffer` because the client
   exported it *before* its first decode (Chrome pre-exports its whole
   NativePixmap pool and caches the fd for the surface's lifetime). The
@@ -823,9 +829,12 @@ below the first needs an MSM render node.
 The geometry and concurrency edges are gated on the target.
 `test/iris-8k-gate.sh` decodes one finite 7680x4320 clip per qualified codec,
 compares every frame with a software framemd5 baseline, and requires the
-granted CAPTURE pool to respect the 384 MiB budget: 32 8K NV12 frames are
+granted CAPTURE pool to respect the memory budget: 32 8K NV12 frames are
 1.5 GiB, more than the device's contiguous carve-out holds, so `STREAMON`
-fails with ENOMEM. `test/iris-two-player-gate.sh` runs two independent ffmpeg
+fails with ENOMEM. The cap is eight frames from the 384 MiB contiguous budget,
+or fifteen when the module reports `capture_sg=Y` and the 720 MiB
+system-memory budget applies; the gate reads the same module parameter the
+driver reads. `test/iris-two-player-gate.sh` runs two independent ffmpeg
 processes at 1920x1080, each with its own VA display and driver trace, and
 requires both to finish with exact pixels, no completion errors and a terminal
 LAST. Neither is a Meson test: both need an Iris node.

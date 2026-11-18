@@ -2,9 +2,12 @@
 
 # Hardware gate for the 8K geometry. The node advertises 96x96 - 8192x8192,
 # but 7680x4320 NV12 is 47.5 MiB per CAPTURE frame: a fixed 32-frame pool asks
-# the device for 1.5 GiB and STREAMON fails with ENOMEM. The session now sizes
-# the pool against a memory budget; this gate proves the budget actually lets
-# all four qualified codecs decode at 8K, byte for byte, with a terminal LAST.
+# the device for 1.5 GiB and STREAMON fails with ENOMEM. The session sizes the
+# pool against a memory budget; this gate proves the budget actually lets all
+# four qualified codecs decode at 8K, byte for byte, with a terminal LAST. The
+# budget and the pool cap follow the module: the stock contiguous carve-out
+# grants 8 frames, the capture_sg module parameter raises the budget to 720 MiB
+# and the cap to 15.
 #
 # The driver is chosen by the caller's environment, which this gate inherits
 # untouched. Leave LIBVA_DRIVERS_PATH unset to test the installed package, or
@@ -91,11 +94,19 @@ run_clip() {
 
     # The pool that was granted must be the memory-budgeted one. A 32-frame
     # pool at this geometry is the failure this gate exists to catch, whether
-    # or not STREAMON happened to succeed on a particular boot.
+    # or not STREAMON happened to succeed on a particular boot. The budget is
+    # 384 MiB of contiguous capture memory (eight 8K frames), or 720 MiB when
+    # the patched module allocates CAPTURE from system memory (capture_sg=1,
+    # fifteen frames, the Direct headroom). The cap is read from the module
+    # parameter because that is what the driver read.
+    pool_cap=8
+    if [ "$(cat /sys/module/qcom_iris/parameters/capture_sg 2>/dev/null || true)" = Y ]; then
+        pool_cap=15
+    fi
     pool=$(sed -n 's/.*capture configure .*pool=\([0-9]*\) memory=.*/\1/p' "$trace" | head -1)
     [ -n "$pool" ] || { echo "FAIL $name: no capture configure record in $trace" >&2; return 1; }
-    [ "$pool" -le 8 ] || {
-        echo "FAIL $name: CAPTURE pool=$pool exceeds the 8K memory budget (8)" >&2
+    [ "$pool" -le "$pool_cap" ] || {
+        echo "FAIL $name: CAPTURE pool=$pool exceeds the 8K memory budget ($pool_cap)" >&2
         return 1
     }
     firmware_min=$(sed -n 's/.*firmware-min=\([0-9]*\).*/\1/p' "$trace" | head -1)

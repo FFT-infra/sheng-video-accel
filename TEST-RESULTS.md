@@ -87,15 +87,42 @@ identity for the three: boot `edd37f6a-cb04-42b0-b9b7-96360172a5ca`, module
 override, source commit `b934188` with a clean tree, decoder node resolved
 by name.
 
-Direct cannot fit at 8K on this device. The policy asks for the firmware
-minimum plus eight held pictures, 15 for H.264 and HEVC, and an 8K NV12
-frame is 47.5 MiB, so that pool alone is about 713 MiB. The mainline
-`sm8550.dtsi` iris node has no `iommus` property and the driver's queues use
-`vb2_dma_contig_memops`, so the CAPTURE pool is contiguous DMA memory from
-the 768 MiB CMA carve-out (`CmaTotal` 786432 kB on this boot). The memory
-budget grants the 8-frame, 380 MiB pool instead. Growing it is a boot-image
-change (IOMMU or a larger carve-out), not a module or driver change, and
-`V4L2_VA_PUBLISH=direct` still stalls at 26/30 as recorded above.
+Direct cannot fit at 8K under the stock module. The policy asks for the
+firmware minimum plus eight held pictures, 15 for H.264 and HEVC, and an 8K
+NV12 frame is 47.5 MiB, so that pool alone is about 713 MiB. The video-codec
+node sits behind the SMMU (the live device tree carries `iommus`, and
+`/sys/kernel/iommu_groups/9/devices` lists `aa00000.video-codec`), but the
+CAPTURE queue uses `vb2_dma_contig_memops`, so the pool is contiguous DMA
+memory from the 768 MiB CMA carve-out (`CmaTotal` 786432 kB on this boot).
+The memory budget grants the 8-frame, 380 MiB pool instead, and
+`V4L2_VA_PUBLISH=direct` still stalls at 26/30 as recorded above. The limit
+is the allocator, not the IOMMU.
+
+`packaging/kernel/0016-*` moves that allocator. With `capture_sg=1` the
+decoder's CAPTURE queue uses `vb2_dma_sg_memops` and the buffer's device
+address is taken from the mapped scatter list at QBUF; the encoder queues and
+every internal buffer keep the contiguous allocator. The driver raises its own
+budget to 720 MiB only while the module parameter reads `Y`, so Auto at 8K
+grants 15 frames, the firmware minimum plus the eight-picture Direct headroom,
+and publishes Direct. One boot, module `ca7aa394…`, driver `d15ff198…` as a
+`LIBVA_DRIVERS_PATH` build-tree override, source `ec282f5` with the budget
+change and 0016 in the working tree, decoder resolved by name:
+
+- `test/iris-8k-gate.sh` under the automatic policy: 30/30 H.264 and 4/4
+  HEVC, VP9 and AV1 frames framemd5-exact, `pool=15 memory=mmap`,
+  `publish=direct` on every frame, `errors=0 last=1 drain=1` (record
+  `gate-8k-sg2`).
+- The 30-picture H.264 clip that stalls at 26/30 under `pool=8` completes
+  30/30 framemd5-exact under both `V4L2_VA_PUBLISH=direct` and the automatic
+  policy.
+- `V4L2_VA_PUBLISH=import` at the same geometry: 30/30 exact with `pool=15
+  memory=import` and `errors=0`.
+- Regression on the same boot: the four-codec 48-frame matrix
+  (`gate-matrix-sg`) and `iris-encode-quality.sh` including its 8K encode lane
+  (`gate-encode-sg`) both pass.
+
+The parameter defaults off and is not part of the qualified module, so a
+stock boot keeps the contiguous pool and Copy publication at 8K.
 
 VP9 12-bit and AV1 12-bit are refused at profile selection; 4:4:4 and
 large-scale tile are outside the advertised profiles or cleanly refused by

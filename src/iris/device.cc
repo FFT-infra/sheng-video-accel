@@ -9,6 +9,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <fstream>
 #include <glob.h>
 #include <system_error>
 
@@ -59,6 +60,15 @@ public:
 
     std::string path() const override { return path_; }
     int fd() const override { return fd_; }
+
+    bool capture_from_system() const override
+    {
+        // A stock module has no such parameter and its CAPTURE pool stays in
+        // the contiguous carve-out.
+        std::ifstream file("/sys/module/qcom_iris/parameters/capture_sg");
+        std::string value;
+        return static_cast<bool>(file >> value) && value == "Y";
+    }
 
     FormatInfo get_format(Queue queue) override
     {
