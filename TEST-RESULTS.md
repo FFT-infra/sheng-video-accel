@@ -332,15 +332,49 @@ visible output is unchanged. 0010 was not isolated from 0011 in this run.
 The qualified module was restored (`8f771ada…dc75`) and the target rebooted
 after the run.
 
+## UBWC surfaces
+
+A surface is UBWC (`QCOM_COMPRESSED`, four-plane Q08C) only when a client lists
+the modifier and `V4L2_VA_UBWC=1`. `test/iris-ubwc-gate.sh` is the gate. This
+run is source `ffb3105`, `source_dirty=0`, `guard=complete exit=0`, on boot
+`edd37f6a-cb04-42b0-b9b7-96360172a5ca`, kernel
+`7.3.4-sm8550-00104-g87ac0f2347eb`, the module installed on this boot
+(`a3732c1c…10608`; the UBWC series adds no kernel patch, and the patch set is
+unchanged from the rest of the tree), and the decoder `/dev/video17` resolved by
+`iris_driver`. This is a build-tree override: the probes loaded
+`~/iris-vaapi-lab/src/build/src/v4l2_drv_video.so`, hash `246e1c21…770c`.
+The installed package driver on this boot is still `35cdab55…d591`, which
+predates the UBWC series; nothing in this section was measured through it.
+
+| Gate | Result |
+| --- | --- |
+| `iris-decode-stream-probe` into Q08C, 640x480, H.264/HEVC/VP9/AV1 | CAPTURE `fourcc=0x3231564e modifier=0x500000000000001 planes=4 size=479232`; Y meta `offset=0 pitch=64 rows=64`, Y `4096/640/480`, UV meta `311296/64/32`, UV `315392/640/256` |
+| `vk-ubwc-read`, frames 0 and 11 of each codec | Q08C reads back `luma=0/307200 chroma=0/153600` differing samples against the linear decode |
+| linear control, same frames | `luma=0/307200 chroma=0/153600` — the read-back path reproduces a linear image plane for plane before it is trusted |
+| `iris-va-ubwc-probe`, `V4L2_VA_UBWC=1` | 21/21: the grant, 12 frames decoded into four UBWC surfaces, an export of four R8 layers at the Q08C offsets carrying the modifier, and `vaDeriveImage`/`vaGetImage`/`vaPutImage` returning `VA_STATUS_ERROR_UNIMPLEMENTED` |
+| `iris-va-ubwc-probe`, switch unset | a compressed-only list is refused (`VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT`); a list with a `LINEAR` fallback creates a surface and exports `DRM_FORMAT_MOD_LINEAR` |
+
+Kernel patch 0015 is not needed. The plan reserved it to widen the module's
+AV1-only UBWC stride/scanline property if H.264, HEVC or VP9 did not decode
+into Q08C. All four codecs read back exactly on the unpatched module.
+
+A compressed surface publishes Direct or Import only. Copy publication, the
+image entry points, film grain, video processing and the encoder refuse it with
+`VA_STATUS_ERROR_UNIMPLEMENTED`, and a completion that would have to degrade to
+Copy is refused and traced (`publish=ubwc-copy-refused`). Q10C is refused on a
+10-bit RT format: the node enumerates it, but nothing on this stack advertises
+`QCOM_COMPRESSED` for P010, so no reader exists.
+
 ## Boundaries
 
-UBWC `Q08C`/`Q10C` CAPTURE formats are enumerated by the node and the
-firmware writes real UBWC. Turnip decodes Q08C byte-exactly through
-`VK_EXT_image_drm_format_modifier`, but EGL — the Copy publish path and
-`vaGetImage`/`vaPutImage` — reads back the wrong pixels, `QCOM_COMPRESSED` on
-P010 is not advertised, and no VA client sets
-`VASurfaceAttribDRMFormatModifiers`. Surfaces stay `NV12`/`P010` and imported
-DMA-BUFs must be `DRM_FORMAT_MOD_LINEAR`. The encode side has no compressor.
+EGL reads UBWC back as the wrong pixels, so the CPU and Copy paths and the
+image API refuse a compressed surface instead of returning them; `Q08C` exists
+for consumers that take the modifier and the four-plane descriptor, evidenced
+above. `QCOM_COMPRESSED` on P010 is not advertised, so `Q10C` has no reader and
+is not offered. No VA client on this target sets
+`VASurfaceAttribDRMFormatModifiers` yet, which is why the surface is opt-in.
+Imported DMA-BUFs must be linear unless they carry the modifier with the
+kernel's four-plane offsets. The encode side has no compressor.
 
 H.264 High 10 decode is absent from the kernel's decode profile mask; VP9
 `show_existing_frame` has no `frame_to_show` field in the VA picture
