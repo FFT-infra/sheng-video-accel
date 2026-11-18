@@ -70,6 +70,21 @@ int main()
     check(query(p, VAProfileH264High, enc, VAConfigAttribPredictionDirection).value
             == VA_PREDICTION_DIRECTION_PREVIOUS,
         "encode predicts from the previous picture");
+    // B pictures are opt-in. FFmpeg reads the future direction as the licence
+    // to code them, and the l1 reference as what it may predict from, so the
+    // two answers must move together; HEVC stays P-only either way.
+    d.options.b_frames = true;
+    check(query(p, VAProfileH264High, enc, VAConfigAttribPredictionDirection).value
+            == (VA_PREDICTION_DIRECTION_PREVIOUS | VA_PREDICTION_DIRECTION_FUTURE),
+        "an opted-in H.264 encode reports a future prediction direction");
+    check((query(p, VAProfileH264High, enc, VAConfigAttribEncMaxRefFrames).value >> 16) == 1,
+        "an opted-in H.264 encode advertises one l1 reference");
+    check(query(p, VAProfileHEVCMain, enc, VAConfigAttribPredictionDirection).value
+            == VA_PREDICTION_DIRECTION_PREVIOUS,
+        "an opted-in HEVC encode stays on the previous direction");
+    check((query(p, VAProfileHEVCMain, enc, VAConfigAttribEncMaxRefFrames).value >> 16) == 0,
+        "an opted-in HEVC encode advertises no l1 reference");
+    d.options.b_frames = false;
     check(query(p, VAProfileH264High, enc, VAConfigAttribEncIntraRefresh).value
             == VA_ENC_INTRA_REFRESH_ROLLING_ROW,
         "rolling-row intra refresh stays advertised");

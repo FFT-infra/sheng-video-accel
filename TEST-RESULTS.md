@@ -201,6 +201,27 @@ under the run directory. An earlier run against the installed package
 reported `max_slices=1` and refused the split stream, which is the module's
 control probe doing its job: that package predates the kernel patch.
 
+B pictures, 11-18: `test/iris-encode-b-gate.sh` encoded 300 frames of
+1280x720 through FFmpeg's `h264_vaapi` with `-bf 1 -async_depth 3 -g 60`.
+With `V4L2_VA_B_FRAMES` set, the stream carries 145 B, 145 P and 10 I
+pictures, all 300 decode, SSIM against the source is 0.996038 against the
+0.90 floor (a blank stream scores 0.000033), and a second run is
+byte-identical. Without the opt-in the same client request codes no B
+pictures and still decodes 300. The HEVC arm codes no B pictures under the
+opt-in, because the config advertises the future direction and the l1
+reference for H.264 only. An experimental build that advertised both to HEVC
+made FFmpeg request them and the firmware answered with an error completion
+after nine pictures, so `configure()` refuses HEVC B pictures as a backstop.
+Run identity: boot `edd37f6a-cb04-42b0-b9b7-96360172a5ca`, kernel
+`7.3.4-sm8550-00104-g87ac0f2347eb`, module `a3732c1c…` (0008, 0009, 0013,
+0014), driver `821bf2a8…` as a `LIBVA_DRIVERS_PATH` build-tree override,
+source commit `249a650` with the attribute work in the working tree, encoder
+node `/dev/video18` resolved by name. Gate record: `gate-bframes-1118c`.
+Before this change FFmpeg never requested B pictures: the driver answered
+`VAConfigAttribPredictionDirection` with the previous direction alone, which
+FFmpeg reads as a P-only encoder however many l1 references are advertised,
+so the option fell back to intra and P pictures.
+
 HEVC B-frames, VP9/AV1 encode and packed headers are not available: the
 encoder node has no VP9/AV1 CAPTURE format, and the experimental HEVC B-frame
 build returned nine pictures at ~23 dB before an error completion.

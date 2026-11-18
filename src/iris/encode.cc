@@ -132,8 +132,10 @@ void EncoderSession::configure(
     // picture it just issued must keep one more picture in flight than the
     // default; a client that does not stalls at the first pair boundary for
     // its sync timeout. FFmpeg reaches that shape with -async_depth 3. Its
-    // HEVC path additionally fails in the firmware itself, so it is refused
-    // where it would otherwise produce a broken stream.
+    // HEVC path requests B pictures as soon as the config advertises a
+    // future reference, and this kernel and firmware answer that request
+    // with an error completion after nine pictures, so HEVC is refused here
+    // rather than left to produce a truncated stream.
     require(!params.b_frames || options_.b_frames, "B pictures are not enabled",
         VA_STATUS_ERROR_UNIMPLEMENTED);
     require(!params.b_frames || h264, "B pictures are not supported for HEVC",

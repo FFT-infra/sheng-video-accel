@@ -174,9 +174,14 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
             attributes[i].value = encode ? 1 : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribPredictionDirection:
-            // One past reference. FFmpeg and GStreamer both need this to know
-            // B pictures are not the default.
-            attributes[i].value = encode ? VA_PREDICTION_DIRECTION_PREVIOUS : VA_ATTRIB_NOT_SUPPORTED;
+            // One past reference, and a future one only when the client opted
+            // into B pictures. FFmpeg reads the future direction as the
+            // licence to code them; without it, `-bf` falls back to intra and
+            // P frames however many l1 references are advertised.
+            attributes[i].value = encode
+                ? (VA_PREDICTION_DIRECTION_PREVIOUS
+                      | (d.options.b_frames && !hevc_encode ? VA_PREDICTION_DIRECTION_FUTURE : 0))
+                : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribDecAV1Features:
             // Large-scale tiles are unsupported, but the attribute is known:
