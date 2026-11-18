@@ -154,11 +154,20 @@ void EncoderSession::configure(
     require(capture.pixelformat == config_.codec, "encoder did not accept the codec",
         VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
 
-    const FormatInfo output = device_->set_format(
-        Queue::Output, FormatInfo { V4L2_PIX_FMT_NV12, config_.width, config_.height, 1, 0, 0 });
-    require(output.pixelformat == V4L2_PIX_FMT_NV12, "encoder did not accept NV12",
+    require(params.bit_depth == 8 || params.bit_depth == 10, "encode bit depth must be 8 or 10",
+        VA_STATUS_ERROR_INVALID_PARAMETER);
+    require(params.bit_depth == 8 || hevc, "10-bit encode is HEVC only",
         VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
-    const Layout input_layout = stable_layout(VA_FOURCC_NV12, config_.width, config_.height);
+    // The raw port carries one format per context: P010 for the 10-bit
+    // path, NV12 otherwise.
+    const bool ten_bit = params.bit_depth > 8;
+    const uint32_t raw_fourcc = ten_bit ? V4L2_PIX_FMT_P010 : V4L2_PIX_FMT_NV12;
+    const FormatInfo output = device_->set_format(
+        Queue::Output, FormatInfo { raw_fourcc, config_.width, config_.height, 1, 0, 0 });
+    require(output.pixelformat == raw_fourcc, ten_bit ? "encoder did not accept P010" : "encoder did not accept NV12",
+        VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+    const Layout input_layout
+        = stable_layout(ten_bit ? VA_FOURCC_P010 : VA_FOURCC_NV12, config_.width, config_.height);
     require(input_layout.size >= output.sizeimage, "surface buffer is smaller than the encoder input",
         VA_STATUS_ERROR_INVALID_SURFACE);
 
@@ -337,8 +346,9 @@ void EncoderSession::configure(
 
     applied_ = params;
     configured_ = true;
-    trace_("encode open node=%s codec=%.4s raw=%ux%u crop=%ux%u mode=%s gop=%u rate=%u/%u",
-        device_->path().c_str(), reinterpret_cast<const char*>(&config_.codec), output.width, output.height,
+    trace_("encode open node=%s codec=%.4s raw=%.4s depth=%u %ux%u crop=%ux%u mode=%s gop=%u rate=%u/%u",
+        device_->path().c_str(), reinterpret_cast<const char*>(&config_.codec),
+        reinterpret_cast<const char*>(&raw_fourcc), params.bit_depth, output.width, output.height,
         config_.width, config_.height, rate_mode_name(params.rate_mode), params.gop_size,
         params.frame_rate_num, params.frame_rate_den);
 }
@@ -434,6 +444,10 @@ void EncoderSession::apply_dynamic(const EncodeParams& params)
     // differently from the rest of the stream.
     require(params.slices == applied_.slices && params.slice_mb == applied_.slice_mb,
         "changing the slice count requires a new context", VA_STATUS_ERROR_UNIMPLEMENTED);
+    // The raw port format is fixed when the queue starts: the kernel has no
+    // usable transition between NV12 and P010 on a streaming output queue.
+    require(params.bit_depth == applied_.bit_depth,
+        "changing the encode bit depth requires a new context", VA_STATUS_ERROR_UNIMPLEMENTED);
     // The refresh period is per-context in V4L2. The kernel marks it dynamic
     // only for a random period, and this driver writes the cyclic one, so a
     // change needs a new context rather than a write the kernel refuses.

@@ -27,6 +27,7 @@ AV1 film grain 合成在用户态完成。客户端给出独立的 `current_disp
 | --- | --- | --- | --- | --- |
 | H.264 | `VAEntrypointEncSlice`（CBR、VBR、CQP） | NV12 | Annex-B | 1080p SSIM 0.9986；CBR 与 VBR 下按请求码率输出 |
 | HEVC | `VAEntrypointEncSlice`（CBR、VBR、CQP） | NV12 | Annex-B | 1080p SSIM 0.9968；CBR 与 VBR 下按请求码率输出 |
+| HEVC Main 10 | `VAEntrypointEncSlice`（CBR、VBR、CQP） | P010 | Annex-B | 640x480 平均 SSIM 0.9995；需 0014 内核补丁，模块接受 P010 时才声明该 profile |
 
 ### 视频处理
 
@@ -47,7 +48,7 @@ AV1 film grain 合成在用户态完成。客户端给出独立的 `current_disp
 - 平台：高通 SM8550（HFI gen2 Iris VPU），aarch64。
 - 核心依赖：`libva` >= 1.1，`libdrm` >= 2.4.52。GPU 拷贝引擎需要 EGL、GLES 与 GBM。
 - 发行版：Fedora 44 是基准。`packaging/` 与 `debian/` 提供 Fedora、Arch 与 Debian/Ubuntu arm64 包。
-- 内核：`sheng-7.3.4`（`87ac0f2347eb`）配 0008-0009，或 `sheng-7.2.6`（`42f3b40c702a`）配 0001-0004，两者均已验收。原版内核上仍可构建安装，降级方式见「已知限制」。补丁在 `packaging/kernel/`。
+- 内核：`sheng-7.3.4`（`87ac0f2347eb`）配 0008-0009，或 `sheng-7.2.6`（`42f3b40c702a`）配 0001-0004，两者均已验收。7.3.4 上 0013 增加编码多切片控件，0014 增加 HEVC Main 10 的 P010 输入；驱动只在已加载模块提供该能力时声明。原版内核上仍可构建安装，降级方式见「已知限制」。补丁在 `packaging/kernel/`。
 
 ## 安装
 
@@ -111,7 +112,7 @@ HEVC Main 8-bit，FFmpeg 8.1.3。CPU 锁最高频，GPU 锁 680 MHz。解码不�
 
 - **AV1 分辨率切换**：上下文内切换后，继续按旧几何导出表面的客户端在这些帧上得到 GPU 拷贝。Chromium 播本地文件时可能选软件 AV1 解码器，是否走硬件以浏览器门禁为准。
 - **原版内核**：解码降级为 GPU 拷贝，IDR 请求改为移动 intra period。
-- **编码**：仅单图单切片。多切片、分块与 ROI 返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。B 帧需 `V4L2_VA_B_FRAMES` 开启，仅 H.264，客户端需保持至少三帧在途（FFmpeg：`-bf 1 -async_depth 3`）。
+- **编码**：客户端给出的切片列表变成宏块预算（`ceil(宏块数 / 切片数)`），仅 CBR 或 CQP、≤60 fps、≤4096x2160，并需要 0013 内核补丁；没有补丁时每帧只有一整片，`VAConfigAttribEncMaxSlices` 答 1。分块与 ROI 返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。B 帧需 `V4L2_VA_B_FRAMES` 开启，仅 H.264，客户端需保持至少三帧在途（FFmpeg：`-bf 1 -async_depth 3`）。
 - **intra refresh**：滚动行请求（`VAEncMiscParameterRIR`）在 CBR 下生效，VBR/CQP 下拒绝。`ltr_count`/`frame_ltr_index`/`use_ltr_frames` 不声明。
 - **封装头**：extradata 报告 `VA_ENC_PACKED_HEADER_NONE`，参数集随码流带内传输。
 - **UBWC**：节点列出 `Q08C`/`Q10C`，固件确实写出 UBWC。Turnip 能逐字节解 Q08C，EGL（Copy 路径与 `vaGetImage`/`vaPutImage`）不能，P010 也没有压缩格式。没有客户端请求压缩表面，表面保持 `NV12`/`P010`，导入必须是 `DRM_FORMAT_MOD_LINEAR` 平面。

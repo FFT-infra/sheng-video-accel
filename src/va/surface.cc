@@ -536,15 +536,17 @@ VAStatus querySurfaceAttributes(VADriverContextP ctx, VAConfigID config, VASurfa
     // the profile can decode into rather than the one the config defaulted to.
     add(VASurfaceAttribPixelFormat, VA_FOURCC_NV12, VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
     const VAProfile profile = it->second.profile;
-    // The encoder's raw port is NV12 only. A decode surface follows the
-    // profile, and a VideoProc surface follows the config's RT format: the
-    // processor scales P010 as well as NV12, one kernel per sample width.
+    // The encoder's raw port is NV12, or P010 for a Main 10 config once the
+    // kernel module accepts P010 input. A decode surface follows the profile,
+    // and a VideoProc surface follows the config's RT format: the processor
+    // scales P010 as well as NV12, one kernel per sample width.
     const bool encoding = it->second.entrypoint == VAEntrypointEncSlice;
+    const bool encoding_p010 = encoding && profile == VAProfileHEVCMain10 && d.capabilities.encode_p010;
     // A VideoProc config creates the render target, not a decoded picture, so
     // its floor is the kernel's rather than the node's; a client scaling down
     // to a thumbnail is otherwise refused before the driver is called.
     const bool vpp = profile == VAProfileNone && it->second.entrypoint == VAEntrypointVideoProc;
-    if (!encoding && d.capabilities.p010 && (p010_decode_profile(profile) || vpp))
+    if (encoding_p010 || (!encoding && d.capabilities.p010 && (p010_decode_profile(profile) || vpp)))
         add(VASurfaceAttribPixelFormat, VA_FOURCC_P010, VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
     // Packed surfaces exist for the processor's overlay input only: a client
     // uploads BGRA or RGBA and asks for it to be composited onto a YUV frame.

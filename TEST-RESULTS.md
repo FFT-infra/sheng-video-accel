@@ -152,10 +152,47 @@ capabilities with no client gate, recorded as such in the capability table.
 1-byte and a header-only misc element with
 `VA_STATUS_ERROR_INVALID_PARAMETER`.
 
-HEVC Main10 encode, HEVC B-frames, VP9/AV1 encode and packed headers are not
-available: the encoder node has no VP9/AV1 CAPTURE format, no P010 raw input,
-and the experimental HEVC B-frame build returned nine pictures at ~23 dB
-before an error completion.
+Multi-slice encode, 11-18: `test/iris-encode-slice-probe` encoded three
+640x480 IDR pictures through one CBR context, first with one slice buffer per
+picture and then with four. H.264 reported `max_slices=128 structure=0x2`,
+wrote 3 slices in the single-slice stream (57167 bytes) and 4 per picture in
+the split stream (58349 bytes); HEVC reported the same attributes, 3 slices
+(144792 bytes) and 4 per picture (144542 bytes). Both split streams pass the
+probe's `slices_per_picture >= 4` check, so the client's slice count reaches
+the firmware through `V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE`.
+Run identity: boot `e6cbc26b-eb9b-457d-b930-79a59deb0985`, kernel
+`7.3.4-sm8550-00104-g87ac0f2347eb`, module
+`5d295a78998b07e919b5c4f616f10e1cee820359ea8ced77b5283682121606b5` (0008,
+0009, 0013), driver `e64c5e10…` as a `LIBVA_DRIVERS_PATH` build-tree override
+(the installed package was not rebuilt), source commit `d817308` with the
+in-progress Main 10 work in the working tree, encoder node `/dev/video18`
+resolved by name. Gate records: `gate-slice-h264c` and `gate-slice-hevc`
+under the run directory. An earlier run against the installed package
+reported `max_slices=1` and refused the split stream, which is the module's
+control probe doing its job: that package predates the kernel patch.
+
+HEVC B-frames, VP9/AV1 encode and packed headers are not available: the
+encoder node has no VP9/AV1 CAPTURE format, and the experimental HEVC B-frame
+build returned nine pictures at ~23 dB before an error completion.
+
+HEVC Main 10 encode, 11-18: `test/iris-encode-main10-gate.sh` encoded 60
+frames of 640x480 from a 10-bit source through FFmpeg's `hevc_vaapi` with
+`-profile:v main10`. The encode moved the Iris IRQ counter by 123, `ffprobe`
+reports `profile=Main 10` and `pix_fmt=yuv420p10le`, all 60 frames decode, and
+the platform decode matches the software decode byte for byte. SSIM against
+the 10-bit source is 0.999480 mean and 0.9973 worst against the 0.90 floor; a
+blank stream scores 0.000032. The decoded luma carries 731 distinct values
+with all four residues modulo 4 present, so the low bits are coded rather than
+padded. The same run's 8-bit HEVC lane still encodes and decodes.
+Run identity: boot `edd37f6a-cb04-42b0-b9b7-96360172a5ca`, kernel
+`7.3.4-sm8550-00104-g87ac0f2347eb`, module
+`a3732c1c5b6c7ff4403a13734f367a9230680b44bc0e45002e18a4db03110608` (0008,
+0009, 0013, 0014), driver `200773f2…` as a `LIBVA_DRIVERS_PATH` build-tree
+override, source commit `d817308` with the Main 10 work in the working tree,
+encoder node `/dev/video18` resolved by name. Gate record: `gate-main10b`
+under the run directory. The first attempt failed at `createConfig` because
+FFmpeg opens a probe config with no attributes and the driver defaulted a
+Main 10 profile to 8 bits; the default now follows the profile.
 
 ## Throughput
 

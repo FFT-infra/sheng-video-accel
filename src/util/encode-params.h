@@ -43,6 +43,9 @@ struct EncodeParams {
     // 1 / 0 leaves the firmware's single full-picture slice alone.
     unsigned slices = 1;
     unsigned slice_mb = 0;
+    // Sample depth of the raw input, 8 or 10. Ten selects P010 and the
+    // firmware's 10-bit path; it is fixed per context.
+    unsigned bit_depth = 8;
     // Deblocking, in the numbering both codecs share: 0 filtering enabled,
     // 1 disabled, 2 disabled across slice boundaries. VA carries these in
     // the slice header and V4L2 in a per-context control, so only the first

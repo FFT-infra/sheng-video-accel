@@ -664,8 +664,11 @@ va end_picture ctx=<n> surface=<n> entrypoint=videoproc src=<n> <w>x<h>-><w>x<h>
                                                        appears only for a
                                                        stack and gives the
                                                        count.)
-encode open node=<path> codec=<fourcc> raw=<w>x<h> crop=<w>x<h> mode=cbr|vbr|cqp
-            gop=<n> rate=<num>/<den>
+encode open node=<path> codec=<fourcc> raw=<fourcc> depth=<8|10> <w>x<h>
+            crop=<w>x<h> mode=cbr|vbr|cqp gop=<n> rate=<num>/<den>
+                                                       (raw is the format the
+                                                       raw port accepted: NV12
+                                                       or P010)
 encode frame index=<n> bytes=<n> idr=0|1 promoted=0|1    (idr=1 covers both the
                                                        client's idr_pic_flag and
                                                        an intra picture without

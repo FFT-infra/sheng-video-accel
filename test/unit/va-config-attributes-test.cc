@@ -48,7 +48,7 @@ VAConfigAttrib query(VADriverContextP ctx, VAProfile profile, VAEntrypoint entry
 int main()
 {
     va::DriverData d;
-    d.capabilities.encode_profiles = { VAProfileH264High, VAProfileHEVCMain };
+    d.capabilities.encode_profiles = { VAProfileH264High, VAProfileHEVCMain, VAProfileHEVCMain10 };
     d.capabilities.profiles = { VAProfileAV1Profile0, VAProfileH264High,
         VAProfileHEVCMain10, VAProfileVP9Profile0, VAProfileVP9Profile2 };
     d.capabilities.p010 = true;
@@ -104,6 +104,26 @@ int main()
     va::queryConfigAttributes(p, p2_id, nullptr, nullptr, &p2_query, &p2_count);
     check(p2_query.value == VA_RT_FORMAT_YUV420_10,
         "VP9 Profile 2 config default is 10-bit only");
+
+    // Same shape on the encode side: FFmpeg opens a probe config with no
+    // attributes before it knows the surface format, so a Main 10 profile
+    // must default to 10 bits instead of the 8-bit default.
+    check(query(p, VAProfileHEVCMain10, enc, VAConfigAttribRTFormat).value == VA_RT_FORMAT_YUV420_10,
+        "Main 10 encode answers YUV420_10 only");
+    VAConfigID m10_id = 0;
+    check(va::createConfig(p, VAProfileHEVCMain10, enc, nullptr, 0, &m10_id) == VA_STATUS_SUCCESS,
+        "Main 10 encode opens a config with no attributes");
+    VAConfigAttrib m10_query = { VAConfigAttribRTFormat, 0 };
+    int m10_count = 1;
+    va::queryConfigAttributes(p, m10_id, nullptr, nullptr, &m10_query, &m10_count);
+    check(m10_query.value == VA_RT_FORMAT_YUV420_10, "Main 10 config default is 10-bit");
+    VAConfigAttrib m10_8bit[] = { { VAConfigAttribRTFormat, VA_RT_FORMAT_YUV420 } };
+    check(va::createConfig(p, VAProfileHEVCMain10, enc, m10_8bit, 1, &m10_id)
+            == VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT,
+        "an 8-bit RT format is refused for Main 10 encode");
+    VAConfigAttrib m10_10bit[] = { { VAConfigAttribRTFormat, VA_RT_FORMAT_YUV420_10 } };
+    check(va::createConfig(p, VAProfileHEVCMain10, enc, m10_10bit, 1, &m10_id) == VA_STATUS_SUCCESS,
+        "Main 10 encode accepts YUV420_10");
 
     // createConfig rejects a value outside getConfigAttributes' mask, but
     // still opens a config for the attributes a real client sends.

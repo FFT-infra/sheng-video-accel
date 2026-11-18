@@ -65,6 +65,7 @@ std::unique_ptr<iris::codec::Encoder> make_encoder(VAProfile profile, iris::Rate
     case VAProfileH264High:
         return iris::codec::make_h264_encoder(profile, rate_mode);
     case VAProfileHEVCMain:
+    case VAProfileHEVCMain10:
         return iris::codec::make_hevc_encoder(profile, rate_mode);
     default:
         throw iris::Error(VA_STATUS_ERROR_UNSUPPORTED_PROFILE, "no encoder for profile");
@@ -974,7 +975,11 @@ VAStatus beginPicture(VADriverContextP ctx, VAContextID id, VASurfaceID surface_
             // it set after a rejected call, and every later vaBeginPicture on
             // this context would fail with "picture already in progress".
             if (c->encoding()) {
-                iris::require(s->fourcc == VA_FOURCC_NV12, "encode input must be NV12",
+                // Main 10 is the only encode profile whose raw input is
+                // P010; every 8-bit profile takes NV12.
+                const bool wants_p010 = c->profile == VAProfileHEVCMain10;
+                iris::require(s->fourcc == (wants_p010 ? VA_FOURCC_P010 : VA_FOURCC_NV12),
+                    wants_p010 ? "Main 10 encode input must be P010" : "encode input must be NV12",
                     VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
                 // The picture the client asked for is checked against the
                 // surface in vaEndPicture, where the sequence parameters that

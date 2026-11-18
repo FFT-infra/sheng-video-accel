@@ -262,6 +262,9 @@ struct Capabilities {
     // property of the module, not of a codec: the controls exist for the
     // node and the rate-control restriction applies to both codecs.
     bool encode_multi_slice = false;
+    // The encoder node takes P010 on its raw port, which is what makes HEVC
+    // Main 10 encodable; without it the profile is not advertised.
+    bool encode_p010 = false;
     unsigned min_width = 96, min_height = 96, max_width = 8192, max_height = 8192;
     std::set<VAProfile> profiles; // decode
     std::set<VAProfile> encode_profiles;

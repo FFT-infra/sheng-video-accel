@@ -84,14 +84,23 @@ public:
             VA_STATUS_ERROR_INVALID_PARAMETER);
         require(params != nullptr, "HEVC encode picture has no picture parameters",
             VA_STATUS_ERROR_INVALID_PARAMETER);
-        require(profile_ == VAProfileHEVCMain, "only HEVC Main encode is supported",
+        const bool main10 = profile_ == VAProfileHEVCMain10;
+        require(main10 || profile_ == VAProfileHEVCMain, "only HEVC Main encode is supported",
             VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
-        // 0 is an unset profile in some clients; anything else must be Main.
-        require(sequence->general_profile_idc == 0 || sequence->general_profile_idc == 1,
+        // 0 is an unset profile in some clients. Main is profile idc 1 and
+        // Main 10 is 2; a Main 10 sequence is also allowed to leave the idc
+        // at 1 in some clients, so the depth below is the deciding check.
+        require(sequence->general_profile_idc == 0 || sequence->general_profile_idc == 1
+                || (main10 && sequence->general_profile_idc == 2),
             "only HEVC Main encode is supported", VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
-        require(sequence->seq_fields.bits.bit_depth_luma_minus8 == 0
-                && sequence->seq_fields.bits.bit_depth_chroma_minus8 == 0,
-            "10-bit encode is not supported", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+        // The two planes and the profile must agree on the depth: the node
+        // has one raw format per context and the firmware writes one
+        // sequence header for the stream.
+        const unsigned bit_depth = sequence->seq_fields.bits.bit_depth_luma_minus8;
+        require(sequence->seq_fields.bits.bit_depth_chroma_minus8 == bit_depth
+                && ((main10 && bit_depth == 2) || (!main10 && bit_depth == 0)),
+            main10 ? "Main 10 encode needs a 10-bit sequence" : "only 8-bit encode is supported",
+            VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
         require(sequence->seq_fields.bits.chroma_format_idc == 1, "4:2:0 encode is required",
             VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
         // VA counts ip_period as the distance between two references, so one
@@ -120,7 +129,8 @@ public:
         // them in coding order. HEVC names the display position in the
         // picture order count, which VA carries on the current picture.
         out.display_order = params->decoded_curr_pic.pic_order_cnt;
-        out.profile = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN;
+        out.profile = main10 ? V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10 : V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN;
+        out.bit_depth = 8 + bit_depth;
         out.level = level_menu(sequence->general_level_idc);
         out.rate_mode = rate_mode_;
         out.bitrate = sequence->bits_per_second;

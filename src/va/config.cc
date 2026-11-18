@@ -93,8 +93,9 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
             if (decode) {
                 attributes[i].value = decode_rt_format(d, profile);
             } else if (encode) {
-                // The encoder's raw port is NV12 only.
-                attributes[i].value = VA_RT_FORMAT_YUV420;
+                // The encoder's raw port is NV12, or P010 for Main 10.
+                attributes[i].value = profile == VAProfileHEVCMain10 ? VA_RT_FORMAT_YUV420_10
+                                                                    : VA_RT_FORMAT_YUV420;
             } else if (vpp) {
                 // The processor scales either width; a picture whose two ends
                 // disagree on bit depth is refused at endPicture. RGB32 is the
@@ -269,6 +270,12 @@ VAStatus createConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entr
         uint32_t rt_format = VA_RT_FORMAT_YUV420;
         if (entrypoint == VAEntrypointVLD)
             rt_format = decode_rt_format(d, profile);
+        // A client that names no RT format gets the profile's own depth.
+        // FFmpeg opens a probe config with no attributes before it knows the
+        // surface format, and a Main 10 probe defaulting to 8 bits would be
+        // refused.
+        if (entrypoint == VAEntrypointEncSlice && profile == VAProfileHEVCMain10)
+            rt_format = VA_RT_FORMAT_YUV420_10;
         if (entrypoint == VAEntrypointVideoProc && d.capabilities.p010)
             rt_format |= VA_RT_FORMAT_YUV420_10;
         uint32_t rate_control = VA_RC_VBR;
@@ -307,8 +314,12 @@ VAStatus createConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entr
             // advertised.
             iris::require((rate_control & (VA_RC_CBR | VA_RC_VBR | VA_RC_CQP)) != 0,
                 "unsupported rate control mode", VA_STATUS_ERROR_INVALID_PARAMETER);
-            iris::require(rt_format & VA_RT_FORMAT_YUV420, "encode needs YUV420",
-                VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+            if (profile == VAProfileHEVCMain10)
+                iris::require(rt_format & VA_RT_FORMAT_YUV420_10, "Main 10 encode needs YUV420_10",
+                    VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+            else
+                iris::require(rt_format & VA_RT_FORMAT_YUV420, "encode needs YUV420",
+                    VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
         } else {
             iris::require(rt_format & (VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV420_10), "unsupported RT format",
                 VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);

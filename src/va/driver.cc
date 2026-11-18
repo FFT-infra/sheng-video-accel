@@ -132,6 +132,7 @@ Capabilities probe_capabilities(const iris::Options& options)
         // without the patch answers no control at all.
         caps.encode_multi_slice
             = encoder->get_control(V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE).has_value();
+        caps.encode_p010 = encoder->format_supported(iris::Queue::Output, V4L2_PIX_FMT_P010);
         for (uint32_t format : { V4L2_PIX_FMT_H264, V4L2_PIX_FMT_HEVC })
             if (encoder->format_supported(iris::Queue::Capture, format))
                 caps.encoder_formats.insert(format);
@@ -143,6 +144,10 @@ Capabilities probe_capabilities(const iris::Options& options)
         }
         if (caps.encoder_formats.count(V4L2_PIX_FMT_HEVC) && encoder_nv12)
             caps.encode_profiles.insert(VAProfileHEVCMain);
+        // Main 10 is a second profile on the same codec, and the kernel
+        // module decides whether its raw port takes P010.
+        if (caps.encoder_formats.count(V4L2_PIX_FMT_HEVC) && caps.encode_p010)
+            caps.encode_profiles.insert(VAProfileHEVCMain10);
         // encode-qualified-end
     } catch (const std::exception&) {
         // An explicit override that does not name an encoder is a

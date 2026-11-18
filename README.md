@@ -40,6 +40,7 @@ libdav1d's grained output byte for byte.
 | --- | --- | --- | --- | --- |
 | H.264 | `VAEntrypointEncSlice` (CBR, VBR, CQP) | NV12 | Annex-B | SSIM 0.9986 at 1080p; encodes the requested rate under CBR and VBR |
 | HEVC | `VAEntrypointEncSlice` (CBR, VBR, CQP) | NV12 | Annex-B | SSIM 0.9968 at 1080p; encodes the requested rate under CBR and VBR |
+| HEVC Main 10 | `VAEntrypointEncSlice` (CBR, VBR, CQP) | P010 | Annex-B | SSIM 0.9995 mean at 640x480; needs the 0014 kernel patch, and the profile is advertised only when the module takes P010 |
 
 ### Video processing
 
@@ -65,9 +66,12 @@ that found Vulkan exposes `VAProfileNone` / `VAEntrypointVideoProc`;
 - Distribution: Fedora 44 is the qualified baseline. `packaging/` and `debian/`
   carry Fedora, Arch and Debian/Ubuntu arm64 packages.
 - Kernel: `sheng-7.3.4` (`87ac0f2347eb`) with patches 0008-0009, or
-  `sheng-7.2.6` (`42f3b40c702a`) with 0001-0004. Both are qualified. On a stock
-  kernel the driver still builds and installs; the fallback is under Known
-  limits. Sources and rebuild instructions are in `packaging/kernel/`.
+  `sheng-7.2.6` (`42f3b40c702a`) with 0001-0004. Both are qualified. On 7.3.4,
+  0013 adds the encoder multi-slice controls and 0014 adds P010 input for HEVC
+  Main 10; the driver advertises each capability only when the loaded module
+  provides it. On a stock kernel the driver still builds and installs; the
+  fallback is under Known limits. Sources and rebuild instructions are in
+  `packaging/kernel/`.
 
 ## Install
 
@@ -155,7 +159,10 @@ Imported DMA-BUFs must match the native CAPTURE layout: one linear object with a
   decides what ran.
 - **Stock kernel**: decode degrades to GPU copy, and IDR requests move the intra
   period instead of forcing a frame.
-- **Encode**: one full-picture slice. Multi-slice, tiles and ROI return
+- **Encode**: a client's slice list becomes a macroblock budget
+  (`ceil(macroblocks / slices)`) under CBR or CQP, up to 60 fps and 4096x2160,
+  and needs the 0013 kernel patch; without it every frame is one full-picture
+  slice and `VAConfigAttribEncMaxSlices` answers 1. Tiles and ROI return
   `VA_STATUS_ERROR_UNIMPLEMENTED`. B pictures are opt-in with
   `V4L2_VA_B_FRAMES`, H.264 only, and need at least three pictures in flight
   (FFmpeg: `-bf 1 -async_depth 3`).
