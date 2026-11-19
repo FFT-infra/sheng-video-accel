@@ -609,22 +609,21 @@ finished with `submitted=7209 completed=7209 errors=0 drops=0 timeouts=0
 drains=1`. Eight simultaneous 1080p sessions therefore stay under the
 firmware's session ceiling.
 
-Twelve and fourteen sessions bound the ceiling. Twelve completed the same
-300 s window with 7200 frames per client, zero drops or timeouts, a terminal
-LAST drain on all twelve, and a peak `video-thermal` of 73.3 °C. Fourteen do
-not start: two clients fail at `createContext` with `REQBUFS: Cannot allocate
-memory`, the kernel logs `dma alloc of size 7077888 failed` from the
-contiguous videobuf2 allocator, and the firmware reports
-`session error 0x1000006` and `0x4000004: invalid operation for current
-state`; sixteen fail the same way with four clients. CMA is 768 MiB on this
-boot. The limit is the contiguous allocation for the decoder's queue buffers,
-not a firmware session count: 0016 switches only CAPTURE to scatter-gather,
-so with `capture_sg=1` the compressed OUTPUT queue is the remaining
-contiguous consumer. Raising the count needs that queue moved off CMA or a
-smaller bitstream buffer, neither of which this module does today. The
-fourteen- and sixteen-session runs aborted at startup, so they carry no
-300 s frame record; the twelve-session run used the same boot, driver and
-module as the table above.
+Twelve and fourteen sessions bound the ceiling at 1080p. Twelve completed the
+same 300 s window with 7200 frames per client, zero drops or timeouts, a
+terminal LAST drain on all twelve, and a peak `video-thermal` of 73.3 °C.
+Fourteen do not start: two clients fail at `createContext` with
+`REQBUFS: Cannot allocate memory`, the kernel logs `dma alloc of size
+7077888 failed` from the contiguous videobuf2 allocator, and the firmware
+reports `session error 0x1000006` and `0x4000004: invalid operation for
+current state`; sixteen fail the same way with four clients. The resource is
+the contiguous carve-out, not a session count: CMA is 768 MiB on this boot
+and the firmware's internal buffers for each session consume part of it, and
+sixteen sessions at 320x240 do start and hold a 60 s window with 1440 frames
+per client, zero drops and a terminal LAST on all sixteen. The fourteen- and
+sixteen-session 1080p runs aborted at startup, so they carry no 300 s frame
+record; the twelve-session run used the same boot, driver and module as the
+table above.
 
 ## Video processing
 
