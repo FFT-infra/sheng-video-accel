@@ -123,6 +123,46 @@ void test_hevc()
         "a bare HEVC picture gets VPS, SPS and PPS");
 }
 
+// A client's raw packed header (SEI) goes in front of the coded picture and
+// behind the parameter sets, which is where FFmpeg puts the SEI it writes
+// itself.
+void test_insert()
+{
+    const std::vector<uint8_t> sets = join({ with_four_byte_code(unit(7)), unit(8) });
+    const std::vector<uint8_t> sei = unit(6, { 0x05, 0x01 });
+    const std::vector<uint8_t> idr = unit(5);
+    const std::vector<uint8_t> access = join({ sets, sei, idr });
+
+    check(iris::codec::insert_before_vcl(access, sei, iris::codec::Codec::H264) == join({ sets, sei, sei, idr }),
+        "the prefix lands before the slice and after the sets");
+    check(iris::codec::insert_before_vcl(access, {}, iris::codec::Codec::H264) == access,
+        "an empty prefix leaves the unit alone");
+
+    // No coded picture at all: nothing to put the prefix in front of, so it
+    // goes at the end rather than being dropped.
+    check(iris::codec::insert_before_vcl(sets, sei, iris::codec::Codec::H264) == join({ sets, sei }),
+        "no slice means the prefix goes last");
+
+    // Bytes that are not Annex-B keep the prefix in front instead of the
+    // function inventing a start code boundary.
+    const std::vector<uint8_t> garbage { 0xde, 0xad };
+    check(iris::codec::insert_before_vcl(garbage, sei, iris::codec::Codec::H264) == join({ sei, garbage }),
+        "a unit without a start code gets the prefix in front");
+
+    // The four-byte start code the client used is kept as it stands.
+    const std::vector<uint8_t> wide = with_four_byte_code(unit(6, { 0x05, 0x01 }));
+    check(iris::codec::insert_before_vcl(access, wide, iris::codec::Codec::H264) == join({ sets, sei, wide, idr }),
+        "a four-byte start code survives the insertion");
+
+    // HEVC: VPS, SPS, PPS are all below the first slice type, 0-31.
+    const std::vector<uint8_t> hsets = join({ hevc_unit(32), hevc_unit(33), hevc_unit(34) });
+    const std::vector<uint8_t> hsei = hevc_unit(39, { 0x04, 0x01 });
+    const std::vector<uint8_t> hslice = hevc_unit(1);
+    check(iris::codec::insert_before_vcl(join({ hsets, hslice }), hsei, iris::codec::Codec::Hevc)
+            == join({ hsets, hsei, hslice }),
+        "the HEVC prefix goes behind VPS, SPS and PPS");
+}
+
 } // namespace
 
 int main()
@@ -130,6 +170,7 @@ int main()
     test_split();
     test_prepend();
     test_hevc();
+    test_insert();
     if (failures) {
         std::fprintf(stderr, "%d annexb check(s) failed\n", failures);
         return 1;

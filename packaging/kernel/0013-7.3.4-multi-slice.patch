@@ -1,0 +1,271 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: xinyang <xinyang@localhost>
+Date: Tue, 18 Nov 2026 12:00:00 +0800
+Subject: [PATCH] media: iris: add encoder multi-slice controls (7.3.4)
+
+The firmware takes a slice cap in units of macroblocks through
+HFI_PROP_MULTI_SLICE_MB_COUNT, or in bytes through
+HFI_PROP_MULTI_SLICE_BYTES_COUNT. The 7.3.4 driver has neither property
+and no control that reaches them, so every encoded frame is one slice.
+
+Register the three V4L2 multi-slice controls on the encoder and translate
+the selected mode into the matching firmware property. The mode is a menu
+of single slice, macroblock count or byte count. A macroblock count below
+the frame's share of the slice budget is raised to that share, and the
+HEVC value is divided by four because the firmware counts 256-pixel CTUs
+where the control counts 16x16 macroblocks.
+
+The firmware accepts slices only for CBR at frame rates up to 60 and
+within the geometry bounds carried in platform_inst_slice_caps; the setter
+rejects anything else instead of silently encoding one slice.
+---
+--- a/drivers/media/platform/qcom/iris/iris_ctrls.c	2026-11-18 12:56:57.536003757 +0800
++++ b/drivers/media/platform/qcom/iris/iris_ctrls.c	2026-11-18 12:56:37.569562268 +0800
+@@ -3,6 +3,7 @@
+  * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+  */
+ 
++#include <linux/math64.h>
+ #include <linux/types.h>
+ #include <media/v4l2-mem2mem.h>
+ 
+@@ -172,6 +173,12 @@
+ 		return DISPLAY_DELAY_ENABLE;
+ 	case V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY:
+ 		return DISPLAY_DELAY;
++	case V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE:
++		return SLICE_MODE;
++	case V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_BYTES:
++		return SLICE_MAX_BYTES;
++	case V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_MB:
++		return SLICE_MAX_MB;
+ 	default:
+ 		return INST_FW_CAP_MAX;
+ 	}
+@@ -333,6 +340,12 @@
+ 		return V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE;
+ 	case DISPLAY_DELAY:
+ 		return V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY;
++	case SLICE_MODE:
++		return V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE;
++	case SLICE_MAX_BYTES:
++		return V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_BYTES;
++	case SLICE_MAX_MB:
++		return V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_MB;
+ 	default:
+ 		return 0;
+ 	}
+@@ -1611,6 +1624,76 @@
+ 					     &value, sizeof(u32));
+ }
+ 
++int iris_set_slice_count(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id)
++{
++	const struct platform_inst_slice_caps *slice_caps =
++		inst->core->iris_platform_data->slice_caps;
++	const struct iris_hfi_session_ops *hfi_ops = inst->hfi_session_ops;
++	u32 output_height = inst->fmt_dst->fmt.pix_mp.height;
++	u32 output_width = inst->fmt_dst->fmt.pix_mp.width;
++	u32 mbpf = NUM_MBS_PER_FRAME(output_height, output_width);
++	u32 max_width, max_height, min_width, min_height;
++	u32 slice_mode = inst->fw_caps[cap_id].value;
++	u32 max_avg_slicesize, hfi_value, hfi_id;
++	u32 rc_type = inst->hfi_rc_type;
++	u32 fps = inst->frame_rate;
++
++	if (slice_mode == V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_SINGLE) {
++		dev_dbg(inst->core->dev, "slice mode is single slice, ignore setting to fw\n");
++		return 0;
++	}
++	if (fps > slice_caps->max_slice_frame_rate ||
++	    (rc_type != HFI_RC_OFF && rc_type != HFI_RC_CBR_CFR &&
++	    rc_type != HFI_RC_CBR_VFR)) {
++		dev_err(inst->core->dev, "slice unsupported, fps: %u, rc_type: %#x\n",
++			fps, rc_type);
++		return -EINVAL;
++	}
++
++	max_width = (slice_mode == V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_MAX_MB) ?
++			slice_caps->max_mb_slice_width : slice_caps->max_bytes_slice_width;
++	max_height = (slice_mode == V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_MAX_MB) ?
++			slice_caps->max_mb_slice_height : slice_caps->max_bytes_slice_height;
++	min_width = (inst->codec == V4L2_PIX_FMT_HEVC) ?
++			slice_caps->min_hevc_slice_width : slice_caps->min_avc_slice_width;
++	min_height = slice_caps->min_slice_height;
++
++	if (output_width < min_width || output_height < min_height ||
++	    output_width > max_width || output_height > max_height) {
++		dev_err(inst->core->dev, "slice unsupported, codec: %#x wxh: [%dx%d]\n",
++			inst->codec, output_width, output_height);
++		return -EINVAL;
++	}
++
++	if (slice_mode == V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_MAX_MB) {
++		hfi_value = inst->fw_caps[SLICE_MAX_MB].value;
++		hfi_value = max(hfi_value, DIV_ROUND_UP(mbpf, slice_caps->max_slices_per_frame));
++		if (inst->codec == V4L2_PIX_FMT_HEVC)
++			hfi_value = (hfi_value + 3) / 4;
++		hfi_id = inst->fw_caps[SLICE_MAX_MB].hfi_id;
++	} else if (slice_mode == V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_MAX_BYTES) {
++		hfi_value = inst->fw_caps[SLICE_MAX_BYTES].value;
++		if (rc_type != HFI_RC_OFF) {
++			max_avg_slicesize =
++				DIV_ROUND_UP_ULL(div_u64(inst->fw_caps[BITRATE].value, fps) / 8,
++						 slice_caps->max_slices_per_frame);
++		} else {
++			max_avg_slicesize = DIV_ROUND_UP(output_width * output_height * 3,
++							 slice_caps->max_slices_per_frame);
++		}
++		hfi_value = max(hfi_value, max_avg_slicesize);
++		hfi_id = inst->fw_caps[SLICE_MAX_BYTES].hfi_id;
++	} else {
++		return -EINVAL;
++	}
++
++	return hfi_ops->session_set_property(inst, hfi_id,
++					     HFI_HOST_FLAGS_NONE,
++					     iris_get_port_info(inst, cap_id),
++					     HFI_PAYLOAD_U32,
++					     &hfi_value, sizeof(u32));
++}
++
+ int iris_set_properties(struct iris_inst *inst, u32 plane)
+ {
+ 	const struct iris_hfi_session_ops *hfi_ops = inst->hfi_session_ops;
+--- a/drivers/media/platform/qcom/iris/iris_ctrls.h	2026-11-18 12:56:57.536003757 +0800
++++ b/drivers/media/platform/qcom/iris/iris_ctrls.h	2026-11-18 12:56:06.354084912 +0800
+@@ -17,6 +17,7 @@
+ int iris_set_stage(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id);
+ int iris_set_pipe(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id);
+ int iris_set_u32(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id);
++int iris_set_slice_count(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id);
+ int iris_set_profile(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id);
+ int iris_set_level(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id);
+ int iris_set_profile_level_gen1(struct iris_inst *inst, enum platform_inst_fw_cap_type cap_id);
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2.c	2026-11-18 12:56:57.536003757 +0800
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2.c	2026-11-18 12:56:06.354084912 +0800
+@@ -13,6 +13,8 @@
+ #define VIDEO_ARCH_LX 1
+ #define MILOS_BITRATE_MAX			100000000
+ #define BITRATE_MAX				245000000
++#define MAX_SLICE_MB_SIZE         \
++	(((4096 + 15) >> 4) * ((2160 + 15) >> 4))
+ 
+ static const struct platform_inst_fw_cap inst_fw_cap_milos_dec[] = {
+ 	{
+@@ -1914,6 +1916,47 @@
+ 		.flags = CAP_FLAG_INPUT_PORT | CAP_FLAG_DYNAMIC_ALLOWED,
+ 		.set = iris_set_req_sync_frame,
+ 	},
++	{
++		.cap_id = SLICE_MODE,
++		.min = V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_SINGLE,
++		.max = V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_MAX_BYTES,
++		.step_or_mask = BIT(V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_SINGLE) |
++					BIT(V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_MAX_MB) |
++					BIT(V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_MAX_BYTES),
++		.value = V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_SINGLE,
++		.flags = CAP_FLAG_OUTPUT_PORT | CAP_FLAG_MENU,
++		.set = iris_set_slice_count,
++	},
++	{
++		.cap_id = SLICE_MAX_BYTES,
++		.min = 512,
++		.max = BITRATE_MAX >> 3,
++		.step_or_mask = 1,
++		.value = 512,
++		.hfi_id = HFI_PROP_MULTI_SLICE_BYTES_COUNT,
++		.flags = CAP_FLAG_OUTPUT_PORT,
++	},
++	{
++		.cap_id = SLICE_MAX_MB,
++		.min = 1,
++		.max = MAX_SLICE_MB_SIZE,
++		.step_or_mask = 1,
++		.value = 1,
++		.hfi_id = HFI_PROP_MULTI_SLICE_MB_COUNT,
++		.flags = CAP_FLAG_OUTPUT_PORT,
++	},
++};
++
++const struct platform_inst_slice_caps iris_vpu2_vpu3x_slice_caps = {
++	.max_slices_per_frame = 128,
++	.max_slice_frame_rate = 60,
++	.max_mb_slice_width = 4096,
++	.max_mb_slice_height = 2160,
++	.max_bytes_slice_width = 1920,
++	.max_bytes_slice_height = 1088,
++	.min_hevc_slice_width = 384,
++	.min_avc_slice_width = 192,
++	.min_slice_height = 128,
+ };
+ 
+ static const u32 sm8550_vdec_input_config_params_default[] = {
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2_defines.h	2026-11-18 12:56:57.537003680 +0800
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2_defines.h	2026-11-18 12:56:06.355084830 +0800
+@@ -80,6 +80,8 @@
+ #define HFI_PROP_MIN_QP_PACKED			0x0300012f
+ #define HFI_PROP_MAX_QP_PACKED			0x03000130
+ #define HFI_PROP_IR_RANDOM_PERIOD		0x03000131
++#define HFI_PROP_MULTI_SLICE_MB_COUNT		0x03000132
++#define HFI_PROP_MULTI_SLICE_BYTES_COUNT	0x03000133
+ #define HFI_PROP_LTR_COUNT			0x03000134
+ #define HFI_PROP_LTR_MARK			0x03000135
+ #define HFI_PROP_LTR_USE			0x03000136
+--- a/drivers/media/platform/qcom/iris/iris_platform_common.h	2026-11-18 12:56:57.537003680 +0800
++++ b/drivers/media/platform/qcom/iris/iris_platform_common.h	2026-11-18 12:56:37.570562189 +0800
+@@ -53,6 +53,7 @@
+ extern const struct iris_firmware_data iris_hfi_gen1_data;
+ extern const struct iris_firmware_data iris_hfi_gen2_data;
+ extern const struct iris_firmware_data iris_hfi_milos_data;
++extern const struct platform_inst_slice_caps iris_vpu2_vpu3x_slice_caps;
+ 
+ extern const struct iris_platform_data milos_data;
+ extern const struct iris_platform_data qcs8300_data;
+@@ -104,6 +105,18 @@
+ 	u32 max_operating_rate;
+ };
+ 
++struct platform_inst_slice_caps {
++	u32 max_slices_per_frame;
++	u32 max_slice_frame_rate;
++	u32 max_mb_slice_width;
++	u32 max_mb_slice_height;
++	u32 max_bytes_slice_width;
++	u32 max_bytes_slice_height;
++	u32 min_hevc_slice_width;
++	u32 min_avc_slice_width;
++	u32 min_slice_height;
++};
++
+ enum platform_inst_fw_cap_type {
+ 	PROFILE_H264 = 1,
+ 	PROFILE_HEVC,
+@@ -194,6 +207,9 @@
+ 	TIME_DELTA_BASED_RC,
+ 	DISPLAY_DELAY_ENABLE,
+ 	DISPLAY_DELAY,
++	SLICE_MODE,
++	SLICE_MAX_BYTES,
++	SLICE_MAX_MB,
+ 	INST_FW_CAP_MAX,
+ };
+ 
+@@ -322,6 +338,7 @@
+ 	const u32 *inst_iris_fmts;
+ 	u32 inst_iris_fmts_size;
+ 	struct platform_inst_caps *inst_caps;
++	const struct platform_inst_slice_caps *slice_caps;
+ 	const struct tz_cp_config *tz_cp_config_data;
+ 	u32 tz_cp_config_data_size;
+ 	u32 num_vpp_pipe;
+--- a/drivers/media/platform/qcom/iris/iris_platform_vpu3x.c	2026-11-18 12:56:54.182262624 +0800
++++ b/drivers/media/platform/qcom/iris/iris_platform_vpu3x.c	2026-11-18 12:56:06.355084830 +0800
+@@ -139,6 +139,7 @@
+ 	.inst_iris_fmts = iris_fmts_vpu3x_dec,
+ 	.inst_iris_fmts_size = ARRAY_SIZE(iris_fmts_vpu3x_dec),
+ 	.inst_caps = &platform_inst_cap_sm8550,
++	.slice_caps = &iris_vpu2_vpu3x_slice_caps,
+ 	.tz_cp_config_data = tz_cp_config_vpu3,
+ 	.tz_cp_config_data_size = ARRAY_SIZE(tz_cp_config_vpu3),
+ 	.num_vpp_pipe = 4,

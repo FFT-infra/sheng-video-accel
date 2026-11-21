@@ -127,13 +127,8 @@ void EncoderSession::configure(
     const bool h264 = config_.codec == V4L2_PIX_FMT_H264;
     const bool hevc = config_.codec == V4L2_PIX_FMT_HEVC;
     require(h264 || hevc, "encoder codec", VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
-    // B pictures are opt-in and H.264 only. The firmware holds the newest
-    // queued picture until another arrives, so a client that syncs the
-    // picture it just issued must keep one more picture in flight than the
-    // default; a client that does not stalls at the first pair boundary for
-    // its sync timeout. FFmpeg reaches that shape with -async_depth 3. Its
-    // HEVC path additionally fails in the firmware itself, so it is refused
-    // where it would otherwise produce a broken stream.
+    // H.264 only, opt-in: the firmware holds the newest queued picture, so
+    // the client needs one more in flight (FFmpeg: -async_depth 3).
     require(!params.b_frames || options_.b_frames, "B pictures are not enabled",
         VA_STATUS_ERROR_UNIMPLEMENTED);
     require(!params.b_frames || h264, "B pictures are not supported for HEVC",
@@ -154,11 +149,18 @@ void EncoderSession::configure(
     require(capture.pixelformat == config_.codec, "encoder did not accept the codec",
         VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
 
-    const FormatInfo output = device_->set_format(
-        Queue::Output, FormatInfo { V4L2_PIX_FMT_NV12, config_.width, config_.height, 1, 0, 0 });
-    require(output.pixelformat == V4L2_PIX_FMT_NV12, "encoder did not accept NV12",
+    require(params.bit_depth == 8 || params.bit_depth == 10, "encode bit depth must be 8 or 10",
+        VA_STATUS_ERROR_INVALID_PARAMETER);
+    require(params.bit_depth == 8 || hevc, "10-bit encode is HEVC only",
         VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
-    const Layout input_layout = stable_layout(VA_FOURCC_NV12, config_.width, config_.height);
+    const bool ten_bit = params.bit_depth > 8;
+    const uint32_t raw_fourcc = ten_bit ? V4L2_PIX_FMT_P010 : V4L2_PIX_FMT_NV12;
+    const FormatInfo output = device_->set_format(
+        Queue::Output, FormatInfo { raw_fourcc, config_.width, config_.height, 1, 0, 0 });
+    require(output.pixelformat == raw_fourcc, ten_bit ? "encoder did not accept P010" : "encoder did not accept NV12",
+        VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+    const Layout input_layout
+        = stable_layout(ten_bit ? VA_FOURCC_P010 : VA_FOURCC_NV12, config_.width, config_.height);
     require(input_layout.size >= output.sizeimage, "surface buffer is smaller than the encoder input",
         VA_STATUS_ERROR_INVALID_SURFACE);
 
@@ -207,11 +209,6 @@ void EncoderSession::configure(
     // checked for consistency but do not reach the kernel.
     set_control(V4L2_CID_MPEG_VIDEO_B_FRAMES, static_cast<int32_t>(params.b_frames), "b frames");
     set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, gop_control(aligned_intra_period(params)), "gop size");
-    // Rolling intra refresh. The firmware acts on the period only under CBR:
-    // measured byte-identical to a stream without it under VBR and CQP
-    // (TEST-RESULTS.md, "Encoder capabilities"), so a client asking for it in
-    // either mode is refused rather than handed a stream that ignores the
-    // request.
     if (params.intra_refresh_period) {
         require(params.rate_mode == RateMode::Cbr,
             "rolling intra refresh needs CBR; the firmware ignores it otherwise",
@@ -241,17 +238,54 @@ void EncoderSession::configure(
     // gets the intra-period lever instead.
     sync_frame_control_ = device_->set_control(V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME, 0);
     trace_("encode idr lever=%s", sync_frame_control_ ? "sync-frame" : "intra-period");
+    if (options_.roi)
+        if (const auto roi = device_->query_control(kRoiDeltaQpControl))
+            roi_capacity_ = roi->dims[0];
 
-    // CAPTURE carries the frame rate the firmware rates against; OUTPUT
-    // carries the operating rate, which only affects clocking. One rate is
-    // fixed for the session because S_PARM cannot change while streaming;
-    // the per-picture timestamps advance on the same value.
+    // S_PARM cannot change while streaming, so one rate per session.
     prepare_ = std::move(prepare);
     rate_num_ = params.frame_rate_num ? params.frame_rate_num : 30;
     rate_den_ = params.frame_rate_den ? params.frame_rate_den : 1;
     frame_us_ = std::max<uint64_t>(1, 1000000ull * rate_den_ / rate_num_);
     device_->set_frame_rate(Queue::Capture, rate_num_, rate_den_);
     device_->set_frame_rate(Queue::Output, rate_num_, rate_den_);
+
+    // Per-context control; apply_dynamic() refuses a later change.
+    if (params.slices > 1) {
+        // The kernel compares its truncated denominator-over-numerator rate.
+        const unsigned fps = rate_num_ ? rate_den_ / rate_num_ : 0;
+        require(params.rate_mode != RateMode::Vbr,
+            "multi-slice encode needs CBR or CQP; the firmware refuses it under VBR",
+            VA_STATUS_ERROR_INVALID_PARAMETER);
+        require(fps <= 60, "multi-slice encode is limited to 60 fps", VA_STATUS_ERROR_INVALID_PARAMETER);
+        require(config_.width >= (hevc ? 384u : 192u) && config_.height >= 128
+                && config_.width <= 4096 && config_.height <= 2160,
+            "multi-slice encode is limited to 4096x2160 and the codec's smallest slice shape",
+            VA_STATUS_ERROR_INVALID_PARAMETER);
+        const unsigned slice_mb = std::max<unsigned>(1, params.slice_mb);
+        set_control(V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE, V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_MAX_MB,
+            "multi-slice mode");
+        set_control(V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_MB, static_cast<int32_t>(slice_mb), "multi-slice mb");
+        trace_("encode slices=%u mode=max_mb mb=%u", params.slices, slice_mb);
+    }
+
+    if (params.temporal_layers > 1) {
+        require(params.temporal_layers <= 6, "temporal layers must be between 1 and 6",
+            VA_STATUS_ERROR_INVALID_PARAMETER);
+        if (h264) {
+            set_control(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_TYPE,
+                V4L2_MPEG_VIDEO_H264_HIERARCHICAL_CODING_P, "hierarchical coding type");
+            set_control(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_LAYER,
+                static_cast<int32_t>(params.temporal_layers - 1), "hierarchical coding layers");
+            set_control(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING, 1, "hierarchical coding");
+        } else {
+            set_control(V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_TYPE,
+                V4L2_MPEG_VIDEO_HEVC_HIERARCHICAL_CODING_P, "hierarchical coding type");
+            set_control(V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_LAYER,
+                static_cast<int32_t>(params.temporal_layers - 1), "hierarchical coding layers");
+        }
+        trace_("encode temporal layers=%u", params.temporal_layers);
+    }
 
     // Iris sizes coded buffers from the current rate-control controls. A
     // format set before them keeps the buffered-RC size, and queueing then
@@ -261,6 +295,14 @@ void EncoderSession::configure(
         Queue::Capture, FormatInfo { config_.codec, config_.width, config_.height, 1, 0, 0 });
     require(coded.pixelformat == config_.codec, "encoder lost the codec after configuration",
         VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
+
+    // The kernel builds the metadata buffer while the queues start, so the
+    // first map has to be written before then.
+    if (roi_capacity_ > 0 && roi_cells() <= roi_capacity_) {
+        const std::vector<int32_t> zeros(roi_cells(), 0);
+        if (!device_->set_control_array(kRoiDeltaQpControl, zeros.data(), zeros.size()))
+            roi_capacity_ = 0;
+    }
 
     // Everything below touches kernel state. A failure halfway through must
     // leave nothing behind: configured_ stays false, so a retry runs this
@@ -313,8 +355,9 @@ void EncoderSession::configure(
 
     applied_ = params;
     configured_ = true;
-    trace_("encode open node=%s codec=%.4s raw=%ux%u crop=%ux%u mode=%s gop=%u rate=%u/%u",
-        device_->path().c_str(), reinterpret_cast<const char*>(&config_.codec), output.width, output.height,
+    trace_("encode open node=%s codec=%.4s raw=%.4s depth=%u %ux%u crop=%ux%u mode=%s gop=%u rate=%u/%u",
+        device_->path().c_str(), reinterpret_cast<const char*>(&config_.codec),
+        reinterpret_cast<const char*>(&raw_fourcc), params.bit_depth, output.width, output.height,
         config_.width, config_.height, rate_mode_name(params.rate_mode), params.gop_size,
         params.frame_rate_num, params.frame_rate_den);
 }
@@ -394,20 +437,21 @@ void EncoderSession::configure_deblocking(const EncodeParams& params)
 void EncoderSession::apply_dynamic(const EncodeParams& params)
 {
     // Only the controls the kernel marks CAP_FLAG_DYNAMIC_ALLOWED may be
-    // written while the raw queue streams; the rest were set in configure().
-    // Deblocking is one of the rest, and the session is already streaming by
-    // the time a second picture arrives, so a change needs a new context.
+    // written while the raw queue streams. Everything below is set in
+    // configure() instead, so a change needs a new context.
     require(params.deblock_mode == applied_.deblock_mode && params.deblock_alpha == applied_.deblock_alpha
             && params.deblock_beta == applied_.deblock_beta,
         "changing deblocking requires a new context", VA_STATUS_ERROR_UNIMPLEMENTED);
-    // The B count is a per-context control too, and changing it mid-GOP
-    // would make the firmware's schedule disagree with the pictures already
-    // coded against the old one.
     require(params.b_frames == applied_.b_frames,
         "changing the B picture count requires a new context", VA_STATUS_ERROR_UNIMPLEMENTED);
-    // The refresh period is per-context in V4L2. The kernel marks it dynamic
-    // only for a random period, and this driver writes the cyclic one, so a
-    // change needs a new context rather than a write the kernel refuses.
+    require(params.slices == applied_.slices && params.slice_mb == applied_.slice_mb,
+        "changing the slice count requires a new context", VA_STATUS_ERROR_UNIMPLEMENTED);
+    require(params.bit_depth == applied_.bit_depth,
+        "changing the encode bit depth requires a new context", VA_STATUS_ERROR_UNIMPLEMENTED);
+    require(params.temporal_layers == applied_.temporal_layers,
+        "changing the temporal layer count requires a new context", VA_STATUS_ERROR_UNIMPLEMENTED);
+    // The kernel marks only a random period dynamic; this driver writes the
+    // cyclic one.
     require(params.intra_refresh_period == applied_.intra_refresh_period,
         "changing the intra refresh period requires a new context", VA_STATUS_ERROR_UNIMPLEMENTED);
     if (params.rate_mode == RateMode::Cqp && params.qp != applied_.qp) {
@@ -429,6 +473,34 @@ void EncoderSession::apply_dynamic(const EncodeParams& params)
         set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, gop_control(aligned_intra_period(params)), "gop size");
         applied_.gop_size = params.gop_size;
     }
+}
+
+size_t EncoderSession::roi_cells() const
+{
+    const unsigned lcu = config_.codec == V4L2_PIX_FMT_HEVC ? 32 : 16;
+    return static_cast<size_t>((config_.width + lcu - 1) / lcu) * ((config_.height + lcu - 1) / lcu);
+}
+
+void EncoderSession::apply_roi(const EncodeParams& params)
+{
+    if (params.roi_map.empty() && !roi_used_)
+        return;
+    require(roi_capacity_ > 0, "ROI needs the kernel ROI control (packaging/kernel/0017-*)",
+        VA_STATUS_ERROR_UNIMPLEMENTED);
+    const size_t cells = roi_cells();
+    require(cells <= roi_capacity_, "the ROI map is larger than the kernel control takes",
+        VA_STATUS_ERROR_INVALID_PARAMETER);
+    require(params.roi_map.empty() || params.roi_map.size() == cells,
+        "the ROI map does not match the encoder's macroblock grid", VA_STATUS_ERROR_INVALID_PARAMETER);
+    // Skipping the write would let the firmware reuse the previous map.
+    const std::vector<int32_t> zeros = params.roi_map.empty() ? std::vector<int32_t>(cells, 0)
+                                                              : std::vector<int32_t>();
+    const int32_t* map = params.roi_map.empty() ? zeros.data() : params.roi_map.data();
+    if (!device_->set_control_array(kRoiDeltaQpControl, map, cells))
+        throw Error(VA_STATUS_ERROR_OPERATION_FAILED, "encoder ROI control disappeared");
+    roi_used_ = true;
+    if (params.roi_regions)
+        trace_("encode roi regions=%u cells=%zu", params.roi_regions, cells);
 }
 
 std::optional<Dequeued> EncoderSession::wait_capture(Clock::time_point limit)
@@ -573,6 +645,7 @@ EncodeTicket EncoderSession::submit(int dmabuf_fd, unsigned dmabuf_length, const
     submitted.force_idr = force_idr;
     submitted.dmabuf_fd = dmabuf_fd;
     submitted.dmabuf_length = dmabuf_length;
+    submitted.submitted_at = Clock::now();
 
     if (applied_.b_frames == 0) {
         queue_pending(submitted);
@@ -605,6 +678,8 @@ void EncoderSession::queue_pending(Pending& picture)
     // is not the submission order, and a QP or a rate written at submission
     // time would land on the wrong picture.
     apply_dynamic(picture.params);
+    // Before the slot is taken, so a refused map does not consume one.
+    apply_roi(picture.params);
     const Clock::time_point limit = deadline();
     take_output_slot(limit);
     const unsigned index = free_output_.front();
@@ -709,11 +784,28 @@ bool EncoderSession::complete_one()
     // decode. Prefix the ones the last access unit carried.
     if (picture.force_idr && prepare_)
         result.bytes = prepare_(result.bytes, parameter_sets_);
-    // No picture type here: the SM8550 encoder firmware does not send frame
-    // info, so V4L2_BUF_FLAG_KEYFRAME is always clear. The bitstream is the
-    // evidence (an IDR NAL at every GOP boundary).
-    trace_("encode frame index=%u bytes=%zu idr=%d promoted=%d", frames_++, result.bytes.size(),
-        picture.params.keyframe ? 1 : 0, picture.params.promoted ? 1 : 0);
+    // In front of the first slice, after the firmware's own parameter sets:
+    // where a decoder expects a prefix SEI.
+    if (!picture.params.prefix_nals.empty()) {
+        const codec::Codec codec = config_.codec == V4L2_PIX_FMT_H264 ? codec::Codec::H264 : codec::Codec::Hevc;
+        size_t bytes = 0;
+        for (const std::vector<uint8_t>& nal : picture.params.prefix_nals) {
+            result.bytes = codec::insert_before_vcl(result.bytes, nal, codec);
+            bytes += nal.size();
+        }
+        trace_("encode packed header bytes=%zu count=%zu", bytes, picture.params.prefix_nals.size());
+    }
+    // No picture type here: the firmware sends no frame info, so
+    // V4L2_BUF_FLAG_KEYFRAME is always clear. The bitstream is the evidence.
+    // Latency includes any queueing the client asked for; `first` marks the
+    // session's first picture, whose bring-up is not representative.
+    const unsigned index = frames_++;
+    const long long latency_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        Clock::now() - picture.submitted_at)
+                                     .count();
+    trace_("encode frame index=%u bytes=%zu idr=%d promoted=%d latency_us=%lld first=%d", index,
+        result.bytes.size(), picture.params.keyframe ? 1 : 0, picture.params.promoted ? 1 : 0, latency_us,
+        index == 0 ? 1 : 0);
     completed_.emplace(picture.ticket.timestamp_us, std::move(result));
 
     if (!done->last())

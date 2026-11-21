@@ -212,6 +212,89 @@ void test_prime2_rejections()
         "an allocation smaller than the descriptor claims is refused");
 }
 
+// The kernel's QC08C layout (iris_yuv_buffer_size_qc08c): four 4 KiB-aligned
+// planes — Y meta, Y, UV meta, UV — and the export side hands them out as
+// four R8 layers. The numbers below are the kernel's formula, not ours.
+void test_ubwc_layout()
+{
+    struct Case {
+        unsigned width, height, size;
+        unsigned plane_pitch[4];
+        unsigned plane_offset[4];
+    };
+    const Case cases[] = {
+        { 1920, 1080, 3153920, { 64, 1920, 64, 1920 }, { 0, 12288, 2101248, 2109440 } },
+        { 1280, 720, 1445888, { 64, 1280, 64, 1280 }, { 0, 8192, 950272, 954368 } },
+        { 3840, 2160, 12591104, { 128, 3840, 128, 3840 }, { 0, 36864, 8392704, 8413184 } },
+    };
+    for (const Case& c : cases) {
+        const iris::PlaneLayout layout = iris::ubwc_layout(c.width, c.height);
+        check(layout.modifier == DRM_FORMAT_MOD_QCOM_COMPRESSED && layout.plane_count == 4,
+            "UBWC reports four planes under the QCOM_COMPRESSED modifier");
+        check(layout.size == c.size, "the UBWC total matches the kernel's sizeimage");
+        for (unsigned i = 0; i < 4; ++i) {
+            check(layout.planes[i].pitch == c.plane_pitch[i] && layout.planes[i].offset == c.plane_offset[i],
+                "a UBWC plane is at the kernel's offset and pitch");
+            check(layout.planes[i].offset % 4096 == 0, "every UBWC plane starts on a page");
+        }
+    }
+}
+
+void test_ubwc_import()
+{
+    const auto compressed = [](unsigned width_in = width, unsigned height_in = height) {
+        const iris::PlaneLayout planes = iris::ubwc_layout(width_in, height_in);
+        VADRMPRIMESurfaceDescriptor descriptor = {};
+        descriptor.fourcc = VA_FOURCC_NV12;
+        descriptor.width = width_in;
+        descriptor.height = height_in;
+        descriptor.num_objects = 1;
+        descriptor.objects[0].fd = 3;
+        descriptor.objects[0].size = planes.size;
+        descriptor.objects[0].drm_format_modifier = DRM_FORMAT_MOD_QCOM_COMPRESSED;
+        descriptor.num_layers = 4;
+        for (unsigned i = 0; i < 4; ++i) {
+            descriptor.layers[i].drm_format = DRM_FORMAT_R8;
+            descriptor.layers[i].num_planes = 1;
+            descriptor.layers[i].object_index[0] = 0;
+            descriptor.layers[i].pitch[0] = planes.planes[i].pitch;
+            descriptor.layers[i].offset[0] = planes.planes[i].offset;
+        }
+        return descriptor;
+    };
+    const unsigned invalid = VA_STATUS_ERROR_INVALID_PARAMETER;
+    const auto status = [](VADRMPRIMESurfaceDescriptor descriptor, uint32_t fourcc_in = VA_FOURCC_NV12,
+                            uint64_t allocation = 0) {
+        if (!allocation)
+            allocation = descriptor.objects[0].size;
+        return status_of(
+            [&] { return iris::validate_prime2(descriptor, width, height, fourcc_in, allocation); });
+    };
+
+    check(status(compressed()) == -1, "a Q08C descriptor in the kernel layout is accepted");
+    VADRMPRIMESurfaceDescriptor descriptor = compressed();
+    descriptor.num_layers = 2;
+    check(status(descriptor) == invalid, "a UBWC descriptor with two layers is refused");
+    descriptor = compressed();
+    descriptor.layers[2].offset[0] += 4096;
+    check(status(descriptor) == invalid, "a UBWC plane at the wrong offset is refused");
+    descriptor = compressed();
+    descriptor.layers[3].pitch[0] = 1920 + 128;
+    check(status(descriptor) == invalid, "a UBWC plane at the wrong pitch is refused");
+    descriptor = compressed();
+    descriptor.layers[0].drm_format = DRM_FORMAT_GR88;
+    check(status(descriptor) == invalid, "a UBWC meta plane named as chroma is refused");
+    descriptor = compressed();
+    descriptor.objects[0].size -= 4096;
+    check(status(descriptor) == invalid, "a UBWC object smaller than its planes is refused");
+    check(status(compressed(), VA_FOURCC_P010) == invalid, "UBWC is NV12 only (P010 has no compressed format)");
+    // A four-layer descriptor under the linear modifier is not an NV12
+    // layout: the linear branch accepts one composed or two split layers.
+    descriptor = compressed();
+    descriptor.objects[0].drm_format_modifier = DRM_FORMAT_MOD_LINEAR;
+    check(status(descriptor) == invalid, "four layers under the linear modifier are refused");
+}
+
 void test_prime1()
 {
     const uint32_t fourcc = VA_FOURCC_NV12;
@@ -252,6 +335,8 @@ int main()
     test_layout_is_shared();
     test_prime2_accepts_the_capture_layout();
     test_prime2_rejections();
+    test_ubwc_layout();
+    test_ubwc_import();
     test_prime1();
     if (failures) {
         std::printf("FAILED %d check(s)\n", failures);

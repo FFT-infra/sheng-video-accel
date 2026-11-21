@@ -70,8 +70,13 @@ if grep -Eq 'mixed-vp9|preflight vp9|VP90' "$concurrency_soak"; then
     echo "FAIL concurrency qualification still exercises withdrawn VP9 VA" >&2
     exit 1
 fi
-if grep -Eq 'start_job mixed-hevc|start_repeated_job mixed-hevc' "$concurrency_soak" \
-    || ! grep -q 'start_once_job mixed-hevc .*hevc-soak\.mkv' "$concurrency_soak"; then
+# The mixed scenario spawns every client from one loop, so the HEVC branch is
+# identified by the stream it feeds, not by a literal job name. Every HEVC job
+# must still be one start_once_job on the duration-sized stream, never a
+# start_job that loops short segments.
+mixed_block=$(sed -n '/^        mixed)$/,/^            ;;/p' "$concurrency_soak")
+if ! printf '%s\n' "$mixed_block" | grep -Fq 'start_once_job "$mixed_name" "$media_dir/hevc-soak.mkv"' \
+    || printf '%s\n' "$mixed_block" | grep -Eq 'start_(repeated_)?job [^#]*hevc(-soak)?\.mkv'; then
     echo "FAIL mixed HEVC soak does not use one continuous duration-sized stream" >&2
     exit 1
 fi

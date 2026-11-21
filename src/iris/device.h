@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -14,12 +15,30 @@
 #include <vector>
 
 extern "C" {
+#include <linux/v4l2-controls.h>
 #include <linux/videodev2.h>
 }
 
 namespace iris {
 
 enum class Queue { Output, Capture };
+
+// The kernel module defines the encoder's ROI delta-QP control locally as
+// V4L2_CID_CODEC_BASE + 658 (packaging/kernel/0017-*). A module without that
+// patch registers no such control and every write is refused.
+constexpr uint32_t kRoiDeltaQpControl = V4L2_CID_CODEC_BASE + 658;
+
+// The shape a caller has to match before writing a control.
+struct ControlInfo {
+    uint32_t type = 0; // V4L2_CTRL_TYPE_*
+    uint32_t flags = 0; // V4L2_CTRL_FLAG_*
+    uint32_t elems = 0; // current element count
+    uint32_t elem_size = 0;
+    uint32_t dims[V4L2_CTRL_MAX_DIMS] = {}; // maximum extent per dimension
+    int64_t minimum = 0;
+    int64_t maximum = 0;
+    int64_t step = 0;
+};
 
 // Iris exposes two M2M nodes with the same driver name: the decoder takes a
 // compressed OUTPUT format, the encoder produces a compressed CAPTURE one.
@@ -64,6 +83,10 @@ public:
     virtual std::string path() const = 0;
     virtual int fd() const = 0;
 
+    // The driver's capture_sg module parameter: CAPTURE comes from system
+    // memory, so the system-memory budget applies.
+    virtual bool capture_from_system() const { return false; }
+
     // Format negotiation.
     virtual FormatInfo get_format(Queue queue) = 0;
     virtual FormatInfo set_format(Queue queue, const FormatInfo& request) = 0;
@@ -77,6 +100,12 @@ public:
     virtual std::optional<int32_t> get_control(uint32_t id) = 0;
     // Returns false if the control does not exist; throws on other errors.
     virtual bool set_control(uint32_t id, int32_t value) = 0;
+    // nullopt when the node has no such control; the caller decides from
+    // `flags` and `dims` whether it can be written.
+    virtual std::optional<ControlInfo> query_control(uint32_t id) = 0;
+    // One write of a dynamic s32 array control. False when the node has no
+    // such control; throws otherwise, including an array the dims refuse.
+    virtual bool set_control_array(uint32_t id, const int32_t* values, size_t count) = 0;
 
     // Buffers.
     // memory: V4L2_MEMORY_MMAP (driver-owned) or V4L2_MEMORY_DMABUF (client

@@ -84,14 +84,20 @@ public:
             VA_STATUS_ERROR_INVALID_PARAMETER);
         require(params != nullptr, "HEVC encode picture has no picture parameters",
             VA_STATUS_ERROR_INVALID_PARAMETER);
-        require(profile_ == VAProfileHEVCMain, "only HEVC Main encode is supported",
+        const bool main10 = profile_ == VAProfileHEVCMain10;
+        require(main10 || profile_ == VAProfileHEVCMain, "only HEVC Main encode is supported",
             VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
-        // 0 is an unset profile in some clients; anything else must be Main.
-        require(sequence->general_profile_idc == 0 || sequence->general_profile_idc == 1,
+        // 0 is unset in some clients, and a Main 10 sequence may also leave
+        // the idc at 1, so the depth check below decides.
+        require(sequence->general_profile_idc == 0 || sequence->general_profile_idc == 1
+                || (main10 && sequence->general_profile_idc == 2),
             "only HEVC Main encode is supported", VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
-        require(sequence->seq_fields.bits.bit_depth_luma_minus8 == 0
-                && sequence->seq_fields.bits.bit_depth_chroma_minus8 == 0,
-            "10-bit encode is not supported", VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+        // One raw format per context, one sequence header per stream.
+        const unsigned bit_depth = sequence->seq_fields.bits.bit_depth_luma_minus8;
+        require(sequence->seq_fields.bits.bit_depth_chroma_minus8 == bit_depth
+                && ((main10 && bit_depth == 2) || (!main10 && bit_depth == 0)),
+            main10 ? "Main 10 encode needs a 10-bit sequence" : "only 8-bit encode is supported",
+            VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
         require(sequence->seq_fields.bits.chroma_format_idc == 1, "4:2:0 encode is required",
             VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
         // VA counts ip_period as the distance between two references, so one
@@ -120,7 +126,8 @@ public:
         // them in coding order. HEVC names the display position in the
         // picture order count, which VA carries on the current picture.
         out.display_order = params->decoded_curr_pic.pic_order_cnt;
-        out.profile = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN;
+        out.profile = main10 ? V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10 : V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN;
+        out.bit_depth = 8 + bit_depth;
         out.level = level_menu(sequence->general_level_idc);
         out.rate_mode = rate_mode_;
         out.bitrate = sequence->bits_per_second;
@@ -205,8 +212,6 @@ public:
             "chroma QP offsets are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
         require(params->num_ref_idx_l0_default_active_minus1 == 0 && !params->ctu_max_bitsize_allowed,
             "reference indexes and CTU bit limits are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
-        require(picture.slices.size() <= 1, "multi-slice encode is not supported",
-            VA_STATUS_ERROR_UNIMPLEMENTED);
         if (slice != nullptr) {
             require(slice->slice_cb_qp_offset == 0 && slice->slice_cr_qp_offset == 0,
                 "chroma QP offsets are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
@@ -220,7 +225,32 @@ public:
             // and the firmware decides the slice layout from the picture
             // parameters. Zero describes no slice at all, so it is refused.
             require(slice->slice_segment_address == 0 && slice->num_ctu_in_slice != 0,
-                "only one full-picture slice is supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+                "invalid slice geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
+            // Picture type, deblocking and QP are per-context controls, so
+            // slices that disagreed could not be expressed.
+            for (const void* raw : picture.slices) {
+                const auto* other = static_cast<const VAEncSliceParameterBufferHEVC*>(raw);
+                require(other->slice_type == slice->slice_type
+                        && other->slice_qp_delta == slice->slice_qp_delta
+                        && other->slice_fields.bits.slice_deblocking_filter_disabled_flag
+                            == slice->slice_fields.bits.slice_deblocking_filter_disabled_flag
+                        && other->slice_fields.bits.slice_loop_filter_across_slices_enabled_flag
+                            == slice->slice_fields.bits.slice_loop_filter_across_slices_enabled_flag
+                        && other->slice_tc_offset_div2 == slice->slice_tc_offset_div2
+                        && other->slice_beta_offset_div2 == slice->slice_beta_offset_div2,
+                    "slices of one picture disagree", VA_STATUS_ERROR_INVALID_PARAMETER);
+                require(other->num_ctu_in_slice != 0, "a slice covers no CTUs",
+                    VA_STATUS_ERROR_INVALID_PARAMETER);
+            }
+            const unsigned slices = static_cast<unsigned>(picture.slices.size());
+            require(slices <= 128, "more than 128 slices in a picture", VA_STATUS_ERROR_UNIMPLEMENTED);
+            out.slices = slices;
+            if (slices > 1) {
+                // The firmware's budget is counted in 16x16 macroblocks, so
+                // round the coded picture to the MB grid before dividing.
+                const unsigned total_mb = ((coded_width + 15) / 16) * ((coded_height + 15) / 16);
+                out.slice_mb = (total_mb + slices - 1) / slices;
+            }
             // HEVC slice types are B = 0, P = 1, I = 2.
             const bool b_slice = slice->slice_type == 0;
             require(slice->slice_type <= 2, "only I, P and B slices are supported",
@@ -263,10 +293,8 @@ public:
         }
         if (const auto* rir = static_cast<const VAEncMiscParameterRIR*>(
                 find_misc(picture.misc, VAEncMiscParameterTypeRIR))) {
-            // Same mapping as H.264: one period, and the firmware sweeps the
-            // picture itself. VA counts the window in MB rows, which for
-            // 4:2:0 is 16 lines; the node takes a picture count, so the
-            // period is how many pictures one full sweep needs.
+            // Same mapping as H.264. VA counts the window in MB rows (16
+            // lines at 4:2:0); the node takes a picture count.
             require(rir->rir_flags.bits.enable_rir_row && !rir->rir_flags.bits.enable_rir_column,
                 "only a rolling row intra refresh is supported", VA_STATUS_ERROR_UNIMPLEMENTED);
             const unsigned rows = rir->intra_insert_size;
@@ -275,9 +303,11 @@ public:
             const unsigned mb_rows = (coded_height + 15) / 16;
             intra_refresh_period_ = mb_rows > rows ? (mb_rows + rows - 1) / rows : 1;
         }
-        // Per-context control, and the client may render the refresh buffer
-        // with one picture only; every picture carries what it last
-        // configured, or apply_dynamic() reads the next one as a change.
+        // Both are per-context controls the client may send once, so every
+        // picture repeats the last value; reading a later picture as "none"
+        // would fail the change check in apply_dynamic().
+        temporal_layers_ = temporal_layers_of(picture.misc, temporal_layers_);
+        out.temporal_layers = temporal_layers_;
         out.intra_refresh_period = intra_refresh_period_;
         // With one B per P nothing predicts from that B, so a client marks it
         // non-reference. The firmware owns the structure and the flag does not
@@ -307,6 +337,10 @@ public:
             require(qp >= 1 && qp <= 51, "encode QP is out of range", VA_STATUS_ERROR_INVALID_PARAMETER);
             out.qp = qp;
         }
+        out.prefix_nals = picture.packed_headers;
+        // The encoder node's ROI map is one delta per 32x32 coding unit.
+        out.roi_map = roi_map_of(picture, 32);
+        out.roi_regions = static_cast<unsigned>(picture.roi.size());
         return out;
     }
 
@@ -320,9 +354,8 @@ private:
     // rate rather than the client's target.
     uint32_t bitrate_ = 0;
     uint32_t peak_bitrate_ = 0;
-    // The sweep period the client configured most recently, for the same
-    // reason as the two rates above.
     unsigned intra_refresh_period_ = 0;
+    unsigned temporal_layers_ = 0;
 };
 
 } // namespace

@@ -99,8 +99,14 @@ chosen per surface from observed client behaviour.
 ```
 Session (one per VA context, one fd)
   owns  OUTPUT pool   : 4 MMAP slots, one access unit each
-  owns  CAPTURE pool  : N slots, N = min(clamp(surfaces + 4, 32, kernel max),
-                        max(firmware min, 384 MiB / frame size)).
+  owns  CAPTURE pool  : N slots, N = min(max(surfaces + 4, firmware min + 8),
+                        kernel max) capped by the memory budget, budget =
+                        384 MiB, or 720 MiB when the kernel allocates CAPTURE
+                        from system memory (capture_sg). A client that
+                        declares no surfaces is sized as 17, because FFmpeg's
+                        VA-API 1.x path passes zero and then creates that
+                        many: a pool equal to the client's count leaves STOP
+                        no buffer for LAST (§4.3).
                         MMAP (default): every slot EXPBUF'd once -> Frame.
                         DMABUF (Import): slot i carries the client buffer
                         queued for one picture; nothing is pre-queued and
@@ -140,7 +146,17 @@ When a CAPTURE completion arrives with a token that has a pending Surface:
 - **Direct**: the surface takes the `shared_ptr<Frame>`. Zero copies. This
   is the policy for clients that export or map a surface only after it has
   been decoded (FFmpeg, GStreamer, mpv, `vaGetImage` users). Every export
-  after this point hands out the slot's own DMA-BUF.
+  after this point hands out the slot's own DMA-BUF. Direct pins one CAPTURE
+  frame per decoded picture the client has not consumed, and the driver
+  cannot see that queue; the automatic policy therefore offers it only when
+  the pool has headroom over the firmware minimum (eight pictures, the
+  FFmpeg filter backlog measured at 8K). At a geometry where the memory
+  budget leaves less, the completion uses the Copy policy instead, which
+  releases the slot immediately. At 8K that is the whole difference between
+  the policies: the 384 MiB budget grants eight frames, which is the
+  firmware minimum plus one, so Auto publishes Copy; with the patched
+  kernel's `capture_sg=1` the same pool is 720 MiB and fifteen frames, and
+  Auto publishes Direct.
 - **Copy**: the surface already owns a `StableBuffer` because the client
   exported it *before* its first decode (Chrome pre-exports its whole
   NativePixmap pool and caches the fd for the surface's lifetime). The
@@ -165,6 +181,19 @@ When a CAPTURE completion arrives with a token that has a pending Surface:
   the firmware still chooses only between the same picture's memory and
   never stalls waiting for somewhere to put the second half. Measured scope
   and failures: TEST-RESULTS.md.
+
+**UBWC surfaces** put the same three policies on a compressed buffer. The
+CAPTURE format is Q08C and the surface carries its own four-plane `Layout`
+(§3.4); only Direct (the surface takes the slot) and Import (the client's
+compressed buffer is queued) have a reader. Copy would have to decompress, so
+an Import request that degrades to Copy fails the picture with
+`publish=ubwc-copy-refused` in the trace instead of copying compressed bytes
+into a different allocation. Every other path that expects linear pixels —
+`vaDeriveImage`, `vaGetImage`, `vaPutImage`, film grain, the video processor,
+the encoder, and the stable-buffer allocation behind them — answers
+`VA_STATUS_ERROR_UNIMPLEMENTED` before touching memory (§8 `va ubwc refused`).
+A context's surfaces must all carry the same modifier, and it cannot change
+while the context lives.
 
 `persistent_export` is set by `vaExportSurfaceHandle`, `vaAcquireBufferHandle`
 or a `DRM_PRIME_2` import when the surface has no token yet. It is never set
@@ -198,15 +227,25 @@ walks all three rungs on the target by running `iris-alloc-probe` under
 resulting `MemoryOrigin` and the exact sequence of attempts, and refuses to
 run an injected mode without the shim.
 
+A surface created with the `QCOM_COMPRESSED` modifier allocates the node's
+Q08C buffer instead: `iris_yuv_buffer_size_qc08c()`'s four 4 KiB-rounded
+planes, Y meta, Y, UV meta and UV, which `src/util/prime.cc` computes and
+`configure_capture` compares against the node's `sizeimage`. A disagreement is
+`VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT`, not a pool of the wrong size.
+`vaExportSurfaceHandle` describes the four planes as R8 layers at the kernel's
+offsets together with the modifier, and refuses the composed-layer form. There
+is no compressor in this stack, so nothing fills one as an encode input.
+
 A surface created over client memory (`vaCreateSurfaces2` with
 `VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2` or the older `_DRM_PRIME`) does not
 allocate. `src/util/prime.cc` checks the descriptor against this layout and
 the resulting `StableBuffer` is a duplicate of the client's fd, marked
 `persistent_export`, so Import and Copy act on it unchanged and it works as
-an encode input too. A buffer in any other geometry, modifier or object count
-is `VA_STATUS_ERROR_INVALID_PARAMETER` at creation: the firmware would write
-its own layout into it and neither side would notice until the picture was
-wrong.
+an encode input too. A QCOM_COMPRESSED descriptor must name the same four
+planes and offsets the driver would export. A buffer in any other geometry,
+modifier or object count is `VA_STATUS_ERROR_INVALID_PARAMETER` at creation:
+the firmware would write its own layout into it and neither side would notice
+until the picture was wrong.
 
 ### 3.5 What is gone
 
@@ -288,6 +327,17 @@ Ordering facts learned on this firmware and kept verbatim:
 - VP9 in-context resolution change and VP9 context recreation rebooted the
   device on display-order firmware; VP9 runs under
   `scripts/iris-experiment-guard.sh` only on that firmware.
+- `STOP` completes by writing `LAST` into a CAPTURE buffer, and a Direct
+  completion pins its slot until the client releases the surface. A pool
+  sized to exactly the number of surfaces the client creates therefore has
+  no buffer left for `LAST`: the drain waits out its bound and the session
+  fails with `no LAST after STOP`. Measured at 1080p with FFmpeg, whose
+  VA-API 1.x path declares zero surfaces and then creates fifteen for HEVC
+  against a fifteen-slot pool; H.264's twelve survived a fourteen-slot one.
+  The pool is sized from the client's declared count, or seventeen when it
+  declares none, plus four, so it always exceeds what the client can pin.
+  `drain begin` records `queued`, `held` and `pool` for exactly this
+  question.
 
 ### 4.1 Encode Session Architecture
 
@@ -296,6 +346,15 @@ The encoder operates as a secondary V4L2 M2M node with a dedicated execution mod
 2. The firmware releases the input buffer as soon as it has read the picture (`OUTPUT` `DQBUF`), and that is what `vaSyncSurface` on the input surface waits for. The coded access unit comes later and is claimed by `vaSyncBuffer` on the coded buffer or by `vaMapBuffer` on it. Keeping the two apart is what lets a client with `-async_depth` pipeline: with one wait, every input sync paid for a whole picture.
 
 This decoupling enables asynchronous submission in clients such as FFmpeg.
+
+Low latency is not a firmware switch here. The encoder side of Qualcomm's
+open driver has no low-latency HFI property (only its CBR path sets one
+implicitly), and this session already submits every picture as it arrives,
+holds none for batching, and hands each completion to the client as soon as
+the CAPTURE queue reports it. What remains is the client's own pipeline depth
+(`-async_depth`), so the measurable quantity is submission-to-completion
+time: `encode frame … latency_us=` reports it, and
+`test/iris-encode-latency.sh` records the first picture, p50 and p95.
 
 #### State Transitions
 
@@ -315,6 +374,8 @@ Closed -> Configured -> Streaming -> Finishing -> Closed
 - **Crop Alignment**: Non-mplane OUTPUT selection applies `V4L2_SEL_TGT_CROP`, aligning dimensions to codec macroblock boundaries (16 for H.264, 32 for HEVC) to avoid geometry distortion.
 - **Picture Geometry**: The coded picture is the geometry the client declared at `vaCreateContext`, narrowed for H.264 by the sequence's frame crop; FFmpeg creates a macroblock-aligned H.264 context (1920x1088) for a 1920x1080 picture, while its HEVC context already carries the visible size. The input surface may be larger than the picture (an aligned decode allocation) and is queued without a copy, so the narrowing stops where the encoder's own raw layout would move the chroma plane; there the surface geometry stands and the decoded layout stays the one the encoder reads.
 - **IDR Mechanisms**: Direct keyframe generation utilizes `V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME` when supported by the kernel module. On stock modules, keyframes are generated by temporarily setting `GOP_SIZE` to zero before submission and restoring the period immediately afterward. Parameter sets (SPS/PPS) are prefixed when firmware omits them on forced frames.
+- **Packed headers**: a raw packed header (`VAEncPackedHeaderRawData`) is copied at `vaRenderPicture`, because the client may destroy that VA buffer when `vaEndPicture` returns, and is spliced into the access unit behind the parameter sets and in front of the first coded-picture NAL. Sequence and slice packed headers are refused: the firmware writes both itself. The payload is not interpreted, only bounded and required to start a NAL. `VAConfigAttribEncPackedHeaders` answers `MISC` for HEVC encode only: FFmpeg's `h264_vaapi` writes a buffering-period SEI that names the SPS by id and relies on the client's SPS, which with only `MISC` advertised it never writes, so H.264 answers no type and keeps the firmware's own headers.
+- **ROI**: opt-in (`V4L2_VA_ROI`) and requires the 0017 kernel patch. `VAEncMiscParameterTypeROI` rectangles are copied at `vaRenderPicture` (the client pointer dies at `vaEndPicture`), mapped onto the coded picture's LCU grid (16x16 H.264, 32x32 HEVC; on overlap the first region wins, the delta is clamped to -31..30), and written to the module's dynamic s32 array control before the picture is queued. `configure` arms one all-zero map before the queues stream: the module builds one metadata buffer per control write, subscribes the firmware's metadata delivery while the session starts, and attaches the armed buffer to the next queued picture, so the map has to be in place before `STREAMON`. The qualified firmware completes the metadata buffer without error and codes a byte-identical picture, so `VAConfigAttribEncROI` is not advertised without the opt-in (TEST-RESULTS.md).
 
 ## 5. Module layout
 
@@ -573,6 +634,12 @@ capture noshow token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu|
                                                                       timestamp when the kernel keeps
                                                                       one, else by decode order)
 capture token=<n> index=<i> flags=<hex> publish=drop                 (released target; not published)
+capture token=<n> index=<i> flags=<hex> publish=ubwc-copy-refused  (UBWC picture whose Import
+                                                                     request degraded to Copy — the
+                                                                     client's layout differed from the
+                                                                     node's. The picture fails instead of
+                                                                     copying compressed bytes into a
+                                                                     different allocation)
 capture token=<n> index=<i> flags=<hex> publish=invisible            (VP9 alt-ref or AV1 hidden install: first of two completions under one token, ERROR with no picture-type bit and no payload; Target::invisible counts it so the second NOSHOW half still publishes the client picture. A released target leaves this completion orphaned; it is still invisible, not a decode error. A visible payload completion reports the drop; if both halves were NOSHOW, neither does, so drops stays 0 for that abandoned picture)
 capture index=<i> flags=<hex> publish=invisible                     (unnamed NOSHOW LAST marker at a DRC boundary; no picture of its own)
 capture token=<n> index=<i> flags=<hex> publish=misplaced slot_token=<n>
@@ -595,7 +662,7 @@ capture token=<n> index=<i> flags=<hex> publish=error                (firmware f
 capture empty index=<i> flags=<hex> last=0|1
 capture last
 capture format rejected wanted=<fourcc> granted=<fourcc> planes=<n> <w>x<h>
-drain begin reason=eos|timeout|finish pending=<n>
+drain begin reason=eos|timeout|finish pending=<n> queued=<n> held=<n> pool=<n>
 drain complete last=1 output_queued=<n>
 drain lost token=<n>
 drc drain begin pending=<n>
@@ -630,6 +697,18 @@ import rejected: <why> (client stride=<n> chroma=<n> size=<n>; capture stride=<n
 import fence token=<n> fd=<n> waited=<n>ms          (only when the wait exceeds 20 ms)
 import token=<n> failed: no client buffer
 va create_surfaces count=<n> <w>x<h> fourcc=<fourcc> imported=0|1 fd=<n>
+                                                     (a UBWC surface appends
+                                                     modifier=qcom_compressed)
+va ubwc refused operation=<name>                     (a linear-pixel path met a
+                                                     compressed surface and
+                                                     answered
+                                                     VA_STATUS_ERROR_UNIMPLEMENTED;
+                                                     <name> is the entry point:
+                                                     vaDeriveImage, vaGetImage,
+                                                     vaPutImage, film grain,
+                                                     video processing, the
+                                                     encoder, or the stable-buffer
+                                                     allocation)
 va create_context id=<n> profile=<id> <w>x<h> targets=<n> mode=<name>
 va create_context id=<n> profile=<id> <w>x<h> entrypoint=encslice codec=<fourcc>
 va create_context id=<n> profile=-1 <w>x<h> entrypoint=videoproc
@@ -664,16 +743,38 @@ va end_picture ctx=<n> surface=<n> entrypoint=videoproc src=<n> <w>x<h>-><w>x<h>
                                                        appears only for a
                                                        stack and gives the
                                                        count.)
-encode open node=<path> codec=<fourcc> raw=<w>x<h> crop=<w>x<h> mode=cbr|vbr|cqp
-            gop=<n> rate=<num>/<den>
-encode frame index=<n> bytes=<n> idr=0|1 promoted=0|1    (idr=1 covers both the
+encode open node=<path> codec=<fourcc> raw=<fourcc> depth=<8|10> <w>x<h>
+            crop=<w>x<h> mode=cbr|vbr|cqp gop=<n> rate=<num>/<den>
+                                                       (raw is the format the
+                                                       raw port accepted: NV12
+                                                       or P010)
+encode frame index=<n> bytes=<n> idr=0|1 promoted=0|1 latency_us=<n> first=0|1
+                                                       (idr=1 covers both the
                                                        client's idr_pic_flag and
                                                        an intra picture without
                                                        it; promoted=1 marks the
                                                        second case, which is the
                                                        only record that the
                                                        request was rewritten
-                                                       rather than honoured)
+                                                       rather than honoured;
+                                                       latency_us runs from the
+                                                       client's vaEndPicture to
+                                                       the access unit, so it
+                                                       includes the pipeline
+                                                       depth the client asked
+                                                       for, and first=1 marks
+                                                       the session's first
+                                                       picture, whose firmware
+                                                       bring-up is not
+                                                       representative)
+encode packed header bytes=<n> count=<n>                (the client's raw
+                                                       packed headers, spliced
+                                                       into the access unit
+                                                       behind the parameter
+                                                       sets and in front of
+                                                       the first slice; the
+                                                       SEI path FFmpeg's HEVC
+                                                       encoder uses)
 encode input fence fd=<n> waited=<ms>                 (only when the input's
                                                        write fence was pending
                                                        20 ms or longer)
@@ -684,6 +785,23 @@ encode intra-refresh period=<n>                        (pictures one rolling
                                                        under CBR only)
 encode idr lever=sync-frame|intra-period               (which requested-IDR
                                                        lever this kernel has)
+encode slices=<n> mode=max_mb mb=<n>                   (the client's slice
+                                                       count as the firmware's
+                                                       macroblock budget; the
+                                                       firmware picks the
+                                                       boundaries)
+encode temporal layers=<n>                            (the client's temporal
+                                                       layer count; the
+                                                       firmware derives the
+                                                       membership)
+encode roi regions=<n> cells=<n>                      (a picture carrying ROI
+                                                       regions and the
+                                                       macroblock cells the
+                                                       map covers; a picture
+                                                       without regions after
+                                                       one with them still
+                                                       writes a zero map and
+                                                       leaves no record)
 encode drain result=complete
 encode drain result=timeout outstanding=<n>
 encode drain marker
@@ -697,6 +815,10 @@ encode control missing name=<control> id=<hex>        (optional control absent;
                                                        the session continues;
                                                        prepend-spspps-to-idr has no id)
 va export_surface id=<n> persistent=0|1 source=frame|stable fd=<n> pitch=<n>
+                                                     (a UBWC surface replaces
+                                                     the pitch with
+                                                     modifier=qcom_compressed
+                                                     planes=<n>)
 va grain <w>x<h> source=frame|stable                   (a grained AV1 display
                                                       surface's blend ran;
                                                       `source` names where
@@ -735,6 +857,20 @@ exactly one client picture at a time and never skips a submitted picture (one
 picture in flight, no holes). A completion whose token does not match its
 buffer's token fails both surfaces and is never published.
 
+The UBWC surface is gated the same way. `test/iris-ubwc-gate.sh` decodes its
+own stream per codec twice, into Q08C and into NV12, and `test/vk-ubwc-read`
+imports the exported compressed buffer through
+`VK_EXT_image_drm_format_modifier` and requires every luma and chroma sample to
+equal the linear decode's. A linear image built from the same reference runs
+through the identical plane copy first, so a mismatch cannot be blamed on the
+read-back path; the gate also requires the session's CAPTURE layout to be Q08C
+with the kernel's four planes and their pitches. `test/iris-va-ubwc-probe`
+covers the layer above: a VP9 decode client asks for the modifier in
+`vaCreateSurfaces`, exports the four-plane descriptor and the modifier, and
+requires `vaDeriveImage`/`vaGetImage`/`vaPutImage` to refuse; the gate runs it
+again with `V4L2_VA_UBWC=0`, where a list naming only the compressed modifier
+has to be refused and a list carrying a linear fallback has to get `LINEAR`.
+
 Client memory entering through `vaCreateSurfaces2` (DRM_PRIME_2 or PRIME_1,
 §3.4) is the same policy reached from the API. Its gates are `prime-import`
 (host: the layout and refusal rules) and `test/iris-va-import-probe.cc`
@@ -746,9 +882,12 @@ below the first needs an MSM render node.
 The geometry and concurrency edges are gated on the target.
 `test/iris-8k-gate.sh` decodes one finite 7680x4320 clip per qualified codec,
 compares every frame with a software framemd5 baseline, and requires the
-granted CAPTURE pool to respect the 384 MiB budget: 32 8K NV12 frames are
-1.5 GiB, more than the device's contiguous carve-out holds, so `STREAMON`
-fails with ENOMEM. `test/iris-two-player-gate.sh` runs two independent ffmpeg
+granted CAPTURE pool to respect the memory budget: 32 8K NV12 frames are
+1.5 GiB, more than the video SMMU's shared IOVA space holds, so `STREAMON`
+fails with ENOMEM. The cap is eight frames from the 384 MiB budget,
+or fifteen when the module reports `capture_sg=Y` and the 720 MiB
+system-memory budget applies; the gate reads the same module parameter the
+driver reads. `test/iris-two-player-gate.sh` runs two independent ffmpeg
 processes at 1920x1080, each with its own VA display and driver trace, and
 requires both to finish with exact pixels, no completion errors and a terminal
 LAST. Neither is a Meson test: both need an Iris node.
@@ -894,11 +1033,13 @@ regenerated from the pinned modules and compared by `test/run-static-checks.sh`.
     clients send the frame rate only with IDR pictures, and a timestamp
     derived per picture therefore went backwards after every GOP boundary,
     which stopped the firmware returning access units.
-16. A surface created over client memory is a view of exactly one linear
-    DMA-BUF in the CAPTURE layout; the driver owns a duplicate of the fd and
-    the client may close its own. Any other geometry, modifier or object
-    count is `VA_STATUS_ERROR_INVALID_PARAMETER` at creation, never a picture
-    decoded into the wrong pixels.
+16. A surface created over client memory is a view of exactly one DMA-BUF in
+    the CAPTURE layout — linear with a pitched luma/chroma pair, or
+    QCOM_COMPRESSED with the four Q08C planes at the kernel's offsets; the
+    driver owns a duplicate of the fd and the client may close its own. Any
+    other geometry, modifier or object count is
+    `VA_STATUS_ERROR_INVALID_PARAMETER` at creation, never a picture decoded
+    into the wrong pixels.
 17. An AV1 picture is submitted at `vaEndPicture`. The internal eight-slot
     DPB assigns refresh slots itself and rewrites `ref_frame_idx[]` to those
     slot numbers, so no successor is needed to name refreshed slots. When all

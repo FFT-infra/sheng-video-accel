@@ -16,6 +16,14 @@ bool is_parameter_set(uint8_t type, Codec codec)
     return type == 32 || type == 33 || type == 34 || type == 39 || type == 40;
 }
 
+// H.264 slices 1-5, every HEVC unit type below 32.
+bool is_vcl(uint8_t type, Codec codec)
+{
+    if (codec == Codec::H264)
+        return type >= 1 && type <= 5;
+    return type <= 31;
+}
+
 // Whether the access unit already carries the codec's two essential sets.
 bool carries_parameter_set(const std::vector<NalUnit>& units, Codec codec)
 {
@@ -98,6 +106,38 @@ std::vector<uint8_t> prepend_parameter_sets(
             carried.push_back(unit);
     if (carries_parameter_set(carried, codec))
         last = std::move(carried);
+    return out;
+}
+
+std::vector<uint8_t> insert_before_vcl(
+    const std::vector<uint8_t>& access_unit, const std::vector<uint8_t>& prefix, Codec codec)
+{
+    if (prefix.empty())
+        return access_unit;
+    const std::vector<NalUnit> units = split_annexb(access_unit.data(), access_unit.size(), codec);
+    if (units.empty()) {
+        // Nothing to split on: keep the client's bytes rather than lose the
+        // picture.
+        std::vector<uint8_t> out = prefix;
+        out.insert(out.end(), access_unit.begin(), access_unit.end());
+        return out;
+    }
+
+    size_t at = units.size();
+    for (size_t i = 0; i < units.size(); ++i) {
+        if (is_vcl(units[i].type, codec)) {
+            at = i;
+            break;
+        }
+    }
+    // Rebuild from the units so a three-byte start code stays one boundary:
+    // the prefix carries its own code.
+    std::vector<uint8_t> out;
+    for (size_t i = 0; i < at; ++i)
+        out.insert(out.end(), units[i].bytes.begin(), units[i].bytes.end());
+    out.insert(out.end(), prefix.begin(), prefix.end());
+    for (size_t i = at; i < units.size(); ++i)
+        out.insert(out.end(), units[i].bytes.begin(), units[i].bytes.end());
     return out;
 }
 

@@ -22,13 +22,17 @@
       "capture_formats": [
         "NV12"
       ],
+      "capture_modifiers": [
+        "LINEAR",
+        "QCOM_COMPRESSED"
+      ],
       "fallback": "software",
       "rejected": [
         "MVC/multiview",
         "interlaced",
         "H.264 High 10: the node's decode profile mask lists Baseline, Constrained Baseline, Main, High and Constrained High and no HIGH_10 (iris_hfi_gen2.c inst_fw_cap_sm8550_dec), and this driver exposes no H264High10 profile",
         "non-4:2:0 chroma: every CAPTURE format the node enumerates is 4:2:0",
-        "UBWC-compressed CAPTURE (Q08C/Q10C): the node enumerates both and the firmware writes real UBWC (0.03% byte agreement with the linear luma). Turnip decodes it byte-exactly through VK_EXT_image_drm_format_modifier (307200/307200 luma bytes, max diff 0), but EGL -- the Copy publish path and vaGetImage/vaPutImage -- reads back the wrong pixels for the same buffer, and QCOM_COMPRESSED on P010 is not advertised at all, so Q10C has no reader. No VA client sets VASurfaceAttribDRMFormatModifiers either. TEST-RESULTS.md records the measurement."
+        "UBWC-compressed 10-bit CAPTURE (Q10C): the node enumerates and sizes it at 4/3 bytes per pixel, but the GPU's 10-bit UBWC importer requires 2 bytes per pixel (640x480: 749568 allocated against 929792 required), so no client on this stack can read the buffer; only the 8-bit Q08C surface is offered (`capture_modifiers`)."
       ],
       "publish_import": "qualified",
       "encode": {
@@ -50,19 +54,23 @@
           "CQP"
         ],
         "rejected": [
-          "packed headers (Annex-B output only)",
           "deblocking other than the firmware default on a kernel without the loop-filter controls (the stock SM8550 module; packaging/kernel/0002-* adds them)",
-          "multi-slice",
           "weighted prediction, scaling lists and chroma QP offsets",
+          "the VAEncMiscParameterTypeHDRMetaData misc buffer, which this driver never accepted: a client that sends it gets VA_STATUS_ERROR_UNIMPLEMENTED at renderPicture. HDR10 metadata does reach the stream as a raw SEI packed header, which is the path FFmpeg's encoders use.",
           "more than one reference index",
           "10-bit or non-4:2:0",
-          "intra refresh forms other than rolling-row, and a per-picture insertion location: the firmware takes one period and decides the sweep itself. Long-term references (ltr_count/frame_ltr_index/use_ltr_frames): VA has no encode-side long-term-reference field at all, so no VA client can ask for one and the driver advertises none.",
+          "intra refresh forms other than rolling-row, and a per-picture insertion location: the firmware takes one period and decides the sweep itself. Long-term references (ltr_count/frame_ltr_index/use_ltr_frames): VA has no encode-side long-term-reference field at all, so no VA client can ask for one and the driver advertises none. The node's controls do reach the firmware: test/iris-encode-ltr-probe.cc marks picture 10 as the LTR frame and references it from picture 12, each control changes the coded pictures, and all three 60-picture streams decode (TEST-RESULTS.md).",
           "UBWC-compressed encode input (Q08C): the encoder node accepts Q08C on its raw OUTPUT queue, but nothing on this stack compresses a frame into it. Turnip decompresses UBWC and can render into a QCOM_COMPRESSED image, yet no VA client supplies compressed input and the driver has no compressor to fill the format itself. NV12 stays the only raw format. TEST-RESULTS.md records the measurement."
         ],
-        "intra_refresh": "rolling-row intra refresh: a VAEncMiscParameterRIR with enable_rir_row maps to V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD, and the firmware sweeps one band of rows per picture. Honoured under CBR only: measured byte-identical to a stream without it under VBR and CQP, so the driver refuses the request there. test/iris-encode-ir-probe.cc drives it through the public VA API and requires the bitstream to change. No VA client requests it today: FFmpeg 8.1.3's h264_vaapi and hevc_vaapi have no such option and libavcodec.so.62 has zero references to VAConfigAttribEncIntraRefresh or VAEncMiscParameterTypeRIR, so this is a driver capability with no client gate behind it."
+        "intra_refresh": "rolling-row intra refresh: a VAEncMiscParameterRIR with enable_rir_row maps to V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD, and the firmware sweeps one band of rows per picture. Honoured under CBR only: measured byte-identical to a stream without it under VBR and CQP, so the driver refuses the request there. test/iris-encode-ir-probe.cc drives it through the public VA API and requires the bitstream to change. No VA client requests it today: FFmpeg 8.1.3's h264_vaapi and hevc_vaapi have no such option and libavcodec.so.62 has zero references to VAConfigAttribEncIntraRefresh or VAEncMiscParameterTypeRIR, so this is a driver capability with no client gate behind it.",
+        "multi_slice": "MAX_MB slicing: V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE in MAX_MB mode, with a macroblock ceiling computed from the client's slice count (ceil(macroblocks / slices)). Needs the 0013 kernel patch; a module without it registers no slice control, and the driver then advertises VAConfigAttribEncMaxSlices = 1 with EQUAL_ROWS. Firmware limits: CBR or CQP only, at most 60 fps, at most 4096x2160, 192x128 (H.264) or 384x128 (HEVC) minimum, and 128 slices.",
+        "temporal_layers": "Temporal layers: VAEncMiscParameterTemporalLayerStructure names the layer count (1..6) and its ids; the firmware derives the membership from the count, so the ids are bounds-checked and the count is written to the node's hierarchical coding controls. Per-layer bitrate control is not offered (VAConfigAttribEncRateControlExt answers temporal_layer_bitrate_control_flag = 0): the firmware ignores per-layer rates while a total bitrate is set. Advertised only when the node registers the hierarchical controls. test/iris-encode-temporal-probe.cc requires a 3-layer HEVC stream to carry temporal ids 0..2.",
+        "packed_headers": "H.264 answers VA_ENC_PACKED_HEADER_NONE. FFmpeg's h264_vaapi writes a buffering-period SEI as a raw packed header that names the SPS by id, and with only MISC advertised FFmpeg never writes the SPS itself, so a CBR or VBR encode fails inside the client. h264_vaapi therefore keeps the firmware's own headers. HEVC does advertise MISC (see the HEVC entry).",
+        "hdr_metadata": "HDR10 mastering-display and content-light-level metadata reach the stream as a raw SEI packed header. FFmpeg's VAAPI encoders build the SEI from AV_FRAME_DATA_MASTERING_DISPLAY_METADATA and AV_FRAME_DATA_CONTENT_LIGHT_LEVEL (-sei hdr, on by default) and the driver splices it in unchanged. The H.264 lane advertises no packed-header type, so FFmpeg sends no raw SEI there (see packed_headers). The VAEncMiscParameterTypeHDRMetaData buffer is still refused. Gate: test/iris-encode-hdr-sei-gate.sh re-encodes an HDR10 source and requires the SEI in the output."
       },
       "experimental": [
-        "B-frames: opt-in with V4L2_VA_B_FRAMES, one B per P. The firmware holds each queued picture until the next one arrives, so the client must keep three pictures in flight (FFmpeg -async_depth 3); with its default two the session stalls at the first pair boundary. The intra period is rounded to a whole number of (P, B) groups, without which the firmware's IDR lands inside a pair and the stream is corrupt from that IDR on. Gate: 300 frames of 720p H.264, 45.06 dB mean PSNR, B pictures present. On a 300-frame 720p natural clip at CQP the encoder spends 20.5 % fewer bits at QP 26 (3652.6 against 4593.3 kbit/s at 37.25 against 37.26 dB) and 12.1 % fewer at QP 30, where libx264 saves 26.8 % and 18.2 %; at VBR it buys 0.5-0.6 dB for 6-10 % more rate (TEST-RESULTS.md)."
+        "B-frames: opt-in with V4L2_VA_B_FRAMES, one B per P. The firmware holds each queued picture until the next one arrives, so the client must keep three pictures in flight (FFmpeg -async_depth 3); with its default two the session stalls at the first pair boundary. The intra period is rounded to a whole number of (P, B) groups, without which the firmware's IDR lands inside a pair and the stream is corrupt from that IDR on. Gate: test/iris-encode-b-gate.sh, 300 frames of 720p H.264, 145 B pictures, SSIM 0.996038, repeat byte-identical (TEST-RESULTS.md). A client reaches B pictures only when the config answers a future prediction direction; this driver reports it together with the l1 reference while the opt-in is set. On a 300-frame 720p natural clip at CQP the encoder spends 20.5 % fewer bits at QP 26 (3652.6 against 4593.3 kbit/s at 37.25 against 37.26 dB) and 12.1 % fewer at QP 30, where libx264 saves 26.8 % and 18.2 %; at VBR it buys 0.5-0.6 dB for 6-10 % more rate (TEST-RESULTS.md).",
+        "ROI: opt-in with V4L2_VA_ROI on a kernel with the 0017 patch. VAConfigAttribEncROI then answers eight regions with delta-QP support; the driver maps VAEncROI rectangles onto the 16x16 macroblock grid (overlaps: first region wins, delta clamped to -31..30) and writes the map to the node's dynamic s32 control before each picture, and the module attaches a metadata buffer to the queued picture. The qualified firmware completes that buffer without error but codes a byte-identical stream, with ROI on every picture at delta -31 under CBR and CQP, so the regions are not advertised by default. test/iris-encode-roi-probe.cc drives the path through the public VA API. TEST-RESULTS.md records the run."
       ]
     },
     {
@@ -79,24 +87,30 @@
         "NV12",
         "P010"
       ],
+      "capture_modifiers": [
+        "LINEAR",
+        "QCOM_COMPRESSED"
+      ],
       "fallback": "software",
       "rejected": [
         "long-term references whose POC MSB cycles do not ascend",
         "interlaced",
         "12-bit",
-        "UBWC-compressed CAPTURE (Q08C/Q10C): the node enumerates both and the firmware writes real UBWC (0.03% byte agreement with the linear luma). Turnip decodes it byte-exactly through VK_EXT_image_drm_format_modifier (307200/307200 luma bytes, max diff 0), but EGL -- the Copy publish path and vaGetImage/vaPutImage -- reads back the wrong pixels for the same buffer, and QCOM_COMPRESSED on P010 is not advertised at all, so Q10C has no reader. No VA client sets VASurfaceAttribDRMFormatModifiers either. TEST-RESULTS.md records the measurement."
+        "UBWC-compressed 10-bit CAPTURE (Q10C): the node enumerates and sizes it at 4/3 bytes per pixel, but the GPU's 10-bit UBWC importer requires 2 bytes per pixel (640x480: 749568 allocated against 929792 required), so no client on this stack can read the buffer; only the 8-bit Q08C surface is offered (`capture_modifiers`)."
       ],
       "publish_import": "qualified",
       "encode": {
         "production": "supported",
         "va_profiles": [
-          "HEVCMain"
+          "HEVCMain",
+          "HEVCMain10"
         ],
         "v4l2_capture_formats": [
           "HEVC"
         ],
         "raw_formats": [
-          "NV12"
+          "NV12",
+          "P010"
         ],
         "rate_control": [
           "CBR",
@@ -104,19 +118,24 @@
           "CQP"
         ],
         "rejected": [
-          "HEVC Main10",
-          "B-frames (the encoder does not advertise them for HEVC: an experimental build that did got nine pictures out of the firmware before an error completion, and those nine decode at about 23 dB)",
-          "packed headers (Annex-B output only)",
+          "B-frames (the encoder does not advertise them for HEVC. With the VA-layer gates relaxed under VBR and -async_depth 3, the session submits 14 pictures, then waits the full 2 s sync bound for a completion, marks the encoder drained and ends with an 11-picture stream whose reference sets do not decode; adding the HEVC hierarchical-B layer type and count the kernel accepts under VBR-CFR shortens the run to two pictures before the same stall. The kernel sets V4L2_BUF_FLAG_{P,B,KEY}FRAME only on completions and reads none from QBUF, so the schedule is the firmware's own and this firmware does not finish it. TEST-RESULTS.md records the run.)",
           "deblocking other than the firmware default on a kernel without the loop-filter controls (the stock SM8550 module; packaging/kernel/0002-* adds them)",
-          "multi-slice",
           "tiles and wavefront coding",
           "weighted prediction, scaling lists, chroma QP offsets and CTU bit limits",
-          "intra refresh forms other than rolling-row, and a per-picture insertion location: the firmware takes one period and decides the sweep itself. Long-term references (ltr_count/frame_ltr_index/use_ltr_frames): VA has no encode-side long-term-reference field at all, so no VA client can ask for one and the driver advertises none.",
-          "UBWC-compressed encode input (Q08C): the encoder node accepts Q08C on its raw OUTPUT queue, but nothing on this stack compresses a frame into it. Turnip decompresses UBWC and can render into a QCOM_COMPRESSED image, yet no VA client supplies compressed input and the driver has no compressor to fill the format itself. NV12 stays the only raw format. TEST-RESULTS.md records the measurement."
+          "the VAEncMiscParameterTypeHDRMetaData misc buffer, which this driver never accepted: a client that sends it gets VA_STATUS_ERROR_UNIMPLEMENTED at renderPicture. HDR10 metadata does reach the stream as a raw SEI packed header, which is the path FFmpeg's encoders use.",
+          "intra refresh forms other than rolling-row, and a per-picture insertion location: the firmware takes one period and decides the sweep itself. Long-term references (ltr_count/frame_ltr_index/use_ltr_frames): VA has no encode-side long-term-reference field at all, so no VA client can ask for one and the driver advertises none. The node's controls do reach the firmware: test/iris-encode-ltr-probe.cc marks picture 10 as the LTR frame and references it from picture 12, each control changes the coded pictures, and all three 60-picture streams decode (TEST-RESULTS.md).",
+          "UBWC-compressed encode input (Q08C): the encoder node accepts Q08C on its raw OUTPUT queue, but nothing on this stack compresses a frame into it. Turnip decompresses UBWC and can render into a QCOM_COMPRESSED image, yet no VA client supplies compressed input and the driver has no compressor to fill the format itself. NV12 and P010 stay the only raw formats. TEST-RESULTS.md records the measurement."
         ],
-        "intra_refresh": "rolling-row intra refresh: a VAEncMiscParameterRIR with enable_rir_row maps to V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD, and the firmware sweeps one band of rows per picture. Honoured under CBR only: measured byte-identical to a stream without it under VBR and CQP, so the driver refuses the request there. test/iris-encode-ir-probe.cc drives it through the public VA API and requires the bitstream to change. No VA client requests it today: FFmpeg 8.1.3's h264_vaapi and hevc_vaapi have no such option and libavcodec.so.62 has zero references to VAConfigAttribEncIntraRefresh or VAEncMiscParameterTypeRIR, so this is a driver capability with no client gate behind it."
+        "intra_refresh": "rolling-row intra refresh: a VAEncMiscParameterRIR with enable_rir_row maps to V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD, and the firmware sweeps one band of rows per picture. Honoured under CBR only: measured byte-identical to a stream without it under VBR and CQP, so the driver refuses the request there. test/iris-encode-ir-probe.cc drives it through the public VA API and requires the bitstream to change. No VA client requests it today: FFmpeg 8.1.3's h264_vaapi and hevc_vaapi have no such option and libavcodec.so.62 has zero references to VAConfigAttribEncIntraRefresh or VAEncMiscParameterTypeRIR, so this is a driver capability with no client gate behind it.",
+        "multi_slice": "MAX_MB slicing: V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE in MAX_MB mode, with a macroblock ceiling computed from the client's slice count (ceil(macroblocks / slices)). Needs the 0013 kernel patch; a module without it registers no slice control, and the driver then advertises VAConfigAttribEncMaxSlices = 1 with EQUAL_ROWS. Firmware limits: CBR or CQP only, at most 60 fps, at most 4096x2160, 192x128 (H.264) or 384x128 (HEVC) minimum, and 128 slices.",
+        "temporal_layers": "Temporal layers: VAEncMiscParameterTemporalLayerStructure names the layer count (1..6) and its ids; the firmware derives the membership from the count, so the ids are bounds-checked and the count is written to the node's hierarchical coding controls. Per-layer bitrate control is not offered (VAConfigAttribEncRateControlExt answers temporal_layer_bitrate_control_flag = 0): the firmware ignores per-layer rates while a total bitrate is set. Advertised only when the node registers the hierarchical controls. test/iris-encode-temporal-probe.cc requires a 3-layer HEVC stream to carry temporal ids 0..2.",
+        "packed_headers": "Raw packed headers (VA_ENC_PACKED_HEADER_MISC): a VAEncPackedHeaderRawData buffer the client renders is kept with the picture and spliced into the access unit behind the parameter sets and in front of the first slice. Sequence and slice packed headers stay unsupported because the firmware writes both itself. Only a NAL that begins with a start code is accepted; anything else fails the picture instead of being concatenated into the stream.",
+        "hdr_metadata": "HDR10 mastering-display and content-light-level metadata reach the stream as a raw SEI packed header. FFmpeg's hevc_vaapi builds the SEI from AV_FRAME_DATA_MASTERING_DISPLAY_METADATA and AV_FRAME_DATA_CONTENT_LIGHT_LEVEL (-sei hdr, on by default) and the driver splices it in unchanged. The VAEncMiscParameterTypeHDRMetaData buffer is still refused. Gate: test/iris-encode-hdr-sei-gate.sh re-encodes an HDR10 source and requires the SEI in the output.",
+        "main10": "HEVC Main 10: raw input P010, profile MAIN_10, and VAProfileHEVCMain10 is advertised only when the encoder node accepts P010 on its OUTPUT queue, which needs the 0014 kernel patch. A module without it answers NV12 only and the profile does not appear. TEST-RESULTS.md records the hardware gate."
       },
-      "experimental": []
+      "experimental": [
+        "ROI: opt-in with V4L2_VA_ROI on a kernel with the 0017 patch. VAConfigAttribEncROI then answers eight regions with delta-QP support; the driver maps VAEncROI rectangles onto the 32x32 coding-tree grid (overlaps: first region wins, delta clamped to -31..30) and writes the map to the node's dynamic s32 control before each picture, and the module attaches a metadata buffer to the queued picture. The qualified firmware completes that buffer without error but codes a byte-identical stream, with ROI on every picture at delta -31 under CBR and CQP, so the regions are not advertised by default. TEST-RESULTS.md records the run."
+      ]
     },
     {
       "codec": "vp9",
@@ -132,12 +151,16 @@
         "NV12",
         "P010"
       ],
+      "capture_modifiers": [
+        "LINEAR",
+        "QCOM_COMPRESSED"
+      ],
       "fallback": "software",
       "rejected": [
         "show_existing_frame through VA (VADecPictureParameterBufferVP9 has no frame_to_show field)",
         "12-bit: src/codec/vp9.cc refuses it with VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT before any buffer is queued. The node's native v4l2vp9dec element can also take 12-bit access units and never return a CAPTURE buffer; that is the element, not this driver.",
         "RGB",
-        "UBWC-compressed CAPTURE (Q08C/Q10C): the node enumerates both and the firmware writes real UBWC (0.03% byte agreement with the linear luma). Turnip decodes it byte-exactly through VK_EXT_image_drm_format_modifier (307200/307200 luma bytes, max diff 0), but EGL -- the Copy publish path and vaGetImage/vaPutImage -- reads back the wrong pixels for the same buffer, and QCOM_COMPRESSED on P010 is not advertised at all, so Q10C has no reader. No VA client sets VASurfaceAttribDRMFormatModifiers either. TEST-RESULTS.md records the measurement."
+        "UBWC-compressed 10-bit CAPTURE (Q10C): the node enumerates and sizes it at 4/3 bytes per pixel, but the GPU's 10-bit UBWC importer requires 2 bytes per pixel (640x480: 749568 allocated against 929792 required), so no client on this stack can read the buffer; only the 8-bit Q08C surface is offered (`capture_modifiers`)."
       ],
       "rt_format_note": "VP9 Profile 2 has no legal 8-bit stream (libvpx refuses to encode one; src/codec/vp9.cc requires bit_depth == 10), so VAEntrypointVLD answers VA_RT_FORMAT_YUV420_10 only (0x100) and createConfig defaults to the same mask when the client passes no RT-format attribute. HEVC Main10 and AV1 Profile0 also decode 8-bit streams and keep both bits (0x101). test/unit/va-config-attributes-test.cc pins the answers and the default; test/iris-vp9-p2-gate.sh requires P010 surfaces and 30/30 exact framemd5 on a generated 10-bit Profile 2 clip. TEST-RESULTS.md records the measurement.",
       "publish_import": "qualified",
@@ -167,11 +190,15 @@
         "NV12",
         "P010"
       ],
+      "capture_modifiers": [
+        "LINEAR",
+        "QCOM_COMPRESSED"
+      ],
       "fallback": "software",
       "rejected": [
         "12-bit: the node has no 12-bit CAPTURE format, and the VA layer refuses the stream at profile selection",
         "large-scale tile: src/codec/av1_obu.cc refuses a picture whose large_scale_tile bit is set. VAConfigAttribDecAV1Features is a known attribute on AV1 VLD and answers 0 (no feature flags), and neither FFmpeg nor Chrome reads that attribute (0 references in the target's libavcodec), so the answer reaches no client today",
-        "UBWC-compressed CAPTURE (Q08C/Q10C): the node enumerates both and the firmware writes real UBWC (0.03% byte agreement with the linear luma). Turnip decodes it byte-exactly through VK_EXT_image_drm_format_modifier (307200/307200 luma bytes, max diff 0), but EGL -- the Copy publish path and vaGetImage/vaPutImage -- reads back the wrong pixels for the same buffer, and QCOM_COMPRESSED on P010 is not advertised at all, so Q10C has no reader. No VA client sets VASurfaceAttribDRMFormatModifiers either. TEST-RESULTS.md records the measurement."
+        "UBWC-compressed 10-bit CAPTURE (Q10C): the node enumerates and sizes it at 4/3 bytes per pixel, but the GPU's 10-bit UBWC importer requires 2 bytes per pixel (640x480: 749568 allocated against 929792 required), so no client on this stack can read the buffer; only the 8-bit Q08C surface is offered (`capture_modifiers`)."
       ],
       "film_grain_note": "Synthesis is qualified for AV1Profile0 at 8 and 10 bits. The client names the ungrained decode target as current_frame and a separate grained current_display_picture; the driver decodes the rebuilt access unit with apply_grain=0 and blends in userspace (src/va/grain.cc) from that picture's endPicture, before the client can recycle current_frame. The gate resolves the 320x240 NV12 20-frame and 352x290 P010 2-frame clips frame-by-frame identical to libdav1d's grained output under V4L2_VA_PUBLISH=import, and both clips matched under direct and copy as well. TEST-RESULTS.md records the run",
       "publish_import": "qualified",

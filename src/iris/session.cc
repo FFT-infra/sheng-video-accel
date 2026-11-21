@@ -5,6 +5,7 @@
 #include "session_internal.h"
 
 #include "../util/error.h"
+#include "../util/prime.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -24,18 +25,30 @@ namespace iris {
 
 namespace {
 
-constexpr unsigned kMinCapturePool = 32;
 constexpr unsigned kMaxCapturePool = 64;
 constexpr int kLastWaitMs = 2000;
 constexpr int kOutputDrainMs = 500;
 
-// The device's contiguous capture memory is a fixed carve-out on SM8550, and
-// it holds the CAPTURE pool alongside the firmware's DPB and scratch buffers.
-// A 7680x4320 NV12 frame is 47.5 MiB, so a 32-frame pool asks for 1.5 GiB and
-// STREAMON fails with ENOMEM; the same node allocates 8 frames and decodes the
-// four codecs byte-exactly. Cap the pool by that budget instead of letting a
-// large geometry turn a fixed count into an unbounded allocation.
+// Shared SMMU IOVA space: 32 8K frames (1.5 GiB) fail STREAMON.
 constexpr uint64_t kCaptureMemoryBudget = 384ull << 20;
+
+// 720 MiB fits the firmware minimum plus kDirectHeadroom at 8K; more fragments
+// the HEVC bitstream buffer.
+constexpr uint64_t kSystemCaptureMemoryBudget = 720ull << 20;
+
+// A Direct target pins one CAPTURE frame per picture the client has not
+// consumed.
+constexpr unsigned kDirectHeadroom = 8;
+
+// FFmpeg's VA-API 1.x path declares no surfaces and creates its pool lazily.
+constexpr unsigned kUndeclaredSurfaceCount = 17;
+
+unsigned capture_pool_wanted(unsigned declared_surfaces, unsigned firmware_min)
+{
+    const unsigned surfaces = declared_surfaces > 0 ? declared_surfaces : kUndeclaredSurfaceCount;
+    const unsigned wanted = std::max(surfaces + 4, firmware_min + kDirectHeadroom);
+    return std::min(wanted, kMaxCapturePool);
+}
 
 // Compressed AU capacity when the caller has no better estimate: Chromium
 // and GStreamer both size the OUTPUT plane from the coded area with a floor.
@@ -48,14 +61,14 @@ unsigned default_au_capacity(unsigned width, unsigned height)
     return 2u << 20;
 }
 
-unsigned capture_pool_count(unsigned wanted, uint64_t frame_size, int firmware_min)
+unsigned capture_pool_count(unsigned wanted, uint64_t frame_size, int firmware_min, uint64_t budget)
 {
     if (frame_size == 0)
         return wanted;
     // The firmware's minimum is not negotiable: it needs that many slots to
     // run at all, even when the budget would prefer fewer.
     const unsigned floor = firmware_min > 0 ? static_cast<unsigned>(firmware_min) : 1u;
-    const uint64_t affordable = std::max<uint64_t>(floor, kCaptureMemoryBudget / frame_size);
+    const uint64_t affordable = std::max<uint64_t>(floor, budget / frame_size);
     return std::min(wanted, static_cast<unsigned>(std::min<uint64_t>(affordable, kMaxCapturePool)));
 }
 
@@ -145,6 +158,16 @@ bool Session::import_compatible(const Layout& client, const Layout& capture)
     // The firmware writes with the CAPTURE pitch and puts chroma after
     // storage_height luma rows; the client's exported offsets are fixed, so
     // both must agree exactly and the buffer must hold the whole plane set.
+    if (capture.compressed()) {
+        if (client.fourcc != capture.fourcc || client.modifier != capture.modifier
+            || client.plane_count != capture.plane_count || client.size < capture.size)
+            return false;
+        for (unsigned i = 0; i < capture.plane_count; ++i)
+            if (client.planes[i].offset != capture.planes[i].offset
+                || client.planes[i].pitch != capture.planes[i].pitch)
+                return false;
+        return true;
+    }
     return client.fourcc == capture.fourcc && client.stride == capture.stride
         && client.chroma_offset() == capture.chroma_offset() && client.size >= capture.size;
 }
@@ -199,7 +222,10 @@ void Session::configure_capture()
     // answer is not the one the client needs (a P010 surface against an NV12
     // default, an Import layout). G_FMT first, exactly as the Capture Setup
     // sequence in dev-decoder.rst prescribes.
-    const uint32_t pixelformat = config_.capture_fourcc == VA_FOURCC_P010 ? V4L2_PIX_FMT_P010 : V4L2_PIX_FMT_NV12;
+    const bool ubwc = config_.capture_modifier == DRM_FORMAT_MOD_QCOM_COMPRESSED;
+    const uint32_t pixelformat = ubwc ? V4L2_PIX_FMT_QC08C
+                                      : (config_.capture_fourcc == VA_FOURCC_P010 ? V4L2_PIX_FMT_P010
+                                                                                  : V4L2_PIX_FMT_NV12);
     FormatInfo current = device_->get_format(Queue::Capture);
     FormatInfo granted = current;
     if (current.pixelformat != pixelformat) {
@@ -231,11 +257,24 @@ void Session::configure_capture()
     layout.fourcc = config_.capture_fourcc;
     layout.width = granted.width;
     layout.height = granted.height;
-    layout.stride = granted.bytesperline;
-    // iris_buffer.c: luma scanlines aligned to 32, chroma directly after.
-    layout.storage_height = (granted.height + 31) & ~31u;
     layout.data_offset = 0;
     layout.size = granted.sizeimage;
+    if (ubwc) {
+        // The kernel's Q08C allocation: four 4 KiB-rounded planes. The
+        // kernel's sizeimage is the one the pool must hold; a disagreement
+        // means the two layouts were derived differently.
+        const PlaneLayout ubwc = iris::ubwc_layout(granted.width, granted.height);
+        require(ubwc.size == granted.sizeimage, "the UBWC layout disagrees with the node's sizeimage",
+            VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+        layout.modifier = ubwc.modifier;
+        layout.plane_count = ubwc.plane_count;
+        for (unsigned i = 0; i < ubwc.plane_count; ++i)
+            layout.planes[i] = { ubwc.planes[i].offset, ubwc.planes[i].pitch, ubwc.planes[i].rows };
+    } else {
+        layout.stride = granted.bytesperline;
+        // iris_buffer.c: luma scanlines aligned to 32, chroma directly after.
+        layout.storage_height = (granted.height + 31) & ~31u;
+    }
 
     // Import memory when the first picture asks for it and the contract
     // holds (docs/architecture.md §3.3): decode-order output, and the
@@ -264,16 +303,12 @@ void Session::configure_capture()
         }
     }
 
-    // Pool sizing: the client's surface count plus in-flight headroom, never
-    // below the firmware's minimum, never below 32 (the old vb2 ceiling that
-    // every hardware pass ran with), capped by the kernel's maximum. At large
-    // geometries the memory budget wins over the fixed count: 32 8K frames
-    // exceed the device's contiguous carve-out and STREAMON fails outright.
     const auto minimum = device_->get_control(V4L2_CID_MIN_BUFFERS_FOR_CAPTURE);
-    unsigned wanted = std::clamp(config_.surface_count + 4, kMinCapturePool, kMaxCapturePool);
-    if (minimum && *minimum > 0)
-        wanted = std::max(wanted, static_cast<unsigned>(*minimum));
-    wanted = capture_pool_count(wanted, layout.size, minimum ? *minimum : 0);
+    const unsigned firmware_min = minimum && *minimum > 0 ? static_cast<unsigned>(*minimum) : 0;
+    const uint64_t budget = device_->capture_from_system() ? kSystemCaptureMemoryBudget : kCaptureMemoryBudget;
+    const unsigned wanted = capture_pool_count(
+        capture_pool_wanted(config_.surface_count, firmware_min), layout.size, static_cast<int>(firmware_min), budget);
+    direct_min_pool_ = firmware_min + kDirectHeadroom;
     pool_.allocate_capture(wanted, layout, memory);
     trace_("capture configure %ux%u stride=%u size=%u visible=%ux%u pool=%u memory=%s firmware-min=%d",
         granted.width, granted.height, granted.bytesperline, granted.sizeimage, visible_.width, visible_.height,
@@ -327,7 +362,8 @@ void Session::drain(const char* reason, bool wait_output)
 {
     require(state_ == SessionState::Streaming, "drain outside Streaming");
     ++stats_.drains;
-    trace_("drain begin reason=%s pending=%zu", reason, pending_.size());
+    trace_("drain begin reason=%s pending=%zu queued=%u held=%u pool=%u", reason, pending_.size(),
+        pool_.capture_queued(), pool_.capture_held(), pool_.capture_count());
     state_ = SessionState::Draining;
     saw_last_ = false;
     require(device_->decoder_command(V4L2_DEC_CMD_STOP), "DECODER_CMD_STOP busy", VA_STATUS_ERROR_HW_BUSY);

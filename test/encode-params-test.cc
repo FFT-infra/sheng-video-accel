@@ -611,6 +611,13 @@ void test_reference_and_slice_shape()
     check(p_params.reconstruction == picture.CurrPic.picture_id,
         "the reconstruction surface comes from CurrPic");
 
+    // The client's raw packed headers travel with the picture unchanged: the
+    // session splices them into the access unit, so the translator must not
+    // drop or rewrite them.
+    p_picture.packed_headers = { { 0, 0, 1, 0x06, 0x05, 0x01 } };
+    check(h264->translate(p_picture).prefix_nals == p_picture.packed_headers,
+        "raw packed headers pass through the translator");
+
     // An intra picture needs no reference, even if the slice list carries a
     // stale one.
     VAEncSliceParameterBufferH264 i_slice = h264_slice(sequence, true);
@@ -652,7 +659,7 @@ void test_reference_and_slice_shape()
     offset.macroblock_address = 1;
     EncodePicture offset_picture = h264_input(sequence, picture);
     offset_picture.slices = { &offset };
-    check(status_of([&] { h264->translate(offset_picture); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
+    check(status_of([&] { h264->translate(offset_picture); }) == VA_STATUS_ERROR_INVALID_PARAMETER,
         "a slice that starts past macroblock zero is refused");
 
     // A B slice in a sequence that asked for no B pictures is the client
@@ -752,7 +759,7 @@ void test_reference_and_slice_shape()
     VAEncPictureParameterBufferHEVC partial_hevc_picture = hevc_picture();
     EncodePicture hpartial = hevc_input(hsequence, partial_hevc_picture);
     hpartial.slices = { &partial_hevc };
-    check(status_of([&] { hevc->translate(hpartial); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
+    check(status_of([&] { hevc->translate(hpartial); }) == VA_STATUS_ERROR_INVALID_PARAMETER,
         "an HEVC slice that starts past CTU zero is refused");
 }
 
@@ -786,13 +793,6 @@ void test_unimplemented_features()
     slice.cabac_init_idc = 1;
     check(status_of([&] { h264->translate(one); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
         "a CABAC initialisation index is refused");
-
-    VAEncSliceParameterBufferH264 second = h264_slice(sequence, true);
-    VAEncPictureParameterBufferH264 many_picture = h264_picture();
-    EncodePicture many = h264_input(sequence, many_picture);
-    many.slices = { &slice, &second };
-    check(status_of([&] { h264->translate(many); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
-        "two slices are refused");
 
     auto hevc = iris::codec::make_hevc_encoder(VAProfileHEVCMain, RateMode::Vbr);
     VAEncSequenceParameterBufferHEVC hsequence = hevc_sequence();
@@ -838,14 +838,173 @@ void test_unimplemented_features()
     hslice.slice_fields.bits.dependent_slice_segment_flag = 1;
     check(status_of([&] { hevc->translate(hinput); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
         "dependent slice segments are refused");
+}
 
-    VAEncSliceParameterBufferHEVC hsecond = base_slice;
-    hslice = base_slice;
-    hinput.slices = { &hslice, &hsecond };
-    check(status_of([&] { hevc->translate(hinput); }) == VA_STATUS_ERROR_UNIMPLEMENTED,
-        "two HEVC slices are refused");
+// A picture the client splits is translated into the one thing the firmware
+// takes: an equal share of 16x16 macroblocks. The firmware chooses the
+// boundaries, so the count is what the client's request becomes.
+void test_multi_slice()
+{
+    auto h264 = iris::codec::make_h264_encoder(VAProfileH264High, RateMode::Cbr);
+    const VAEncSequenceParameterBufferH264 sequence = h264_sequence();
+    const VAEncPictureParameterBufferH264 picture = h264_picture();
+    VAEncSliceParameterBufferH264 first = h264_slice(sequence, true);
+    VAEncSliceParameterBufferH264 second = h264_slice(sequence, true);
+    second.macroblock_address = first.num_macroblocks / 2;
+    second.num_macroblocks = first.num_macroblocks - second.macroblock_address;
+    EncodePicture input = h264_input(sequence, picture);
+    const iris::EncodeParams single = h264->translate(input);
+    check(single.slices == 1 && single.slice_mb == 0,
+        "one H.264 slice leaves the firmware's layout alone");
+
+    input.slices = { &first, &second };
+    const iris::EncodeParams two = h264->translate(input);
+    check(two.slices == 2, "two H.264 slices are accepted");
+    check(two.slice_mb == 4080, "two H.264 slices split 8160 macroblocks evenly");
+
+    VAEncSliceParameterBufferH264 third = second;
+    third.slice_qp_delta = 2;
+    input.slices = { &first, &second, &third };
+    check(status_of([&] { h264->translate(input); }) == VA_STATUS_ERROR_INVALID_PARAMETER,
+        "H.264 slices that disagree on QP are refused");
+
+    auto hevc = iris::codec::make_hevc_encoder(VAProfileHEVCMain, RateMode::Cbr);
+    const VAEncSequenceParameterBufferHEVC hsequence = hevc_sequence();
+    VAEncPictureParameterBufferHEVC hpicture = hevc_picture();
+    VAEncSliceParameterBufferHEVC hfirst = {};
+    hfirst.slice_type = 2;
+    hfirst.num_ctu_in_slice = 1;
+    VAEncSliceParameterBufferHEVC hsecond = hfirst;
+    hsecond.slice_segment_address = 30;
+    EncodePicture hinput;
+    hinput.sequence = &hsequence;
+    hinput.picture = &hpicture;
+    hinput.surface_width = 1920;
+    hinput.surface_height = 1080;
+    hinput.slices = { &hfirst };
+    const iris::EncodeParams hsingle = hevc->translate(hinput);
+    check(hsingle.slices == 1 && hsingle.slice_mb == 0,
+        "one HEVC slice leaves the firmware's layout alone");
+
+    hinput.slices = { &hfirst, &hsecond };
+    const iris::EncodeParams htwo = hevc->translate(hinput);
+    check(htwo.slices == 2, "two HEVC slices are accepted");
+    check(htwo.slice_mb == 4080, "two HEVC slices split 8160 macroblocks evenly");
+
+    hsecond.slice_fields.bits.slice_loop_filter_across_slices_enabled_flag = 1;
+    check(status_of([&] { hevc->translate(hinput); }) == VA_STATUS_ERROR_INVALID_PARAMETER,
+        "HEVC slices that disagree on deblocking are refused");
 }
 } // namespace
+
+// The temporal layer structure belongs to a coded sequence: the client sends
+// it with the first picture, and every later picture must carry the same
+// count or the session's change check fires. A count or id the firmware
+// cannot express is refused here, before a context is opened.
+void test_temporal_layers()
+{
+    const VAEncSequenceParameterBufferH264 sequence = h264_sequence();
+    const VAEncPictureParameterBufferH264 picture = h264_picture();
+    auto encoder = iris::codec::make_h264_encoder(VAProfileH264High, RateMode::Cbr);
+
+    VAEncMiscParameterTemporalLayerStructure three = {};
+    three.number_of_layers = 3;
+    three.periodicity = 4;
+    const uint32_t ids[4] = { 2, 1, 2, 0 };
+    for (int i = 0; i < 4; ++i)
+        three.layer_id[i] = ids[i];
+    std::vector<uint32_t> storage = misc(VAEncMiscParameterTypeTemporalLayerStructure, three);
+    const EncodePicture with = h264_input(sequence, picture, { storage.data() });
+    check(encoder->translate(with).temporal_layers == 3, "the layer count reaches the parameters");
+
+    const EncodePicture later = h264_input(sequence, picture);
+    check(encoder->translate(later).temporal_layers == 3,
+        "a later picture keeps the layer count the client configured");
+
+    VAEncMiscParameterTemporalLayerStructure too_many = three;
+    too_many.number_of_layers = 7;
+    std::vector<uint32_t> too_many_storage
+        = misc(VAEncMiscParameterTypeTemporalLayerStructure, too_many);
+    const EncodePicture too_many_input = h264_input(sequence, picture, { too_many_storage.data() });
+    check(status_of([&] { encoder->translate(too_many_input); }) == VA_STATUS_ERROR_INVALID_PARAMETER,
+        "seven temporal layers are refused");
+
+    VAEncMiscParameterTemporalLayerStructure bad_id = three;
+    bad_id.layer_id[0] = 3;
+    std::vector<uint32_t> bad_id_storage = misc(VAEncMiscParameterTypeTemporalLayerStructure, bad_id);
+    const EncodePicture bad_id_input = h264_input(sequence, picture, { bad_id_storage.data() });
+    check(status_of([&] { encoder->translate(bad_id_input); }) == VA_STATUS_ERROR_INVALID_PARAMETER,
+        "a layer id past the layer count is refused");
+}
+
+// The client's ROI rectangles become the kernel's per-macroblock delta-QP
+// map. The grid is one cell per LCU of the picture's visible size, the same
+// grid the kernel builds from its unaligned OUTPUT format.
+void test_roi_map()
+{
+    auto h264 = iris::codec::make_h264_encoder(VAProfileH264High, RateMode::Vbr);
+    const VAEncSequenceParameterBufferH264 sequence = h264_sequence();
+    const VAEncPictureParameterBufferH264 picture = h264_picture();
+
+    EncodePicture input = h264_input(sequence, picture);
+    check(h264->translate(input).roi_map.empty(), "a picture without regions has no map");
+
+    const unsigned h264_columns = (1920 + 15) / 16;
+    const unsigned h264_rows = (1080 + 15) / 16;
+    input.roi = { VAEncROI { VARectangle { 0, 0, 16, 16 }, -10 } };
+    iris::EncodeParams params = h264->translate(input);
+    check(params.roi_regions == 1, "one region reaches the parameters");
+    check(params.roi_map.size() == h264_columns * h264_rows, "H.264 maps one cell per 16x16 macroblock");
+    check(params.roi_map[0] == -10, "the covered macroblock carries the delta");
+    check(params.roi_map[1] == 0 && params.roi_map[h264_columns] == 0,
+        "macroblock 1 and the next row are outside the region");
+
+    // Unaligned height: 1080 is 67.5 macroblock rows, so the last row is a
+    // partial one and still a cell.
+    check(((1080 + 15) / 16) == 68 && params.roi_map.size() == 120u * 68u,
+        "a partial macroblock row still counts");
+
+    // A region covering the picture, then a smaller one on top of cell 0:
+    // the first one the client listed wins.
+    input.roi = { VAEncROI { VARectangle { 0, 0, 1920, 1080 }, 5 },
+        VAEncROI { VARectangle { 0, 0, 16, 16 }, -3 } };
+    params = h264->translate(input);
+    check(params.roi_regions == 2, "both regions reach the parameters");
+    check(params.roi_map[0] == 5 && params.roi_map.back() == 5,
+        "the first region wins where two overlap");
+
+    // A rectangle with a negative origin is clipped to the picture.
+    input.roi = { VAEncROI { VARectangle { -8, -8, 24, 24 }, 7 } };
+    params = h264->translate(input);
+    check(params.roi_map[0] == 7, "a clipped rectangle still covers its visible part");
+    check(params.roi_map[1] == 0, "and stops at its right edge");
+
+    // A region entirely off the picture claims nothing.
+    input.roi = { VAEncROI { VARectangle { 3000, 0, 16, 16 }, 7 } };
+    check(h264->translate(input).roi_map.size() == h264_columns * h264_rows,
+        "an off-picture region still sizes the map");
+    check(h264->translate(input).roi_map[0] == 0, "and covers no cell");
+
+    // VA's roi_value is an int8_t; the control takes -31..30, so both ends
+    // are clamped rather than refused.
+    input.roi = { VAEncROI { VARectangle { 0, 0, 1920, 1080 }, 100 } };
+    check(h264->translate(input).roi_map[0] == 30, "a delta above the control's range clamps to 30");
+    input.roi = { VAEncROI { VARectangle { 0, 0, 1920, 1080 }, -100 } };
+    check(h264->translate(input).roi_map[0] == -31, "a delta below it clamps to -31");
+
+    // HEVC is the same map on a 32x32 grid.
+    auto hevc = iris::codec::make_hevc_encoder(VAProfileHEVCMain, RateMode::Vbr);
+    const VAEncSequenceParameterBufferHEVC hevc_seq = hevc_sequence();
+    const VAEncPictureParameterBufferHEVC hevc_pic = hevc_picture();
+    EncodePicture hevc_in = hevc_input(hevc_seq, hevc_pic);
+    hevc_in.roi = { VAEncROI { VARectangle { 64, 32, 64, 32 }, -6 } };
+    const iris::EncodeParams hevc_params = hevc->translate(hevc_in);
+    const unsigned hevc_columns = (1920 + 31) / 32;
+    check(hevc_params.roi_map.size() == hevc_columns * ((1080 + 31) / 32),
+        "HEVC maps one cell per 32x32 coding tree block");
+    check(hevc_params.roi_map[1 * hevc_columns + 2] == -6, "the first covered CTB carries the delta");
+    check(hevc_params.roi_map[1 * hevc_columns + 1] == 0, "the CTB to its left does not");
+}
 
 int main()
 {
@@ -858,6 +1017,9 @@ int main()
     test_intra_refresh();
     test_reference_and_slice_shape();
     test_unimplemented_features();
+    test_multi_slice();
+    test_temporal_layers();
+    test_roi_map();
     if (failures) {
         std::cerr << failures << " encode parameter check(s) failed\n";
         return 1;

@@ -9,6 +9,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <fstream>
 #include <glob.h>
 #include <system_error>
 
@@ -59,6 +60,14 @@ public:
 
     std::string path() const override { return path_; }
     int fd() const override { return fd_; }
+
+    bool capture_from_system() const override
+    {
+        // A stock module has no such parameter.
+        std::ifstream file("/sys/module/qcom_iris/parameters/capture_sg");
+        std::string value;
+        return static_cast<bool>(file >> value) && value == "Y";
+    }
 
     FormatInfo get_format(Queue queue) override
     {
@@ -141,6 +150,46 @@ public:
         if (errno == EINVAL || errno == ENOTTY || errno == EACCES)
             return false;
         throw Error(VA_STATUS_ERROR_OPERATION_FAILED, std::string("S_CTRL: ") + std::strerror(errno));
+    }
+
+    std::optional<ControlInfo> query_control(uint32_t id) override
+    {
+        v4l2_query_ext_ctrl query = {};
+        query.id = id;
+        if (call(fd_, VIDIOC_QUERY_EXT_CTRL, &query) < 0)
+            return std::nullopt;
+        ControlInfo info;
+        info.type = query.type;
+        info.flags = query.flags;
+        info.elems = query.elems;
+        info.elem_size = query.elem_size;
+        std::memcpy(info.dims, query.dims, sizeof(info.dims));
+        info.minimum = query.minimum;
+        info.maximum = query.maximum;
+        info.step = query.step;
+        return info;
+    }
+
+    bool set_control_array(uint32_t id, const int32_t* values, size_t count) override
+    {
+        // `ptr`, not `p_s32`: the vendored UAPI headers predate the s32
+        // pointer, and the ioctl only reads the address.
+        v4l2_ext_control control = {};
+        control.id = id;
+        control.size = static_cast<uint32_t>(count * sizeof(int32_t));
+        control.ptr = const_cast<int32_t*>(values);
+        v4l2_ext_controls controls = {};
+        controls.which = V4L2_CTRL_WHICH_CUR_VAL;
+        controls.count = 1;
+        controls.controls = &control;
+        if (call(fd_, VIDIOC_S_EXT_CTRLS, &controls) == 0)
+            return true;
+        // No such control: EINVAL from the id lookup, ENOTTY from a node
+        // without the control API. ENOSPC is a shape the control refused,
+        // which is a caller bug.
+        if (errno == EINVAL || errno == ENOTTY)
+            return false;
+        throw Error(VA_STATUS_ERROR_OPERATION_FAILED, std::string("S_EXT_CTRLS: ") + std::strerror(errno));
     }
 
     unsigned request_buffers(Queue queue, unsigned count, uint32_t memory = V4L2_MEMORY_MMAP) override

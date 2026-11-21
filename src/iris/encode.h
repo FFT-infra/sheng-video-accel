@@ -123,11 +123,19 @@ private:
         // into the access unit, and it rises in queue order rather than in
         // ticket order, which is what the firmware checks.
         uint64_t queue_us = 0;
+        // When the client submitted the picture. The completion trace reports
+        // the difference, which is the latency a client can act on.
+        std::chrono::steady_clock::time_point submitted_at;
     };
 
     using Clock = std::chrono::steady_clock;
 
     void apply_dynamic(const EncodeParams& params);
+    // One write arms the metadata buffer the kernel attaches to the raw
+    // buffer queued next, so it runs immediately before that QBUF.
+    void apply_roi(const EncodeParams& params);
+    // One cell per LCU of the coded size: 16 pixels for H.264, 32 for HEVC.
+    size_t roi_cells() const;
     // Take an input slot, apply this picture's dynamic parameters, pull the
     // IDR lever and queue the raw frame. Called with mutex_ held, in queue
     // order, which is display order when B pictures are in use.
@@ -173,6 +181,11 @@ private:
     // REQUEST_SYNC_FRAME capability). False means the intra period is the
     // only lever a requested IDR has.
     bool sync_frame_control_ = false;
+    // Zero when the module carries no ROI patch (0017).
+    uint32_t roi_capacity_ = 0;
+    // Later pictures without regions get zeros, so they do not inherit the
+    // previous map.
+    bool roi_used_ = false;
     // The firmware answered the drain marker (V4L2_ENC_CMD_STOP).
     bool drained_ = false;
     // V4L2_ENC_CMD_STOP was sent. It ends the stream: the firmware returns

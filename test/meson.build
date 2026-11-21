@@ -66,6 +66,77 @@ if va_drm_dep.found()
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
 
+# Hardware probe, built but not registered as a meson test: a VA client's ROI
+# map. The host tests cover the attribute, the rectangle-to-macroblock mapping
+# and the kernel control write; only the firmware can say whether it honours
+# the per-macroblock delta QP, and the kernel module carries the protocol only
+# with packaging/kernel/0017 applied.
+if va_drm_dep.found()
+  executable(
+    'iris-encode-roi-probe',
+    'iris-encode-roi-probe.cc',
+    dependencies: [va_drm_dep],
+    cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+endif
+
+# Hardware probe, built but not registered as a meson test: a VA client's
+# slice count. The unit tests prove the translation and the control writes;
+# only the firmware can say whether it splits the picture, and this counts the
+# coded slice NAL units a client receives.
+if va_drm_dep.found()
+  executable(
+    'iris-encode-slice-probe',
+    'iris-encode-slice-probe.cc',
+    dependencies: [va_drm_dep],
+    cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+endif
+
+# Hardware probe, built but not registered as a meson test: a VA client's
+# temporal layer structure. The unit tests cover the translation and the
+# control writes; only the firmware can say whether it codes more than one
+# layer, and this reads the temporal ids out of the stream it produces.
+if va_drm_dep.found()
+  executable(
+    'iris-encode-temporal-probe',
+    'iris-encode-temporal-probe.cc',
+    dependencies: [va_drm_dep],
+    cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+endif
+
+# Hardware probe, built but not registered as a meson test: one elementary
+# stream straight into the node through the driver's session, with a chosen
+# CAPTURE format. The VA layer refuses a profile before a stream is parsed,
+# so only the node can say whether the firmware itself accepts the stream.
+executable(
+  'iris-decode-stream-probe',
+  'iris-decode-stream-probe.cc',
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+
+# Hardware probe, built but not registered as a meson test: the only reader of
+# UBWC in this tree is the GPU, through VK_EXT_image_drm_format_modifier, and
+# only a build with Vulkan can build the reader. test/iris-ubwc-gate.sh runs it
+# over the frames iris-decode-stream-probe dumps.
+if have_vulkan_vpp
+  executable(
+    'vk-ubwc-read',
+    'vk-ubwc-read.cc',
+    dependencies: [iris_core_dep, vulkan_dep],
+    cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+endif
+
+# Hardware probe, built but not registered as a meson test: the VA half of a
+# UBWC surface. test/iris-ubwc-gate.sh runs it with and without V4L2_VA_UBWC,
+# so the grant, the exported four-plane descriptor and the image-entry-point
+# refusals all come from the public API rather than from a unit test.
+if va_drm_dep.found()
+  executable(
+    'iris-va-ubwc-probe',
+    'iris-va-ubwc-probe.cc',
+    dependencies: [iris_core_dep, va_drm_dep],
+    cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+endif
+
 # Hardware probe, built but not registered as a meson test: the upload half of
 # the image API. vaPutImage and the derived-image write path are what put
 # client pixels into a surface; vaGetImage reads them back. No decode is
@@ -97,6 +168,17 @@ endif
 executable(
   'iris-encode-control-probe',
   'iris-encode-control-probe.cc',
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+
+# Hardware probe, built but not registered as a meson test: long-term
+# references have no VA-side field, so the probe drives the V4L2 encoder node
+# itself and writes the three kernel controls. Two otherwise identical
+# sessions, one marking and using an LTR frame, say whether the firmware acts
+# on the request: byte-identical streams mean it ignores it.
+executable(
+  'iris-encode-ltr-probe',
+  'iris-encode-ltr-probe.cc',
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 
@@ -286,8 +368,11 @@ test('va-config-attributes', va_config_attributes_test)
 # run-static-checks.sh is the same entry point CI uses, so `meson test` and CI
 # cannot drift apart. The individual checks stay registered as well to keep
 # failures attributable without reading the aggregate output.
+# The aggregate runs every checker in the tree, which is past meson's 30 s
+# default; the measured standalone time is about three minutes, so it keeps
+# headroom while the individual checkers run beside it.
 test('static-checks', find_program('run-static-checks.sh'),
-     args: [meson.project_source_root()])
+     args: [meson.project_source_root()], timeout: 300)
 test('iris-source-invariants', find_program('iris-source-invariants.sh'),
      args: [meson.project_source_root()])
 test('iris-env-doc-check', find_program('iris-env-doc-check.sh'),
@@ -307,7 +392,7 @@ test('iris-clip-trace-check-self-test', find_program('iris-clip-trace-check-self
 test('iris-gate-output-self-test', find_program('iris-gate-output-self-test.sh'),
      args: [meson.project_source_root()])
 test('iris-deploy-path-check', find_program('iris-deploy-path-check.sh'),
-     args: [meson.project_source_root()])
+     args: [meson.project_source_root()], timeout: 120)
 test('iris-setup-path-check', find_program('iris-setup-path-check.sh'),
      args: [meson.project_source_root()])
 test('iris-packaging-check', find_program('iris-packaging-check.sh'),
@@ -315,9 +400,9 @@ test('iris-packaging-check', find_program('iris-packaging-check.sh'),
 test('iris-spec-selfobsolete-check', find_program('iris-spec-selfobsolete-check.sh'),
      args: ['--self-test', meson.project_source_root()])
 test('iris-make-dist-check', find_program('iris-make-dist-check.sh'),
-     args: [meson.project_source_root()])
+     args: [meson.project_source_root()], timeout: 120)
 test('iris-kernel-patch-check', find_program('iris-kernel-patch-check.sh'),
-     args: [meson.project_source_root()])
+     args: [meson.project_source_root()], timeout: 120)
 test('iris-install-manifest-check', find_program('iris-install-manifest-check.sh'),
      args: [meson.project_source_root()])
 test('provenance-self-test', find_program('provenance-self-test.sh'),

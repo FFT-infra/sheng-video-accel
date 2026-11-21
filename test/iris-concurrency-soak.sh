@@ -6,6 +6,11 @@
 #
 # Usage:
 #   ./test/iris-concurrency-soak.sh [all|dual-h264|mixed]
+#
+# `mixed` runs IRIS_SOAK_SESSIONS clients (default 2), alternating H.264 and
+# HEVC, each decoding IRIS_SOAK_SIZE (default 640x360) in real time. The
+# firmware's session ceiling shows up as an open or STREAMON failure in the
+# job's exit status or trace.
 
 set -eu
 
@@ -18,6 +23,8 @@ root=${IRIS_SOAK_DIR:-$(iris_artifact_dir concurrency-soak)}
 duration=${IRIS_SOAK_SECONDS:-7200}
 fps=${IRIS_SOAK_FPS:-24}
 temperature_interval=${IRIS_SOAK_TEMPERATURE_INTERVAL_SECONDS:-30}
+sessions=${IRIS_SOAK_SESSIONS:-2}
+size=${IRIS_SOAK_SIZE:-640x360}
 # Same backstop as scripts/iris-experiment-guard.sh: below the zones'
 # 110000 millidegree critical trip, not at a comfort line.
 max_temperature=${IRIS_SOAK_MAX_TEMP_MILLIC:-100000}
@@ -29,11 +36,19 @@ case "$scenario" in
     all|dual-h264|mixed) ;;
     *) echo "usage: $0 [all|dual-h264|mixed]" >&2; exit 2 ;;
 esac
-case "$duration:$fps:$temperature_interval:$max_temperature:$grace" in
-    *[!0-9:]*|0:*|*:0:*|*:0)
+case "$duration:$fps:$temperature_interval:$max_temperature:$grace:$sessions" in
+    *[!0-9:]*|0:*|*:0:*|*:0|*:0)
         echo "FAIL soak numeric settings must be positive integers" >&2
         exit 2
         ;;
+esac
+case "$sessions" in
+    1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16) ;;
+    *) echo "FAIL IRIS_SOAK_SESSIONS must be between 1 and 16" >&2; exit 2 ;;
+esac
+case "$size" in
+    [0-9]*x[0-9]*) ;;
+    *) echo "FAIL IRIS_SOAK_SIZE must be WxH" >&2; exit 2 ;;
 esac
 
 for tool in ffmpeg v4l2-ctl timeout awk sha256sum ps; do
@@ -159,16 +174,16 @@ done
 media_dir="$root/media"
 mkdir -p "$media_dir"
 frames=48
-ffmpeg -y -hide_banner -loglevel error -f lavfi -i "testsrc2=size=640x360:rate=$fps" \
+ffmpeg -y -hide_banner -loglevel error -f lavfi -i "testsrc2=size=$size:rate=$fps" \
     -frames:v "$frames" -c:v "${IRIS_H264_ENCODER:-libx264}" -preset ultrafast \
     -tune zerolatency -g "$fps" -bf 0 -pix_fmt yuv420p -an "$media_dir/h264.mp4"
 if [ "$scenario" = all ] || [ "$scenario" = mixed ]; then
-    ffmpeg -y -hide_banner -loglevel error -f lavfi -i "testsrc2=size=640x360:rate=$fps" \
+    ffmpeg -y -hide_banner -loglevel error -f lavfi -i "testsrc2=size=$size:rate=$fps" \
         -frames:v "$frames" -c:v "${IRIS_HEVC_ENCODER:-libx265}" -preset ultrafast \
         -x265-params "keyint=$fps:min-keyint=$fps:scenecut=0" -pix_fmt yuv420p -an \
         "$media_dir/hevc.mkv"
     hevc_soak_frames=$((duration * fps))
-    ffmpeg -y -hide_banner -loglevel error -f lavfi -i "testsrc2=size=640x360:rate=$fps" \
+    ffmpeg -y -hide_banner -loglevel error -f lavfi -i "testsrc2=size=$size:rate=$fps" \
         -frames:v "$hevc_soak_frames" -c:v "${IRIS_HEVC_ENCODER:-libx265}" -preset ultrafast \
         -x265-params "keyint=$fps:min-keyint=$fps:scenecut=0" -pix_fmt yuv420p -an \
         "$media_dir/hevc-soak.mkv"
@@ -353,10 +368,23 @@ run_scenario() {
             start_job dual-h264-b "$media_dir/h264.mp4"
             ;;
         mixed)
-            scenario_jobs='mixed-h264 mixed-hevc'
-            scenario_job_count=2
-            start_job mixed-h264 "$media_dir/h264.mp4"
-            start_once_job mixed-hevc "$media_dir/hevc-soak.mkv"
+            # IRIS_SOAK_SESSIONS clients alternate H.264 and HEVC. A firmware
+            # session ceiling surfaces as a failed open or STREAMON in the
+            # job's status, not as a silent short run.
+            scenario_jobs=''
+            mixed_index=1
+            while [ "$mixed_index" -le "$sessions" ]; do
+                if [ $((mixed_index % 2)) -eq 1 ]; then
+                    mixed_name="mixed-h264-$mixed_index"
+                    start_job "$mixed_name" "$media_dir/h264.mp4"
+                else
+                    mixed_name="mixed-hevc-$mixed_index"
+                    start_once_job "$mixed_name" "$media_dir/hevc-soak.mkv"
+                fi
+                scenario_jobs="$scenario_jobs $mixed_name"
+                mixed_index=$((mixed_index + 1))
+            done
+            scenario_job_count=$sessions
             ;;
     esac
 

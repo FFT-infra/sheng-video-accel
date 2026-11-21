@@ -38,6 +38,12 @@ struct FakeConfig {
     unsigned visible_width = 1920, visible_height = 1080;
     unsigned stride = 1920;
     unsigned au_capacity = 2u << 20;
+    // The CAPTURE format the node reports and grants. QC08C models a node
+    // that allocates the four-plane UBWC layout (kernel sizeimage).
+    uint32_t capture_pixelformat = V4L2_PIX_FMT_NV12;
+    // Off: a QC08C node whose sizeimage is the linear one — the session must
+    // notice that the two layouts disagree instead of trusting the format.
+    bool ubwc_sizeimage = true;
 };
 
 class FakeDevice final : public Device {
@@ -132,6 +138,8 @@ public:
     bool format_supported(Queue, uint32_t) override { return true; }
     std::optional<int32_t> get_control(uint32_t id) override;
     bool set_control(uint32_t id, int32_t value) override;
+    std::optional<ControlInfo> query_control(uint32_t id) override;
+    bool set_control_array(uint32_t id, const int32_t* values, size_t count) override;
     unsigned request_buffers(Queue queue, unsigned count, uint32_t memory = V4L2_MEMORY_MMAP) override;
     BufferInfo query_buffer(Queue queue, unsigned index) override;
     int export_buffer(Queue queue, unsigned index) override;

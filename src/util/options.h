@@ -32,6 +32,9 @@ struct Options {
     // VAEntrypointVideoProc). Off by default so a VPP-capable build does not
     // change the decode/encode surface any client already qualified against.
     bool vpp_enabled = false;
+    // On unless V4L2_VA_UBWC=0. A client still gets one only when its
+    // modifier list asks for QCOM_COMPRESSED.
+    bool ubwc = true;
     // Opt in to B pictures in the encoder (V4L2_CID_MPEG_VIDEO_B_FRAMES).
     // Off by default: the firmware holds the newest queued picture until the
     // picture after it is queued, so the client must keep three pictures in
@@ -39,6 +42,9 @@ struct Options {
     // session stalls at the first pair boundary. H.264 only; the firmware's
     // HEVC path fails outright.
     bool b_frames = false;
+    // Off by default: the firmware completes the metadata buffer but codes
+    // the picture unchanged, so a client would get no effect and no error.
+    bool roi = false;
     // Directory to write each submitted access unit into; empty disables.
     std::string dump_dir;
 

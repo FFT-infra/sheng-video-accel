@@ -249,20 +249,42 @@ public:
             "chroma QP offsets are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
         require(params->num_ref_idx_l0_active_minus1 == 0 && params->num_ref_idx_l1_active_minus1 == 0,
             "multiple reference indexes are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
-        require(picture.slices.size() <= 1, "multi-slice encode is not supported",
-            VA_STATUS_ERROR_UNIMPLEMENTED);
         if (slice != nullptr) {
             require(slice->cabac_init_idc == 0, "a CABAC initialisation index is not supported",
                 VA_STATUS_ERROR_UNIMPLEMENTED);
             require(slice->num_ref_idx_l0_active_minus1 == 0 && slice->num_ref_idx_l1_active_minus1 == 0,
                 "multiple reference indexes are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
-            // One slice has to cover the whole picture: the firmware decides
-            // the slice layout, and a partial slice would code a partial
-            // frame.
-            require(slice->macroblock_address == 0
-                    && slice->num_macroblocks
-                        == unsigned(sequence->picture_width_in_mbs) * sequence->picture_height_in_mbs,
-                "only one full-picture slice is supported", VA_STATUS_ERROR_UNIMPLEMENTED);
+            // Picture type, deblocking and QP are per-context controls, so
+            // slices that disagreed could not be expressed. The boundaries
+            // are the firmware's: it splits the picture into equal shares
+            // from the count.
+            require(slice->macroblock_address == 0 && slice->num_macroblocks != 0,
+                "invalid slice geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
+            for (const void* raw : picture.slices) {
+                const auto* other = static_cast<const VAEncSliceParameterBufferH264*>(raw);
+                require(other->slice_type == slice->slice_type
+                        && other->disable_deblocking_filter_idc == slice->disable_deblocking_filter_idc
+                        && other->slice_alpha_c0_offset_div2 == slice->slice_alpha_c0_offset_div2
+                        && other->slice_beta_offset_div2 == slice->slice_beta_offset_div2
+                        && other->slice_qp_delta == slice->slice_qp_delta,
+                    "slices of one picture disagree", VA_STATUS_ERROR_INVALID_PARAMETER);
+                require(other->num_macroblocks != 0, "a slice covers no macroblocks",
+                    VA_STATUS_ERROR_INVALID_PARAMETER);
+            }
+            const unsigned slices = static_cast<unsigned>(picture.slices.size());
+            require(slices <= 128, "more than 128 slices in a picture", VA_STATUS_ERROR_UNIMPLEMENTED);
+            out.slices = slices;
+            const unsigned total_mb
+                = unsigned(sequence->picture_width_in_mbs) * sequence->picture_height_in_mbs;
+            if (slices == 1) {
+                // One slice has to cover the whole picture: the firmware
+                // decides the slice layout, and a partial slice would code a
+                // partial frame.
+                require(slice->num_macroblocks == total_mb,
+                    "a single slice has to cover the whole picture", VA_STATUS_ERROR_UNIMPLEMENTED);
+            } else {
+                out.slice_mb = (total_mb + slices - 1) / slices;
+            }
             require(intra_slice(slice->slice_type) || p_slice(slice->slice_type)
                     || b_slice(slice->slice_type),
                 "only I, P and B slices are supported", VA_STATUS_ERROR_UNIMPLEMENTED);
@@ -322,14 +344,10 @@ public:
             out.peak_bitrate = 0;
         if (const auto* rir = static_cast<const VAEncMiscParameterRIR*>(
                 find_misc(picture.misc, VAEncMiscParameterTypeRIR))) {
-            // VA names a rolling refresh as a window of MB rows or columns
-            // and a per-picture insertion location; the firmware takes one
-            // period and sweeps the picture itself. Only the window size
-            // survives that mapping, as the number of pictures one full
-            // sweep takes. A request the firmware cannot act on (adaptive,
-            // or a window the client did not size) is refused rather than
-            // silently dropped: the client asked for a stream property the
-            // output would not have.
+            // The firmware takes one period and sweeps the picture itself,
+            // so only VA's window size survives, as the pictures one sweep
+            // takes. A request it cannot act on is refused rather than
+            // silently dropped.
             require(rir->rir_flags.bits.enable_rir_row && !rir->rir_flags.bits.enable_rir_column,
                 "only a rolling row intra refresh is supported", VA_STATUS_ERROR_UNIMPLEMENTED);
             const unsigned rows = rir->intra_insert_size;
@@ -338,10 +356,11 @@ public:
             const unsigned mb_rows = sequence->picture_height_in_mbs;
             intra_refresh_period_ = mb_rows > rows ? (mb_rows + rows - 1) / rows : 1;
         }
-        // The period is a per-context control and the client may render the
-        // refresh buffer with one picture only, so every picture carries the
-        // value the client last configured. Reading a later picture as "no
-        // refresh" would fail the change check in apply_dynamic().
+        // Both are per-context controls the client may send once, so every
+        // picture repeats the last value; reading a later picture as "none"
+        // would fail the change check in apply_dynamic().
+        temporal_layers_ = temporal_layers_of(picture.misc, temporal_layers_);
+        out.temporal_layers = temporal_layers_;
         out.intra_refresh_period = intra_refresh_period_;
         require(out.rate_mode != RateMode::Cbr || out.bitrate > 0, "CBR needs a bitrate",
             VA_STATUS_ERROR_INVALID_PARAMETER);
@@ -355,6 +374,10 @@ public:
             require(qp >= 1 && qp <= 51, "encode QP is out of range", VA_STATUS_ERROR_INVALID_PARAMETER);
             out.qp = qp;
         }
+        out.prefix_nals = picture.packed_headers;
+        // The encoder node's ROI map is one delta per 16x16 macroblock.
+        out.roi_map = roi_map_of(picture, 16);
+        out.roi_regions = static_cast<unsigned>(picture.roi.size());
         return out;
     }
 
@@ -368,9 +391,8 @@ private:
     // rate rather than the client's target.
     uint32_t bitrate_ = 0;
     uint32_t peak_bitrate_ = 0;
-    // The sweep period the client configured most recently, for the same
-    // reason as the two rates above.
     unsigned intra_refresh_period_ = 0;
+    unsigned temporal_layers_ = 0;
 };
 
 } // namespace

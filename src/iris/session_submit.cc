@@ -8,6 +8,7 @@
 
 #include "session_internal.h"
 #include "../util/error.h"
+#include "../util/prime.h"
 
 #include <cstdio>
 #include <cstring>
@@ -58,8 +59,14 @@ void Session::submit(const uint8_t* data, size_t size, const TargetPtr& target)
         pump(20);
     }
 
-    if (state_ == SessionState::Configured && target->fourcc != 0)
+    if (state_ == SessionState::Configured && target->fourcc != 0) {
         config_.capture_fourcc = target->fourcc;
+        config_.capture_modifier = target->modifier;
+    }
+    require(target->modifier == config_.capture_modifier,
+        "the CAPTURE modifier cannot change inside one context", VA_STATUS_ERROR_INVALID_PARAMETER);
+    require(target->modifier != DRM_FORMAT_MOD_QCOM_COMPRESSED || target->publish != Publish::Copy,
+        "UBWC surfaces publish Direct or Import only", VA_STATUS_ERROR_UNIMPLEMENTED);
     std::memcpy(slot->mapping, data, size);
     if (dump_) {
         std::fwrite(data, 1, size, static_cast<FILE*>(dump_));

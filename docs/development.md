@@ -357,8 +357,11 @@ error, incomplete stateful teardown, too few decoded frames, or any worker
 failure.
 
 `IRIS_SOAK_SECONDS` may shorten a development run, but the report is labelled
-`SHORTENED` unless it is exactly 7200 seconds. `IRIS_SOAK_MAX_TEMP_MILLIC` and
-`IRIS_SOAK_TEMPERATURE_INTERVAL_SECONDS` tune the thermal guard. A durable
+`SHORTENED` unless it is exactly 7200 seconds. `IRIS_SOAK_SESSIONS` (1-16,
+default 2) sets how many clients the `mixed` scenario runs, alternating H.264
+and HEVC, and `IRIS_SOAK_SIZE` (default 640x360) sets the generated geometry.
+`IRIS_SOAK_MAX_TEMP_MILLIC` and `IRIS_SOAK_TEMPERATURE_INTERVAL_SECONDS` tune
+the thermal guard. A durable
 guard file records a running test; a later invocation refuses to hide an
 interrupted or rebooted soak until the operator inspects it and deliberately
 sets `IRIS_SOAK_ALLOW_STALE_GUARD=1`.

@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 namespace iris {
 
@@ -36,6 +37,14 @@ struct EncodeParams {
     int min_qp = -1; // < 0 leaves the firmware default
     int max_qp = -1;
     bool cabac = true; // H.264 only; HEVC is always CABAC
+    // Per-context controls: the session refuses a change mid-stream. 1 / 0 is
+    // the firmware's single full-picture slice.
+    unsigned slices = 1;
+    unsigned slice_mb = 0;
+    // Ten selects P010 and the firmware's 10-bit path.
+    unsigned bit_depth = 8;
+    // The firmware derives layer membership from the count.
+    unsigned temporal_layers = 0;
     // Deblocking, in the numbering both codecs share: 0 filtering enabled,
     // 1 disabled, 2 disabled across slice boundaries. VA carries these in
     // the slice header and V4L2 in a per-context control, so only the first
@@ -70,12 +79,9 @@ struct EncodeParams {
     unsigned b_frames = 0;
     // This picture's slice is B-coded. Only reachable when b_frames is set.
     bool b_picture = false;
-    // Rolling intra refresh: refresh the whole picture over this many
-    // pictures. 0 leaves it off. The firmware sweeps one band of rows per
-    // picture on its own, so a client's per-picture location is not what it
-    // acts on; the codec layer turns VA's insert size into this period.
-    // Honoured only under CBR: measured byte-identical to no refresh under
-    // VBR and CQP (TEST-RESULTS.md, "Encoder capabilities").
+    // 0 leaves it off. The firmware sweeps one band per picture itself, so a
+    // client's per-picture location is ignored. CBR only: measured
+    // byte-identical to no refresh under VBR and CQP.
     unsigned intra_refresh_period = 0;
     // Where this picture sits in display order, from the codec's picture
     // order count (H.264 CurrPic's field order counts, HEVC pic_order_cnt).
@@ -91,6 +97,16 @@ struct EncodeParams {
     // not include va.h.
     uint32_t reconstruction = 0;
     uint32_t reference = 0;
+    // Annex-B NALs with their start codes (VAEncPackedHeaderRawData). The
+    // firmware writes the parameter sets itself but has no SEI input, so the
+    // session inserts these ahead of the first coded-picture NAL.
+    std::vector<std::vector<uint8_t>> prefix_nals;
+    // One signed delta per macroblock in raster order. The firmware applies
+    // the map to the picture whose raw buffer is queued after it is written.
+    // Empty keeps the previous picture's map from being inherited.
+    std::vector<int32_t> roi_map;
+    // For the trace; a non-empty map always has regions.
+    unsigned roi_regions = 0;
 };
 
 } // namespace iris

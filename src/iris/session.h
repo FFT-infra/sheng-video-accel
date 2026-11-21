@@ -84,6 +84,8 @@ struct Target {
     // config without an RT format attribute and declare 10-bit only through
     // its surfaces (FFmpeg does).
     uint32_t fourcc = 0;
+    // QCOM_COMPRESSED makes the CAPTURE format Q08C.
+    uint64_t modifier = 0;
 };
 
 // The session, the surface and this driver's own retained copy each hold the
@@ -94,6 +96,8 @@ using TargetPtr = std::shared_ptr<Target>;
 struct SessionConfig {
     uint32_t codec_pixelformat = 0; // V4L2_PIX_FMT_H264 / HEVC / VP9 / AV1
     uint32_t capture_fourcc = 0; // VA_FOURCC_NV12 or P010
+    // QCOM_COMPRESSED when the client's surfaces are UBWC.
+    uint64_t capture_modifier = 0;
     unsigned width = 0, height = 0;
     unsigned surface_count = 0; // the client's pool size, for CAPTURE sizing
     unsigned output_slots = 4;
@@ -123,6 +127,14 @@ public:
     // Whether an Import target can still be honoured: decode-order output,
     // and the CAPTURE pool (if built) is in Import memory.
     bool supports_import() const;
+    // Direct pins one CAPTURE frame per unconsumed picture, and the driver
+    // cannot see that queue, so the pool needs headroom over the firmware
+    // minimum. Where the memory budget leaves none, Copy releases the slot at
+    // the completion instead.
+    bool can_publish_direct() const
+    {
+        return pool_.capture_count() == 0 || pool_.capture_count() >= direct_min_pool_;
+    }
     // Scripted tests only: pretend the codec is not in the capability table.
     void set_import_allowed_for_test(bool allowed)
     {
@@ -210,6 +222,8 @@ private:
     CopyEngine* copier_;
     Trace trace_;
     SlotPool pool_;
+    // 0 before the CAPTURE pool is sized; see can_publish_direct().
+    unsigned direct_min_pool_ = 0;
     SessionMode mode_ = SessionMode::DisplayOrder;
     SessionState state_ = SessionState::Configured;
     SessionStats stats_;

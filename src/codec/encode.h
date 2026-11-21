@@ -9,7 +9,9 @@
 #include "annexb.h"
 
 #include "../util/encode-params.h"
+#include "../util/error.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -33,8 +35,55 @@ struct EncodePicture {
     // VAEncSliceParameterBuffer<Codec>. The firmware owns the slice layout,
     // but CQP takes the picture QP from the first slice's delta.
     std::vector<const void*> slices;
+    // One Annex-B NAL each, start code included.
+    std::vector<std::vector<uint8_t>> packed_headers;
+    // Copied out of the misc buffer that named them: its array is client
+    // memory, valid only until vaEndPicture.
+    std::vector<VAEncROI> roi;
     unsigned surface_width = 0, surface_height = 0;
 };
+
+// The range packaging/kernel/0017-* takes. VA's roi_value is an int8_t, so an
+// out-of-range value is clamped: the region still means cheaper or dearer.
+constexpr int32_t kRoiMinDeltaQp = -31;
+constexpr int32_t kRoiMaxDeltaQp = 30;
+
+// One cell per LCU of `lcu` pixels over the surface's visible size, which is
+// the grid the kernel builds from its own unaligned OUTPUT format. The first
+// region listed wins an overlap; VA gives overlaps no meaning.
+inline std::vector<int32_t> roi_map_of(const EncodePicture& picture, unsigned lcu)
+{
+    if (picture.roi.empty() || !picture.surface_width || !picture.surface_height || !lcu)
+        return {};
+    const unsigned columns = (picture.surface_width + lcu - 1) / lcu;
+    const unsigned rows = (picture.surface_height + lcu - 1) / lcu;
+    std::vector<int32_t> map(static_cast<size_t>(columns) * rows, 0);
+    std::vector<char> claimed(map.size(), 0);
+    for (const VAEncROI& region : picture.roi) {
+        const VARectangle& rect = region.roi_rectangle;
+        const int32_t left = std::max<int32_t>(0, rect.x);
+        const int32_t top = std::max<int32_t>(0, rect.y);
+        const int32_t right = std::min<int32_t>(picture.surface_width, static_cast<int32_t>(rect.x) + rect.width);
+        const int32_t bottom = std::min<int32_t>(picture.surface_height, static_cast<int32_t>(rect.y) + rect.height);
+        if (right <= left || bottom <= top)
+            continue;
+        const int32_t delta = std::clamp<int32_t>(region.roi_value, kRoiMinDeltaQp, kRoiMaxDeltaQp);
+        const unsigned first_column = static_cast<unsigned>(left) / lcu;
+        const unsigned first_row = static_cast<unsigned>(top) / lcu;
+        const unsigned last_column = (static_cast<unsigned>(right) + lcu - 1) / lcu;
+        const unsigned last_row = (static_cast<unsigned>(bottom) + lcu - 1) / lcu;
+        for (unsigned row = first_row; row < last_row; ++row) {
+            for (unsigned column = first_column; column < last_column; ++column) {
+                const size_t cell = static_cast<size_t>(row) * columns + column;
+                if (claimed[cell])
+                    continue;
+                claimed[cell] = 1;
+                map[cell] = delta;
+            }
+        }
+    }
+    return map;
+}
 
 // Payload of the first misc buffer of `type`, or nullptr. Every misc buffer
 // is a VAEncMiscParameterBuffer header followed by the typed payload.
@@ -46,6 +95,26 @@ inline const void* find_misc(const std::vector<const void*>& misc, VAEncMiscPara
             return buffer->data;
     }
     return nullptr;
+}
+
+// `current` when this picture carries no structure: the client sends one with
+// the first picture, so the count is remembered and repeated like the
+// rate-control parameters. The firmware derives membership from the count
+// alone, so a pattern that cannot follow that hierarchy is refused.
+inline unsigned temporal_layers_of(const std::vector<const void*>& misc, unsigned current)
+{
+    const auto* structure = static_cast<const VAEncMiscParameterTemporalLayerStructure*>(
+        find_misc(misc, VAEncMiscParameterTypeTemporalLayerStructure));
+    if (!structure)
+        return current;
+    require(structure->number_of_layers >= 1 && structure->number_of_layers <= 6,
+        "temporal layers must be between 1 and 6", VA_STATUS_ERROR_INVALID_PARAMETER);
+    require(structure->periodicity >= 1 && structure->periodicity <= 32,
+        "temporal layer periodicity must be between 1 and 32", VA_STATUS_ERROR_INVALID_PARAMETER);
+    for (uint32_t i = 0; i < structure->periodicity; ++i)
+        require(structure->layer_id[i] < structure->number_of_layers,
+            "a temporal layer id exceeds the layer count", VA_STATUS_ERROR_INVALID_PARAMETER);
+    return structure->number_of_layers;
 }
 
 class Encoder {

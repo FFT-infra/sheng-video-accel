@@ -33,6 +33,16 @@ struct Layout {
     unsigned storage_height = 0; // rows before the chroma plane
     unsigned data_offset = 0;
     unsigned size = 0;
+    // QCOM_COMPRESSED when the CAPTURE format is Q08C.
+    uint64_t modifier = 0;
+    struct Plane {
+        unsigned offset = 0;
+        unsigned pitch = 0;
+        unsigned rows = 0;
+    };
+    Plane planes[4];
+    unsigned plane_count = 0;
+    bool compressed() const { return plane_count != 0; }
     unsigned chroma_offset() const { return data_offset + stride * storage_height; }
 };
 

@@ -3,6 +3,7 @@
 #include "fake_device.h"
 
 #include "../../src/util/error.h"
+#include "../../src/util/prime.h"
 
 #include <cstring>
 #include <numeric>
@@ -35,12 +36,19 @@ FormatInfo FakeDevice::current_format(Queue queue)
         info.num_planes = 1;
         info.sizeimage = config_.au_capacity;
     } else {
-        info.pixelformat = V4L2_PIX_FMT_NV12;
+        info.pixelformat = config_.capture_pixelformat;
         info.width = config_.coded_width;
         info.height = config_.coded_height;
         info.num_planes = 1;
         info.bytesperline = config_.stride;
         info.sizeimage = config_.stride * config_.coded_height * 3 / 2;
+        if (info.pixelformat == V4L2_PIX_FMT_QC08C) {
+            // iris_vdec.c CAPTURE S_FMT: luma pitch aligned to 128 and the
+            // buffer holding the four-plane UBWC layout.
+            info.bytesperline = (config_.coded_width + 127) & ~127u;
+            if (config_.ubwc_sizeimage)
+                info.sizeimage = iris::ubwc_layout(config_.coded_width, config_.coded_height).size;
+        }
     }
     return info;
 }
@@ -96,6 +104,21 @@ bool FakeDevice::set_control(uint32_t id, int32_t value)
         note(id == V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY ? "S_CTRL DISPLAY_DELAY" : "S_CTRL DISPLAY_DELAY_ENABLE");
         return true;
     }
+    return false;
+}
+
+std::optional<iris::ControlInfo> FakeDevice::query_control(uint32_t id)
+{
+    // The decoder node has no ROI control; the encoder node is the one that
+    // registers it. Answering here keeps the fake honest about which role it
+    // models.
+    (void)id;
+    return std::nullopt;
+}
+
+bool FakeDevice::set_control_array(uint32_t id, const int32_t*, size_t)
+{
+    (void)id;
     return false;
 }
 

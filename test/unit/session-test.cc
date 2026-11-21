@@ -7,6 +7,7 @@
 
 #include "../../src/iris/session.h"
 #include "../../src/util/error.h"
+#include "../../src/util/prime.h"
 
 #include <cstdio>
 #include <cstring>
@@ -133,8 +134,9 @@ void test_open_sequence()
     // driver derived from the bitstream).
     CHECK(!log_has(fake, "S_FMT CAPTURE"));
     CHECK(h.session->state() == SessionState::Streaming);
-    // Pool: 16 surfaces + 4 headroom -> clamp to 32 minimum.
-    CHECK(fake.capture_allocated() == 32);
+    // Pool: 16 surfaces + 4 headroom, above the firmware minimum plus the
+    // Direct headroom (4 + 8).
+    CHECK(fake.capture_allocated() == 20);
     CHECK(h.session->visible().width == 1920 && h.session->visible().height == 1080);
 }
 
@@ -177,14 +179,52 @@ void test_pool_sizing_respects_memory_budget()
     CHECK(h.session->state() == SessionState::Streaming);
 }
 
-void test_pool_sizing_keeps_small_geometry_at_the_full_pool()
+void test_direct_publish_needs_headroom_over_the_firmware_minimum()
 {
-    // 1920x1088 NV12 is 3 MiB per frame; the whole 32-frame pool is 96 MiB,
-    // well inside the budget, so the old sizing is unchanged at 1080p.
+    // Direct pins one CAPTURE frame per decoded picture the client holds. The
+    // 8K budget pool is the firmware minimum plus one, so a client whose
+    // consumer lags can pin every slot while AUs are still queued; the policy
+    // must fall back to Copy there.
+    FakeConfig fc;
+    fc.coded_width = 7680;
+    fc.coded_height = 4320;
+    fc.visible_width = 7680;
+    fc.visible_height = 4320;
+    fc.stride = 7680;
+    fc.firmware_min_capture = 7;
+    Harness h(fc, fast_options(), config(16));
+    // No pool yet: the policy has no size to judge and Direct is offered.
+    CHECK(h.session->can_publish_direct());
+    auto t = make_target();
+    h.submit(t);
+    CHECK(h.fake->capture_allocated() == 8);
+    CHECK(!h.session->can_publish_direct());
+}
+
+void test_pool_sizing_keeps_small_geometry_at_the_client_count()
+{
+    // 1920x1088 NV12 is 3 MiB per frame, so the 384 MiB budget is far above
+    // any count this geometry asks for; the pool follows the client's 16
+    // surfaces plus 4 headroom rather than a fixed floor.
     Harness h({}, fast_options(), config(16));
     auto t = make_target();
     h.submit(t);
-    CHECK(h.fake->capture_allocated() == 32);
+    CHECK(h.fake->capture_allocated() == 20);
+    CHECK(h.session->state() == SessionState::Streaming);
+}
+
+void test_pool_sizing_floors_at_the_firmware_minimum_plus_headroom()
+{
+    // A client that declares fewer surfaces than the firmware needs still
+    // gets a pool a Direct target can live in: the firmware minimum plus the
+    // eight-picture headroom.
+    FakeConfig fc;
+    fc.firmware_min_capture = 9;
+    Harness h(fc, fast_options(), config(1)); // wants 5
+    auto t = make_target();
+    h.submit(t);
+    CHECK(h.fake->capture_allocated() == 17);
+    CHECK(h.session->can_publish_direct());
     CHECK(h.session->state() == SessionState::Streaming);
 }
 
@@ -198,13 +238,13 @@ void test_direct_publish_holds_slot_until_release()
     h.session->wait(t);
     CHECK(t->completed && !t->error && !t->pending);
     CHECK(t->frame != nullptr);
-    // Invariant 2: a held slot is never queued. 32 slots, one held.
+    // Invariant 2: a held slot is never queued. 20 slots, one held.
     CHECK(h.session->capture_held() == 1);
-    CHECK(h.session->capture_queued() == 31);
+    CHECK(h.session->capture_queued() + h.session->capture_held() == 20);
     h.session->release(t);
     h.session->service();
     CHECK(h.session->capture_held() == 0);
-    CHECK(h.session->capture_queued() == 32);
+    CHECK(h.session->capture_queued() == 20);
 }
 
 void test_copy_publish_releases_slot_immediately()
@@ -223,7 +263,8 @@ void test_copy_publish_releases_slot_immediately()
     CHECK(t->completed && !t->frame);
     CHECK(h.session->capture_held() == 0);
     h.session->service();
-    CHECK(h.session->capture_queued() == 32);
+    // Copy frees its slot at the completion.
+    CHECK(h.session->capture_queued() == 20);
 }
 
 void test_late_completion_after_release_is_dropped()
@@ -283,8 +324,8 @@ void test_firmware_error_marker_is_never_published()
     CHECK(h.session->stats().errors == 1);
     CHECK(h.session->stats().completed == 2);
     h.session->service();
-    // The marker's slot went back to the firmware.
-    CHECK(h.session->capture_queued() + h.session->capture_held() == 32);
+    // The marker's slot went back to the firmware, less the reserved one.
+    CHECK(h.session->capture_queued() + h.session->capture_held() == 20);
 }
 
 void test_output_error_fails_target()
@@ -665,6 +706,32 @@ void test_finish_drains_and_refuses_submit()
     CHECK_THROWS(h.submit(c), VA_STATUS_ERROR_OPERATION_FAILED);
 }
 
+void test_drain_survives_a_client_that_pins_every_slot()
+{
+    // Reproduces FFmpeg at 1080p: no declared surfaces, fifteen created,
+    // every picture Direct. A fifteen-slot pool pinned them all and STOP had
+    // no buffer for LAST.
+    FakeConfig fc;
+    fc.firmware_min_capture = 7;
+    Harness h(fc, fast_options(), config(0));
+    h.submit(make_target());
+    const unsigned pool = h.fake->capture_allocated();
+    CHECK(pool == 21);
+
+    std::vector<TargetPtr> pinned;
+    for (unsigned i = 0; i + 1 < pool; ++i) {
+        auto t = make_target();
+        h.submit(t);
+        h.session->wait(t);
+        CHECK(t->completed);
+        pinned.push_back(t);
+        CHECK(h.session->capture_queued() >= 1);
+    }
+    h.session->finish();
+    CHECK(h.session->state() == SessionState::Finished);
+    CHECK(h.session->stats().drains == 1);
+}
+
 // --- resolution change -----------------------------------------------------
 
 void test_resolution_change_rebuilds_capture()
@@ -813,7 +880,7 @@ void test_import_queues_client_buffer_per_picture()
     tb->destination = b.stable.get();
     h.submit(ta);
     CHECK(h.session->capture_memory() == CaptureMemory::Import);
-    CHECK(log_has(*h.fake, "REQBUFS CAPTURE 32 DMABUF"));
+    CHECK(log_has(*h.fake, "REQBUFS CAPTURE 20 DMABUF"));
     CHECK(h.fake->capture_memory() == V4L2_MEMORY_DMABUF);
     // CAPTURE streams before the first picture's buffer goes in: the kernel
     // only clears the DRC boundary sub-state in iris_process_streamon_output,
@@ -960,7 +1027,7 @@ void test_import_rejected_on_display_order_kernel()
     CHECK(!h.session->supports_import());
     h.submit(ta);
     CHECK(h.session->capture_memory() == CaptureMemory::Mmap);
-    CHECK(log_has(*h.fake, "REQBUFS CAPTURE 32") && !log_has(*h.fake, "DMABUF"));
+    CHECK(log_has(*h.fake, "REQBUFS CAPTURE 20") && !log_has(*h.fake, "DMABUF"));
     h.session->wait(ta);
     // Degraded to Copy: the pixels reached the client buffer anyway.
     CHECK(ta->completed && !ta->error && ta->publish == Publish::Copy && ta->frame == nullptr);
@@ -1176,6 +1243,121 @@ void test_import_altref_does_not_stall_the_next_picture()
 }
 
 
+// ---- UBWC (Q08C CAPTURE) ----
+
+SessionConfig ubwc_config(unsigned surfaces = 16)
+{
+    SessionConfig c = config(surfaces);
+    c.capture_modifier = DRM_FORMAT_MOD_QCOM_COMPRESSED;
+    return c;
+}
+
+// The VA layer stamps every render target with its surface's modifier
+// (src/va/picture.cc); a target without it is a different CAPTURE format.
+TargetPtr make_ubwc_target(Publish publish = Publish::Direct)
+{
+    auto t = make_target();
+    t->modifier = DRM_FORMAT_MOD_QCOM_COMPRESSED;
+    t->publish = publish;
+    return t;
+}
+
+Layout ubwc_client_layout(unsigned width, unsigned height)
+{
+    const PlaneLayout planes = ubwc_layout(width, height);
+    Layout layout;
+    layout.fourcc = VA_FOURCC_NV12;
+    layout.width = width;
+    layout.height = height;
+    layout.size = planes.size;
+    layout.modifier = planes.modifier;
+    layout.plane_count = planes.plane_count;
+    for (unsigned i = 0; i < planes.plane_count; ++i)
+        layout.planes[i] = { planes.planes[i].offset, planes.planes[i].pitch, planes.planes[i].rows };
+    return layout;
+}
+
+void test_ubwc_capture_uses_the_q08c_layout()
+{
+    FakeConfig fc;
+    fc.capture_pixelformat = V4L2_PIX_FMT_QC08C;
+    Harness h(fc, fast_options(), ubwc_config());
+    auto t = make_ubwc_target();
+    h.submit(t);
+    CHECK(h.session->state() == SessionState::Streaming);
+    CHECK(h.fake->capture_allocated() == 20);
+    // Direct hands out the compressed slot itself.
+    h.session->wait(t);
+    CHECK(t->completed && !t->error && t->frame);
+    CHECK(t->frame && t->frame->layout().compressed());
+}
+
+void test_ubwc_capture_layout_mismatch_is_refused()
+{
+    // A node that grants the format but allocates the linear sizeimage is
+    // not the node the driver thinks it is; taking its buffer would put the
+    // firmware's planes where the client's exports do not expect them.
+    FakeConfig fc;
+    fc.capture_pixelformat = V4L2_PIX_FMT_QC08C;
+    fc.ubwc_sizeimage = false;
+    Harness h(fc, fast_options(), ubwc_config());
+    auto t = make_ubwc_target();
+    CHECK_THROWS(h.submit(t), VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT);
+    CHECK(h.session->state() == SessionState::Failed);
+}
+
+void test_ubwc_import_is_zero_copy()
+{
+    FakeConfig fc;
+    fc.capture_pixelformat = V4L2_PIX_FMT_QC08C;
+    Harness h(fc, fast_options(), ubwc_config());
+    ClientBuffer a(ubwc_client_layout(fc.coded_width, fc.coded_height));
+    auto t = make_ubwc_target(Publish::Import);
+    t->destination = a.stable.get();
+    h.submit(t);
+    CHECK(h.session->capture_memory() == CaptureMemory::Import);
+    h.session->wait(t);
+    CHECK(t->completed && !t->error && t->frame == nullptr);
+    CHECK(same_buffer(h.fake->capture_fd(0), a.fd));
+}
+
+void test_ubwc_import_mismatch_fails_instead_of_copying()
+{
+    // A linear client buffer against a compressed capture: Import cannot be
+    // honoured and Copy would write compressed slot bytes into the client's
+    // buffer. The picture must fail.
+    FakeConfig fc;
+    fc.capture_pixelformat = V4L2_PIX_FMT_QC08C;
+    Harness h(fc, fast_options(), ubwc_config());
+    ClientBuffer a(stable_layout(VA_FOURCC_NV12, fc.coded_width, fc.coded_height));
+    auto t = make_ubwc_target(Publish::Import);
+    t->destination = a.stable.get();
+    h.submit(t);
+    CHECK(h.session->capture_memory() == CaptureMemory::Mmap);
+    CHECK_THROWS(h.session->wait(t), VA_STATUS_ERROR_UNIMPLEMENTED);
+    CHECK(t->error);
+}
+
+void test_ubwc_copy_publish_is_refused()
+{
+    FakeConfig fc;
+    fc.capture_pixelformat = V4L2_PIX_FMT_QC08C;
+    Harness h(fc, fast_options(), ubwc_config());
+    auto t = make_ubwc_target(Publish::Copy);
+    CHECK_THROWS(h.submit(t), VA_STATUS_ERROR_UNIMPLEMENTED);
+}
+
+void test_ubwc_modifier_cannot_change_inside_a_context()
+{
+    FakeConfig fc;
+    fc.capture_pixelformat = V4L2_PIX_FMT_QC08C;
+    Harness h(fc, fast_options(), ubwc_config());
+    auto t = make_ubwc_target();
+    h.submit(t);
+    auto second = make_target(); // a linear surface in a compressed context
+    CHECK_THROWS(h.submit(second), VA_STATUS_ERROR_INVALID_PARAMETER);
+}
+
 } // namespace
 
 int main()
@@ -1189,7 +1371,12 @@ int main()
         { "display-order fallback", test_display_order_fallback },
         { "pool sizing respects kernel max", test_pool_sizing_respects_kernel_max },
         { "pool sizing respects memory budget", test_pool_sizing_respects_memory_budget },
-        { "pool sizing keeps small geometry at the full pool", test_pool_sizing_keeps_small_geometry_at_the_full_pool },
+        { "pool sizing keeps small geometry at the client count",
+            test_pool_sizing_keeps_small_geometry_at_the_client_count },
+        { "pool sizing floors at the firmware minimum plus headroom",
+            test_pool_sizing_floors_at_the_firmware_minimum_plus_headroom },
+        { "direct publish needs headroom over the firmware minimum",
+            test_direct_publish_needs_headroom_over_the_firmware_minimum },
         { "direct publish holds slot until release", test_direct_publish_holds_slot_until_release },
         { "copy publish releases slot immediately", test_copy_publish_releases_slot_immediately },
         { "late completion after release is dropped", test_late_completion_after_release_is_dropped },
@@ -1211,6 +1398,7 @@ int main()
         { "display-order timeout drains then recovers", test_display_order_timeout_drains_then_recovers },
         { "START EBUSY is retried", test_start_ebusy_is_retried },
         { "finish drains and refuses submit", test_finish_drains_and_refuses_submit },
+        { "drain survives a client that pins every slot", test_drain_survives_a_client_that_pins_every_slot },
         { "resolution change rebuilds capture", test_resolution_change_rebuilds_capture },
         { "resolution change keeps held frames", test_resolution_change_keeps_held_frames },
         { "AU larger than slot is rejected", test_au_larger_than_slot_is_rejected },
@@ -1232,6 +1420,13 @@ int main()
         { "import install hidden frame lends one buffer twice",
             test_import_install_hidden_frame_lends_one_buffer_twice },
         { "import alt-ref does not stall the next picture", test_import_altref_does_not_stall_the_next_picture },
+        { "UBWC capture uses the Q08C layout", test_ubwc_capture_uses_the_q08c_layout },
+        { "UBWC capture layout mismatch is refused", test_ubwc_capture_layout_mismatch_is_refused },
+        { "UBWC import is zero copy", test_ubwc_import_is_zero_copy },
+        { "UBWC import mismatch fails instead of copying", test_ubwc_import_mismatch_fails_instead_of_copying },
+        { "UBWC copy publish is refused", test_ubwc_copy_publish_is_refused },
+        { "UBWC modifier cannot change inside a context",
+            test_ubwc_modifier_cannot_change_inside_a_context },
     };
     int ran = 0;
     for (const auto& c : cases) {

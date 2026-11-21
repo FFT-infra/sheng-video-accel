@@ -37,11 +37,12 @@ namespace va {
 constexpr const char* kVendor = "Qualcomm Iris V4L2 stateful (libva-v4l2)";
 constexpr unsigned kMaxProfiles = 16;
 constexpr unsigned kMaxEntrypoints = 2;
-// getConfigAttributes answers any type a client asks for, so this ceiling is
-// only what vaMaxNumConfigAttributes reports. Keep it at the full libva 1.23
-// config-attribute range; a smaller number makes the driver look narrower
-// than it is to a client sizing its query array.
+// Only what vaMaxNumConfigAttributes reports; getConfigAttributes answers any
+// type a client asks for. Keep it at the full libva 1.23 range.
 constexpr unsigned kMaxAttributes = 16;
+// The client-facing region limit VAConfigAttribEncROI reports. The kernel
+// control bounds only the macroblock map.
+constexpr unsigned kMaxRoiRegions = 8;
 // What vaMaxNumImageFormats reports, and therefore the largest list
 // queryImageFormats may fill: a client sizes its array from this number.
 // NV12 and P010 for the codecs, I420 as the planar form of the same 4:2:0
@@ -61,6 +62,9 @@ struct Config {
 struct Surface {
     unsigned width = 0, height = 0;
     uint32_t fourcc = VA_FOURCC_NV12;
+    // DRM_FORMAT_MOD_QCOM_COMPRESSED when the client asked for UBWC. Such a
+    // surface publishes Direct or Import only.
+    uint64_t modifier = 0;
     VAContextID owner = VA_INVALID_ID;
     // Session-side state: token, held frame, completion. Shared with the
     // session, which may outlive the surface through a retained Import
@@ -174,6 +178,10 @@ struct Context {
     // keeps the bytes valid even after vaDestroyBuffer removed it from the
     // table; the parameters still describe the stream.
     std::shared_ptr<Buffer> enc_sequence;
+    // A packed-header parameter buffer rendered before its data buffer; the
+    // pair becomes one prefix NAL on the picture.
+    bool enc_packed_pending = false;
+    uint32_t enc_packed_bits = 0;
     uint64_t enc_frames = 0;
     // The picture most recently submitted from each input surface. A client
     // that syncs the surface instead of the coded buffer (VA's older
@@ -258,6 +266,21 @@ struct Capabilities {
     // falls back to Copy for anything else.
     std::set<uint32_t> import_formats;
     bool nv12 = false, p010 = false;
+    // The client asked for UBWC surfaces (V4L2_VA_UBWC=1) and the node
+    // enumerates the Q08C CAPTURE format.
+    bool ubwc = false;
+    // A property of the module, not of a codec: the controls exist for the
+    // node and the rate-control restriction applies to both codecs.
+    bool encode_multi_slice = false;
+    // The encoder node takes P010 on its raw port; without it Main 10 is not
+    // advertised.
+    bool encode_p010 = false;
+    // The hierarchical controls are part of the 7.3.4 node; probing keeps the
+    // capability honest on a kernel that does not register them.
+    bool encode_temporal_layers = false;
+    // Zero when the module carries no ROI patch (packaging/kernel/0017-*),
+    // which is also what VAConfigAttribEncROI reports.
+    unsigned encode_roi_regions = 0;
     unsigned min_width = 96, min_height = 96, max_width = 8192, max_height = 8192;
     std::set<VAProfile> profiles; // decode
     std::set<VAProfile> encode_profiles;
@@ -353,13 +376,19 @@ iris::Publish publish_policy(const DriverData& d, const Surface& surface, const 
 // Allocate the surface's stable buffer if it has none.
 iris::StableBuffer& ensure_stable(DriverData& d, Surface& surface);
 
+// Every path that reads or writes linear pixels — the Copy publish, the image
+// entry points, film grain, VideoProc and the encoder — must call this first.
+// UBWC memory has no linear pixels to hand out; only vaExportSurfaceHandle
+// and a Direct/Import decode can reach those bytes. `operation` names the
+// entry point in the trace record.
+void require_linear(DriverData& d, const Surface& surface, const char* operation);
+
 // Probe the node once at init.
 Capabilities probe_capabilities(const iris::Options& options);
 
-// Fill everything a VA context needs except the probed capabilities: the
-// version and table-size fields, the vendor string, the 50 entry points and,
-// when the client offers the VPP sub-table and this build has the backend,
-// the three VideoProc entry points. No ioctl and no driver state is touched,
+// Fill the version and table-size fields, the vendor string, the entry points
+// and, when the client offers the VPP sub-table and this build has the
+// backend, the three VideoProc slots. No ioctl and no driver state is touched,
 // so a host test can drive it with a zeroed VADriverContext.
 void fill_context(VADriverContextP ctx, DriverData& d);
 

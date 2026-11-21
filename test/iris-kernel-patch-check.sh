@@ -60,16 +60,16 @@ if [ -n "$bad" ]; then
     fail "recorded hash does not match: $bad"
 fi
 
-# Only the twelve patches may be listed, and every one of them must be.
-# 0001-0007 apply to sheng-7.2.6; 0008-0012 are the 7.3.4 set.
+# Only the seventeen patches may be listed, and every one of them must be.
+# 0001-0007 apply to sheng-7.2.6; 0008-0017 are the 7.3.4 set.
 listed=$(awk '{print $2}' "$sums")
-for name in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011 0012; do
+for name in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011 0012 0013 0014 0015 0016 0017; do
     printf '%s\n' "$listed" | grep -q "^$name-" \
         || fail "SHA256SUMS does not record $name"
 done
 count=$(printf '%s\n' "$listed" | grep -c '\.patch$' || true)
-[ "$count" -eq 12 ] \
-    || fail "SHA256SUMS must record exactly twelve patches, found $count"
+[ "$count" -eq 17 ] \
+    || fail "SHA256SUMS must record exactly seventeen patches, found $count"
 for name in $(printf '%s\n' "$listed" | grep '\.patch$'); do
     [ -f "$kernel_dir/$name" ] || fail "SHA256SUMS records a file that is not there: $name"
 done
@@ -157,6 +157,66 @@ expect_marker "$kernel_dir/0012-7.3.4-quiesce-irq-before-core-lock.patch" \
 expect_marker "$kernel_dir/0012-7.3.4-quiesce-irq-before-core-lock.patch" \
     '+	enable_irq(core->irq);' 1
 
+# 0013's value is the translation, not the registration: the cap entry alone
+# reaches no property, and the setter alone has nothing to select a mode with.
+expect_marker "$kernel_dir/0013-7.3.4-multi-slice.patch" \
+    '+		.cap_id = SLICE_MODE,' 1
+expect_marker "$kernel_dir/0013-7.3.4-multi-slice.patch" \
+    '+#define HFI_PROP_MULTI_SLICE_MB_COUNT' 1
+expect_marker "$kernel_dir/0013-7.3.4-multi-slice.patch" \
+    '+int iris_set_slice_count(' 2
+
+# 0014 has to reach all four places at once: the raw format table, the
+# buffer size, the firmware color format and the bit-depth property. The
+# format table alone would size a P010 buffer as 8-bit.
+expect_marker "$kernel_dir/0014-7.3.4-encode-p010.patch" \
+    '+	[IRIS_FMT_TP10] = V4L2_PIX_FMT_P010,' 1
+expect_marker "$kernel_dir/0014-7.3.4-encode-p010.patch" \
+    '+				return iris_yuv_buffer_size_p010(inst);' 1
+expect_marker "$kernel_dir/0014-7.3.4-encode-p010.patch" \
+    '+			hfi_colorformat = HFI_COLOR_FMT_P010;' 1
+expect_marker "$kernel_dir/0014-7.3.4-encode-p010.patch" \
+    '+	HFI_PROP_LUMA_CHROMA_BIT_DEPTH,' 1
+
+# 0015 is only useful if the codec id and the two caps all land: an id alone
+# reaches no profile control, and a cap alone has nothing to select it.
+expect_marker "$kernel_dir/0015-7.3.4-mpeg2-decode.patch" \
+    '+	HFI_CODEC_DECODE_MPEG2			= 6,' 1
+expect_marker "$kernel_dir/0015-7.3.4-mpeg2-decode.patch" \
+    '+		.cap_id = PROFILE_MPEG2,' 1
+expect_marker "$kernel_dir/0015-7.3.4-mpeg2-decode.patch" \
+    '+		.cap_id = LEVEL_MPEG2,' 1
+
+# 0016 only works when the allocator, the address and the Kconfig select all
+# move: sg memops alone queue buffers with a zero device address, and the
+# address alone is read from a contiguous mapping that does not exist. The
+# one-segment guard is load-bearing: the firmware gets a single address, so a
+# mapping split across segments must fail at QBUF instead of writing past the
+# first one. The parameter must stay decoder-only: the encoder's CAPTURE queue
+# was never measured with system memory.
+expect_marker "$kernel_dir/0016-7.3.4-capture-sg.patch" \
+    '+	dst_vq->mem_ops = capture_sg && inst->domain == DECODER ?' 1
+expect_marker "$kernel_dir/0016-7.3.4-capture-sg.patch" \
+    '+		if (!sgt || sgt->nents != 1)' 1
+expect_marker "$kernel_dir/0016-7.3.4-capture-sg.patch" \
+    '+		buf->device_addr = sg_dma_address(sgt->sgl);' 1
+expect_marker "$kernel_dir/0016-7.3.4-capture-sg.patch" \
+    '+	select VIDEOBUF2_DMA_SG' 1
+
+# 0017 only works when the control, the payload and the delivery mark all
+# land: an s32 array alone fills nothing, a payload alone has no control to
+# arm it, and the firmware drops metadata for a session that never subscribed.
+# The exact-grid guard is load-bearing: a partly filled map would let the
+# firmware read the previous picture's values for the rest.
+expect_marker "$kernel_dir/0017-7.3.4-encode-roi.patch" \
+    '+		.cap_id = ROI_PARAMS,' 1
+expect_marker "$kernel_dir/0017-7.3.4-encode-roi.patch" \
+    '+	if (array_size != lcu_width * lcu_height)' 1
+expect_marker "$kernel_dir/0017-7.3.4-encode-roi.patch" \
+    '+	payload_hdr->type = HFI_PROP_ROI_INFO;' 1
+expect_marker "$kernel_dir/0017-7.3.4-encode-roi.patch" \
+    '+	u32 payload[2] = { HFI_MODE_METADATA, HFI_PROP_ROI_INFO };' 1
+
 # 0004's whole point is that the copy lands in the ERROR branch. Checking the
 # line order inside the hunk is what distinguishes that from a copy added to
 # the normal completion path, where the timestamp was already correct.
@@ -183,7 +243,10 @@ fi
 # which is also the cheapest way to prove the file is still a patch.
 if command -v git >/dev/null 2>&1; then
     for patch in "$kernel_dir"/0*.patch; do
-        if ! paths=$(git apply --numstat "$patch" 2>&1); then
+        # Parse from the repository root: `git apply` reports the paths of a
+        # plain unified diff relative to the caller's directory, so running
+        # this from a build tree would prefix every path with it.
+        if ! paths=$(git -C "$root" apply --numstat "$patch" 2>&1); then
             fail "${patch##*/}: git cannot read it as a patch"
             continue
         fi
@@ -248,4 +311,4 @@ if [ "$failures" -ne 0 ]; then
     printf 'FAIL kernel patches: %d problem(s)\n' "$failures" >&2
     exit 1
 fi
-printf 'PASS kernel patches: twelve files, recorded hashes, Iris-only paths\n'
+printf 'PASS kernel patches: seventeen files, recorded hashes, Iris-only paths\n'

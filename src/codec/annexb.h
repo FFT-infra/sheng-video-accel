@@ -33,4 +33,10 @@ std::vector<NalUnit> split_annexb(const uint8_t* data, size_t size, Codec codec)
 std::vector<uint8_t> prepend_parameter_sets(
     const std::vector<uint8_t>& access_unit, std::vector<NalUnit>& last, Codec codec);
 
+// `prefix` goes immediately in front of the first coded-picture NAL, leaving
+// the parameter sets ahead of it. An access unit with no start code at all
+// gets the prefix in front; one with no coded-picture NAL gets it at the end.
+std::vector<uint8_t> insert_before_vcl(
+    const std::vector<uint8_t>& access_unit, const std::vector<uint8_t>& prefix, Codec codec);
+
 } // namespace iris::codec

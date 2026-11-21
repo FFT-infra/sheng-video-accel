@@ -3,7 +3,7 @@
 This is a portability checklist, not a support claim. The only qualified
 target is the Xiaomi Pad 6S Pro (`sheng`, SM8550) on Fedora 44, running
 either the `sheng-7.2.6` kernel at `42f3b40c702a` with patches 0001-0004 or
-`sheng-7.3.4` at `87ac0f2347eb` with patches 0008-0009.
+`sheng-7.3.4` at `87ac0f2347eb` with patches 0008-0017.
 `data/iris-codec-capabilities.json` names that target; do not broaden its
 `target` field to imply support for another SoC. No codec, profile or publish
 policy may be advertised on a new SoC until its own hardware gate passes and
@@ -11,9 +11,11 @@ policy may be advertised on a new SoC until its own hardware gate passes and
 
 ## What is SM8550-specific
 
-1. **Kernel patches.** The nine files in `packaging/kernel/` target
+1. **Kernel patches.** The seventeen files in `packaging/kernel/` target
    `ianchb/sm8550-mainline`: 0001-0007 apply to `sheng-7.2.6`
-   (`42f3b40c702a`) and 0008-0009 to `sheng-7.3.4` (`87ac0f2347eb`). On
+   (`42f3b40c702a`) and 0008-0017 to `sheng-7.3.4` (`87ac0f2347eb`); 0008
+   and 0009 are the qualified pair and 0010-0017 are experimental, each with
+   its own row in `packaging/kernel/README.md`. On
    7.2.6, 0001 adds `DISPLAY_DELAY_ENABLE`/`DISPLAY_DELAY` to
    `inst_fw_cap_sm8550_dec` and the `sm8550_vdec_input_config_param_*` arrays;
    0002 and 0003 add controls to `inst_fw_cap_sm8550_enc`; 0004 changes
@@ -34,9 +36,11 @@ policy may be advertised on a new SoC until its own hardware gate passes and
    (`CONFIG_ARM64_BTI=y`, `CONFIG_ARM64_PTR_AUTH=y`,
    `CONFIG_ARM64_PTR_AUTH_KERNEL=y`). A module-only build must use the running
    kernel's config, `Module.symvers` and toolchain; a differently configured
-   module is not acceptable. The recipe in `packaging/kernel/README.md` uses
-   `/boot/config-$(uname -r)`, a `localversion` file and a `Module.symvers`
-   derived from the running kernel's exports.
+   module is not acceptable. The recipe in `packaging/kernel/README.md` takes
+   the config from `/proc/config.gz` (the `/boot/config-*` files on `sheng`
+   differ from the running kernel), writes the `-g<sha>` suffix into
+   `localversion`, and derives `Module.symvers` from the running kernel's
+   exports.
 3. **Device resolution.** Nodes are found at runtime by the `iris_driver`
    QUERYCAP name and the queue carrying the compressed format. No `/dev/videoN`
    literal is allowed in code, launchers or packaging. A new device with a

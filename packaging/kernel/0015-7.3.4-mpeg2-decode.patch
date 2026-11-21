@@ -1,0 +1,368 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: xinyang <xinyang@localhost>
+Date: Tue, 18 Nov 2026 12:00:00 +0800
+Subject: [PATCH] media: iris: add MPEG-2 decode on SM8550 (7.3.4)
+
+The SM8550 video firmware carries an MPEG-2 decoder: the blob names
+mpeg2Dec_SessionSetBuffers and the MPEG2Decoder error paths, and codec id 6
+is the one value missing from the driver's HFI codec enum between VP9 and
+AV1. The Qualcomm platform data for this firmware generation lists the
+MPEG-2 profiles and property tables, while the SM8550 vendor driver's codec
+list has no MPEG-2 entry, so whether this firmware build enables the codec
+is open.
+
+Register V4L2_PIX_FMT_MPEG2 on the SM8550 decoder only, map it to codec 6,
+and carry the pieces a session needs: the profile and level caps with the
+values the platform data names, the MPEG-2 port-settings-change list, an
+output property subscription, the response-side profile and level copies,
+and the reverse control-id mapping. The bitstream, co-located motion vector,
+line and persistent buffers reuse the H.264 sizes, which bound what MPEG-2
+needs because MPEG-2 has neither CABAC nor the H.264 partition syntax.
+
+This is an experiment, not a capability. It stays out of the qualified
+module unless a target run decodes an MPEG-2 stream byte-exactly.
+---
+--- a/drivers/media/platform/qcom/iris/iris_ctrls.c
++++ b/drivers/media/platform/qcom/iris/iris_ctrls.c
+@@ -35,6 +35,10 @@
+ 		return LEVEL_HEVC;
+ 	case V4L2_CID_MPEG_VIDEO_VP9_LEVEL:
+ 		return LEVEL_VP9;
++	case V4L2_CID_MPEG_VIDEO_MPEG2_PROFILE:
++		return PROFILE_MPEG2;
++	case V4L2_CID_MPEG_VIDEO_MPEG2_LEVEL:
++		return LEVEL_MPEG2;
+ 	case V4L2_CID_MPEG_VIDEO_HEVC_TIER:
+ 		return TIER;
+ 	case V4L2_CID_MPEG_VIDEO_HEADER_MODE:
+@@ -202,6 +206,10 @@
+ 		return V4L2_CID_MPEG_VIDEO_HEVC_LEVEL;
+ 	case LEVEL_VP9:
+ 		return V4L2_CID_MPEG_VIDEO_VP9_LEVEL;
++	case PROFILE_MPEG2:
++		return V4L2_CID_MPEG_VIDEO_MPEG2_PROFILE;
++	case LEVEL_MPEG2:
++		return V4L2_CID_MPEG_VIDEO_MPEG2_LEVEL;
+ 	case TIER:
+ 		return V4L2_CID_MPEG_VIDEO_HEVC_TIER;
+ 	case HEADER_MODE:
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2.c
+@@ -951,6 +951,30 @@
+ 		.set = iris_set_u32_enum,
+ 	},
+ 	{
++		.cap_id = PROFILE_MPEG2,
++		.min = V4L2_MPEG_VIDEO_MPEG2_PROFILE_SIMPLE,
++		.max = V4L2_MPEG_VIDEO_MPEG2_PROFILE_MAIN,
++		.step_or_mask = BIT(V4L2_MPEG_VIDEO_MPEG2_PROFILE_SIMPLE) |
++				BIT(V4L2_MPEG_VIDEO_MPEG2_PROFILE_MAIN),
++		.value = V4L2_MPEG_VIDEO_MPEG2_PROFILE_MAIN,
++		.hfi_id = HFI_PROP_PROFILE,
++		.flags = CAP_FLAG_OUTPUT_PORT | CAP_FLAG_MENU,
++		.set = iris_set_u32_enum,
++	},
++	{
++		.cap_id = LEVEL_MPEG2,
++		.min = V4L2_MPEG_VIDEO_MPEG2_LEVEL_LOW,
++		.max = V4L2_MPEG_VIDEO_MPEG2_LEVEL_HIGH,
++		.step_or_mask = BIT(V4L2_MPEG_VIDEO_MPEG2_LEVEL_LOW) |
++				BIT(V4L2_MPEG_VIDEO_MPEG2_LEVEL_MAIN) |
++				BIT(V4L2_MPEG_VIDEO_MPEG2_LEVEL_HIGH_1440) |
++				BIT(V4L2_MPEG_VIDEO_MPEG2_LEVEL_HIGH),
++		.value = V4L2_MPEG_VIDEO_MPEG2_LEVEL_MAIN,
++		.hfi_id = HFI_PROP_LEVEL,
++		.flags = CAP_FLAG_OUTPUT_PORT | CAP_FLAG_MENU,
++		.set = iris_set_u32_enum,
++	},
++	{
+ 		.cap_id = PROFILE_VP9,
+ 		.min = V4L2_MPEG_VIDEO_VP9_PROFILE_0,
+ 		.max = V4L2_MPEG_VIDEO_VP9_PROFILE_2,
+@@ -2008,6 +2032,16 @@
+ 	HFI_PROP_SIGNAL_COLOR_INFO,
+ };
+ 
++static const u32 sm8550_vdec_input_config_param_mpeg2[] = {
++	HFI_PROP_BITSTREAM_RESOLUTION,
++	HFI_PROP_CROP_OFFSETS,
++	HFI_PROP_LUMA_CHROMA_BIT_DEPTH,
++	HFI_PROP_CODED_FRAMES,
++	HFI_PROP_BUFFER_FW_MIN_OUTPUT_COUNT,
++	HFI_PROP_PROFILE,
++	HFI_PROP_LEVEL,
++};
++
+ static const u32 sm8550_venc_input_config_params[] = {
+ 	HFI_PROP_COLOR_FORMAT,
+ 	HFI_PROP_RAW_RESOLUTION,
+@@ -2053,6 +2087,10 @@
+ 	HFI_PROP_WORST_COMPLEXITY_FACTOR,
+ };
+ 
++static const u32 sm8550_vdec_subscribe_output_properties_mpeg2[] = {
++	HFI_PROP_PICTURE_TYPE,
++};
++
+ static const u32 sm8550_dec_ip_int_buf_tbl[] = {
+ 	BUF_BIN,
+ 	BUF_COMV,
+@@ -2103,6 +2141,10 @@
+ 		sm8550_vdec_input_config_param_av1,
+ 	.dec_input_config_params_av1_size =
+ 		ARRAY_SIZE(sm8550_vdec_input_config_param_av1),
++	.dec_input_config_params_mpeg2 =
++		sm8550_vdec_input_config_param_mpeg2,
++	.dec_input_config_params_mpeg2_size =
++		ARRAY_SIZE(sm8550_vdec_input_config_param_mpeg2),
+ 	.dec_output_config_params =
+ 		sm8550_vdec_output_config_params,
+ 	.dec_output_config_params_size =
+@@ -2131,6 +2173,9 @@
+ 	.dec_output_prop_av1 = sm8550_vdec_subscribe_output_properties_av1,
+ 	.dec_output_prop_av1_size =
+ 		ARRAY_SIZE(sm8550_vdec_subscribe_output_properties_av1),
++	.dec_output_prop_mpeg2 = sm8550_vdec_subscribe_output_properties_mpeg2,
++	.dec_output_prop_mpeg2_size =
++		ARRAY_SIZE(sm8550_vdec_subscribe_output_properties_mpeg2),
+ 
+ 	.dec_ip_int_buf_tbl = sm8550_dec_ip_int_buf_tbl,
+ 	.dec_ip_int_buf_tbl_size = ARRAY_SIZE(sm8550_dec_ip_int_buf_tbl),
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2_command.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2_command.c
+@@ -422,6 +422,9 @@
+ 	case V4L2_PIX_FMT_AV1:
+ 		profile = inst->fw_caps[PROFILE_AV1].value;
+ 		break;
++	case V4L2_PIX_FMT_MPEG2:
++		profile = inst->fw_caps[PROFILE_MPEG2].value;
++		break;
+ 	}
+ 
+ 	inst_hfi_gen2->src_subcr_params.profile = profile;
+@@ -454,6 +457,9 @@
+ 	case V4L2_PIX_FMT_AV1:
+ 		level = inst->fw_caps[LEVEL_AV1].value;
+ 		break;
++	case V4L2_PIX_FMT_MPEG2:
++		level = inst->fw_caps[LEVEL_MPEG2].value;
++		break;
+ 	}
+ 
+ 	inst_hfi_gen2->src_subcr_params.level = level;
+@@ -747,6 +753,9 @@
+ 			} else if (inst->codec == V4L2_PIX_FMT_AV1) {
+ 				config_params = fdata->dec_input_config_params_av1;
+ 				config_params_size = fdata->dec_input_config_params_av1_size;
++			} else if (inst->codec == V4L2_PIX_FMT_MPEG2) {
++				config_params = fdata->dec_input_config_params_mpeg2;
++				config_params_size = fdata->dec_input_config_params_mpeg2_size;
+ 			} else {
+ 				return -EINVAL;
+ 			}
+@@ -805,6 +814,9 @@
+ 	case V4L2_PIX_FMT_AV1:
+ 		codec = HFI_CODEC_DECODE_AV1;
+ 		break;
++	case V4L2_PIX_FMT_MPEG2:
++		codec = HFI_CODEC_DECODE_MPEG2;
++		break;
+ 	}
+ 
+ 	iris_hfi_gen2_packet_session_property(inst,
+@@ -975,6 +987,11 @@
+ 		change_param_size =
+ 			core->iris_firmware_data->dec_input_config_params_av1_size;
+ 		break;
++	case V4L2_PIX_FMT_MPEG2:
++		change_param = core->iris_firmware_data->dec_input_config_params_mpeg2;
++		change_param_size =
++			core->iris_firmware_data->dec_input_config_params_mpeg2_size;
++		break;
+ 	}
+ 
+ 	payload[0] = HFI_MODE_PORT_SETTINGS_CHANGE;
+@@ -1127,6 +1144,11 @@
+ 			subscribe_prop_size =
+ 				core->iris_firmware_data->dec_output_prop_av1_size;
+ 			break;
++		case V4L2_PIX_FMT_MPEG2:
++			subcribe_prop = core->iris_firmware_data->dec_output_prop_mpeg2;
++			subscribe_prop_size =
++				core->iris_firmware_data->dec_output_prop_mpeg2_size;
++			break;
+ 		}
+ 	}
+ 
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2_defines.h
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2_defines.h
+@@ -204,6 +204,7 @@
+ 	HFI_CODEC_DECODE_HEVC			= 3,
+ 	HFI_CODEC_ENCODE_HEVC			= 4,
+ 	HFI_CODEC_DECODE_VP9			= 5,
++	HFI_CODEC_DECODE_MPEG2			= 6,
+ 	HFI_CODEC_DECODE_AV1			= 7,
+ };
+ 
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c
+@@ -631,6 +631,10 @@
+ 		inst->fw_caps[PROFILE_AV1].value = subsc_params.profile;
+ 		inst->fw_caps[LEVEL_AV1].value = subsc_params.level;
+ 		break;
++	case V4L2_PIX_FMT_MPEG2:
++		inst->fw_caps[PROFILE_MPEG2].value = subsc_params.profile;
++		inst->fw_caps[LEVEL_MPEG2].value = subsc_params.level;
++		break;
+ 	}
+ 
+ 	inst->fw_caps[POC].value = subsc_params.pic_order_cnt;
+@@ -896,6 +900,10 @@
+ 		subsc_params->profile = inst->fw_caps[PROFILE_AV1].value;
+ 		subsc_params->level = inst->fw_caps[LEVEL_AV1].value;
+ 		break;
++	case V4L2_PIX_FMT_MPEG2:
++		subsc_params->profile = inst->fw_caps[PROFILE_MPEG2].value;
++		subsc_params->level = inst->fw_caps[LEVEL_MPEG2].value;
++		break;
+ 	}
+ 
+ 	subsc_params->pic_order_cnt = inst->fw_caps[POC].value;
+--- a/drivers/media/platform/qcom/iris/iris_instance.h
++++ b/drivers/media/platform/qcom/iris/iris_instance.h
+@@ -22,6 +22,7 @@
+ 	IRIS_FMT_HEVC,
+ 	IRIS_FMT_VP9,
+ 	IRIS_FMT_AV1,
++	IRIS_FMT_MPEG2,
+ };
+ 
+ enum iris_fmt_type_cap {
+--- a/drivers/media/platform/qcom/iris/iris_platform_common.h
++++ b/drivers/media/platform/qcom/iris/iris_platform_common.h
+@@ -210,6 +210,13 @@
+ 	SLICE_MODE,
+ 	SLICE_MAX_BYTES,
+ 	SLICE_MAX_MB,
++	/*
++	 * Appended rather than grouped with the other profiles: the caps
++	 * table is indexed by this enum, so a new entry only takes the next
++	 * free index.
++	 */
++	PROFILE_MPEG2,
++	LEVEL_MPEG2,
+ 	INST_FW_CAP_MAX,
+ };
+ 
+@@ -281,6 +288,8 @@
+ 	unsigned int dec_input_config_params_vp9_size;
+ 	const u32 *dec_input_config_params_av1;
+ 	unsigned int dec_input_config_params_av1_size;
++	const u32 *dec_input_config_params_mpeg2;
++	unsigned int dec_input_config_params_mpeg2_size;
+ 	const u32 *dec_output_config_params;
+ 	unsigned int dec_output_config_params_size;
+ 	const u32 *enc_input_config_params;
+@@ -298,6 +307,8 @@
+ 	unsigned int dec_output_prop_vp9_size;
+ 	const u32 *dec_output_prop_av1;
+ 	unsigned int dec_output_prop_av1_size;
++	const u32 *dec_output_prop_mpeg2;
++	unsigned int dec_output_prop_mpeg2_size;
+ 
+ 	const u32 *dec_ip_int_buf_tbl;
+ 	unsigned int dec_ip_int_buf_tbl_size;
+--- a/drivers/media/platform/qcom/iris/iris_platform_vpu3x.c
++++ b/drivers/media/platform/qcom/iris/iris_platform_vpu3x.c
+@@ -55,6 +55,19 @@
+ 	[IRIS_FMT_AV1] = V4L2_PIX_FMT_AV1,
+ };
+ 
++/*
++ * The SM8550 firmware carries an MPEG-2 decoder that the generic vpu3x
++ * format list does not name. Keep the extra format on this platform so a
++ * device whose firmware refuses codec 6 does not enumerate it.
++ */
++static const u32 iris_fmts_vpu3x_dec_sm8550[] = {
++	[IRIS_FMT_H264] = V4L2_PIX_FMT_H264,
++	[IRIS_FMT_HEVC] = V4L2_PIX_FMT_HEVC,
++	[IRIS_FMT_VP9] = V4L2_PIX_FMT_VP9,
++	[IRIS_FMT_AV1] = V4L2_PIX_FMT_AV1,
++	[IRIS_FMT_MPEG2] = V4L2_PIX_FMT_MPEG2,
++};
++
+ static const struct icc_info iris_icc_info_vpu3x[] = {
+ 	{ "cpu-cfg",    1000, 1000     },
+ 	{ "video-mem",  1000, 15000000 },
+@@ -136,8 +149,8 @@
+ 	.opp_clk_tbl = iris_opp_clk_table_vpu3x,
+ 	/* Upper bound of DMA address range */
+ 	.dma_mask = 0xe0000000 - 1,
+-	.inst_iris_fmts = iris_fmts_vpu3x_dec,
+-	.inst_iris_fmts_size = ARRAY_SIZE(iris_fmts_vpu3x_dec),
++	.inst_iris_fmts = iris_fmts_vpu3x_dec_sm8550,
++	.inst_iris_fmts_size = ARRAY_SIZE(iris_fmts_vpu3x_dec_sm8550),
+ 	.inst_caps = &platform_inst_cap_sm8550,
+ 	.slice_caps = &iris_vpu2_vpu3x_slice_caps,
+ 	.tz_cp_config_data = tz_cp_config_vpu3,
+--- a/drivers/media/platform/qcom/iris/iris_vpu_buffer.c
++++ b/drivers/media/platform/qcom/iris/iris_vpu_buffer.c
+@@ -720,6 +720,13 @@
+ 		return hfi_buffer_bin_vp9d(width, height, num_vpp_pipes);
+ 	else if (inst->codec == V4L2_PIX_FMT_AV1)
+ 		return hfi_buffer_bin_av1d(width, height, num_vpp_pipes);
++	else if (inst->codec == V4L2_PIX_FMT_MPEG2) {
++		/*
++		 * MPEG-2 has no sizing helper of its own here and is simpler
++		 * than H.264, so the H.264 sizes are an upper bound.
++		 */
++		return hfi_buffer_bin_h264d(width, height, num_vpp_pipes);
++	}
+ 
+ 	return 0;
+ }
+@@ -735,6 +742,8 @@
+ 		return hfi_buffer_comv_h264d(width, height, num_comv);
+ 	else if (inst->codec == V4L2_PIX_FMT_HEVC)
+ 		return hfi_buffer_comv_h265d(width, height, num_comv);
++	else if (inst->codec == V4L2_PIX_FMT_MPEG2)
++		return hfi_buffer_comv_h264d(width, height, num_comv);
+ 
+ 	return 0;
+ }
+@@ -753,6 +762,8 @@
+ 		return hfi_buffer_comv_h264d(width, height, num_comv);
+ 	else if (inst->codec == V4L2_PIX_FMT_HEVC)
+ 		return hfi_buffer_comv_h265d(width, height, num_comv);
++	else if (inst->codec == V4L2_PIX_FMT_MPEG2)
++		return hfi_buffer_comv_h264d(width, height, num_comv);
+ 	else if (inst->codec == V4L2_PIX_FMT_AV1) {
+ 		if (inst->fw_caps[DRAP].value)
+ 			return 0;
+@@ -781,6 +792,8 @@
+ 		else
+ 			return hfi_buffer_persist_av1d(0, 0, 0);
+ 	}
++	else if (inst->codec == V4L2_PIX_FMT_MPEG2)
++		return hfi_buffer_persist_h264d();
+ 
+ 	return 0;
+ }
+@@ -804,6 +817,8 @@
+ 		return hfi_buffer_non_comv_h264d(width, height, num_vpp_pipes);
+ 	else if (inst->codec == V4L2_PIX_FMT_HEVC)
+ 		return hfi_buffer_non_comv_h265d(width, height, num_vpp_pipes);
++	else if (inst->codec == V4L2_PIX_FMT_MPEG2)
++		return hfi_buffer_non_comv_h264d(width, height, num_vpp_pipes);
+ 
+ 	return 0;
+ }
+@@ -829,6 +844,8 @@
+ 			num_vpp_pipes);
+ 	else if (inst->codec == V4L2_PIX_FMT_AV1)
+ 		return hfi_buffer_line_av1d(width, height, is_opb, num_vpp_pipes);
++	else if (inst->codec == V4L2_PIX_FMT_MPEG2)
++		return hfi_buffer_line_h264d(width, height, is_opb, num_vpp_pipes);
+ 
+ 	return 0;
+ }

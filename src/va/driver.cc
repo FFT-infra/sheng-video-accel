@@ -14,6 +14,7 @@
 #include <cstring>
 
 extern "C" {
+#include <libdrm/drm_fourcc.h>
 #include <linux/v4l2-controls.h>
 #include <va/va_drmcommon.h>
 }
@@ -32,6 +33,12 @@ bool p010_decode_profile(VAProfile profile)
 
 iris::Publish publish_policy(const DriverData& d, const Surface& surface, const iris::Session& session)
 {
+    // UBWC is compressed memory: only Direct (the surface takes the slot) and
+    // Import (the client's own buffer) have a reader. Copy would have to
+    // decompress, which no engine here does.
+    if (surface.modifier == DRM_FORMAT_MOD_QCOM_COMPRESSED)
+        return session.supports_import() && surface.persistent_export ? iris::Publish::Import
+                                                                      : iris::Publish::Direct;
     switch (d.options.publish) {
     case iris::PublishOverride::Copy:
         return iris::Publish::Copy;
@@ -42,8 +49,13 @@ iris::Publish publish_policy(const DriverData& d, const Surface& surface, const 
     case iris::PublishOverride::Auto:
         break;
     }
-    if (!surface.persistent_export)
-        return iris::Publish::Direct;
+    if (!surface.persistent_export) {
+        // Direct pins a CAPTURE frame until the client consumes the picture;
+        // where the memory budget leaves no headroom, a lagging consumer can
+        // pin every slot and stall the session (8K, FFmpeg's hwdownload
+        // backlog). Copy releases the slot at the completion.
+        return session.can_publish_direct() ? iris::Publish::Direct : iris::Publish::Copy;
+    }
     // A pre-exporting client (Chrome) gets its own buffer decoded into when
     // the kernel and the session allow it, and the GPU copy otherwise.
     return session.supports_import() ? iris::Publish::Import : iris::Publish::Copy;
@@ -54,10 +66,23 @@ bool vpp_available(const DriverData& d)
     return d.options.vpp_enabled && iris::vpp::compiled_in();
 }
 
+void require_linear(DriverData& d, const Surface& surface, const char* operation)
+{
+    if (surface.modifier != DRM_FORMAT_MOD_QCOM_COMPRESSED)
+        return;
+    d.trace("va ubwc refused operation=%s", operation);
+    throw iris::Error(VA_STATUS_ERROR_UNIMPLEMENTED,
+        std::string("a UBWC surface has no linear pixels for ") + operation);
+}
+
 iris::StableBuffer& ensure_stable(DriverData& d, Surface& surface)
 {
-    if (!surface.stable)
+    // An imported UBWC surface already owns its buffer: the client's
+    // compressed memory, which Import publish decodes into.
+    if (!surface.stable) {
+        require_linear(d, surface, "the stable buffer");
         surface.stable = iris::allocate_stable(d.render_fd, iris::stable_layout(surface.fourcc, surface.width, surface.height));
+    }
     return *surface.stable;
 }
 
@@ -71,6 +96,9 @@ Capabilities probe_capabilities(const iris::Options& options)
             caps.output_formats.insert(format);
     caps.nv12 = device->format_supported(iris::Queue::Capture, V4L2_PIX_FMT_NV12);
     caps.p010 = device->format_supported(iris::Queue::Capture, V4L2_PIX_FMT_P010);
+    // UBWC is only offered when the node can actually be asked for the Q08C
+    // CAPTURE format; V4L2_VA_UBWC=0 turns it off.
+    caps.ubwc = options.ubwc && device->format_supported(iris::Queue::Capture, V4L2_PIX_FMT_QC08C);
 
     // Profiles: every entry here is qualified in
     // data/iris-codec-capabilities.json; a codec is advertised only after its
@@ -94,16 +122,9 @@ Capabilities probe_capabilities(const iris::Options& options)
         if (caps.p010)
             caps.profiles.insert(VAProfileVP9Profile2);
     }
-    // AV1 is qualified at 8 and 10 bits (matrix, FFmpeg over alt-ref and
-    // no-alt-ref streams bit-exact against libdav1d, browser media-surface
-    // evidence). The internal-DPB translator submits each picture at
-    // vaEndPicture, so a client that syncs each surface never waits for a
-    // successor; its installed-package matrix, clip, DRC and browser gates
-    // are recorded in TEST-RESULTS.md.
     if (caps.output_formats.count(V4L2_PIX_FMT_AV1) && caps.nv12)
         caps.profiles.insert(VAProfileAV1Profile0);
     // profile-qualified-end
-    // Import is qualified per codec, separately from decoding.
     // import-qualified-begin
     if (caps.output_formats.count(V4L2_PIX_FMT_H264) && caps.nv12)
         caps.import_formats.insert(V4L2_PIX_FMT_H264);
@@ -127,6 +148,24 @@ Capabilities probe_capabilities(const iris::Options& options)
         auto encoder = iris::open_device(options.encoder_path, iris::NodeRole::Encoder);
         caps.encoder_node = encoder->path();
         const bool encoder_nv12 = encoder->format_supported(iris::Queue::Output, V4L2_PIX_FMT_NV12);
+        // All three multi-slice controls are registered together.
+        caps.encode_multi_slice
+            = encoder->get_control(V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE).has_value();
+        caps.encode_p010 = encoder->format_supported(iris::Queue::Output, V4L2_PIX_FMT_P010);
+        // The H.264 enable and the HEVC layer count are the two switches the
+        // session writes.
+        caps.encode_temporal_layers
+            = encoder->get_control(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING).has_value()
+            && encoder->get_control(V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_LAYER).has_value();
+        // A control of any other shape is not the one the session writes. The
+        // opt-in is separate: the qualified firmware completes the metadata
+        // buffer but codes the picture unchanged, so a client would see
+        // regions accepted and ignored (TEST-RESULTS.md).
+        const auto roi = encoder->query_control(iris::kRoiDeltaQpControl);
+        if (options.roi && roi && roi->type == V4L2_CTRL_TYPE_INTEGER
+            && roi->elem_size == sizeof(int32_t) && (roi->flags & V4L2_CTRL_FLAG_DYNAMIC_ARRAY)
+            && roi->dims[0] > 0)
+            caps.encode_roi_regions = kMaxRoiRegions;
         for (uint32_t format : { V4L2_PIX_FMT_H264, V4L2_PIX_FMT_HEVC })
             if (encoder->format_supported(iris::Queue::Capture, format))
                 caps.encoder_formats.insert(format);
@@ -138,6 +177,10 @@ Capabilities probe_capabilities(const iris::Options& options)
         }
         if (caps.encoder_formats.count(V4L2_PIX_FMT_HEVC) && encoder_nv12)
             caps.encode_profiles.insert(VAProfileHEVCMain);
+        // Main 10 is a second profile on the same codec, and the kernel
+        // module decides whether its raw port takes P010.
+        if (caps.encoder_formats.count(V4L2_PIX_FMT_HEVC) && caps.encode_p010)
+            caps.encode_profiles.insert(VAProfileHEVCMain10);
         // encode-qualified-end
     } catch (const std::exception&) {
         // An explicit override that does not name an encoder is a

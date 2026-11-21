@@ -19,6 +19,10 @@ for codec, item in entries.items():
     assert isinstance(item["va_profiles"], list), codec
     assert isinstance(item["v4l2_output_formats"], list), codec
     assert isinstance(item["capture_formats"], list), codec
+    # UBWC (Q08C) is offered for every codec this driver decodes, so the
+    # modifier has to appear exactly where a codec is claimed.
+    assert isinstance(item["capture_modifiers"], list), codec
+    assert ("QCOM_COMPRESSED" in item["capture_modifiers"]) == (item["production"] == "supported"), codec
     assert item["fallback"] in {"software", "native-v4l2-or-software"}, codec
     assert isinstance(item["rejected"], list) and item["rejected"], codec
     assert isinstance(item["experimental"], list), codec
@@ -45,6 +49,14 @@ for codec, item in entries.items():
     assert ("intra_refresh" in enc) == (enc["production"] == "supported"), codec
     if enc["production"] == "supported":
         assert "CBR" in enc["intra_refresh"], codec
+    # ROI stays a rejection until a hardware run shows the firmware changing
+    # the picture; an entry that claims it has to bring that evidence.
+    assert "roi" not in enc, codec
+# Packed headers are a separate claim from HDR metadata: HEVC answers the raw
+# SEI type, H.264 answers none so FFmpeg keeps the firmware's headers. The
+# driver's advertisement and these strings move together.
+assert "VA_ENC_PACKED_HEADER_MISC" in entries["hevc"]["encode"]["packed_headers"]
+assert "VA_ENC_PACKED_HEADER_NONE" in entries["h264"]["encode"]["packed_headers"]
 assert entries["vp9"]["encode"]["production"] == "absent"
 assert entries["av1"]["encode"]["production"] == "absent"
 # The driver decides the publish policy from its own import table; it must
