@@ -37,19 +37,13 @@ struct EncodeParams {
     int min_qp = -1; // < 0 leaves the firmware default
     int max_qp = -1;
     bool cabac = true; // H.264 only; HEVC is always CABAC
-    // The slice count the client asked for in this picture, and the largest
-    // 16x16-macroblock budget one slice may cover. The firmware splits a
-    // picture itself, so the count becomes an equal-share budget; both are
-    // per-context controls and the session refuses a change mid-stream.
-    // 1 / 0 leaves the firmware's single full-picture slice alone.
+    // Per-context controls: the session refuses a change mid-stream. 1 / 0 is
+    // the firmware's single full-picture slice.
     unsigned slices = 1;
     unsigned slice_mb = 0;
-    // Sample depth of the raw input, 8 or 10. Ten selects P010 and the
-    // firmware's 10-bit path; it is fixed per context.
+    // Ten selects P010 and the firmware's 10-bit path.
     unsigned bit_depth = 8;
-    // Temporal layer count from the client's structure, 0 or 1 when it asked
-    // for none. The firmware derives the membership from the count, which is
-    // a per-context control, so it is fixed in configure().
+    // The firmware derives layer membership from the count.
     unsigned temporal_layers = 0;
     // Deblocking, in the numbering both codecs share: 0 filtering enabled,
     // 1 disabled, 2 disabled across slice boundaries. VA carries these in
@@ -85,12 +79,9 @@ struct EncodeParams {
     unsigned b_frames = 0;
     // This picture's slice is B-coded. Only reachable when b_frames is set.
     bool b_picture = false;
-    // Rolling intra refresh: refresh the whole picture over this many
-    // pictures. 0 leaves it off. The firmware sweeps one band of rows per
-    // picture on its own, so a client's per-picture location is not what it
-    // acts on; the codec layer turns VA's insert size into this period.
-    // Honoured only under CBR: measured byte-identical to no refresh under
-    // VBR and CQP (TEST-RESULTS.md, "Encoder capabilities").
+    // 0 leaves it off. The firmware sweeps one band per picture itself, so a
+    // client's per-picture location is ignored. CBR only: measured
+    // byte-identical to no refresh under VBR and CQP.
     unsigned intra_refresh_period = 0;
     // Where this picture sits in display order, from the codec's picture
     // order count (H.264 CurrPic's field order counts, HEVC pic_order_cnt).
@@ -106,22 +97,15 @@ struct EncodeParams {
     // not include va.h.
     uint32_t reconstruction = 0;
     uint32_t reference = 0;
-    // The raw packed headers the client rendered with this picture, each an
-    // Annex-B NAL with its start code (VAEncPackedHeaderRawData). The
+    // Annex-B NALs with their start codes (VAEncPackedHeaderRawData). The
     // firmware writes the parameter sets itself but has no SEI input, so the
-    // encoder session inserts these in front of the first coded-picture NAL
-    // of the access unit. Empty leaves the stream untouched.
+    // session inserts these ahead of the first coded-picture NAL.
     std::vector<std::vector<uint8_t>> prefix_nals;
-    // The ROI delta-QP map for this picture, one signed delta per macroblock
-    // in raster order, already clipped to the delta-QP range. The firmware
-    // applies it to the picture whose raw buffer is queued after the map is
-    // written, so the session writes it per picture. Empty means the client
-    // rendered no regions; the session then writes an all-zero map for as
-    // long as the stream has used ROI, so a picture does not inherit the
-    // previous one's.
+    // One signed delta per macroblock in raster order. The firmware applies
+    // the map to the picture whose raw buffer is queued after it is written.
+    // Empty keeps the previous picture's map from being inherited.
     std::vector<int32_t> roi_map;
-    // Regions the client rendered, for the trace. Zero with a non-empty map
-    // cannot happen; it is kept so the record does not have to count cells.
+    // For the trace; a non-empty map always has regions.
     unsigned roi_regions = 0;
 };
 

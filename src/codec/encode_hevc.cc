@@ -87,15 +87,12 @@ public:
         const bool main10 = profile_ == VAProfileHEVCMain10;
         require(main10 || profile_ == VAProfileHEVCMain, "only HEVC Main encode is supported",
             VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
-        // 0 is an unset profile in some clients. Main is profile idc 1 and
-        // Main 10 is 2; a Main 10 sequence is also allowed to leave the idc
-        // at 1 in some clients, so the depth below is the deciding check.
+        // 0 is unset in some clients, and a Main 10 sequence may also leave
+        // the idc at 1, so the depth check below decides.
         require(sequence->general_profile_idc == 0 || sequence->general_profile_idc == 1
                 || (main10 && sequence->general_profile_idc == 2),
             "only HEVC Main encode is supported", VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
-        // The two planes and the profile must agree on the depth: the node
-        // has one raw format per context and the firmware writes one
-        // sequence header for the stream.
+        // One raw format per context, one sequence header per stream.
         const unsigned bit_depth = sequence->seq_fields.bits.bit_depth_luma_minus8;
         require(sequence->seq_fields.bits.bit_depth_chroma_minus8 == bit_depth
                 && ((main10 && bit_depth == 2) || (!main10 && bit_depth == 0)),
@@ -229,9 +226,8 @@ public:
             // parameters. Zero describes no slice at all, so it is refused.
             require(slice->slice_segment_address == 0 && slice->num_ctu_in_slice != 0,
                 "invalid slice geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
-            // Every slice of one picture is coded alike: the picture type,
-            // deblocking and QP are per-context controls, so slices that
-            // disagreed could not be expressed.
+            // Picture type, deblocking and QP are per-context controls, so
+            // slices that disagreed could not be expressed.
             for (const void* raw : picture.slices) {
                 const auto* other = static_cast<const VAEncSliceParameterBufferHEVC*>(raw);
                 require(other->slice_type == slice->slice_type
@@ -297,10 +293,8 @@ public:
         }
         if (const auto* rir = static_cast<const VAEncMiscParameterRIR*>(
                 find_misc(picture.misc, VAEncMiscParameterTypeRIR))) {
-            // Same mapping as H.264: one period, and the firmware sweeps the
-            // picture itself. VA counts the window in MB rows, which for
-            // 4:2:0 is 16 lines; the node takes a picture count, so the
-            // period is how many pictures one full sweep needs.
+            // Same mapping as H.264. VA counts the window in MB rows (16
+            // lines at 4:2:0); the node takes a picture count.
             require(rir->rir_flags.bits.enable_rir_row && !rir->rir_flags.bits.enable_rir_column,
                 "only a rolling row intra refresh is supported", VA_STATUS_ERROR_UNIMPLEMENTED);
             const unsigned rows = rir->intra_insert_size;
@@ -309,12 +303,9 @@ public:
             const unsigned mb_rows = (coded_height + 15) / 16;
             intra_refresh_period_ = mb_rows > rows ? (mb_rows + rows - 1) / rows : 1;
         }
-        // Per-context control, and the client may render the refresh buffer
-        // with one picture only; every picture carries what it last
-        // configured, or apply_dynamic() reads the next one as a change.
-        // The layer count is also per context and is sent with the first
-        // picture, so every picture repeats the last structure the client
-        // gave, like the refresh period above.
+        // Both are per-context controls the client may send once, so every
+        // picture repeats the last value; reading a later picture as "none"
+        // would fail the change check in apply_dynamic().
         temporal_layers_ = temporal_layers_of(picture.misc, temporal_layers_);
         out.temporal_layers = temporal_layers_;
         out.intra_refresh_period = intra_refresh_period_;
@@ -363,10 +354,7 @@ private:
     // rate rather than the client's target.
     uint32_t bitrate_ = 0;
     uint32_t peak_bitrate_ = 0;
-    // The sweep period the client configured most recently, for the same
-    // reason as the two rates above.
     unsigned intra_refresh_period_ = 0;
-    // The temporal layer count the client last configured.
     unsigned temporal_layers_ = 0;
 };
 

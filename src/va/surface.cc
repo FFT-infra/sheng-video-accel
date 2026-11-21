@@ -297,9 +297,8 @@ VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, 
                 external = attribute.value.value.p;
                 break;
             case VASurfaceAttribDRMFormatModifiers: {
-                // Resolved after the loop: the list is a preference order,
-                // and the answer depends on the final pixel format, which a
-                // client may name before or after this attribute.
+                // Resolved after the loop: the answer depends on the pixel
+                // format, which a client may name after this attribute.
                 iris::require(attribute.value.type == VAGenericValueTypePointer && attribute.value.value.p,
                     "null DRM format modifier list", VA_STATUS_ERROR_INVALID_PARAMETER);
                 modifier_list = static_cast<const VADRMFormatModifierList*>(attribute.value.value.p);
@@ -314,13 +313,9 @@ VAStatus createSurfaces2(VADriverContextP ctx, unsigned format, unsigned width, 
             }
         }
         if (modifier_list) {
-            // A client asking for a UBWC surface (Chrome, a Wayland
-            // compositor) lists the modifiers it can consume, most preferred
-            // first; the driver grants the first it can produce. Only
-            // QCOM_COMPRESSED on 8-bit NV12 exists here, and only with the
-            // opt-in switch. A list that names it but not LINEAR is refused
-            // rather than downgraded: the client never said it could read
-            // linear memory.
+            // Grant the first modifier in the client's preference order that
+            // this driver can produce. A list naming neither is refused, not
+            // downgraded: the client never said it could read linear memory.
             const bool ubwc_supported = d.capabilities.ubwc && format == VA_RT_FORMAT_YUV420
                 && fourcc == VA_FOURCC_NV12;
             bool granted = false;
@@ -554,11 +549,9 @@ VAStatus querySurfaceError(VADriverContextP ctx, VASurfaceID id, VAStatus error_
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
             surface(d, id);
         }
-        // libva dispatches this slot without a null check, so leaving it empty
-        // crashes any client that asks after a failed sync. The firmware
-        // reports whole-picture failures, not per-MB ones, so there is no
-        // record to hand back: a valid surface answers with an empty list and
-        // the caller reads its own error status.
+        // libva dispatches this slot without a null check. The firmware
+        // reports whole-picture failures, so there is no per-MB record to
+        // hand back: a valid surface answers with an empty list.
         (void)error_status;
         *error_info = nullptr;
         return VA_STATUS_SUCCESS;
@@ -587,9 +580,8 @@ VAStatus querySurfaceAttributes(VADriverContextP ctx, VAConfigID config, VASurfa
     add(VASurfaceAttribPixelFormat, VA_FOURCC_NV12, VA_SURFACE_ATTRIB_GETTABLE | VA_SURFACE_ATTRIB_SETTABLE);
     const VAProfile profile = it->second.profile;
     // The encoder's raw port is NV12, or P010 for a Main 10 config once the
-    // kernel module accepts P010 input. A decode surface follows the profile,
-    // and a VideoProc surface follows the config's RT format: the processor
-    // scales P010 as well as NV12, one kernel per sample width.
+    // kernel module accepts P010 input. A decode surface follows the profile;
+    // a VideoProc surface follows the config's RT format.
     const bool encoding = it->second.entrypoint == VAEntrypointEncSlice;
     const bool encoding_p010 = encoding && profile == VAProfileHEVCMain10 && d.capabilities.encode_p010;
     // A VideoProc config creates the render target, not a decoded picture, so
@@ -678,9 +670,8 @@ VAStatus exportSurfaceHandle(VADriverContextP ctx, VASurfaceID id, uint32_t mem_
         desc.objects[0].drm_format_modifier = layout.compressed() ? layout.modifier : DRM_FORMAT_MOD_LINEAR;
         const bool p010 = layout.fourcc == VA_FOURCC_P010;
         if (layout.compressed()) {
-            // UBWC: one R8 layer per Q08C plane, at the kernel's offsets.
-            // The composed-layer form has no meaning for compressed memory
-            // and is refused rather than described wrongly.
+            // One R8 layer per Q08C plane, at the kernel's offsets. The
+            // composed-layer form has no meaning for compressed memory.
             iris::require(!(flags & VA_EXPORT_SURFACE_COMPOSED_LAYERS),
                 "a UBWC surface exports separate planes", VA_STATUS_ERROR_INVALID_PARAMETER);
             desc.num_layers = layout.plane_count;

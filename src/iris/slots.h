@@ -33,8 +33,7 @@ struct Layout {
     unsigned storage_height = 0; // rows before the chroma plane
     unsigned data_offset = 0;
     unsigned size = 0;
-    // DRM_FORMAT_MOD_LINEAR, or DRM_FORMAT_MOD_QCOM_COMPRESSED when the
-    // CAPTURE format is Q08C and the four planes below describe the buffer.
+    // QCOM_COMPRESSED when the CAPTURE format is Q08C.
     uint64_t modifier = 0;
     struct Plane {
         unsigned offset = 0;

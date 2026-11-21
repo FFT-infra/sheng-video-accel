@@ -29,8 +29,8 @@ VAStatus guarded(VADriverContextP ctx, const char* where, auto&& body)
     }
 }
 
-// A raw packed header is concatenated onto the firmware's Annex-B stream as
-// it stands, so it has to begin a NAL of its own.
+// The header is concatenated onto the firmware's Annex-B stream as it stands,
+// so it has to begin a NAL of its own.
 bool starts_with_start_code(const uint8_t* data, size_t size)
 {
     if (size >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1)
@@ -870,9 +870,8 @@ VAStatus createContext(VADriverContextP ctx, VAConfigID config, int width, int h
         sc.height = c->height;
         sc.surface_count = static_cast<unsigned>(std::max(count, 0));
         sc.import_allowed = d.capabilities.import_formats.count(sc.codec_pixelformat) != 0;
-        // UBWC is a property of the surfaces the context decodes into: every
-        // render target has to carry the same modifier, and a compressed
-        // target turns the session's CAPTURE format into Q08C.
+        // A compressed render target turns the session's CAPTURE format into
+        // Q08C, and one CAPTURE format cannot serve two layouts.
         for (int i = 0; i < count; ++i) {
             auto it = d.surfaces.find(render_targets[i]);
             if (it == d.surfaces.end())
@@ -1002,8 +1001,6 @@ VAStatus beginPicture(VADriverContextP ctx, VAContextID id, VASurfaceID surface_
             // it set after a rejected call, and every later vaBeginPicture on
             // this context would fail with "picture already in progress".
             if (c->encoding()) {
-                // Main 10 is the only encode profile whose raw input is
-                // P010; every 8-bit profile takes NV12.
                 const bool wants_p010 = c->profile == VAProfileHEVCMain10;
                 iris::require(s->fourcc == (wants_p010 ? VA_FOURCC_P010 : VA_FOURCC_NV12),
                     wants_p010 ? "Main 10 encode input must be P010" : "encode input must be NV12",
@@ -1110,8 +1107,7 @@ VAStatus renderPicture(VADriverContextP ctx, VAContextID id, VABufferID* buffers
                     c->enc_picture.picture = b->data.data();
                     break;
                 case VAEncMiscParameterBufferType:
-                    // A client can create a misc buffer with any element size;
-                    // the header we are about to read is not guaranteed to fit.
+                    // A client can create a misc buffer with any element size.
                     iris::require(b->size >= sizeof(VAEncMiscParameterBuffer),
                         "encode misc buffer is too small", VA_STATUS_ERROR_INVALID_PARAMETER);
                     for (unsigned k = 0; k < b->count; ++k) {
@@ -1123,20 +1119,15 @@ VAStatus renderPicture(VADriverContextP ctx, VAContextID id, VABufferID* buffers
                         case VAEncMiscParameterTypeRIR:
                             break;
                         case VAEncMiscParameterTypeTemporalLayerStructure:
-                            // Read by the codec translator, which bounds the
-                            // layer count and every id. The element has to
-                            // hold the whole structure here because that read
-                            // happens after this check.
+                            // The translator reads the whole structure after
+                            // this check, so it has to fit here.
                             iris::require(b->size >= sizeof(VAEncMiscParameterBuffer)
                                     + sizeof(VAEncMiscParameterTemporalLayerStructure),
                                 "temporal layer buffer is too small", VA_STATUS_ERROR_INVALID_PARAMETER);
                             break;
                         case VAEncMiscParameterTypeQualityLevel:
-                            // One advertised level. The firmware has no
-                            // quality knob, so a client asking for more must
-                            // be told instead of silently ignored. The
-                            // quality_level field follows the header, so a
-                            // truncated element cannot be read here.
+                            // One level advertised, no knob behind it: a
+                            // larger request is refused, not ignored.
                             iris::require(b->size >= sizeof(VAEncMiscParameterBuffer) + sizeof(uint32_t),
                                 "encode quality buffer is too small", VA_STATUS_ERROR_INVALID_PARAMETER);
                             iris::require(reinterpret_cast<const VAEncMiscParameterBufferQualityLevel*>(
@@ -1144,12 +1135,10 @@ VAStatus renderPicture(VADriverContextP ctx, VAContextID id, VABufferID* buffers
                                 "unsupported encoder quality level", VA_STATUS_ERROR_INVALID_PARAMETER);
                             break;
                         case VAEncMiscParameterTypeROI: {
-                            // The kernel control takes a delta-QP per
-                            // macroblock and nothing else, so only that form
-                            // has a meaning here. The regions pointer in the
-                            // parameter buffer is client memory, valid only
-                            // until vaEndPicture: the rectangles are copied
-                            // now and the buffer is never read again.
+                            // The kernel control takes delta-QP per macroblock
+                            // and nothing else. The regions are client memory
+                            // valid only until vaEndPicture, so they are
+                            // copied now.
                             iris::require(d.capabilities.encode_roi_regions > 0, "ROI is not supported",
                                 VA_STATUS_ERROR_UNIMPLEMENTED);
                             iris::require(b->size >= sizeof(VAEncMiscParameterBuffer)
@@ -1186,12 +1175,10 @@ VAStatus renderPicture(VADriverContextP ctx, VAContextID id, VABufferID* buffers
                         c->enc_picture.slices.push_back(b->data.data() + static_cast<size_t>(k) * b->size);
                     break;
                 case VAEncPackedHeaderParameterBufferType:
-                    // VA pairs one parameter buffer with the data buffer that
-                    // follows it, and the pair becomes one NAL in front of
-                    // the access unit. Only a raw header has a meaning here:
-                    // the firmware writes the parameter sets and the slice
-                    // headers itself, and a client-supplied sequence header
-                    // would contradict the stream it actually coded.
+                    // VA pairs a parameter buffer with the data buffer that
+                    // follows it; the pair becomes one NAL ahead of the access
+                    // unit. Only a raw header has a meaning here: the firmware
+                    // writes the parameter sets and slice headers itself.
                     for (unsigned k = 0; k < b->count; ++k) {
                         iris::require(b->size >= sizeof(VAEncPackedHeaderParameterBuffer),
                             "packed header parameter buffer is too small", VA_STATUS_ERROR_INVALID_PARAMETER);
@@ -1292,7 +1279,7 @@ VAStatus endPicture(VADriverContextP ctx, VAContextID id)
             iris::require(c->enc_picture.picture != nullptr, "encode picture has no picture parameters",
                 VA_STATUS_ERROR_INVALID_PARAMETER);
             // A parameter buffer with no data buffer describes a header the
-            // client never sent; the picture would silently lose it.
+            // client never sent.
             iris::require(!c->enc_packed_pending, "packed header parameter has no data buffer",
                 VA_STATUS_ERROR_INVALID_PARAMETER);
             const VABufferID coded_id = c->encoder->coded_buf(c->enc_picture);

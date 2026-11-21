@@ -19,13 +19,11 @@ VAStatus guarded(VADriverContextP ctx, const char* where, auto&& body)
 }
 
 // The RT-format mask a VLD config answers, and the default when a client
-// opens one without an RT-format attribute (FFmpeg does this for VP9 P2).
-// Both surfaces must agree, so one function computes them.
+// opens one without an RT-format attribute.
 uint32_t decode_rt_format(const DriverData& d, VAProfile profile)
 {
-    // VP9 Profile 2 has no legal 8-bit stream: libvpx refuses to encode one
-    // and src/codec/vp9.cc requires bit_depth == 10. HEVC Main10 and AV1
-    // Profile0 also decode 8-bit streams, so they keep both bits.
+    // VP9 Profile 2 has no legal 8-bit stream. HEVC Main10 and AV1 Profile0
+    // also decode 8-bit streams, so they keep both bits.
     if (profile == VAProfileVP9Profile2 && d.capabilities.p010)
         return VA_RT_FORMAT_YUV420_10;
     uint32_t value = VA_RT_FORMAT_YUV420;
@@ -93,7 +91,6 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
             if (decode) {
                 attributes[i].value = decode_rt_format(d, profile);
             } else if (encode) {
-                // The encoder's raw port is NV12, or P010 for Main 10.
                 attributes[i].value = profile == VAProfileHEVCMain10 ? VA_RT_FORMAT_YUV420_10
                                                                     : VA_RT_FORMAT_YUV420;
             } else if (vpp) {
@@ -130,8 +127,7 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
         case VAConfigAttribEncPackedHeaders:
             // HEVC only: its raw path is the client's SEI. h264_vaapi's
             // buffering-period SEI names the SPS by id and FFmpeg writes no
-            // parameter sets for MISC alone, so every CBR/VBR encode fails in
-            // the client.
+            // parameter sets for MISC alone, so CBR/VBR encode fails there.
             attributes[i].value = !encode ? VA_ATTRIB_NOT_SUPPORTED
                 : hevc_encode       ? VA_ENC_PACKED_HEADER_MISC
                                     : VA_ENC_PACKED_HEADER_NONE;
@@ -147,9 +143,8 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
             attributes[i].value = encode ? VA_ENC_INTERLACED_NONE : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribEncSliceStructure:
-            // A slice may begin at any macroblock. Without the multi-slice
-            // controls there is one full-picture slice, which EQUAL_ROWS is
-            // the closest VA shape for.
+            // Without the multi-slice controls there is one full-picture
+            // slice, which EQUAL_ROWS is the closest VA shape for.
             attributes[i].value = encode
                 ? (d.capabilities.encode_multi_slice ? VA_ENC_SLICE_STRUCTURE_ARBITRARY_MACROBLOCKS
                                                      : VA_ENC_SLICE_STRUCTURE_EQUAL_ROWS)
@@ -173,7 +168,7 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
                 ? 0 : VA_ATTRIB_NOT_SUPPORTED;
             break;
         case VAConfigAttribEncRateControlExt: {
-            // Six layers, no per-layer bitrates: the firmware ignores them
+            // Six layers, no per-layer bitrates: the firmware ignores those
             // while a total is set.
             if (!encode || !d.capabilities.encode_temporal_layers) {
                 attributes[i].value = VA_ATTRIB_NOT_SUPPORTED;
@@ -186,8 +181,7 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
             break;
         }
         case VAConfigAttribEncROI: {
-            // The node's ROI control takes delta-QP per macroblock (0017), so
-            // that is the only form advertised.
+            // The node's ROI control takes delta-QP per macroblock (0017).
             if (!encode || !d.capabilities.encode_roi_regions) {
                 attributes[i].value = VA_ATTRIB_NOT_SUPPORTED;
                 break;
@@ -220,7 +214,7 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
         }
         case VAConfigAttribEncHEVCBlockSizes: {
             // 32x32 CTB, 8x8 smallest block, 4x4..32x32 transforms, no
-            // hierarchy. FFmpeg otherwise guesses and logs that it guessed.
+            // hierarchy.
             if (!hevc_encode) {
                 attributes[i].value = VA_ATTRIB_NOT_SUPPORTED;
                 break;
@@ -239,7 +233,7 @@ VAStatus getConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoi
 #endif
         default:
             // ROI, quantization, JPEG, tiling and the extended rate-control
-            // surface stay unsupported: the firmware decides the layout.
+            // surface: the firmware decides the layout.
             attributes[i].value = VA_ATTRIB_NOT_SUPPORTED;
             break;
         }
@@ -285,8 +279,8 @@ VAStatus createConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entr
             getConfigAttributes(ctx, profile, entrypoint, &query, 1);
             if (query.value != VA_ATTRIB_NOT_SUPPORTED) {
                 // An RT-format the driver cannot honour is a format refusal,
-                // not a generic attribute one: clients key off this status to
-                // pick another surface format.
+                // not a generic attribute one: clients key off it to pick
+                // another surface format.
                 const VAStatus status = attributes[i].type == VAConfigAttribRTFormat
                     ? VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT : VA_STATUS_ERROR_ATTR_NOT_SUPPORTED;
                 iris::require((attributes[i].value & ~query.value) == 0,

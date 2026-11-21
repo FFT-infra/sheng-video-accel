@@ -35,32 +35,22 @@ struct EncodePicture {
     // VAEncSliceParameterBuffer<Codec>. The firmware owns the slice layout,
     // but CQP takes the picture QP from the first slice's delta.
     std::vector<const void*> slices;
-    // Raw packed headers the client sent with this picture, in render order.
-    // Each is one Annex-B NAL as the client wrote it, start code included.
+    // One Annex-B NAL each, start code included.
     std::vector<std::vector<uint8_t>> packed_headers;
-    // The client's ROI regions (VAEncROI), copied out of the misc buffer that
-    // named them. The array that buffer points at is client memory, valid
-    // only until vaEndPicture, so the regions are copied when the picture is
-    // rendered and the buffer itself is not read again.
+    // Copied out of the misc buffer that named them: its array is client
+    // memory, valid only until vaEndPicture.
     std::vector<VAEncROI> roi;
     unsigned surface_width = 0, surface_height = 0;
 };
 
-// The delta-QP range the encoder node's ROI control takes (min -31, max 30
-// in packaging/kernel/0017-*). VA's roi_value is an int8_t and a client may
-// name anything in that range, so a value outside the control's is clamped
-// rather than refused: the region still means "cheaper" or "dearer".
+// The range packaging/kernel/0017-* takes. VA's roi_value is an int8_t, so an
+// out-of-range value is clamped: the region still means cheaper or dearer.
 constexpr int32_t kRoiMinDeltaQp = -31;
 constexpr int32_t kRoiMaxDeltaQp = 30;
 
-// Map the client's ROI rectangles onto the encoder's per-macroblock delta-QP
-// grid, one cell per LCU of `lcu` pixels (16 for H.264, 32 for HEVC) over the
-// surface's visible size. That is the grid the kernel builds from its own
-// unaligned OUTPUT format, so the two agree. A cell no region covers is 0, a
-// rectangle is clipped to the picture, and when two regions overlap the one
-// the client listed first wins — VA gives overlapping regions no meaning and
-// Intel's driver resolves them the same way. Returns an empty map when the
-// picture carries no regions.
+// One cell per LCU of `lcu` pixels over the surface's visible size, which is
+// the grid the kernel builds from its own unaligned OUTPUT format. The first
+// region listed wins an overlap; VA gives overlaps no meaning.
 inline std::vector<int32_t> roi_map_of(const EncodePicture& picture, unsigned lcu)
 {
     if (picture.roi.empty() || !picture.surface_width || !picture.surface_height || !lcu)
@@ -107,13 +97,10 @@ inline const void* find_misc(const std::vector<const void*>& misc, VAEncMiscPara
     return nullptr;
 }
 
-// The temporal layer count from a VAEncMiscParameterTemporalLayerStructure,
-// or `current` when this picture carries none. The structure belongs to a
-// coded sequence: a client sends it with the first picture, so the count is
-// remembered and repeated like the rate-control parameters. The firmware
-// derives layer membership from the count alone, so a structure whose
-// pattern cannot follow that hierarchy is refused instead of silently
-// coded with a different membership.
+// `current` when this picture carries no structure: the client sends one with
+// the first picture, so the count is remembered and repeated like the
+// rate-control parameters. The firmware derives membership from the count
+// alone, so a pattern that cannot follow that hierarchy is refused.
 inline unsigned temporal_layers_of(const std::vector<const void*>& misc, unsigned current)
 {
     const auto* structure = static_cast<const VAEncMiscParameterTemporalLayerStructure*>(
@@ -127,9 +114,6 @@ inline unsigned temporal_layers_of(const std::vector<const void*>& misc, unsigne
     for (uint32_t i = 0; i < structure->periodicity; ++i)
         require(structure->layer_id[i] < structure->number_of_layers,
             "a temporal layer id exceeds the layer count", VA_STATUS_ERROR_INVALID_PARAMETER);
-    // The firmware derives membership from the count, and the advertised
-    // attribute says per-layer bitrate control is off, so the client's
-    // pattern is advisory here; the count is what is honoured.
     return structure->number_of_layers;
 }
 

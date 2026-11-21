@@ -7,7 +7,6 @@
 
 #include "../iris/vpp/scale.h"
 #include "../util/error.h"
-#include "../util/prime.h"
 
 #include <algorithm>
 #include <cstdarg>
@@ -15,6 +14,7 @@
 #include <cstring>
 
 extern "C" {
+#include <libdrm/drm_fourcc.h>
 #include <linux/v4l2-controls.h>
 #include <va/va_drmcommon.h>
 }
@@ -33,9 +33,9 @@ bool p010_decode_profile(VAProfile profile)
 
 iris::Publish publish_policy(const DriverData& d, const Surface& surface, const iris::Session& session)
 {
-    // A UBWC surface is compressed memory: only Direct (the surface takes the
-    // slot) and Import (the client's own compressed buffer) have a reader.
-    // Copy would have to decompress, which no engine here does.
+    // UBWC is compressed memory: only Direct (the surface takes the slot) and
+    // Import (the client's own buffer) have a reader. Copy would have to
+    // decompress, which no engine here does.
     if (surface.modifier == DRM_FORMAT_MOD_QCOM_COMPRESSED)
         return session.supports_import() && surface.persistent_export ? iris::Publish::Import
                                                                       : iris::Publish::Direct;
@@ -50,11 +50,10 @@ iris::Publish publish_policy(const DriverData& d, const Surface& surface, const 
         break;
     }
     if (!surface.persistent_export) {
-        // Direct pins a CAPTURE frame until the client consumes the picture.
-        // Where the memory budget leaves the pool no headroom over the
-        // firmware minimum, a client whose consumer lags can pin every slot
-        // and stall the session (8K, FFmpeg's hwdownload backlog); Copy
-        // releases the slot at the completion.
+        // Direct pins a CAPTURE frame until the client consumes the picture;
+        // where the memory budget leaves no headroom, a lagging consumer can
+        // pin every slot and stall the session (8K, FFmpeg's hwdownload
+        // backlog). Copy releases the slot at the completion.
         return session.can_publish_direct() ? iris::Publish::Direct : iris::Publish::Copy;
     }
     // A pre-exporting client (Chrome) gets its own buffer decoded into when
@@ -79,8 +78,7 @@ void require_linear(DriverData& d, const Surface& surface, const char* operation
 iris::StableBuffer& ensure_stable(DriverData& d, Surface& surface)
 {
     // An imported UBWC surface already owns its buffer: the client's
-    // compressed memory, which Import publish decodes into. Only the
-    // allocation is refused — there is no linear layout to allocate.
+    // compressed memory, which Import publish decodes into.
     if (!surface.stable) {
         require_linear(d, surface, "the stable buffer");
         surface.stable = iris::allocate_stable(d.render_fd, iris::stable_layout(surface.fourcc, surface.width, surface.height));
@@ -150,24 +148,19 @@ Capabilities probe_capabilities(const iris::Options& options)
         auto encoder = iris::open_device(options.encoder_path, iris::NodeRole::Encoder);
         caps.encoder_node = encoder->path();
         const bool encoder_nv12 = encoder->format_supported(iris::Queue::Output, V4L2_PIX_FMT_NV12);
-        // The multi-slice controls arrive with the kernel patch. Probing the
-        // menu is enough: all three are registered together, and a module
-        // without the patch answers no control at all.
+        // All three multi-slice controls are registered together.
         caps.encode_multi_slice
             = encoder->get_control(V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE).has_value();
         caps.encode_p010 = encoder->format_supported(iris::Queue::Output, V4L2_PIX_FMT_P010);
-        // The hierarchical controls are one set; the H.264 enable and the
-        // HEVC layer count are the two switches the session writes.
+        // The H.264 enable and the HEVC layer count are the two switches the
+        // session writes.
         caps.encode_temporal_layers
             = encoder->get_control(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING).has_value()
             && encoder->get_control(V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_LAYER).has_value();
-        // The ROI map is the kernel patch's own control, written as a dynamic
-        // s32 array. A module without it answers no control, and a control of
-        // any other shape is not the one the session writes: advertising ROI
-        // then would fail at the first picture. Advertising also needs the
-        // opt-in: the qualified firmware completes the metadata buffer but
-        // codes the same picture either way, so a client would see regions
-        // accepted and ignored (TEST-RESULTS.md).
+        // A control of any other shape is not the one the session writes. The
+        // opt-in is separate: the qualified firmware completes the metadata
+        // buffer but codes the picture unchanged, so a client would see
+        // regions accepted and ignored (TEST-RESULTS.md).
         const auto roi = encoder->query_control(iris::kRoiDeltaQpControl);
         if (options.roi && roi && roi->type == V4L2_CTRL_TYPE_INTEGER
             && roi->elem_size == sizeof(int32_t) && (roi->flags & V4L2_CTRL_FLAG_DYNAMIC_ARRAY)

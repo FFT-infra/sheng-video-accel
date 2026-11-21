@@ -325,9 +325,7 @@ void Session::publish(Target& target, FrameRef frame, const Dequeued& completion
     } else if (target.publish == Publish::Import) {
         // Asked for Import, got an Mmap pool: the client buffer exists, so
         // fill it the Copy way. supports_import() tells the caller. UBWC has
-        // no linear copy: the slot's bytes are compressed and the client's
-        // buffer is a different allocation, so degrading would hand out
-        // garbage. A layout mismatch is the session's only way here.
+        // no linear copy, so degrading would hand out garbage.
         if (frame->layout().compressed()) {
             trace_("%s token=%llu index=%u flags=%#x publish=ubwc-copy-refused", event ? event : "capture",
                 static_cast<unsigned long long>(completion.timestamp_us), completion.index, completion.flags);

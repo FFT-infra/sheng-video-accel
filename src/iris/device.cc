@@ -63,8 +63,7 @@ public:
 
     bool capture_from_system() const override
     {
-        // A stock module has no such parameter and its CAPTURE pool keeps the
-        // smaller budget.
+        // A stock module has no such parameter.
         std::ifstream file("/sys/module/qcom_iris/parameters/capture_sg");
         std::string value;
         return static_cast<bool>(file >> value) && value == "Y";
@@ -173,11 +172,8 @@ public:
 
     bool set_control_array(uint32_t id, const int32_t* values, size_t count) override
     {
-        // V4L2_CTRL_WHICH_CUR_VAL is the only selector a driver-side array
-        // write needs, and it is what a control without a request API takes.
-        // The union member is `ptr` rather than `p_s32`: the vendored UAPI
-        // headers this tree builds against predate the s32 pointer, and the
-        // ioctl only reads the address.
+        // `ptr`, not `p_s32`: the vendored UAPI headers predate the s32
+        // pointer, and the ioctl only reads the address.
         v4l2_ext_control control = {};
         control.id = id;
         control.size = static_cast<uint32_t>(count * sizeof(int32_t));
@@ -188,13 +184,11 @@ public:
         controls.controls = &control;
         if (call(fd_, VIDIOC_S_EXT_CTRLS, &controls) == 0)
             return true;
-        // The control class is absent entirely: EINVAL from the id lookup or
-        // ENOTTY from a node without the control API.
+        // No such control: EINVAL from the id lookup, ENOTTY from a node
+        // without the control API. ENOSPC is a shape the control refused,
+        // which is a caller bug.
         if (errno == EINVAL || errno == ENOTTY)
             return false;
-        // ENOSPC means the array is larger than the control's dims: the node
-        // has the control and refused this shape. That is a caller bug, not a
-        // missing capability.
         throw Error(VA_STATUS_ERROR_OPERATION_FAILED, std::string("S_EXT_CTRLS: ") + std::strerror(errno));
     }
 

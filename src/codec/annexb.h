@@ -33,12 +33,9 @@ std::vector<NalUnit> split_annexb(const uint8_t* data, size_t size, Codec codec)
 std::vector<uint8_t> prepend_parameter_sets(
     const std::vector<uint8_t>& access_unit, std::vector<NalUnit>& last, Codec codec);
 
-// `access_unit` with `prefix` inserted immediately in front of its first
-// coded-picture NAL, which leaves the parameter sets in front of it as the
-// decoder expects. The prefix is a client's raw packed header: one or more
-// Annex-B NALs, start code included. An access unit without a start code at
-// all gets the prefix in front of it; one with no coded-picture NAL (only
-// parameter sets) gets the prefix at the end.
+// `prefix` goes immediately in front of the first coded-picture NAL, leaving
+// the parameter sets ahead of it. An access unit with no start code at all
+// gets the prefix in front; one with no coded-picture NAL gets it at the end.
 std::vector<uint8_t> insert_before_vcl(
     const std::vector<uint8_t>& access_unit, const std::vector<uint8_t>& prefix, Codec codec);
 

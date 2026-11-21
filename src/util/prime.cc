@@ -72,9 +72,8 @@ unsigned div_round_up(unsigned value, unsigned divisor)
 
 PlaneLayout ubwc_layout(unsigned width, unsigned height)
 {
-    // iris_yuv_buffer_size_qc08c(): four planes, each rounded to 4 KiB:
-    // Y meta (width/32 by height/8), Y, UV meta (width/64 by height/16),
-    // UV. Pitch and scanlines follow the same alignments as the GPU's.
+    // iris_yuv_buffer_size_qc08c(), byte for byte: Y meta, Y, UV meta, UV,
+    // each rounded to 4 KiB.
     require(width && height, "surface geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
     PlaneLayout layout;
     layout.modifier = DRM_FORMAT_MOD_QCOM_COMPRESSED;
@@ -135,9 +134,8 @@ PlaneLayout validate_prime2(const VADRMPRIMESurfaceDescriptor& descriptor, unsig
             || descriptor.objects[0].drm_format_modifier == DRM_FORMAT_MOD_QCOM_COMPRESSED,
         "import requires a linear or QCOM-compressed DMA-BUF", VA_STATUS_ERROR_INVALID_PARAMETER);
     if (descriptor.objects[0].drm_format_modifier == DRM_FORMAT_MOD_QCOM_COMPRESSED) {
-        // UBWC NV12: the buffer holds the four Q08C planes in the kernel's
-        // order, each described by its own layer. A client that lays them out
-        // differently would hand the firmware the wrong memory.
+        // The four Q08C planes in the kernel's order, one layer each. Any
+        // other layout would hand the firmware the wrong memory.
         require(fourcc == VA_FOURCC_NV12, "only NV12 has a UBWC layout", VA_STATUS_ERROR_INVALID_PARAMETER);
         const PlaneLayout layout = ubwc_layout(width, height);
         require(descriptor.num_layers == 4, "a UBWC surface has four planes",

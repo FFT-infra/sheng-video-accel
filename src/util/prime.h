@@ -23,15 +23,13 @@ namespace iris {
 
 // Byte geometry of one NV12/P010 buffer in the Iris CAPTURE layout.
 struct PlaneLayout {
-    // DRM_FORMAT_MOD_LINEAR, or DRM_FORMAT_MOD_QCOM_COMPRESSED for the
-    // four-plane UBWC layout the QC08C CAPTURE format carries.
+    // QCOM_COMPRESSED for the four-plane QC08C layout.
     uint64_t modifier = 0;
     unsigned stride = 0; // bytes per row, both planes (linear)
     unsigned storage_height = 0; // luma rows before the chroma plane (linear)
     unsigned chroma_offset = 0; // (linear)
     unsigned size = 0; // whole allocation
-    // Compressed layouts: Y meta, Y, UV meta, UV, in that order, each plane
-    // as the kernel's iris_yuv_buffer_size_qc08c() rounds it.
+    // Y meta, Y, UV meta, UV.
     struct Plane {
         unsigned offset = 0;
         unsigned pitch = 0;
@@ -42,8 +40,7 @@ struct PlaneLayout {
     bool compressed() const { return plane_count != 0; }
 };
 
-// The Q08C geometry for `width` x `height`, matching
-// iris_yuv_buffer_size_qc08c() byte for byte.
+// The Q08C geometry for `width` x `height`.
 PlaneLayout ubwc_layout(unsigned width, unsigned height);
 
 // The CAPTURE layout for `fourcc` at `width` x `height`; the one definition

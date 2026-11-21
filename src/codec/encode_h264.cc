@@ -254,13 +254,10 @@ public:
                 VA_STATUS_ERROR_UNIMPLEMENTED);
             require(slice->num_ref_idx_l0_active_minus1 == 0 && slice->num_ref_idx_l1_active_minus1 == 0,
                 "multiple reference indexes are not supported", VA_STATUS_ERROR_UNIMPLEMENTED);
-            // The first slice starts at the top of the picture, and every
-            // slice of one picture is coded alike: the picture's type,
-            // deblocking and QP are per-context controls, so slices that
-            // disagreed could not be expressed. The boundaries themselves
+            // Picture type, deblocking and QP are per-context controls, so
+            // slices that disagreed could not be expressed. The boundaries
             // are the firmware's: it splits the picture into equal shares
-            // from the count, and the client's addresses are its expectation
-            // rather than an instruction.
+            // from the count.
             require(slice->macroblock_address == 0 && slice->num_macroblocks != 0,
                 "invalid slice geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
             for (const void* raw : picture.slices) {
@@ -347,14 +344,10 @@ public:
             out.peak_bitrate = 0;
         if (const auto* rir = static_cast<const VAEncMiscParameterRIR*>(
                 find_misc(picture.misc, VAEncMiscParameterTypeRIR))) {
-            // VA names a rolling refresh as a window of MB rows or columns
-            // and a per-picture insertion location; the firmware takes one
-            // period and sweeps the picture itself. Only the window size
-            // survives that mapping, as the number of pictures one full
-            // sweep takes. A request the firmware cannot act on (adaptive,
-            // or a window the client did not size) is refused rather than
-            // silently dropped: the client asked for a stream property the
-            // output would not have.
+            // The firmware takes one period and sweeps the picture itself,
+            // so only VA's window size survives, as the pictures one sweep
+            // takes. A request it cannot act on is refused rather than
+            // silently dropped.
             require(rir->rir_flags.bits.enable_rir_row && !rir->rir_flags.bits.enable_rir_column,
                 "only a rolling row intra refresh is supported", VA_STATUS_ERROR_UNIMPLEMENTED);
             const unsigned rows = rir->intra_insert_size;
@@ -363,13 +356,9 @@ public:
             const unsigned mb_rows = sequence->picture_height_in_mbs;
             intra_refresh_period_ = mb_rows > rows ? (mb_rows + rows - 1) / rows : 1;
         }
-        // The period is a per-context control and the client may render the
-        // refresh buffer with one picture only, so every picture carries the
-        // value the client last configured. Reading a later picture as "no
-        // refresh" would fail the change check in apply_dynamic().
-        // The layer count is also per context and is sent with the first
-        // picture, so every picture repeats the last structure the client
-        // gave, like the refresh period above.
+        // Both are per-context controls the client may send once, so every
+        // picture repeats the last value; reading a later picture as "none"
+        // would fail the change check in apply_dynamic().
         temporal_layers_ = temporal_layers_of(picture.misc, temporal_layers_);
         out.temporal_layers = temporal_layers_;
         out.intra_refresh_period = intra_refresh_period_;
@@ -402,10 +391,7 @@ private:
     // rate rather than the client's target.
     uint32_t bitrate_ = 0;
     uint32_t peak_bitrate_ = 0;
-    // The sweep period the client configured most recently, for the same
-    // reason as the two rates above.
     unsigned intra_refresh_period_ = 0;
-    // The temporal layer count the client last configured.
     unsigned temporal_layers_ = 0;
 };
 
