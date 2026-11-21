@@ -127,15 +127,9 @@ void EncoderSession::configure(
     const bool h264 = config_.codec == V4L2_PIX_FMT_H264;
     const bool hevc = config_.codec == V4L2_PIX_FMT_HEVC;
     require(h264 || hevc, "encoder codec", VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
-    // B pictures are opt-in and H.264 only. The firmware holds the newest
-    // queued picture until another arrives, so a client that syncs the
-    // picture it just issued must keep one more picture in flight than the
-    // default; a client that does not stalls at the first pair boundary for
-    // its sync timeout. FFmpeg reaches that shape with -async_depth 3. Its
-    // HEVC path requests B pictures as soon as the config advertises a
-    // future reference, and this kernel and firmware answer that request
-    // with an error completion after nine pictures, so HEVC is refused here
-    // rather than left to produce a truncated stream.
+    // H.264 only, opt-in: the firmware holds the newest queued picture, so
+    // the client needs one more in flight (FFmpeg: -async_depth 3). HEVC's
+    // request errors after nine pictures.
     require(!params.b_frames || options_.b_frames, "B pictures are not enabled",
         VA_STATUS_ERROR_UNIMPLEMENTED);
     require(!params.b_frames || h264, "B pictures are not supported for HEVC",
@@ -218,11 +212,8 @@ void EncoderSession::configure(
     // checked for consistency but do not reach the kernel.
     set_control(V4L2_CID_MPEG_VIDEO_B_FRAMES, static_cast<int32_t>(params.b_frames), "b frames");
     set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, gop_control(aligned_intra_period(params)), "gop size");
-    // Rolling intra refresh. The firmware acts on the period only under CBR:
-    // measured byte-identical to a stream without it under VBR and CQP
-    // (TEST-RESULTS.md, "Encoder capabilities"), so a client asking for it in
-    // either mode is refused rather than handed a stream that ignores the
-    // request.
+    // CBR only: measured byte-identical to a stream without it under VBR and
+    // CQP.
     if (params.intra_refresh_period) {
         require(params.rate_mode == RateMode::Cbr,
             "rolling intra refresh needs CBR; the firmware ignores it otherwise",
@@ -252,18 +243,11 @@ void EncoderSession::configure(
     // gets the intra-period lever instead.
     sync_frame_control_ = device_->set_control(V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME, 0);
     trace_("encode idr lever=%s", sync_frame_control_ ? "sync-frame" : "intra-period");
-    // The ROI control is a dynamic s32 array the module registers with the
-    // 0017 patch. Its dims bound the map; a context whose grid is larger than
-    // that is not encodable with ROI, and the picture is refused rather than
-    // written and failed by the kernel.
     if (options_.roi)
         if (const auto roi = device_->query_control(kRoiDeltaQpControl))
             roi_capacity_ = roi->dims[0];
 
-    // CAPTURE carries the frame rate the firmware rates against; OUTPUT
-    // carries the operating rate, which only affects clocking. One rate is
-    // fixed for the session because S_PARM cannot change while streaming;
-    // the per-picture timestamps advance on the same value.
+    // S_PARM cannot change while streaming, so one rate per session.
     prepare_ = std::move(prepare);
     rate_num_ = params.frame_rate_num ? params.frame_rate_num : 30;
     rate_den_ = params.frame_rate_den ? params.frame_rate_den : 1;
@@ -271,10 +255,7 @@ void EncoderSession::configure(
     device_->set_frame_rate(Queue::Capture, rate_num_, rate_den_);
     device_->set_frame_rate(Queue::Output, rate_num_, rate_den_);
 
-    // Multi-slice. The kernel turns the macroblock budget into the firmware's
-    // slice count, and it accepts one only under CBR or with rate control
-    // off, at 60 fps or less, within the codec's slice geometry. Both are
-    // per-context controls, so the count is fixed here; apply_dynamic()
+    // Per-context controls, so the count is fixed here; apply_dynamic()
     // refuses a later picture that changes it.
     if (params.slices > 1) {
         // The kernel's frame rate is the denominator over the numerator,
@@ -295,11 +276,8 @@ void EncoderSession::configure(
         trace_("encode slices=%u mode=max_mb mb=%u", params.slices, slice_mb);
     }
 
-    // Temporal layers. The firmware derives the layer membership from the
-    // count, so that is all the node takes; H.264 has an explicit enable and
-    // HEVC's layer count is its own switch. Per-layer bitrates are not
-    // written: the advertised attribute says per-layer rate control is off,
-    // and the firmware ignores them while a total bitrate is set.
+    // The firmware derives membership from the count; per-layer bitrates are
+    // ignored while a total is set.
     if (params.temporal_layers > 1) {
         require(params.temporal_layers <= 6, "temporal layers must be between 1 and 6",
             VA_STATUS_ERROR_INVALID_PARAMETER);
@@ -327,12 +305,8 @@ void EncoderSession::configure(
     require(coded.pixelformat == config_.codec, "encoder lost the codec after configuration",
         VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
 
-    // The kernel arms one ROI metadata buffer per control write and attaches
-    // it to the next queued picture. It builds the buffer and subscribes the
-    // firmware's metadata delivery while the session is starting, so the
-    // array must be in place before the queues stream; a client writes its
-    // first map with the picture it belongs to, which is later. Arm an
-    // all-zero map now, once, and every per-picture write replaces it.
+    // The kernel builds the metadata buffer while the queues start, before a
+    // client can write its first map.
     if (roi_capacity_ > 0 && roi_cells() <= roi_capacity_) {
         const std::vector<int32_t> zeros(roi_cells(), 0);
         if (!device_->set_control_array(kRoiDeltaQpControl, zeros.data(), zeros.size()))

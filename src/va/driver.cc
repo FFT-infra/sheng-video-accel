@@ -124,16 +124,9 @@ Capabilities probe_capabilities(const iris::Options& options)
         if (caps.p010)
             caps.profiles.insert(VAProfileVP9Profile2);
     }
-    // AV1 is qualified at 8 and 10 bits (matrix, FFmpeg over alt-ref and
-    // no-alt-ref streams bit-exact against libdav1d, browser media-surface
-    // evidence). The internal-DPB translator submits each picture at
-    // vaEndPicture, so a client that syncs each surface never waits for a
-    // successor; its installed-package matrix, clip, DRC and browser gates
-    // are recorded in TEST-RESULTS.md.
     if (caps.output_formats.count(V4L2_PIX_FMT_AV1) && caps.nv12)
         caps.profiles.insert(VAProfileAV1Profile0);
     // profile-qualified-end
-    // Import is qualified per codec, separately from decoding.
     // import-qualified-begin
     if (caps.output_formats.count(V4L2_PIX_FMT_H264) && caps.nv12)
         caps.import_formats.insert(V4L2_PIX_FMT_H264);
