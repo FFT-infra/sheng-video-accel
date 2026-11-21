@@ -669,37 +669,45 @@ after the run.
 
 ## UBWC surfaces
 
-Opt-in (`V4L2_VA_UBWC=1`); gate `test/iris-ubwc-gate.sh`. Run identity: source
-`8561d10`, `source_dirty=0`, `guard=complete exit=0`, boot
-`edd37f6a-cb04-42b0-b9b7-96360172a5ca`, kernel
-`7.3.4-sm8550-00104-g87ac0f2347eb`, module `a3732c1c…10608` (the series adds
-no kernel patch and the patch set is unchanged), decoder `/dev/video17`
-resolved by `iris_driver`. The first pass loaded the build tree
-(`246e1c21…770c`); `scripts/install-system.sh` then put the same build at
-`/usr/lib64/dri/v4l2_drv_video.so` (the previous file is under
-`~/iris-vaapi-lab/rollback/`) and the gate was rerun there with the same
-results.
+Offered by default, `V4L2_VA_UBWC=0` disables it; gate
+`test/iris-ubwc-gate.sh`. Run identity: source `b6e41c6`, `source_dirty=1`
+(this record is the only dirty file), `guard=complete exit=0`, boot
+`d843e7b8-f05f-4d2d-885d-cdb0fac5b139`, kernel
+`7.3.4-sm8550-00104-g87ac0f2347eb`, module
+`1323d58a…f66a5` (the series adds no kernel patch), decoder `/dev/video17`
+resolved by `iris_driver`, encoder `/dev/video18`. The run used the build-tree
+driver `/home/xinyang/iris-vaapi-lab/src/build/src/v4l2_drv_video.so`, sha256
+`5592247a…533`; the installed package still holds `d15ff198…b7a`, and the
+same gate passes on it with the previous source.
 
 | Gate | Result |
 | --- | --- |
 | `iris-decode-stream-probe` into Q08C, 640x480, H.264/HEVC/VP9/AV1 | CAPTURE `fourcc=0x3231564e modifier=0x500000000000001 planes=4 size=479232`; Y meta `offset=0 pitch=64 rows=64`, Y `4096/640/480`, UV meta `311296/64/32`, UV `315392/640/256` |
 | `vk-ubwc-read`, frames 0 and 11 of each codec | Q08C `luma=0/307200 chroma=0/153600` differing samples against the linear decode |
 | linear control, same frames | `luma=0/307200 chroma=0/153600`; the control goes through the identical copy first, so a Q08C mismatch would be the modifier's |
-| `iris-va-ubwc-probe`, `V4L2_VA_UBWC=1` | 21/21: the grant, 12 frames decoded into four UBWC surfaces, four R8 layers exported at the Q08C offsets with the modifier, and `vaDeriveImage`/`vaGetImage`/`vaPutImage` answered with `VA_STATUS_ERROR_UNIMPLEMENTED` |
-| `iris-va-ubwc-probe`, switch unset | a compressed-only list is refused (`VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT`); a list with a `LINEAR` fallback creates a surface and exports `DRM_FORMAT_MOD_LINEAR` |
+| `iris-va-ubwc-probe`, default (offered) | the grant, 12 frames decoded into four UBWC surfaces, four R8 layers exported at the Q08C offsets with the modifier, and `vaDeriveImage`/`vaGetImage`/`vaPutImage` answered with `VA_STATUS_ERROR_UNIMPLEMENTED` |
+| `iris-va-ubwc-probe`, `V4L2_VA_UBWC=0` | a compressed-only list is refused (`VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT`); a list with a `LINEAR` fallback creates a surface and exports `DRM_FORMAT_MOD_LINEAR` |
 
 The module applies its UBWC stride/scanline property only to AV1 decodes; the
 other three codecs read back exactly without it, so no kernel patch is needed
 for this.
 
-The linear path is unchanged by these commits, on the same build-tree driver:
-`iris-matrix.sh` 48/48 per codec (`drops=0 timeouts=0`),
-`iris-real-clip-gate.sh` plain 120/120 (`import=120 invisible=15`),
-`iris-av1-grain-gate.sh` grain8 20/20 and grain10 2/2, and
-`iris-dynamic-resolution.sh` 101 contexts over 100 transitions (`drops=0`).
-Each is `guard=complete exit=0`; the tree moved only through test and
-documentation commits (`ffb3105` to `7645dc6`), and the driver hash is the
-same at both.
+The same build-tree driver, same boot and module, on the linear path:
+
+| Gate | Result |
+| --- | --- |
+| `iris-real-clip-gate.sh` `set=plain` | 120/120, `import=120 copy=0 invisible=15`, byte-exact |
+| `iris-8k-gate.sh` under the automatic policy | `pool=15` per codec, H.264 30/30 and HEVC, VP9, AV1 4/4 framemd5-exact, `errors=0 last=1 drain=1` |
+| 1080p H.264, 120 frames | `capture configure ... pool=21 memory=mmap firmware-min=6`; `drain begin ... queued=9 held=12 pool=21`, then `drain complete last=1` and 120/120 exact |
+
+The 1080p run is the pool-sizing change: a client that declares no surfaces
+is sized as 17 plus four headroom, floored at the firmware minimum plus the
+eight-picture Direct headroom. The drain shows the margin doing its job —
+twelve slots held by Direct targets, nine queued, and LAST still had a buffer.
+
+`iris-av1-grain-gate.sh` and `iris-dynamic-resolution.sh` were not rerun this
+round; they cover paths this change does not touch (grain synthesis and the
+DRC boundary), and the last records for them are above under the same module.
 
 Installed as the package file, the rest of the target gates pass at source
 `4b0d63e`, `source_dirty=0`, `guard=complete exit=0`:
@@ -721,9 +729,11 @@ The browser gates were not rerun; they need an interactive session.
 
 A compressed surface publishes Direct or Import only. Copy, the image entry
 points, film grain, video processing and the encoder answer
-`VA_STATUS_ERROR_UNIMPLEMENTED`, a completion that would degrade to Copy fails
-with `publish=ubwc-copy-refused`, and Q10C is refused because nothing on this
-stack advertises `QCOM_COMPRESSED` for P010.
+`VA_STATUS_ERROR_UNIMPLEMENTED`, and a completion that would degrade to Copy
+fails with `publish=ubwc-copy-refused`. Q10C stays refused: decoding a 10-bit
+stream into it completes, but the node allocates 4/3 bytes per pixel where the
+GPU's 10-bit UBWC importer requires 2 (640x480: 749568 allocated, 929792
+required), so no reader on this stack can consume the buffer.
 
 ## Boundaries
 
@@ -731,8 +741,8 @@ EGL reads UBWC back as the wrong pixels, so the CPU and Copy paths and the
 image API refuse a compressed surface instead of returning them; `Q08C` exists
 for consumers that take the modifier and the four-plane descriptor, evidenced
 above. `QCOM_COMPRESSED` on P010 is not advertised, so `Q10C` has no reader and
-is not offered. No VA client on this target sets
-`VASurfaceAttribDRMFormatModifiers` yet, which is why the surface is opt-in.
+is not offered. The surface is offered by default; a client still only gets
+one when it lists the modifier, and no VA client on this target does yet.
 Imported DMA-BUFs must be linear unless they carry the modifier with the
 kernel's four-plane offsets. The encode side has no compressor.
 
