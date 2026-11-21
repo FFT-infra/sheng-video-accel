@@ -11,12 +11,16 @@ from `test/remote/gate.sh` with
 kernel `7.3.4-sm8550-00104-g87ac0f2347eb`, module
 `8f771ada9bc16711465e2f56dcd1fee82d979edcceb5ce985a30ecc99f79dc75`, decoder
 `/dev/video17` and encoder `/dev/video18` resolved by `iris_driver` QUERYCAP
-name. The installed driver is
-`/usr/lib64/dri/v4l2_drv_video.so`, hash
-`35cdab5561db2888a74bcd6dddcdff98bc74f45841061f08330ddb446d63d591`, built from
-source `aa375a3` with `source_dirty=0` and installed live with
-`scripts/install-system.sh` (not a `DESTDIR` staging run). Runs that name a
-build-tree override say so.
+name. A section that names a driver path means that file. The installed
+`/usr/lib64/dri/v4l2_drv_video.so` has been overwritten in place since the
+RPM was installed: `35cdab55…d591` from `aa375a3` on 2026-11-17,
+`246e1c21…770c` on 2026-11-18, and `d15ff198…b7a` (12072720 B) from
+`021b157` since 2026-11-19 01:33.
+`/usr/local/share/iris-vaapi/install-manifest.txt` records the last of these
+and keeps the previous file under its `backup/`. The RPM owns a separate
+manifest at `/usr/share/iris-vaapi/` that still describes payload
+`278abdfe…` (400424 B) from source `65686a2`, so `rpm -V` reports a size
+difference against the live file.
 
 ## Host verification
 
@@ -131,7 +135,7 @@ change and 0016 in the working tree, decoder resolved by name:
 - Regression on the same boot: the four-codec 48-frame matrix
   (`gate-matrix-sg`) and `iris-encode-quality.sh` including its 8K encode lane
   (`gate-encode-sg`) both pass.
-- The same 8K gate on the installed package (`/usr/lib64/dri`, driver
+- The same 8K gate on the installed driver (`/usr/lib64/dri`, driver
   `d15ff198…`, no `LIBVA_*` override): all four codecs at `pool=15`, 30/30
   H.264, `publish=direct` (record `gate-8k-installed2`).
 - Further coverage under `capture_sg=1` on the installed driver: UBWC Q08C
@@ -677,7 +681,7 @@ Offered by default, `V4L2_VA_UBWC=0` disables it; gate
 `1323d58a…f66a5` (the series adds no kernel patch), decoder `/dev/video17`
 resolved by `iris_driver`, encoder `/dev/video18`. The run used the build-tree
 driver `/home/xinyang/iris-vaapi-lab/src/build/src/v4l2_drv_video.so`, sha256
-`5592247a…533`; the installed package still holds `d15ff198…b7a`, and the
+`5592247a…533`; the installed driver still holds `d15ff198…b7a`, and the
 same gate passes on it with the previous source.
 
 Everything after `b6e41c6` is comment text plus one include swap, and the
