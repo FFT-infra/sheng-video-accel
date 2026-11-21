@@ -17,7 +17,7 @@
 
 只有能力表标记 `production: supported` 的编码格式才声明 VA profile。一致性数字来自与软件解码的逐帧比对。Fluster 是语料结果，不是每次构建的回归；失败向量归类见 `TEST-RESULTS.md`。VP9 参考 MD5 早于本机 libvpx，176/305 不是解码缺陷数。
 
-UBWC 表面默认提供，`V4L2_VA_UBWC=0` 关闭。客户端在 `VASurfaceAttribDRMFormatModifiers` 里列出 `DRM_FORMAT_MOD_QCOM_COMPRESSED` 时得到 Q08C 表面，也就是节点分配的四平面压缩缓冲；`vaExportSurfaceHandle` 按每个平面一个 R8 层报出该修饰符。这类表面只能走 Direct 或 Import 发布：Copy、图像入口、film grain、视频处理与编码器都返回 `VA_STATUS_ERROR_UNIMPLEMENTED`，因为本驱动没有 UBWC 解压。Q10C 不提供：节点按每像素 4/3 字节分配，GPU 的 10-bit UBWC 导入要求每像素 2 字节，这个栈上没有客户端能读这块缓冲。`test/iris-ubwc-gate.sh` 让四种编码格式都解码到 Q08C，并要求 GPU 读回（`test/vk-ubwc-read`，Turnip）与线性解码的亮度和色度逐字节一致。
+UBWC 表面默认提供，`V4L2_VA_UBWC=0` 关闭。客户端在 `VASurfaceAttribDRMFormatModifiers` 里列出 `DRM_FORMAT_MOD_QCOM_COMPRESSED` 时得到 Q08C 表面，按每个平面一个 R8 层导出，且只能走 Direct 或 Import 发布：本驱动没有 UBWC 解压，Copy、图像入口、film grain、视频处理与编码器都拒绝它。Q10C 不提供——节点按每像素 4/3 字节分配，GPU 的 10-bit 导入要求 2 字节。`test/iris-ubwc-gate.sh` 让四种编码格式都解码到 Q08C，并要求 Turnip 读回（`test/vk-ubwc-read`）与线性解码逐字节一致。
 
 解码上限 7680x4320，四种编码格式均支持；两个 1080p 客户端可同时解码。
 
@@ -78,14 +78,9 @@ dpkg-buildpackage -b -us -uc
 sudo apt install ../libva-v4l2-iris_0.1.0_arm64.deb
 ```
 
-Debian 包请在 chroot（`sbuild`、`pbuilder`）里构建：`libgbm-dev` 绑定发行版 Mesa，直接装依赖可能降级厂商修改过的图形栈。安装包会放置驱动本体和 `msm_drv_video.so`、`qcom_drv_video.so` 两个别名，libva 无需 `LIBVA_DRIVER_NAME` 即可解析。
+Debian 包请在 chroot（`sbuild`、`pbuilder`）里构建：`libgbm-dev` 绑定发行版 Mesa，直接装依赖可能降级厂商修改过的图形栈。安装包会放置驱动本体和 `msm_drv_video.so`、`qcom_drv_video.so` 两个别名，libva 无需 `LIBVA_DRIVER_NAME` 即可解析。各客户端（mpv、VLC、Sunshine、Firefox、GStreamer）的设置在 `docs/install.md#client-setup`。
 
-## 验证
-
-```sh
-iris-device-check
-iris-verify
-```
+### 诊断工具
 
 `iris-device-check` 只读：节点、固件版本、绑定的驱动与队列格式。`iris-verify` 编解码一段样例，要求 Iris 中断计数增长。四种编码格式的完整像素比对用 `test/iris-matrix.sh`。浏览器会话只有在媒体表面给出解码器、解码帧数与丢帧数时才算走硬件，流程见 `docs/install.md`。
 
@@ -114,11 +109,10 @@ HEVC Main 8-bit，FFmpeg 8.1.3。CPU 锁最高频，GPU 锁 680 MHz。解码不�
 
 - **AV1 分辨率切换**：上下文内切换后，继续按旧几何导出表面的客户端在这些帧上得到 GPU 拷贝。Chromium 播本地文件时可能选软件 AV1 解码器，是否走硬件以浏览器门禁为准。
 - **原版内核**：解码降级为 GPU 拷贝，IDR 请求改为移动 intra period。
-- **编码**：客户端给出的切片列表变成宏块预算（`ceil(宏块数 / 切片数)`），仅 CBR 或 CQP、≤60 fps、≤4096x2160，并需要 0013 内核补丁；没有补丁时每帧只有一整片，`VAConfigAttribEncMaxSlices` 答 1。分块返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。ROI 需 `V4L2_VA_ROI` 开启并安装 0017 内核补丁：模块会把每个宏块的 delta-QP 元数据缓冲区送进固件、固件也正常完成，但已验收镜像编出的图像没有任何变化（CBR 与 CQP、H.264 与 HEVC 都是逐字节相同），所以默认不声明区域。B 帧需 `V4L2_VA_B_FRAMES` 开启，仅 H.264，客户端需保持至少三帧在途（FFmpeg：`-bf 1 -async_depth 3`）。
-- **intra refresh**：滚动行请求（`VAEncMiscParameterRIR`）在 CBR 下生效，VBR/CQP 下拒绝。`ltr_count`/`frame_ltr_index`/`use_ltr_frames` 不声明。
-- **时域分层**：`VAEncMiscParameterTemporalLayerStructure` 给出 1-6 层，固件按层数自行推导成员关系，客户端给的层 id 只做越界检查；不支持逐层码率。节点注册了分层控件时通过 `VAConfigAttribEncRateControlExt` 声明。
-- **封装头**：`VAConfigAttribEncPackedHeaders` 在 HEVC 编码答 `VA_ENC_PACKED_HEADER_MISC`，H.264 答 0。客户端给的原始封装头（`VAEncPackedHeaderRawData`）插在参数集之后、第一个 slice 之前；FFmpeg `hevc_vaapi` 的 HDR10 mastering display、content light level 和字幕 SEI 都走这条路。H.264 不能答 MISC：`h264_vaapi` 的 buffering period SEI 按 id 引用 SPS，而只声明 MISC 时 FFmpeg 不会自己写 SPS，CBR/VBR 编码会在客户端内部失败。序列头与 slice 头仍不支持，固件自己写；参数集随码流带内传输。
-- **UBWC**：默认提供（`V4L2_VA_UBWC=0` 关闭），只有 8 位 Q08C，且只能走 Direct 或 Import 发布。Copy 路径、`vaDeriveImage`/`vaGetImage`/`vaPutImage`、film grain、视频处理与编码器没有解压器，遇到压缩表面直接拒绝。Q10C 没有读取方，不提供；导入必须带修饰符和内核的四平面偏移。
+- **8K Direct**：`capture_sg=1` 让解码器的 CAPTURE 池经 SMMU 从系统内存分配，15 帧 8K 池才放得下；没有它只给八帧，该分辨率下自动策略走 Copy。见 `packaging/kernel/README.md`。
+- **编码**：客户端给出的切片列表变成宏块预算，仅 CBR 或 CQP、≤60 fps、≤4096x2160，并需要 0013 内核补丁；没有补丁时每帧只有一整片。分块返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。ROI 需 `V4L2_VA_ROI` 开启并安装 0017：固件正常完成元数据缓冲区，但编出的图像逐字节相同，所以默认不声明区域。B 帧需 `V4L2_VA_B_FRAMES` 开启，仅 H.264，客户端需保持三帧在途。
+- **时域分层与 intra refresh**：`VAEncMiscParameterTemporalLayerStructure` 给出 1-6 层，固件按层数自行推导成员关系，不支持逐层码率。滚动行 intra refresh 在 CBR 下生效，VBR/CQP 下拒绝。`ltr_count`/`frame_ltr_index`/`use_ltr_frames` 不声明。
+- **封装头**：HEVC 编码答 `VA_ENC_PACKED_HEADER_MISC`，把客户端的原始头插在参数集之后，FFmpeg `hevc_vaapi` 的 HDR10 与字幕 SEI 走这条路。H.264 答 0：`h264_vaapi` 的 buffering period SEI 按 id 引用 SPS，而只声明 MISC 时 FFmpeg 不会自己写参数集，CBR/VBR 编码会在客户端内部失败。序列头与 slice 头仍不支持，固件自己写。
 
 ## 环境变量
 
