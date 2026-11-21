@@ -437,11 +437,23 @@ advertised on both, FFmpeg 8.1.3's `h264_vaapi` failed every CBR/VBR encode
 at `SPS id 0 not available`: it writes a buffering-period SEI as a raw packed
 header that names the SPS by id, and the client only writes the SPS itself
 when the sequence packed-header type is advertised. HEVC advertises MISC for
-the HDR10 SEI (`test/iris-encode-hdr-sei-gate.sh` below); H.264 keeps the
-firmware's own headers. After the correction, 60 frames of 1080p at CBR
-2 Mbit/s encode for both codecs (H.264 490729 bytes, HEVC 541745 bytes)
-through the build-tree driver (artifact `2b897cdf…`, source commit `6c216ba`
-plus the working-tree changes).
+the HDR10 SEI; H.264 keeps the firmware's own headers. After the correction,
+60 frames of 1080p at CBR 2 Mbit/s encode for both codecs (H.264 490729
+bytes, HEVC 541745 bytes) through the build-tree driver (artifact
+`2b897cdf…`, source commit `6c216ba` plus the working-tree changes).
+
+HDR10 SEI, 11-22: `test/iris-encode-hdr-sei-gate.sh` encodes a 10-bit
+libx265 source whose frames carry mastering-display and content-light-level
+side data through FFmpeg's `hevc_vaapi -sei hdr`, and reads both messages
+back out of the coded stream with ffprobe. The input's own side data is
+checked first, so a bare source cannot pass. Run identity: boot
+`d843e7b8-f05f-4d2d-885d-cdb0fac5b139`, kernel
+`7.3.4-sm8550-00104-g87ac0f2347eb`, module `1323d58a…f66a5` (the 0017 set),
+driver `5592247a…533` as a `LIBVA_DRIVERS_PATH` build-tree override from
+source `c9b68ba`, `source_dirty=0`, encoder `/dev/video18` resolved by
+`iris_driver`. Both SEI messages are present in the 60-frame output, the
+encode moved the IRQ counter by 125, and the same module still codes an
+8-bit NV12 lane. Record `hdr-sei-1122b`.
 
 ROI metadata, 11-19: `test/iris-encode-roi-probe.cc` and FFmpeg `addroi`
 drive `VAConfigAttribEncROI` with the 0017 module. Run identity: boot
