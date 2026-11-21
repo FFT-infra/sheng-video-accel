@@ -784,7 +784,7 @@ bool EncoderSession::complete_one()
     // decode. Prefix the ones the last access unit carried.
     if (picture.force_idr && prepare_)
         result.bytes = prepare_(result.bytes, parameter_sets_);
-    // Before the first slice is after the firmware's own parameter sets,
+    // In front of the first slice, after the firmware's own parameter sets:
     // where a decoder expects a prefix SEI.
     if (!picture.params.prefix_nals.empty()) {
         const codec::Codec codec = config_.codec == V4L2_PIX_FMT_H264 ? codec::Codec::H264 : codec::Codec::Hevc;
