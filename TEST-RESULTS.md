@@ -680,6 +680,10 @@ driver `/home/xinyang/iris-vaapi-lab/src/build/src/v4l2_drv_video.so`, sha256
 `5592247a…533`; the installed package still holds `d15ff198…b7a`, and the
 same gate passes on it with the previous source.
 
+Everything after `b6e41c6` is comment text plus one include swap, and the
+driver's `.text`, `.rodata`, `.data` and `.data.rel.ro` are byte-identical to
+the one above, so the recorded hash still describes the code under test.
+
 | Gate | Result |
 | --- | --- |
 | `iris-decode-stream-probe` into Q08C, 640x480, H.264/HEVC/VP9/AV1 | CAPTURE `fourcc=0x3231564e modifier=0x500000000000001 planes=4 size=479232`; Y meta `offset=0 pitch=64 rows=64`, Y `4096/640/480`, UV meta `311296/64/32`, UV `315392/640/256` |
