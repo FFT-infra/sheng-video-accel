@@ -156,7 +156,11 @@ When a CAPTURE completion arrives with a token that has a pending Surface:
   the policies: the 384 MiB budget grants eight frames, which is the
   firmware minimum plus one, so Auto publishes Copy; with the patched
   kernel's `capture_sg=1` the same pool is 720 MiB and fifteen frames, and
-  Auto publishes Direct.
+  Auto publishes Direct. Direct is the faster policy there, by about 60 fps
+  against 35. Fifteen slots are also few enough for a client that declares
+  more to hold all of them, and a drain then has no buffer to carry its
+  terminal LAST: that is why `capture_sg` stays experimental (TEST-RESULTS.md
+  records both the throughput and the failed drains).
 - **Copy**: the surface already owns a `StableBuffer` because the client
   exported it *before* its first decode (Chrome pre-exports its whole
   NativePixmap pool and caches the fd for the surface's lifetime). The
@@ -355,6 +359,22 @@ the CAPTURE queue reports it. What remains is the client's own pipeline depth
 (`-async_depth`), so the measurable quantity is submission-to-completion
 time: `encode frame … latency_us=` reports it, and
 `test/iris-encode-latency.sh` records the first picture, p50 and p95.
+
+The firmware does carry an encoder low-latency mode, but not as a property
+of its own. Every gen2 property header on SM8550 (vendor, LineageOS,
+qualcomm-linux) has zero `*LATENCY*` defines, the firmware's gen2 property
+table has no such row, and the eight unassigned IDs in the 0x03000100 window
+do not occur anywhere in the image. The `SET_PROPERTY:
+VENC_LOW_LATENCY_MODE` string that suggested one belongs to the legacy DX
+dispatcher, whose numbering is a different space. Qualcomm's own driver maps
+encoder low latency to `HFI_PROP_STAGE` (0x0300010a) = `STAGE_1`, which the
+firmware table does carry, and forces it under CBR or slice-delivery. Two
+firmware strings bound the mode: it is turned off above 4K and with B
+pictures. The kernel's `iris_set_stage()` sends `STAGE_2` for the encoder
+unconditionally, so the node never asks for it. Enabling it would take a
+kernel patch, a node control and a gate; none of that is in this tree, and
+`test/iris-encode-latency.sh` measures what the qualified module does
+without it.
 
 #### State Transitions
 

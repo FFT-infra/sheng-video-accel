@@ -211,22 +211,56 @@ frames but stays below 60 fps, so it is recorded as a measured value, not an
 table above does. The guarded fps run peaked at 38.6 °C and the pack went from
 73 % to 70 %.
 
-A 60-frame run through the downloading client exposed one drain edge under
-the experimental allocator. When every picture has completed before the
-client destroys its context (`pending=0`, as the download lane produces),
-HEVC and VP9 never receive the terminal LAST while the driver waits: the
-firmware's drain-last message is processed only once the next command
-(STREAMOFF) reaches the queue, so the session reports `session failed: no
-LAST after STOP` after its 2 s bound, and a 6 s bound does not change it. The
-pictures are unaffected: the same 60-frame gate run reported
-`frames=60 framemd5=exact` and `submitted=60 completed=60 errors=0 drops=0`
-for both codecs, and only the LAST check failed. H.264 and AV1 drain
-normally, and the same HEVC stream on the contiguous allocator
-(`capture_sg=0`, `pool=8`, Copy) reaches LAST with `pending=0`. The parameter
-is experimental and off by default, so the qualified path is unaffected.
+The AV1 figure does not reproduce on the current client stack. Re-measured
+on one boot (source `2dd96f3`, driver `5592247a…b533` build tree, boot
+`d843e7b8…`, module `1323d58a…66a5`, `capture_sg=1`), three rounds each:
 
-The parameter defaults off and is not part of the qualified module, so a
-stock boot keeps the contiguous pool and Copy publication at 8K.
+| Lane | fps, three rounds |
+| --- | --- |
+| AV1 no-download | 45.2 / 42.4 (27 of 60 dropped) |
+| AV1 download | 19.6 / 19.4 / 19.5 |
+
+AV1 on the download lane measures half the recorded value, and the installed
+driver `d15ff198…`, which is the binary the 39.5 came from, gives the same
+19.5/19.1/19.8 on that boot, so the driver is not what changed.
+The client is: ffmpeg 8.1.3-2.fc44 and mesa-dri-drivers 26.2.7 were
+installed on 20 November, after the 39.5 run. That version change is the
+only difference found, not a proven cause; the older ffmpeg was not
+reinstalled to confirm it. Decoding alone is 42-45 fps, so the download
+lane's copy of 47.5 MiB per frame (2.85 GiB over 60 frames) is what halves
+it on this stack. AV1 8K is therefore a decode at about 45 fps and a
+client-side download that brings the round trip to about 19.5 fps; the older
+39.5 download-lane number is superseded and not carried forward.
+
+A 60-frame run through the downloading client exposed one drain edge under
+the experimental allocator: HEVC and VP9 report `session failed: no LAST
+after STOP` after the 2 s bound, while the pictures themselves are
+unaffected (`frames=60 framemd5=exact`, `submitted=60 completed=60 errors=0
+drops=0`, only the LAST check failed). A later run on current `main` showed
+the cause is the pool, not the timing. Under the automatic policy at
+`capture_sg=1` the session publishes Direct, and a Direct target pins one
+CAPTURE slot per picture the client still holds. The 720 MiB budget grants
+fifteen slots to a client that declares more, so the client can pin every
+slot: `drain begin ... pending=0 queued=0 held=15 pool=15` for HEVC and
+`pending=1 queued=1 held=14 pool=15` for VP9, and STOP then has no buffer to
+carry LAST. H.264 and AV1 keep a slot free and drain. The same gate on
+driver `226e9374…cff216`, boot `d843e7b8…`, reproduced both lines exactly
+(record `scope-8k-auto2`). Forcing Copy at the same geometry passes all four
+codecs (`pool=15`, exact framemd5, `errors=0 last=1 drain=1`, record
+`scope-8k-copy`), because Copy releases the slot at the completion. The
+firmware's drain-last message being processed only once the next command
+reaches the queue explains the `pending=0` case; the fully pinned pool
+explains the rest.
+
+Copy costs about half the throughput, which is why `capture_sg` exists. On
+one boot and one driver (`226e9374…cff216`), three rounds per codec,
+`V4L2_VA_PUBLISH` selects the policy: Auto (Direct) decoded H.264 at
+40.5/44.7/51.9, HEVC at 52.6/64.0/61.7 and VP9 at 51.8/64.3/58.6 fps, and
+Copy at 21.8/24.4/25.1, 29.2/31.2/29.2 and 27.6/29.0/39.9. The absolute
+figures move between runs on this board; the ratio does not. `capture_sg`
+stays experimental and off by default: the qualified module keeps the
+contiguous pool and Copy publication at 8K, and a drain with no free slot is
+the reason the parameter is not promoted.
 
 VP9 12-bit and AV1 12-bit are refused at profile selection; 4:4:4 and
 large-scale tile are outside the advertised profiles or cleanly refused by
@@ -639,6 +673,18 @@ per client, zero drops and a terminal LAST on all sixteen. The fourteen- and
 sixteen-session 1080p runs aborted at startup, so they carry no 300 s frame
 record; the twelve-session run used the same boot, driver and module as the
 table above.
+
+The ceiling above is the contiguous allocator's, not the firmware's. With
+the experimental `capture_sg=1` module loaded, fourteen 1080p sessions held
+the same 300 s window: `submitted=7200 completed=7200` on every client, zero
+drops, zero teardown timeouts, `stateful_drain_complete=1` on all fourteen,
+and the boot unchanged (record `scope-soak-14`; source `2dd96f3`,
+`source_dirty=0`, driver `5592247a…b533` as a `LIBVA_DRIVERS_PATH` build-tree
+override, boot `d843e7b8…`, module `1323d58a…66a5`, decoder `/dev/video17`
+resolved by `iris_driver`). Twelve sessions also passed on the same boot.
+The 14-session 1080p failure recorded earlier is therefore the CMA
+carve-out; moving CAPTURE to system memory removes it. Sixteen was not
+retried under `capture_sg`.
 
 ## Video processing
 
