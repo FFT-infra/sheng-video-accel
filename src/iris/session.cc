@@ -29,24 +29,18 @@ constexpr unsigned kMaxCapturePool = 64;
 constexpr int kLastWaitMs = 2000;
 constexpr int kOutputDrainMs = 500;
 
-// Every CAPTURE slot is mapped into the video SMMU for the life of the pool,
-// and that IOVA space is shared by all sessions. A 7680x4320 NV12 frame is
-// 47.5 MiB, so a fixed 32-frame pool asks for 1.5 GiB and STREAMON fails.
+// Shared SMMU IOVA space: 32 8K frames (1.5 GiB) fail STREAMON.
 constexpr uint64_t kCaptureMemoryBudget = 384ull << 20;
 
-// The same pool when the kernel allocates CAPTURE from system memory
-// (capture_sg). 720 MiB is the firmware minimum of seven plus kDirectHeadroom
-// at 8K; a larger pool fragments the HEVC bitstream buffer's allocation.
+// 720 MiB fits the firmware minimum plus kDirectHeadroom at 8K; more fragments
+// the HEVC bitstream buffer.
 constexpr uint64_t kSystemCaptureMemoryBudget = 720ull << 20;
 
-// Pictures a client can hold between completion and consumption. A Direct
-// target pins one CAPTURE frame for each, so a pool with less headroom over
-// the firmware minimum can be pinned completely while AUs are still queued.
+// A Direct target pins one CAPTURE frame per picture the client has not
+// consumed.
 constexpr unsigned kDirectHeadroom = 8;
 
 // FFmpeg's VA-API 1.x path declares no surfaces and creates its pool lazily.
-// Sizing to the firmware minimum then lands on exactly the count it pins, and
-// STOP has no buffer for LAST; 17 is the largest pool seen at 1080p.
 constexpr unsigned kUndeclaredSurfaceCount = 17;
 
 unsigned capture_pool_wanted(unsigned declared_surfaces, unsigned firmware_min)
