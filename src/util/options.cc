@@ -58,7 +58,8 @@ Options Options::from_environment()
     options.vpp_enabled = !vpp || std::strcmp(vpp, "0") != 0;
     options.b_frames = env("V4L2_VA_B_FRAMES") != nullptr;
     options.roi = env("V4L2_VA_ROI") != nullptr;
-    options.ubwc = env("V4L2_VA_UBWC") != nullptr;
+    const char* ubwc = env("V4L2_VA_UBWC");
+    options.ubwc = !ubwc || std::strcmp(ubwc, "0") != 0;
     if (const char* dump = env("V4L2_VA_DUMP"))
         options.dump_dir = dump;
     return options;

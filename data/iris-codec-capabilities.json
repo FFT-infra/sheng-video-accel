@@ -32,7 +32,7 @@
         "interlaced",
         "H.264 High 10: the node's decode profile mask lists Baseline, Constrained Baseline, Main, High and Constrained High and no HIGH_10 (iris_hfi_gen2.c inst_fw_cap_sm8550_dec), and this driver exposes no H264High10 profile",
         "non-4:2:0 chroma: every CAPTURE format the node enumerates is 4:2:0",
-        "UBWC-compressed 10-bit CAPTURE (Q10C): the node enumerates it, but nothing on this stack advertises the QCOM_COMPRESSED modifier for P010, so only the 8-bit Q08C surface exists (`capture_modifiers`)."
+        "UBWC-compressed 10-bit CAPTURE (Q10C): the node enumerates and sizes it at 4/3 bytes per pixel, but the GPU's 10-bit UBWC importer requires 2 bytes per pixel (640x480: 749568 allocated against 929792 required), so no client on this stack can read the buffer; only the 8-bit Q08C surface is offered (`capture_modifiers`)."
       ],
       "publish_import": "qualified",
       "encode": {
@@ -96,7 +96,7 @@
         "long-term references whose POC MSB cycles do not ascend",
         "interlaced",
         "12-bit",
-        "UBWC-compressed 10-bit CAPTURE (Q10C): the node enumerates it, but nothing on this stack advertises the QCOM_COMPRESSED modifier for P010, so only the 8-bit Q08C surface exists (`capture_modifiers`)."
+        "UBWC-compressed 10-bit CAPTURE (Q10C): the node enumerates and sizes it at 4/3 bytes per pixel, but the GPU's 10-bit UBWC importer requires 2 bytes per pixel (640x480: 749568 allocated against 929792 required), so no client on this stack can read the buffer; only the 8-bit Q08C surface is offered (`capture_modifiers`)."
       ],
       "publish_import": "qualified",
       "encode": {
@@ -160,7 +160,7 @@
         "show_existing_frame through VA (VADecPictureParameterBufferVP9 has no frame_to_show field)",
         "12-bit: src/codec/vp9.cc refuses it with VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT before any buffer is queued. The node's native v4l2vp9dec element can also take 12-bit access units and never return a CAPTURE buffer; that is the element, not this driver.",
         "RGB",
-        "UBWC-compressed 10-bit CAPTURE (Q10C): the node enumerates it, but nothing on this stack advertises the QCOM_COMPRESSED modifier for P010, so only the 8-bit Q08C surface exists (`capture_modifiers`)."
+        "UBWC-compressed 10-bit CAPTURE (Q10C): the node enumerates and sizes it at 4/3 bytes per pixel, but the GPU's 10-bit UBWC importer requires 2 bytes per pixel (640x480: 749568 allocated against 929792 required), so no client on this stack can read the buffer; only the 8-bit Q08C surface is offered (`capture_modifiers`)."
       ],
       "rt_format_note": "VP9 Profile 2 has no legal 8-bit stream (libvpx refuses to encode one; src/codec/vp9.cc requires bit_depth == 10), so VAEntrypointVLD answers VA_RT_FORMAT_YUV420_10 only (0x100) and createConfig defaults to the same mask when the client passes no RT-format attribute. HEVC Main10 and AV1 Profile0 also decode 8-bit streams and keep both bits (0x101). test/unit/va-config-attributes-test.cc pins the answers and the default; test/iris-vp9-p2-gate.sh requires P010 surfaces and 30/30 exact framemd5 on a generated 10-bit Profile 2 clip. TEST-RESULTS.md records the measurement.",
       "publish_import": "qualified",
@@ -198,7 +198,7 @@
       "rejected": [
         "12-bit: the node has no 12-bit CAPTURE format, and the VA layer refuses the stream at profile selection",
         "large-scale tile: src/codec/av1_obu.cc refuses a picture whose large_scale_tile bit is set. VAConfigAttribDecAV1Features is a known attribute on AV1 VLD and answers 0 (no feature flags), and neither FFmpeg nor Chrome reads that attribute (0 references in the target's libavcodec), so the answer reaches no client today",
-        "UBWC-compressed 10-bit CAPTURE (Q10C): the node enumerates it, but nothing on this stack advertises the QCOM_COMPRESSED modifier for P010, so only the 8-bit Q08C surface exists (`capture_modifiers`)."
+        "UBWC-compressed 10-bit CAPTURE (Q10C): the node enumerates and sizes it at 4/3 bytes per pixel, but the GPU's 10-bit UBWC importer requires 2 bytes per pixel (640x480: 749568 allocated against 929792 required), so no client on this stack can read the buffer; only the 8-bit Q08C surface is offered (`capture_modifiers`)."
       ],
       "film_grain_note": "Synthesis is qualified for AV1Profile0 at 8 and 10 bits. The client names the ungrained decode target as current_frame and a separate grained current_display_picture; the driver decodes the rebuilt access unit with apply_grain=0 and blends in userspace (src/va/grain.cc) from that picture's endPicture, before the client can recycle current_frame. The gate resolves the 320x240 NV12 20-frame and 352x290 P010 2-frame clips frame-by-frame identical to libdav1d's grained output under V4L2_VA_PUBLISH=import, and both clips matched under direct and copy as well. TEST-RESULTS.md records the run",
       "publish_import": "qualified",

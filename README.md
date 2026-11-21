@@ -25,13 +25,15 @@ per-build regressions; `TEST-RESULTS.md` classifies every failing vector. The
 VP9 reference MD5s predate this machine's libvpx; 176/305 is not a decode-defect
 count.
 
-UBWC surfaces are opt-in (`V4L2_VA_UBWC=1`). A client that lists
+UBWC surfaces are offered unless `V4L2_VA_UBWC=0`. A client that lists
 `DRM_FORMAT_MOD_QCOM_COMPRESSED` in `VASurfaceAttribDRMFormatModifiers` gets a
 Q08C surface, the node's four-plane compressed allocation, and
 `vaExportSurfaceHandle` reports the modifier with one R8 layer per plane. Such
 a surface publishes Direct or Import only: Copy, the image entry points, film
 grain, video processing and the encoder return `VA_STATUS_ERROR_UNIMPLEMENTED`,
-because nothing here decompresses UBWC. Q10C is not offered.
+because nothing here decompresses UBWC. Q10C is not offered: the node
+allocates 4/3 bytes per pixel while the GPU's 10-bit UBWC importer requires 2,
+so no client on this stack can read the buffer.
 `test/iris-ubwc-gate.sh` decodes all four codecs into Q08C and requires a GPU
 read-back (`test/vk-ubwc-read`, Turnip) to reproduce the linear decode's luma
 and chroma byte for byte.
@@ -206,11 +208,12 @@ Q08C offsets under the `QCOM_COMPRESSED` modifier. Anything else returns
   itself, so a CBR or VBR encode fails inside the client. Sequence and slice
   packed headers stay unsupported because the firmware writes them itself;
   parameter sets travel in-band.
-- **UBWC**: opt-in (`V4L2_VA_UBWC=1`), 8-bit Q08C only, and only through Direct
-  or Import publication. The Copy path, `vaDeriveImage`/`vaGetImage`/
-  `vaPutImage`, film grain, video processing and the encoder have no
-  decompressor and refuse a compressed surface. Q10C has no reader and is not
-  offered; imports must carry the modifier and the kernel's four-plane offsets.
+- **UBWC**: offered by default (`V4L2_VA_UBWC=0` disables it), 8-bit Q08C only,
+  and only through Direct or Import publication. The Copy path,
+  `vaDeriveImage`/`vaGetImage`/`vaPutImage`, film grain, video processing and the
+  encoder have no decompressor and refuse a compressed surface. Q10C has no
+  reader and is not offered; imports must carry the modifier and the kernel's
+  four-plane offsets.
 
 ## Environment variables
 
@@ -225,7 +228,7 @@ Q08C offsets under the `QCOM_COMPRESSED` modifier. Anything else returns
 | `V4L2_VA_VPP` | on | Set to `0` to disable Vulkan video processing |
 | `V4L2_VA_B_FRAMES` | off | Opt in to B pictures in the H.264 encoder; needs three pictures in flight (FFmpeg: `-async_depth 3`) |
 | `V4L2_VA_ROI` | off | Opt in to advertising ROI regions; needs the 0017 kernel patch, and the qualified firmware ignores the map |
-| `V4L2_VA_UBWC` | off | Opt in to UBWC (Q08C) decode surfaces for clients that request the `QCOM_COMPRESSED` modifier |
+| `V4L2_VA_UBWC` | on (`0` disables) | Offer UBWC (Q08C) decode surfaces to clients that request the `QCOM_COMPRESSED` modifier |
 | `V4L2_VA_DUMP` | off | Directory path to dump submitted access units |
 
 ## Naming

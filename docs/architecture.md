@@ -853,7 +853,7 @@ with the kernel's four planes and their pitches. `test/iris-va-ubwc-probe`
 covers the layer above: a VP9 decode client asks for the modifier in
 `vaCreateSurfaces`, exports the four-plane descriptor and the modifier, and
 requires `vaDeriveImage`/`vaGetImage`/`vaPutImage` to refuse; the gate runs it
-again without `V4L2_VA_UBWC`, where a list naming only the compressed modifier
+again with `V4L2_VA_UBWC=0`, where a list naming only the compressed modifier
 has to be refused and a list carrying a linear fallback has to get `LINEAR`.
 
 Client memory entering through `vaCreateSurfaces2` (DRM_PRIME_2 or PRIME_1,

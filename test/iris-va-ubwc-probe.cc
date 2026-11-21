@@ -12,14 +12,13 @@
 // reads only a handful of header bits from the picture parameters, so the
 // probe can be a decode client without synthesising parameter sets.
 //
-// With V4L2_VA_UBWC=1 in the environment the probe requires a
-// QCOM_COMPRESSED surface: four R8 layers at the kernel's Q08C offsets,
-// the modifier on the exported object, and the image entry points refusing
-// it. With the switch unset a list that names only QCOM_COMPRESSED must be
-// refused, so the capability cannot appear without the opt-in, while a list
-// that carries a LINEAR fallback gets the fallback. Either way it also
-// requires QCOM_COMPRESSED on a 10-bit RT format to be refused, and a linear
-// surface to keep the two-plane export.
+// Unless V4L2_VA_UBWC=0, the probe requires a QCOM_COMPRESSED surface: four
+// R8 layers at the kernel's Q08C offsets, the modifier on the exported
+// object, and the image entry points refusing it. With the switch set to 0 a
+// list that names only QCOM_COMPRESSED must be refused, while a list that
+// carries a LINEAR fallback gets the fallback. Either way it also requires
+// QCOM_COMPRESSED on a 10-bit RT format to be refused, and a linear surface
+// to keep the two-plane export.
 //
 // Exit status: 0 when every check passes, 1 on a failed check, 2 on usage,
 // import or decode failure.
@@ -251,7 +250,8 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "%s is not an IVF file with frames\n", argv[2]);
         return 2;
     }
-    const bool ubwc_expected = std::getenv("V4L2_VA_UBWC") != nullptr;
+    const char* ubwc_env = std::getenv("V4L2_VA_UBWC");
+    const bool ubwc_expected = !ubwc_env || std::strcmp(ubwc_env, "0") != 0;
     std::printf("INFO frames=%zu ubwc_expected=%d\n", frames.size(), ubwc_expected ? 1 : 0);
 
     int fd = -1;
@@ -310,7 +310,7 @@ int main(int argc, char** argv)
             VASurfaceID only_ids[1] = { VA_INVALID_ID };
             check(vaCreateSurfaces(display, VA_RT_FORMAT_YUV420, width, height, only_ids, 1, only_attributes, 2)
                     == VA_STATUS_ERROR_UNSUPPORTED_RT_FORMAT,
-                "without V4L2_VA_UBWC a compressed-only list is refused, not downgraded");
+                "with V4L2_VA_UBWC=0 a compressed-only list is refused, not downgraded");
             check(status == VA_STATUS_SUCCESS,
                 "a compressed list with a linear fallback falls back to linear");
             if (status == VA_STATUS_SUCCESS) {
@@ -323,10 +323,10 @@ int main(int argc, char** argv)
             }
             if (failures)
                 return 1;
-            std::printf("PASS UBWC surfaces stay off without the opt-in\n");
+            std::printf("PASS UBWC surfaces stay off when disabled\n");
             return 0;
         }
-        check(status == VA_STATUS_SUCCESS, "V4L2_VA_UBWC grants a QCOM_COMPRESSED surface");
+        check(status == VA_STATUS_SUCCESS, "the driver grants a QCOM_COMPRESSED surface");
         if (status != VA_STATUS_SUCCESS) {
             std::fprintf(stderr, "vaCreateSurfaces: %s\n", vaErrorStr(status));
             return 2;

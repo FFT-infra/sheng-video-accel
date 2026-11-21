@@ -98,8 +98,8 @@ Capabilities probe_capabilities(const iris::Options& options)
             caps.output_formats.insert(format);
     caps.nv12 = device->format_supported(iris::Queue::Capture, V4L2_PIX_FMT_NV12);
     caps.p010 = device->format_supported(iris::Queue::Capture, V4L2_PIX_FMT_P010);
-    // UBWC is opt-in and only offered when the node can actually be asked for
-    // the Q08C CAPTURE format.
+    // UBWC is only offered when the node can actually be asked for the Q08C
+    // CAPTURE format; V4L2_VA_UBWC=0 turns it off.
     caps.ubwc = options.ubwc && device->format_supported(iris::Queue::Capture, V4L2_PIX_FMT_QC08C);
 
     // Profiles: every entry here is qualified in

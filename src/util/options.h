@@ -32,10 +32,9 @@ struct Options {
     // VAEntrypointVideoProc). Off by default so a VPP-capable build does not
     // change the decode/encode surface any client already qualified against.
     bool vpp_enabled = false;
-    // Opt in to UBWC (Q08C) decode surfaces. Off by default: the CAPTURE
-    // format is compressed and only a Direct or Import publish can hand the
-    // buffer to a client that understands the modifier.
-    bool ubwc = false;
+    // Offer UBWC (Q08C) decode surfaces. On unless V4L2_VA_UBWC=0: a client
+    // only gets one when its modifier list asks for QCOM_COMPRESSED.
+    bool ubwc = true;
     // Opt in to B pictures in the encoder (V4L2_CID_MPEG_VIDEO_B_FRAMES).
     // Off by default: the firmware holds the newest queued picture until the
     // picture after it is queued, so the client must keep three pictures in
