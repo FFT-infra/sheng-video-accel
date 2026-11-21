@@ -15,12 +15,11 @@ name. A section that names a driver path means that file. The installed
 `/usr/lib64/dri/v4l2_drv_video.so` has been overwritten in place since the
 RPM was installed: `35cdab55…d591` from `aa375a3` on 2026-11-17,
 `246e1c21…770c` on 2026-11-18, and `d15ff198…b7a` (12072720 B) from
-`021b157` since 2026-11-19 01:33.
-`/usr/local/share/iris-vaapi/install-manifest.txt` records the last of these
-and keeps the previous file under its `backup/`. The RPM owns a separate
-manifest at `/usr/share/iris-vaapi/` that still describes payload
-`278abdfe…` (400424 B) from source `65686a2`, so `rpm -V` reports the live
-file as `S.5....T.`.
+`021b157` since 2026-11-19 01:33. The last of these is what
+`/usr/local/share/iris-vaapi/install-manifest.txt` records, with the previous
+file kept under its `backup/`. The RPM owns a separate manifest at
+`/usr/share/iris-vaapi/` that still describes payload `278abdfe…` (400424 B)
+from source `65686a2`, so `rpm -V` reports the live file as `S.5....T.`.
 
 ## Host verification
 
