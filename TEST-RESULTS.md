@@ -19,8 +19,8 @@ RPM was installed: `35cdab55…d591` from `aa375a3` on 2026-11-17,
 `/usr/local/share/iris-vaapi/install-manifest.txt` records the last of these
 and keeps the previous file under its `backup/`. The RPM owns a separate
 manifest at `/usr/share/iris-vaapi/` that still describes payload
-`278abdfe…` (400424 B) from source `65686a2`, so `rpm -V` reports a size
-difference against the live file.
+`278abdfe…` (400424 B) from source `65686a2`, so `rpm -V` reports the live
+file as `S.5....T.`.
 
 ## Host verification
 
