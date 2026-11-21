@@ -134,8 +134,9 @@ void test_open_sequence()
     // driver derived from the bitstream).
     CHECK(!log_has(fake, "S_FMT CAPTURE"));
     CHECK(h.session->state() == SessionState::Streaming);
-    // Pool: 16 surfaces + 4 headroom -> clamp to 32 minimum.
-    CHECK(fake.capture_allocated() == 32);
+    // Pool: 16 surfaces + 4 headroom, above the firmware minimum plus the
+    // Direct headroom (4 + 8).
+    CHECK(fake.capture_allocated() == 20);
     CHECK(h.session->visible().width == 1920 && h.session->visible().height == 1080);
 }
 
@@ -200,14 +201,30 @@ void test_direct_publish_needs_headroom_over_the_firmware_minimum()
     CHECK(!h.session->can_publish_direct());
 }
 
-void test_pool_sizing_keeps_small_geometry_at_the_full_pool()
+void test_pool_sizing_keeps_small_geometry_at_the_client_count()
 {
-    // 1920x1088 NV12 is 3 MiB per frame; the whole 32-frame pool is 96 MiB,
-    // well inside the budget, so the old sizing is unchanged at 1080p.
+    // 1920x1088 NV12 is 3 MiB per frame, so the 384 MiB budget is far above
+    // any count this geometry asks for; the pool follows the client's 16
+    // surfaces plus 4 headroom rather than a fixed floor.
     Harness h({}, fast_options(), config(16));
     auto t = make_target();
     h.submit(t);
-    CHECK(h.fake->capture_allocated() == 32);
+    CHECK(h.fake->capture_allocated() == 20);
+    CHECK(h.session->state() == SessionState::Streaming);
+}
+
+void test_pool_sizing_floors_at_the_firmware_minimum_plus_headroom()
+{
+    // A client that declares fewer surfaces than the firmware needs still
+    // gets a pool a Direct target can live in: the firmware minimum plus the
+    // eight-picture headroom.
+    FakeConfig fc;
+    fc.firmware_min_capture = 9;
+    Harness h(fc, fast_options(), config(1)); // wants 5
+    auto t = make_target();
+    h.submit(t);
+    CHECK(h.fake->capture_allocated() == 17);
+    CHECK(h.session->can_publish_direct());
     CHECK(h.session->state() == SessionState::Streaming);
 }
 
@@ -221,13 +238,13 @@ void test_direct_publish_holds_slot_until_release()
     h.session->wait(t);
     CHECK(t->completed && !t->error && !t->pending);
     CHECK(t->frame != nullptr);
-    // Invariant 2: a held slot is never queued. 32 slots, one held.
+    // Invariant 2: a held slot is never queued. 20 slots, one held.
     CHECK(h.session->capture_held() == 1);
-    CHECK(h.session->capture_queued() == 31);
+    CHECK(h.session->capture_queued() + h.session->capture_held() == 20);
     h.session->release(t);
     h.session->service();
     CHECK(h.session->capture_held() == 0);
-    CHECK(h.session->capture_queued() == 32);
+    CHECK(h.session->capture_queued() == 20);
 }
 
 void test_copy_publish_releases_slot_immediately()
@@ -246,7 +263,8 @@ void test_copy_publish_releases_slot_immediately()
     CHECK(t->completed && !t->frame);
     CHECK(h.session->capture_held() == 0);
     h.session->service();
-    CHECK(h.session->capture_queued() == 32);
+    // Copy frees its slot at the completion.
+    CHECK(h.session->capture_queued() == 20);
 }
 
 void test_late_completion_after_release_is_dropped()
@@ -306,8 +324,8 @@ void test_firmware_error_marker_is_never_published()
     CHECK(h.session->stats().errors == 1);
     CHECK(h.session->stats().completed == 2);
     h.session->service();
-    // The marker's slot went back to the firmware.
-    CHECK(h.session->capture_queued() + h.session->capture_held() == 32);
+    // The marker's slot went back to the firmware, less the reserved one.
+    CHECK(h.session->capture_queued() + h.session->capture_held() == 20);
 }
 
 void test_output_error_fails_target()
@@ -688,6 +706,32 @@ void test_finish_drains_and_refuses_submit()
     CHECK_THROWS(h.submit(c), VA_STATUS_ERROR_OPERATION_FAILED);
 }
 
+void test_drain_survives_a_client_that_pins_every_slot()
+{
+    // Reproduces FFmpeg at 1080p: no declared surfaces, fifteen created,
+    // every picture Direct. A fifteen-slot pool pinned them all and STOP had
+    // no buffer for LAST.
+    FakeConfig fc;
+    fc.firmware_min_capture = 7;
+    Harness h(fc, fast_options(), config(0));
+    h.submit(make_target());
+    const unsigned pool = h.fake->capture_allocated();
+    CHECK(pool == 21);
+
+    std::vector<TargetPtr> pinned;
+    for (unsigned i = 0; i + 1 < pool; ++i) {
+        auto t = make_target();
+        h.submit(t);
+        h.session->wait(t);
+        CHECK(t->completed);
+        pinned.push_back(t);
+        CHECK(h.session->capture_queued() >= 1);
+    }
+    h.session->finish();
+    CHECK(h.session->state() == SessionState::Finished);
+    CHECK(h.session->stats().drains == 1);
+}
+
 // --- resolution change -----------------------------------------------------
 
 void test_resolution_change_rebuilds_capture()
@@ -836,7 +880,7 @@ void test_import_queues_client_buffer_per_picture()
     tb->destination = b.stable.get();
     h.submit(ta);
     CHECK(h.session->capture_memory() == CaptureMemory::Import);
-    CHECK(log_has(*h.fake, "REQBUFS CAPTURE 32 DMABUF"));
+    CHECK(log_has(*h.fake, "REQBUFS CAPTURE 20 DMABUF"));
     CHECK(h.fake->capture_memory() == V4L2_MEMORY_DMABUF);
     // CAPTURE streams before the first picture's buffer goes in: the kernel
     // only clears the DRC boundary sub-state in iris_process_streamon_output,
@@ -983,7 +1027,7 @@ void test_import_rejected_on_display_order_kernel()
     CHECK(!h.session->supports_import());
     h.submit(ta);
     CHECK(h.session->capture_memory() == CaptureMemory::Mmap);
-    CHECK(log_has(*h.fake, "REQBUFS CAPTURE 32") && !log_has(*h.fake, "DMABUF"));
+    CHECK(log_has(*h.fake, "REQBUFS CAPTURE 20") && !log_has(*h.fake, "DMABUF"));
     h.session->wait(ta);
     // Degraded to Copy: the pixels reached the client buffer anyway.
     CHECK(ta->completed && !ta->error && ta->publish == Publish::Copy && ta->frame == nullptr);
@@ -1241,7 +1285,7 @@ void test_ubwc_capture_uses_the_q08c_layout()
     auto t = make_ubwc_target();
     h.submit(t);
     CHECK(h.session->state() == SessionState::Streaming);
-    CHECK(h.fake->capture_allocated() == 32);
+    CHECK(h.fake->capture_allocated() == 20);
     // Direct hands out the compressed slot itself.
     h.session->wait(t);
     CHECK(t->completed && !t->error && t->frame);
@@ -1327,7 +1371,10 @@ int main()
         { "display-order fallback", test_display_order_fallback },
         { "pool sizing respects kernel max", test_pool_sizing_respects_kernel_max },
         { "pool sizing respects memory budget", test_pool_sizing_respects_memory_budget },
-        { "pool sizing keeps small geometry at the full pool", test_pool_sizing_keeps_small_geometry_at_the_full_pool },
+        { "pool sizing keeps small geometry at the client count",
+            test_pool_sizing_keeps_small_geometry_at_the_client_count },
+        { "pool sizing floors at the firmware minimum plus headroom",
+            test_pool_sizing_floors_at_the_firmware_minimum_plus_headroom },
         { "direct publish needs headroom over the firmware minimum",
             test_direct_publish_needs_headroom_over_the_firmware_minimum },
         { "direct publish holds slot until release", test_direct_publish_holds_slot_until_release },
@@ -1351,6 +1398,7 @@ int main()
         { "display-order timeout drains then recovers", test_display_order_timeout_drains_then_recovers },
         { "START EBUSY is retried", test_start_ebusy_is_retried },
         { "finish drains and refuses submit", test_finish_drains_and_refuses_submit },
+        { "drain survives a client that pins every slot", test_drain_survives_a_client_that_pins_every_slot },
         { "resolution change rebuilds capture", test_resolution_change_rebuilds_capture },
         { "resolution change keeps held frames", test_resolution_change_keeps_held_frames },
         { "AU larger than slot is rejected", test_au_larger_than_slot_is_rejected },

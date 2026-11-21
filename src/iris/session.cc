@@ -25,33 +25,36 @@ namespace iris {
 
 namespace {
 
-constexpr unsigned kMinCapturePool = 32;
 constexpr unsigned kMaxCapturePool = 64;
 constexpr int kLastWaitMs = 2000;
 constexpr int kOutputDrainMs = 500;
 
-// The device's contiguous capture memory is a fixed carve-out on SM8550, and
-// it holds the CAPTURE pool alongside the firmware's DPB and scratch buffers.
-// A 7680x4320 NV12 frame is 47.5 MiB, so a 32-frame pool asks for 1.5 GiB and
-// STREAMON fails with ENOMEM; the same node allocates 8 frames and decodes the
-// four codecs byte-exactly. Cap the pool by that budget instead of letting a
-// large geometry turn a fixed count into an unbounded allocation.
+// Every CAPTURE slot is mapped into the video SMMU for the life of the pool,
+// and that IOVA space is shared by all sessions. A 7680x4320 NV12 frame is
+// 47.5 MiB, so a fixed 32-frame pool asks for 1.5 GiB and STREAMON fails.
 constexpr uint64_t kCaptureMemoryBudget = 384ull << 20;
 
-// The same pool when the kernel allocates CAPTURE from system memory and maps
-// it through the IOMMU (capture_sg). 720 MiB is the 15 8K frames a Direct
-// target needs: the firmware minimum of seven plus the eight-picture headroom.
-// A larger pool fragmented the memory the HEVC bitstream buffer asks for.
+// The same pool when the kernel allocates CAPTURE from system memory
+// (capture_sg). 720 MiB is the firmware minimum of seven plus kDirectHeadroom
+// at 8K; a larger pool fragments the HEVC bitstream buffer's allocation.
 constexpr uint64_t kSystemCaptureMemoryBudget = 720ull << 20;
 
-// Decoded pictures a client can hold between completion and consumption.
-// The driver cannot see that queue: FFmpeg's hwdownload filter backlog held
-// eight 8K pictures between the last capture and the sync that waited for the
-// ninth. A Direct target pins one CAPTURE frame for every one of them, so a
-// pool with less headroom than this over the firmware's minimum can be pinned
-// completely while access units are still queued, and neither side can move.
-// At 8K the budget leaves exactly the firmware minimum plus one.
+// Pictures a client can hold between completion and consumption. A Direct
+// target pins one CAPTURE frame for each, so a pool with less headroom over
+// the firmware minimum can be pinned completely while AUs are still queued.
 constexpr unsigned kDirectHeadroom = 8;
+
+// FFmpeg's VA-API 1.x path declares no surfaces and creates its pool lazily.
+// Sizing to the firmware minimum then lands on exactly the count it pins, and
+// STOP has no buffer for LAST; 17 is the largest pool seen at 1080p.
+constexpr unsigned kUndeclaredSurfaceCount = 17;
+
+unsigned capture_pool_wanted(unsigned declared_surfaces, unsigned firmware_min)
+{
+    const unsigned surfaces = declared_surfaces > 0 ? declared_surfaces : kUndeclaredSurfaceCount;
+    const unsigned wanted = std::max(surfaces + 4, firmware_min + kDirectHeadroom);
+    return std::min(wanted, kMaxCapturePool);
+}
 
 // Compressed AU capacity when the caller has no better estimate: Chromium
 // and GStreamer both size the OUTPUT plane from the coded area with a floor.
@@ -306,18 +309,12 @@ void Session::configure_capture()
         }
     }
 
-    // Pool sizing: the client's surface count plus in-flight headroom, never
-    // below the firmware's minimum, never below 32 (the old vb2 ceiling that
-    // every hardware pass ran with), capped by the kernel's maximum. At large
-    // geometries the memory budget wins over the fixed count: 32 8K frames
-    // exceed the device's contiguous carve-out and STREAMON fails outright.
     const auto minimum = device_->get_control(V4L2_CID_MIN_BUFFERS_FOR_CAPTURE);
-    unsigned wanted = std::clamp(config_.surface_count + 4, kMinCapturePool, kMaxCapturePool);
-    if (minimum && *minimum > 0)
-        wanted = std::max(wanted, static_cast<unsigned>(*minimum));
+    const unsigned firmware_min = minimum && *minimum > 0 ? static_cast<unsigned>(*minimum) : 0;
     const uint64_t budget = device_->capture_from_system() ? kSystemCaptureMemoryBudget : kCaptureMemoryBudget;
-    wanted = capture_pool_count(wanted, layout.size, minimum ? *minimum : 0, budget);
-    direct_min_pool_ = (minimum && *minimum > 0 ? static_cast<unsigned>(*minimum) : 0) + kDirectHeadroom;
+    const unsigned wanted = capture_pool_count(
+        capture_pool_wanted(config_.surface_count, firmware_min), layout.size, static_cast<int>(firmware_min), budget);
+    direct_min_pool_ = firmware_min + kDirectHeadroom;
     pool_.allocate_capture(wanted, layout, memory);
     trace_("capture configure %ux%u stride=%u size=%u visible=%ux%u pool=%u memory=%s firmware-min=%d",
         granted.width, granted.height, granted.bytesperline, granted.sizeimage, visible_.width, visible_.height,
@@ -371,7 +368,8 @@ void Session::drain(const char* reason, bool wait_output)
 {
     require(state_ == SessionState::Streaming, "drain outside Streaming");
     ++stats_.drains;
-    trace_("drain begin reason=%s pending=%zu", reason, pending_.size());
+    trace_("drain begin reason=%s pending=%zu queued=%u held=%u pool=%u", reason, pending_.size(),
+        pool_.capture_queued(), pool_.capture_held(), pool_.capture_count());
     state_ = SessionState::Draining;
     saw_last_ = false;
     require(device_->decoder_command(V4L2_DEC_CMD_STOP), "DECODER_CMD_STOP busy", VA_STATUS_ERROR_HW_BUSY);

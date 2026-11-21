@@ -89,7 +89,7 @@ public:
 
     // True when the kernel allocates the CAPTURE queue from system memory and
     // maps it through the IOMMU (the driver's capture_sg module parameter).
-    // The contiguous carve-out no longer bounds the pool then.
+    // The system-memory budget applies instead.
     virtual bool capture_from_system() const { return false; }
 
     // Format negotiation.

@@ -63,8 +63,8 @@ public:
 
     bool capture_from_system() const override
     {
-        // A stock module has no such parameter and its CAPTURE pool stays in
-        // the contiguous carve-out.
+        // A stock module has no such parameter and its CAPTURE pool keeps the
+        // smaller budget.
         std::ifstream file("/sys/module/qcom_iris/parameters/capture_sg");
         std::string value;
         return static_cast<bool>(file >> value) && value == "Y";

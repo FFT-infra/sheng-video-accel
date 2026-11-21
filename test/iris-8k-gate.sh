@@ -5,9 +5,9 @@
 # the device for 1.5 GiB and STREAMON fails with ENOMEM. The session sizes the
 # pool against a memory budget; this gate proves the budget actually lets all
 # four qualified codecs decode at 8K, byte for byte, with a terminal LAST. The
-# budget and the pool cap follow the module: the stock contiguous carve-out
-# grants 8 frames, the capture_sg module parameter raises the budget to 720 MiB
-# and the cap to 15.
+# budget and the pool cap follow the module: a stock module grants 8 frames,
+# the capture_sg module parameter raises the budget to 720 MiB and the cap to
+# 15.
 #
 # The driver is chosen by the caller's environment, which this gate inherits
 # untouched. Leave LIBVA_DRIVERS_PATH unset to test the installed package, or
@@ -95,7 +95,7 @@ run_clip() {
     # The pool that was granted must be the memory-budgeted one. A 32-frame
     # pool at this geometry is the failure this gate exists to catch, whether
     # or not STREAMON happened to succeed on a particular boot. The budget is
-    # 384 MiB of contiguous capture memory (eight 8K frames), or 720 MiB when
+    # 384 MiB of capture memory (eight 8K frames), or 720 MiB when
     # the patched module allocates CAPTURE from system memory (capture_sg=1,
     # fifteen frames, the Direct headroom). The cap is read from the module
     # parameter because that is what the driver read.

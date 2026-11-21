@@ -99,10 +99,14 @@ chosen per surface from observed client behaviour.
 ```
 Session (one per VA context, one fd)
   owns  OUTPUT pool   : 4 MMAP slots, one access unit each
-  owns  CAPTURE pool  : N slots, N = min(clamp(surfaces + 4, 32, kernel max),
-                        max(firmware min, budget / frame size)), budget =
-                        384 MiB contiguous, or 720 MiB when the kernel
-                        allocates CAPTURE from system memory (capture_sg).
+  owns  CAPTURE pool  : N slots, N = min(max(surfaces + 4, firmware min + 8),
+                        kernel max) capped by the memory budget, budget =
+                        384 MiB, or 720 MiB when the kernel allocates CAPTURE
+                        from system memory (capture_sg). A client that
+                        declares no surfaces is sized as 17, because FFmpeg's
+                        VA-API 1.x path passes zero and then creates that
+                        many: a pool equal to the client's count leaves STOP
+                        no buffer for LAST (§4.3).
                         MMAP (default): every slot EXPBUF'd once -> Frame.
                         DMABUF (Import): slot i carries the client buffer
                         queued for one picture; nothing is pre-queued and
@@ -149,8 +153,8 @@ When a CAPTURE completion arrives with a token that has a pending Surface:
   FFmpeg filter backlog measured at 8K). At a geometry where the memory
   budget leaves less, the completion uses the Copy policy instead, which
   releases the slot immediately. At 8K that is the whole difference between
-  the policies: the 384 MiB contiguous budget grants eight frames, which is
-  the firmware minimum plus one, so Auto publishes Copy; with the patched
+  the policies: the 384 MiB budget grants eight frames, which is the
+  firmware minimum plus one, so Auto publishes Copy; with the patched
   kernel's `capture_sg=1` the same pool is 720 MiB and fifteen frames, and
   Auto publishes Direct.
 - **Copy**: the surface already owns a `StableBuffer` because the client
@@ -323,6 +327,17 @@ Ordering facts learned on this firmware and kept verbatim:
 - VP9 in-context resolution change and VP9 context recreation rebooted the
   device on display-order firmware; VP9 runs under
   `scripts/iris-experiment-guard.sh` only on that firmware.
+- `STOP` completes by writing `LAST` into a CAPTURE buffer, and a Direct
+  completion pins its slot until the client releases the surface. A pool
+  sized to exactly the number of surfaces the client creates therefore has
+  no buffer left for `LAST`: the drain waits out its bound and the session
+  fails with `no LAST after STOP`. Measured at 1080p with FFmpeg, whose
+  VA-API 1.x path declares zero surfaces and then creates fifteen for HEVC
+  against a fifteen-slot pool; H.264's twelve survived a fourteen-slot one.
+  The pool is sized from the client's declared count, or seventeen when it
+  declares none, plus four, so it always exceeds what the client can pin.
+  `drain begin` records `queued`, `held` and `pool` for exactly this
+  question.
 
 ### 4.1 Encode Session Architecture
 
@@ -647,7 +662,7 @@ capture token=<n> index=<i> flags=<hex> publish=error                (firmware f
 capture empty index=<i> flags=<hex> last=0|1
 capture last
 capture format rejected wanted=<fourcc> granted=<fourcc> planes=<n> <w>x<h>
-drain begin reason=eos|timeout|finish pending=<n>
+drain begin reason=eos|timeout|finish pending=<n> queued=<n> held=<n> pool=<n>
 drain complete last=1 output_queued=<n>
 drain lost token=<n>
 drc drain begin pending=<n>
@@ -868,8 +883,8 @@ The geometry and concurrency edges are gated on the target.
 `test/iris-8k-gate.sh` decodes one finite 7680x4320 clip per qualified codec,
 compares every frame with a software framemd5 baseline, and requires the
 granted CAPTURE pool to respect the memory budget: 32 8K NV12 frames are
-1.5 GiB, more than the device's contiguous carve-out holds, so `STREAMON`
-fails with ENOMEM. The cap is eight frames from the 384 MiB contiguous budget,
+1.5 GiB, more than the video SMMU's shared IOVA space holds, so `STREAMON`
+fails with ENOMEM. The cap is eight frames from the 384 MiB budget,
 or fifteen when the module reports `capture_sg=Y` and the 720 MiB
 system-memory budget applies; the gate reads the same module parameter the
 driver reads. `test/iris-two-player-gate.sh` runs two independent ffmpeg

@@ -175,7 +175,7 @@ Q08C offsets under the `QCOM_COMPRESSED` modifier. Anything else returns
   period instead of forcing a frame.
 - **8K Direct**: the kernel patch set's `capture_sg=1` module parameter
   allocates the decoder's CAPTURE pool from system memory through the SMMU and
-  is what makes a 15-frame 8K pool (713 MiB) fit. Without it the contiguous
+  is what makes a 15-frame 8K pool (713 MiB) fit. Without it the smaller
   budget grants eight 8K frames, and the automatic policy publishes Copy at
   that geometry. See `packaging/kernel/README.md`.
 - **Encode**: a client's slice list becomes a macroblock budget
