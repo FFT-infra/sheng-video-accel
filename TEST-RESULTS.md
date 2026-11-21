@@ -385,7 +385,7 @@ made FFmpeg request them and the firmware answered with an error completion
 after nine pictures, so `configure()` refuses HEVC B pictures as a backstop.
 Run identity: boot `edd37f6a-cb04-42b0-b9b7-96360172a5ca`, kernel
 `7.3.4-sm8550-00104-g87ac0f2347eb`, module `a3732c1c…` (0008, 0009, 0013,
-0014), driver `246e1c21…` as the installed package, source commit `249a650`
+0014), driver `246e1c21…` as the installed file, source commit `249a650`
 with the attribute work in the working tree, encoder node `/dev/video18`
 resolved by name. Gate record: `gate-bframes-1118c`.
 Before this change FFmpeg never requested B pictures: the driver answered
