@@ -15,7 +15,7 @@
 | VP9 | Profile 0, Profile 2 | Import（零拷贝） | Fluster 176/305 |
 | AV1 | Profile 0（8/10 位） | Import（零拷贝，解码顺序内核） | 与 libdav1d 逐帧一致，含 film grain 合成 |
 
-只有能力表标记 `production: supported` 的编码格式才声明 VA profile。一致性数字来自与软件解码的逐帧比对。Fluster 是语料结果，不是每次构建的回归，失败向量逐个归类。VP9 参考 MD5 早于本机 libvpx，176/305 不是解码缺陷数。
+只有 `data/iris-codec-capabilities.json` 标记 `production: supported` 的编码格式才声明 VA profile。一致性数字来自与软件解码的逐帧比对。Fluster 是语料结果，不是每次构建的回归，失败向量逐个归类。VP9 参考 MD5 早于本机 libvpx，176/305 不是解码缺陷数。
 
 UBWC 表面默认提供，`V4L2_VA_UBWC=0` 关闭。客户端在 `VASurfaceAttribDRMFormatModifiers` 里列出 `DRM_FORMAT_MOD_QCOM_COMPRESSED` 时得到 Q08C 表面，按每个平面一个 R8 层导出，且只能走 Direct 或 Import 发布：本驱动没有 UBWC 解压，Copy、图像入口、film grain、视频处理与编码器都拒绝它。Q10C 不提供——节点按每像素 4/3 字节分配，GPU 的 10-bit 导入要求 2 字节。`test/iris-ubwc-gate.sh` 让四种编码格式都解码到 Q08C，并要求 Turnip 读回（`test/vk-ubwc-read`）与线性解码逐字节一致。
 
@@ -78,7 +78,7 @@ dpkg-buildpackage -b -us -uc
 sudo apt install ../libva-v4l2-iris_0.1.0_arm64.deb
 ```
 
-Debian 包请在 chroot（`sbuild`、`pbuilder`）里构建：`libgbm-dev` 绑定发行版 Mesa，直接装依赖可能降级厂商修改过的图形栈。安装包会放置驱动本体和 `msm_drv_video.so`、`qcom_drv_video.so` 两个别名，libva 无需 `LIBVA_DRIVER_NAME` 即可解析。各客户端在自己的设置里开启 VA-API。
+Debian 包请在 chroot（`sbuild`、`pbuilder`）里构建：`libgbm-dev` 绑定发行版 Mesa，直接装依赖可能降级厂商修改过的图形栈。安装包会放置驱动本体和 `msm_drv_video.so`、`qcom_drv_video.so` 两个别名，libva 无需 `LIBVA_DRIVER_NAME` 即可解析。各客户端设置见 `docs/install.md#client-setup`。
 
 ### 诊断工具
 

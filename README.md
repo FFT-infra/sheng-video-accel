@@ -18,8 +18,8 @@ mpv, GStreamer and Sunshine use it through VA-API.
 | VP9 | Profile 0, Profile 2 | Import (zero-copy) | Fluster 176/305 |
 | AV1 | Profile 0 (8/10-bit) | Import (zero-copy, decode-order kernel) | Bit-exact against libdav1d; film grain included |
 
-A profile is advertised only for codecs the capability table marks
-`production: supported`. The conformance numbers are frame-by-frame
+A profile is advertised only for codecs `data/iris-codec-capabilities.json`
+marks `production: supported`. The conformance numbers are frame-by-frame
 comparisons against a software decode; Fluster counts are corpus results, not
 per-build regressions, and every failing vector is classified. Decode is
 qualified up to 7680x4320 for all four codecs, and for two concurrent 1080p
@@ -97,7 +97,7 @@ Build the Debian package in a chroot (`sbuild`, `pbuilder`): `libgbm-dev` is
 pinned to the distribution's Mesa and can downgrade a vendor-patched graphics
 stack. The package installs the driver plus the `msm_drv_video.so` and
 `qcom_drv_video.so` aliases, so libva resolves it without `LIBVA_DRIVER_NAME`.
-Clients enable VA-API in their own settings.
+Per-client settings are in `docs/install.md#client-setup`.
 
 ### Diagnostic tools
 
