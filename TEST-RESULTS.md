@@ -126,6 +126,32 @@ only. These are one-picture-at-a-time costs through a stateful pipeline, not
 a low-latency claim: the driver submits each AU as `vaEndPicture` returns and
 hands the completion back when the firmware returns it.
 
+### 8192 geometry
+
+The node advertises 96x96-8192x8192 for every codec
+(`VIDIOC_ENUM_FRAMESIZES`, step 1/1). Fresh clips at the advertised top were
+decoded through the build-tree driver on boot
+`d843e7b8-f05f-4d2d-885d-cdb0fac5b139`, module `1323d58a…66a5`
+(`capture_sg=Y`), driver `20e65896…d50c`, decoder `/dev/video17` resolved by
+`iris_driver`. Each clip is four pictures of `testsrc2`, generated on the
+target or the host:
+
+| Codec | 8192x4320 | 8192x4352 |
+| --- | --- | --- |
+| H.264 | - | `pool=14 memory=import`, 4/4, `errors=0` |
+| AV1 | - | `pool=14 memory=import`, 4/4, `errors=0` |
+| HEVC | `pool=14`, 4/4, `errors=0` | first DQBUF `Input/output error`, 0 frames |
+| VP9 | `pool=14`, 4/4, `errors=0` | first DQBUF `Input/output error`, 0 frames |
+
+So the advertised 8192 ceiling is real for all four, but the tallest
+geometry above 8K differs by codec: H.264 and AV1 decode 8192x4352, HEVC and
+VP9 stop at 8192x4320. The HEVC clip declares level 6.2, whose MaxLumaPs is
+35651584; 8192x4352 is 35651584 exactly, so the failing geometry is the
+largest one that level allows and the clip is legal at the level it declares.
+The firmware fails it at the first dequeue, before any `capture configure`.
+This is a boundary, not a qualified resolution: the qualified decode limit
+stays 7680x4320 (README).
+
 At 7680x4320, `test/iris-8k-gate.sh` decodes 30-picture clips, one per
 qualified codec, with a software framemd5 oracle: 30/30 exact frames each,
 granted CAPTURE pool 8 under the 384 MiB memory budget, `errors=0 last=1
@@ -285,6 +311,19 @@ lane's copy of 47.5 MiB per frame (2.85 GiB over 60 frames) is what halves
 it on this stack. AV1 8K is therefore a decode at about 45 fps and a
 client-side download that brings the round trip to about 19.5 fps; the older
 39.5 download-lane number is superseded and not carried forward.
+
+The AV1 shortfall against the other three was checked on 2026-11-22. H.264,
+HEVC and VP9 decode 8K at 84, 107 and 86 fps steady-state (first completion
+to last, 60 frames each); AV1 reaches 54-57 fps and drops 27 of its 60
+pictures, the same 27 the no-download lane records above, so its frame rate
+is bounded by the release-before-publish behaviour, not by the decoder.
+Pinning all three CPU clusters to `performance` moved AV1 to 52.9-53.5 fps,
+so DVFS is not the limiter. The download lane reaches 60/60 at 35.2 and
+39.8 fps whole-run, which includes startup. Run identity: boot
+`d843e7b8-f05f-4d2d-885d-cdb0fac5b139`, module `1323d58a…66a5`
+(`capture_sg=Y`), driver `20e65896…d50c`. There is no 8K60 AV1 claim to
+make: the codec decodes 8K, but the client that keeps all surfaces loses 45 %
+of the pictures and the one that downloads does so at about half the rate.
 
 A 60-frame run through the downloading client exposed one drain edge under
 the experimental allocator: HEVC and VP9 report `session failed: no LAST
@@ -737,8 +776,26 @@ and the boot unchanged (record `scope-soak-14`; source `2dd96f3`,
 override, boot `d843e7b8…`, module `1323d58a…66a5`, decoder `/dev/video17`
 resolved by `iris_driver`). Twelve sessions also passed on the same boot.
 The 14-session 1080p failure recorded earlier is therefore the CMA
-carve-out; moving CAPTURE to system memory removes it. Sixteen was not
-retried under `capture_sg`.
+carve-out; moving CAPTURE to system memory removes it.
+
+Sixteen was retried under `capture_sg` on 2026-11-22 and the ceiling is
+fourteen concurrent, not sixteen. A startup probe launches every client back
+to back and requires them to be alive together: at 14 all fourteen decode
+(1449 frames each, last completions within 43 ms of each other, zero errors);
+at 15 and at 16 the last client to start fails `STREAMON: Cannot allocate
+memory` after reaching `capture configure` with the same `pool=21
+memory=mmap firmware-min=6` as the others, and decodes no frame. Run
+identity: boot `d843e7b8-f05f-4d2d-885d-cdb0fac5b139`, module `1323d58a…66a5`
+with `capture_sg=Y`, build-tree driver `20e65896…d50c`, decoder `/dev/video17`
+resolved by `iris_driver`, records `conc14`/`conc15`/`conc16`.
+
+The failure is an allocation the node cannot satisfy at STREAMON; these runs
+do not isolate which pool. `CmaFree` reads 6.5 MiB of a 1.28 GiB carve-out
+even with no client running, so it is not a usable signal here, and the
+`memory=mmap` in the trace is this driver's label for a driver-allocated
+CAPTURE pool against a client Import, not a statement about contiguity. The
+300 s fourteen-session window and this 20 s startup window agree on
+fourteen; neither shows a fifteenth.
 
 ## Video processing
 
