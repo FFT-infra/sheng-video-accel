@@ -147,17 +147,14 @@ Imported DMA-BUFs must match the native CAPTURE layout: one linear object with a
   period instead of forcing a frame.
 - **Above 8K**: the node advertises up to 8192x8192. H.264 and AV1 decode
   8192x4352; HEVC and VP9 stop at 8192x4320 and fail the first dequeue above
-  it. Both need `capture_sg=1` for the pool, so this is an experimental
-  boundary, not part of the qualified 7680x4320 limit.
-- **8K Direct**: the experimental `capture_sg=1` module parameter allocates the
-  CAPTURE pool from system memory and is what makes a 15-frame 8K pool fit;
-  without it eight frames are granted and the automatic policy publishes Copy
-  at that geometry. With it, 8K publishes Direct and the decoder runs at
-  85-88 fps for H.264, 88-92 for HEVC, 80-85 for VP9 and 62 for AV1, measured
-  with a client that consumes every picture. A client that holds every slot leaves
-  the drain no buffer for its terminal LAST, so HEVC and VP9 report a failed
-  drain on the downloading client. The parameter is off by default and not
-  part of the qualified module.
+  it.
+- **8K Direct**: experimental, behind `capture_sg=1`, which allocates the
+  CAPTURE pool from system memory. Without it eight frames are granted and the
+  automatic policy publishes Copy; with it a 15-frame pool fits, 8K publishes
+  Direct, and the decoder runs at 85-88 fps for H.264, 88-92 for HEVC, 80-85
+  for VP9 and 62 for AV1 on a client that consumes every picture. A client that
+  holds every slot leaves the drain no buffer for its terminal LAST, so HEVC and
+  VP9 report a failed drain. Off by default, not part of the qualified module.
 - **Encode**: slices become a macroblock budget under CBR or CQP, up to 60 fps
   and 4096x2160, and need 0013. Tiles, long-term references and per-layer
   bitrates are not offered. B pictures, ROI, temporal layers and rolling-row

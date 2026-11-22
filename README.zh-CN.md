@@ -109,8 +109,8 @@ HEVC Main 8-bit，FFmpeg 8.1.3。CPU 锁最高频，GPU 锁 680 MHz。解码不�
 
 - **AV1 分辨率切换**：上下文内切换后，继续按旧几何导出表面的客户端在这些帧上得到 GPU 拷贝。Chromium 播本地文件时可能选软件 AV1 解码器，是否走硬件以浏览器门禁为准。
 - **原版内核**：解码降级为 GPU 拷贝，IDR 请求改为移动 intra period。
-- **超过 8K**：节点声明上限 8192x8192。H.264 和 AV1 能解 8192x4352；HEVC 和 VP9 停在 8192x4320，再高就在第一次出队失败。两者都需要 `capture_sg=1` 才够分配池，所以这是实验性边界，不属于已验证的 7680x4320 上限。
-- **8K Direct**：`capture_sg=1` 让解码器的 CAPTURE 池经 SMMU 从系统内存分配，15 帧 8K 池才放得下；没有它只给八帧，该分辨率下自动策略走 Copy。开启后 8K 走 Direct，在消费每一帧的客户端上解码为 H.264 85-88 fps、HEVC 88-92、VP9 80-85、AV1 62。客户端占满所有槽位时，drain 没有缓冲区接收终止的 LAST，下载客户端上 HEVC 和 VP9 会报 drain 失败。该参数默认关闭，不属于已验证组合。见 `packaging/kernel/README.md`。
+- **超过 8K**：节点声明上限 8192x8192。H.264 和 AV1 能解 8192x4352；HEVC 和 VP9 停在 8192x4320，再高就在第一次出队失败。
+- **8K Direct**：实验性，需 `capture_sg=1`，让 CAPTURE 池经 SMMU 从系统内存分配。没有它只给八帧，该分辨率下自动策略走 Copy；开启后 15 帧池放得下，8K 走 Direct，在消费每一帧的客户端上解码为 H.264 85-88 fps、HEVC 88-92、VP9 80-85、AV1 62。客户端占满所有槽位时，drain 没有缓冲区接收终止的 LAST，HEVC 和 VP9 会报 drain 失败。默认关闭，不属于已验证组合。见 `packaging/kernel/README.md`。
 - **编码**：客户端给出的切片列表变成宏块预算，仅 CBR 或 CQP、≤60 fps、≤4096x2160，并需要 0013 内核补丁；没有补丁时每帧只有一整片。分块返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。ROI 需 `V4L2_VA_ROI` 开启并安装 0017：固件正常完成元数据缓冲区，但编出的图像逐字节相同，所以默认不声明区域。B 帧需 `V4L2_VA_B_FRAMES` 开启，仅 H.264，客户端需保持三帧在途。
 - **时域分层与 intra refresh**：`VAEncMiscParameterTemporalLayerStructure` 给出 1-6 层，固件按层数自行推导成员关系，不支持逐层码率。滚动行 intra refresh 在 CBR 下生效，VBR/CQP 下拒绝。`ltr_count`/`frame_ltr_index`/`use_ltr_frames` 不声明。
 - **封装头**：HEVC 编码答 `VA_ENC_PACKED_HEADER_MISC`，把客户端的原始头插在参数集之后，FFmpeg `hevc_vaapi` 的 HDR10 与字幕 SEI 走这条路。H.264 答 0：`h264_vaapi` 的 buffering period SEI 按 id 引用 SPS，而只声明 MISC 时 FFmpeg 不会自己写参数集，CBR/VBR 编码会在客户端内部失败。序列头与 slice 头仍不支持，固件自己写。
