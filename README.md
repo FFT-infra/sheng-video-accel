@@ -18,12 +18,12 @@ mpv, GStreamer and Sunshine use it through VA-API.
 | VP9 | Profile 0, Profile 2 | Import (zero-copy) | Fluster 176/305 |
 | AV1 | Profile 0 (8/10-bit) | Import (zero-copy, decode-order kernel) | Bit-exact against libdav1d; film grain included |
 
-A profile is advertised only for codecs marked `production: supported` in
-`data/iris-codec-capabilities.json`. Conformance numbers are frame-by-frame
+A profile is advertised only for codecs the capability table marks
+`production: supported`. The conformance numbers are frame-by-frame
 comparisons against a software decode; Fluster counts are corpus results, not
-per-build regressions, and `TEST-RESULTS.md` classifies every failing vector.
-Decode is qualified up to 7680x4320 for all four codecs, and for two concurrent
-1080p clients.
+per-build regressions, and every failing vector is classified. Decode is
+qualified up to 7680x4320 for all four codecs, and for two concurrent 1080p
+clients.
 
 UBWC surfaces are offered unless `V4L2_VA_UBWC=0`: a client that lists
 `DRM_FORMAT_MOD_QCOM_COMPRESSED` gets a Q08C surface exported as one R8 layer
@@ -53,7 +53,7 @@ against libdav1d.
 
 Input is NV12, P010, BGRA or RGBA; output is NV12 or P010. The backend is
 pinned Vulkan compute on surface DMA-BUFs; `V4L2_VA_VPP=0` removes the
-entrypoint. Details are in `docs/architecture.md`.
+entrypoint.
 
 ## Requirements
 
@@ -97,17 +97,16 @@ Build the Debian package in a chroot (`sbuild`, `pbuilder`): `libgbm-dev` is
 pinned to the distribution's Mesa and can downgrade a vendor-patched graphics
 stack. The package installs the driver plus the `msm_drv_video.so` and
 `qcom_drv_video.so` aliases, so libva resolves it without `LIBVA_DRIVER_NAME`.
-Per-client settings (mpv, VLC, Sunshine, Firefox, GStreamer) are in
-`docs/install.md#client-setup`.
+Clients enable VA-API in their own settings.
 
 ### Diagnostic tools
 
 `iris-device-check` is read-only: nodes, firmware version, bound driver and
 queue formats. `iris-verify` decodes and encodes a sample clip and requires the
 Iris interrupt counters to move. The full four-codec pixel oracle is
-`test/iris-matrix.sh`. A browser session counts as hardware only when the media
-surface names the selected decoder and reports decoded and dropped frames; the
-procedure is in `docs/install.md`.
+`test/iris-matrix.sh`. A browser session counts as hardware only when the
+media surface names the selected decoder and reports decoded and dropped
+frames.
 
 ## Performance
 
@@ -121,9 +120,8 @@ upload.
 | Encode | 679 fps | 585 fps | 172 fps |
 
 Throughput follows DVFS more than the driver, so an unpinned run measures the
-governor. Sweeps, power and method are in `TEST-RESULTS.md`. At 1080p and
-4 Mbit/s, H.264 encodes 4.4x faster than libx264 `veryfast`, HEVC 15.2x faster
-than libx265, and both reach 7680x4320 (`test/iris-encode-baseline.sh`).
+governor. At 1080p and 4 Mbit/s, H.264 encodes 4.4x faster than libx264
+`veryfast`, HEVC 15.2x faster than libx265, and both reach 7680x4320.
 
 ## Memory model
 
@@ -155,8 +153,8 @@ Imported DMA-BUFs must match the native CAPTURE layout: one linear object with a
 - **Encode**: slices become a macroblock budget under CBR or CQP, up to 60 fps
   and 4096x2160, and need 0013. Tiles, long-term references and per-layer
   bitrates are not offered. B pictures, ROI, temporal layers and rolling-row
-  intra refresh are opt-in and qualified only on the kernel patches listed in
-  `data/iris-codec-capabilities.json`, which also names every refusal.
+  intra refresh are opt-in and qualified only on the kernel patches they
+  require.
 - **Packed headers**: HEVC encode answers `VA_ENC_PACKED_HEADER_MISC` and splices
   the client's raw header behind the parameter sets, which is how FFmpeg's
   `hevc_vaapi` carries HDR10 and caption SEI. H.264 answers none, because
