@@ -269,6 +269,15 @@ hevc_parameter_sets_test = executable(
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('hevc-parameter-sets', hevc_parameter_sets_test)
 
+# The node takes whole frames, so a field picture is refused before
+# submission rather than failing at the first DQBUF. No hardware.
+h264_translator_test = executable(
+  'h264-translator-test',
+  'h264-translator-test.cc',
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
+test('h264-translator', h264_translator_test)
+
 # The rebuilt AV1 frame header walked back with a spec-ordered reader: the
 # fields whose coding is not a plain copy of the VA value. No hardware.
 av1_obu_test = executable(

@@ -23,8 +23,8 @@ from source `65686a2`, so `rpm -V` reports the live file as `S.5....T.`.
 
 ## Host verification
 
-`sh test/run-static-checks.sh` PASS, `meson test -C build-local` 34/34,
-`meson test -C build-asan` 34/34, `git diff --check` clean. Both CI jobs
+`sh test/run-static-checks.sh` PASS, `meson test -C build-local` 35/35,
+`meson test -C build-asan` 35/35, `git diff --check` clean. Both CI jobs
 (`build-and-check`, `sanitizers`) are green on the pushed head. The VPP
 shaders, kernel patch hashes, media pins, install manifest and source-archive
 boundary are each pinned by a host check.
@@ -438,6 +438,19 @@ profiles are not advertised; 6 more are Baseline/Extended pixel differences on
 an unadvertised profile; `FM2_SVA_C` has no readable elementary stream to
 probe. The passing Constrained Baseline and Main vectors are frame-coded
 streams.
+
+Field-coded H.264 is now refused in `vaEndPicture`, before the access unit
+reaches the node: the translator answers `VA_STATUS_ERROR_UNIMPLEMENTED` and
+submits nothing, so the 49 field-coded vectors above fail at the driver rather
+than at the kernel. The context still opens its session (that happens in
+`vaCreateContext`), but no picture is queued and the DQBUF that used to follow
+the first submission no longer happens. Verified on a 1920x1080 High field-coded
+clip: `endPicture status=20` with zero DQBUF, against `status=23 DQBUF:
+Input/output error` before the change; a progressive 1080p control decodes
+20/20. Run identity: source `561d7fc` plus this change, build-tree driver
+`77b2538f…` under `LIBVA_DRIVERS_PATH`, boot `d843e7b8…`, kernel
+`7.3.4-sm8550-00104-g87ac0f2347eb`, module `1323d58a…`, decoder
+`/dev/video17`; the field-coded clip published 0 frames.
 
 HEVC, 6 failures: two `PICSIZE_A/B_Bossen_1` vectors are 8440 wide, above the
 node's 8192 limit; two `WPP_D_ericsson_MAIN_2`/`_MAIN10_2` are 64 wide, below
