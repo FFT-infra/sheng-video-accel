@@ -72,6 +72,45 @@ continued decoding (160 -> 278 frames, `dropped=0`, no media error), with and
 without `--disable-features=ExtendedVideoBitstreamValidation`, so this driver
 needs no seek workaround on that browser.
 
+### Media clients
+
+Three desktop players selected the driver's decoder on the installed package
+(`/usr/lib64/dri/v4l2_drv_video.so`, `d15ff198…`, no build-tree override).
+Each cell is one `V4L2_VA_TRACE=1` run and reads `submitted=N completed=N
+errors=0 drops=0 timeouts=0 drains=1 misplaced=0 retained=0`. The control is
+the same H.264 clip with the client's software decoder (VLC
+`--avcodec-hw=none`, mpv `--hwdec=no`): the Iris interrupt counter does not
+move at all.
+
+| Client | H.264 1080p | HEVC 1080p | VP9 10-bit 720p | AV1 720p |
+| --- | ---: | ---: | ---: | ---: |
+| VLC 3.0.24 | 120/120 | 90/90 | 328/328 | software |
+| Kodi 22.0-RC2 | 120/120 | 90/90 | 328/328 | 120/120 |
+| mpv 0.41.0 | 65/65 (60 requested) | — | — | — |
+
+VLC logs `VAAPI driver: Qualcomm Iris V4L2 stateful (libva-v4l2)` and uses its
+`vaapi_drm` module. AV1 goes to dav1d because VLC lists that module ahead of
+avcodec; the same file through FFmpeg decodes on the driver, so the fallback
+is the client's module order and not a refusal.
+
+Kodi logs `VAAPI EGL interop: nv12,p010le` and selects `ff-h264-vaapi`,
+`ff-hevc-vaapi`, `ff-vp9-vaapi` and `ff-av1-vaapi`. Its two errors do not
+touch the decode. `failed loading sse4 lib` is its x86 CPU-copy helper, absent
+on aarch64. `vaQueryVideoProcFilterCaps ... (32)` is
+`VA_STATUS_ERROR_UNSUPPORTED_FILTER` for `VAProcFilterDeinterlacing`, after
+which Kodi omits its VA-API deinterlacing methods; interlaced content is
+refused before the node, so that filter has no source.
+
+mpv needs `--vo=gpu`; with `--vo=null` it reports `DR failed - disabling`
+because the null output does not take vaapi frames. Its surface probe draws
+one driver warning, `surface pixel format does not match the RT format`, when
+it asks for a `vaapi/rgba` surface against a YUV420 config; the driver refuses
+that and the probe settles on nv12 and p010.
+
+Run identity: boot `d843e7b8-f05f-4d2d-885d-cdb0fac5b139`, kernel
+`7.3.4-sm8550-00104-g87ac0f2347eb`, module `1323d58a…` (the 0017 set), decoder
+`/dev/video17` resolved by `iris_driver`.
+
 ### AV1 film grain in the firmware
 
 `V4L2_VA_HW_GRAIN` makes the firmware apply film grain and write the grained
