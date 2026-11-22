@@ -557,6 +557,103 @@ void write_global_param(BitWriter& writer, unsigned type, unsigned idx, int32_t 
     write_signed_subexp_with_ref(writer, -mx, mx + 1, r, v);
 }
 
+// Spec 5.9.30 film_grain_params(). VA hands over the parameters already
+// resolved for this picture, so a frame that applies grain codes its whole
+// set (update_grain = 1) instead of borrowing a reference's. The syntax is
+// only present when the sequence allows grain and the frame is shown or
+// showable; otherwise the spec resets the parameters and nothing is written.
+//
+// With `hardware_grain` on, this firmware applies the grain itself: the
+// CAPTURE slot holds the grained picture and the VA glue publishes it into
+// current_display_picture. Off, the header asks for none and the software
+// blend in src/va/grain.cc produces the display picture from the ungrained
+// slot.
+void write_film_grain_params(BitWriter& writer, const VADecPictureParameterBufferAV1& picture,
+    bool hardware_grain)
+{
+    const auto& seq = picture.seq_info_fields.fields;
+    const auto& pic = picture.pic_info_fields.bits;
+    if (!seq.film_grain_params_present || (!pic.show_frame && !pic.showable_frame))
+        return;
+
+    const auto& grain = picture.film_grain_info;
+    const auto& f = grain.film_grain_info_fields.bits;
+    // With hardware grain off the header asks for none: the CAPTURE slot
+    // must hold the ungrained reference the software blend reads.
+    writer.bit(hardware_grain ? f.apply_grain : 0);
+    if (!hardware_grain || !f.apply_grain)
+        return;
+
+    writer.bits(grain.grain_seed, 16);
+    if (pic.frame_type == INTER_FRAME)
+        writer.bit(1); // update_grain
+
+    const unsigned num_y = std::min<unsigned>(grain.num_y_points, 14);
+    writer.bits(num_y, 4);
+    for (unsigned i = 0; i < num_y; ++i) {
+        writer.bits(grain.point_y_value[i], 8);
+        writer.bits(grain.point_y_scaling[i], 8);
+    }
+
+    if (!seq.mono_chrome)
+        writer.bit(f.chroma_scaling_from_luma);
+    // In 4:2:0 with no luma points the chroma point counts are inferred zero,
+    // so the client's values are not coded even if it set them.
+    const bool chroma_inferred = seq.mono_chrome || f.chroma_scaling_from_luma
+        || (seq.subsampling_x && seq.subsampling_y && num_y == 0);
+    unsigned num_cb = 0;
+    unsigned num_cr = 0;
+    if (!chroma_inferred) {
+        num_cb = std::min<unsigned>(grain.num_cb_points, 10);
+        writer.bits(num_cb, 4);
+        for (unsigned i = 0; i < num_cb; ++i) {
+            writer.bits(grain.point_cb_value[i], 8);
+            writer.bits(grain.point_cb_scaling[i], 8);
+        }
+        num_cr = std::min<unsigned>(grain.num_cr_points, 10);
+        writer.bits(num_cr, 4);
+        for (unsigned i = 0; i < num_cr; ++i) {
+            writer.bits(grain.point_cr_value[i], 8);
+            writer.bits(grain.point_cr_scaling[i], 8);
+        }
+    }
+
+    writer.bits(f.grain_scaling_minus_8, 2);
+    writer.bits(f.ar_coeff_lag, 2);
+    const unsigned num_pos_luma = 2 * static_cast<unsigned>(f.ar_coeff_lag) * (f.ar_coeff_lag + 1);
+    unsigned num_pos_chroma = num_pos_luma;
+    // The coefficients are signed in VA and biased by 128 on the wire.
+    const auto biased = [](int8_t value) { return static_cast<unsigned>(static_cast<int>(value) + 128); };
+    if (num_y) {
+        num_pos_chroma = num_pos_luma + 1;
+        for (unsigned i = 0; i < num_pos_luma; ++i)
+            writer.bits(biased(grain.ar_coeffs_y[i]), 8);
+    }
+    if (f.chroma_scaling_from_luma || num_cb) {
+        for (unsigned i = 0; i < num_pos_chroma; ++i)
+            writer.bits(biased(grain.ar_coeffs_cb[i]), 8);
+    }
+    if (f.chroma_scaling_from_luma || num_cr) {
+        for (unsigned i = 0; i < num_pos_chroma; ++i)
+            writer.bits(biased(grain.ar_coeffs_cr[i]), 8);
+    }
+    writer.bits(f.ar_coeff_shift_minus_6, 2);
+    writer.bits(f.grain_scale_shift, 2);
+    // The chroma weights travel already biased in VA, which is the wire form.
+    if (num_cb) {
+        writer.bits(grain.cb_mult, 8);
+        writer.bits(grain.cb_luma_mult, 8);
+        writer.bits(grain.cb_offset, 9);
+    }
+    if (num_cr) {
+        writer.bits(grain.cr_mult, 8);
+        writer.bits(grain.cr_luma_mult, 8);
+        writer.bits(grain.cr_offset, 9);
+    }
+    writer.bit(f.overlap_flag);
+    writer.bit(f.clip_to_restricted_range);
+}
+
 bool write_global_motion_params(BitWriter& writer, const VADecPictureParameterBufferAV1& picture,
     const AV1ReferenceState& references, bool frame_is_intra, const char** reject_reason)
 {
@@ -693,11 +790,11 @@ bool av1_build_frame_obu(std::vector<uint8_t>& payload,
         *reject_reason = "primary_ref_frame outside the eight reference slots";
         return false;
     }
-    // Film grain: the access unit rebuilt here asks the firmware for no grain
-    // (film_grain_params() writes apply_grain=0 below), so the CAPTURE slot
-    // holds the ungrained picture the spec uses for reference. The grained
-    // picture the client named in current_display_picture is blended in
-    // software from that slot at the first wait (src/va/grain.cc).
+    // Film grain is written by write_film_grain_params() below, from
+    // sequence.hardware_grain: on, the firmware applies the client's
+    // parameters and the CAPTURE slot holds the grained picture; off, the
+    // header asks for none and the software blend (src/va/grain.cc) reads
+    // the ungrained slot.
     if (picture.pic_info_fields.bits.large_scale_tile) {
         *reject_reason = "large scale tile streams are not supported";
         return false;
@@ -938,13 +1035,7 @@ bool av1_build_frame_obu(std::vector<uint8_t>& payload,
     if (!write_global_motion_params(writer, picture, references, frame_is_intra, reject_reason))
         return false;
 
-    // film_grain_params(): the firmware never applies grain, whatever the
-    // client's parameters said; the software blend in src/va/grain.cc produces
-    // the grained display picture. When the sequence does not allow grain, or
-    // the frame is neither shown nor showable, the spec resets the parameters
-    // and no syntax is written.
-    if (seq.film_grain_params_present && (pic.show_frame || pic.showable_frame))
-        writer.bit(0);
+    write_film_grain_params(writer, picture, sequence.hardware_grain);
 
     // An OBU_FRAME carries the frame header immediately followed by the tile
     // group, separated only by byte alignment.

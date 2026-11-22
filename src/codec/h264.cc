@@ -109,6 +109,13 @@ public:
             "H.264 picture without parameters or slices", VA_STATUS_ERROR_INVALID_PARAMETER);
         const auto& parameters = *static_cast<const VAPictureParameterBufferH264*>(picture.parameters);
         const auto& first_slice = *static_cast<const VASliceParameterBufferH264*>(picture.slice_parameters.front());
+        // A field picture is half a frame, and the node takes whole frames
+        // only. Refuse it here: submitted as a frame, the first DQBUF fails
+        // and the client has already paid for the round trip before falling
+        // back to software.
+        require(parameters.seq_fields.bits.frame_mbs_only_flag
+                && !(parameters.CurrPic.flags & (VA_PICTURE_H264_TOP_FIELD | VA_PICTURE_H264_BOTTOM_FIELD)),
+            "interlaced H.264 unsupported", VA_STATUS_ERROR_UNIMPLEMENTED);
 
         out.bytes.clear();
         out.deferred = false;

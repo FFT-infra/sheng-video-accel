@@ -23,8 +23,8 @@ from source `65686a2`, so `rpm -V` reports the live file as `S.5....T.`.
 
 ## Host verification
 
-`sh test/run-static-checks.sh` PASS, `meson test -C build-local` 34/34,
-`meson test -C build-asan` 34/34, `git diff --check` clean. Both CI jobs
+`sh test/run-static-checks.sh` PASS, `meson test -C build-local` 35/35,
+`meson test -C build-asan` 35/35, `git diff --check` clean. Both CI jobs
 (`build-and-check`, `sanitizers`) are green on the pushed head. The VPP
 shaders, kernel patch hashes, media pins, install manifest and source-archive
 boundary are each pinned by a host check.
@@ -47,7 +47,7 @@ oracle.
 | `iris-real-clip-gate.sh` drc | in-context 1280x720 -> 854x480, 80/80 exact, `import=40 copy=40 invisible=1`; the GPU-copy half is the expected fail-safe for a client exporting surfaces at the old geometry |
 | `iris-real-clip-gate.sh` 4k | AV1 3840x2160, 30/30 exact, `import=30 copy=0` |
 | `iris-vp9-p2-gate.sh` | generated 640x360 `yuv420p10le` Profile 2, 30/30 exact, 12 P010 surfaces, 0 NV12, `import=30`, `VAEntrypointVLD` answers `VA_RT_FORMAT_YUV420_10` only |
-| `iris-av1-grain-gate.sh` | 8-bit NV12 and 10-bit P010 clips, every frame byte-identical to libdav1d's grained output under Import, direct and copy |
+| `iris-av1-grain-gate.sh` | 8-bit NV12 and 10-bit P010 clips, every frame byte-identical to libdav1d's grained output under Import and Direct, in both the default software blend and `V4L2_VA_HW_GRAIN` (see below). The gate refuses a forced Copy publication: without a layout mismatch it is a silent Import regression. |
 | `iris-dynamic-resolution.sh` | VP9 Import, 100 alternating 640x360/1280x720 switches in both single- and multi-process lanes, 202 frames over 101 contexts, pixels equal to software, `drops=0 timeouts=0` |
 | `iris-gstreamer-gate.sh` | `GST_VA_ALL_DRIVERS=1` registers 7 elements; `vaav1dec` 120/120 hashes equal to software; `vah264enc`/`vah265enc` encode 60 frames that decode back |
 
@@ -72,6 +72,86 @@ continued decoding (160 -> 278 frames, `dropped=0`, no media error), with and
 without `--disable-features=ExtendedVideoBitstreamValidation`, so this driver
 needs no seek workaround on that browser.
 
+### AV1 film grain in the firmware
+
+`V4L2_VA_HW_GRAIN` makes the firmware apply film grain and write the grained
+picture into the client's `current_display_picture`; the default path leaves
+the firmware output ungrained and blends in software from the decode
+completion. Both were measured against libdav1d's own grained output on one
+boot (boot `d843e7b8-f05f-4d2d-885d-cdb0fac5b139`, module `1323d58a…66a5`,
+build-tree driver `5bb00099…53de` from source `7cdeef2` plus this change,
+decoder `/dev/video17` resolved by the `iris_driver` name, publish policy
+named per row):
+
+| Clip | Mode | Result |
+| --- | --- | --- |
+| `grain8.webm` 320x240 8-bit, 21 pictures | hardware, Import | `frames=21 blends=0`, framemd5 identical to libdav1d, `session finish submitted=21 completed=21 errors=0 drops=0` |
+| `grain8.webm` | hardware, Direct | same pixels, `import=0 copy=0 invisible=12` |
+| `grain8.webm` | software, Import | `blends=21`, identical to libdav1d |
+| `grain8.webm` | software, Direct | `blends=21`, identical to libdav1d |
+| `grain10.webm` 352x290 P010, 10 pictures | hardware, Import | `frames=10 blends=0`, identical to libdav1d, `submitted=11 completed=11` |
+| `grain10.webm` | hardware, Direct | same pixels, `import=0 copy=0 invisible=2` |
+| `grain10.webm` | software, Import | `blends=10`, identical to libdav1d |
+| `grain-hd.mkv` 1280x720, 90 inter-coded pictures | hardware, Import | 90 hardware routes, framemd5 identical to libdav1d, `submitted=93 completed=93 errors=0 drops=0` |
+
+The hardware path is opt-in and not part of the qualified combination: it
+changes which surface receives the pixels (the completion lands on
+`current_display_picture`, not `current_frame`), and a client that reads
+`current_frame` after `vaEndPicture` would get no picture where the software
+path would have given it the ungrained one. A forced Copy publication is not
+a gate lane: `iris-clip-trace-check.sh` refuses a copy with no recorded
+layout mismatch, and no grain clip has one.
+
+### Decode latency
+
+The session reports `latency_us` on every capture completion: the span from
+the access unit reaching the OUTPUT queue to the picture completing, the same
+submit-to-completion shape the encoder traces. Measured on one boot (boot
+`d843e7b8-f05f-4d2d-885d-cdb0fac5b139`, module `1323d58a…66a5`,
+build-tree driver `20e65896…d50c` from source `7cdeef2` plus this change,
+decoder `/dev/video17` resolved by the `iris_driver` name), `av1-720.webm`
+1280x720 AV1 through `ffmpeg -hwaccel vaapi -f null -` with Import
+publishing, three rounds:
+
+| Round | First picture | p50 | p95 | max |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 10061 us | 10145 us | 13503 us | 15328 us |
+| 2 | 9558 us | 10120 us | 14211 us | 19256 us |
+| 3 | 11342 us | 10023 us | 13998 us | 16946 us |
+
+Each round is 120 completions. The first picture is not an outlier here
+because the session is already configured by the time the client's second
+picture arrives; the number includes firmware bring-up on the first round
+only. These are one-picture-at-a-time costs through a stateful pipeline, not
+a low-latency claim: the driver submits each AU as `vaEndPicture` returns and
+hands the completion back when the firmware returns it.
+
+### 8192 geometry
+
+The node advertises 96x96-8192x8192 for every codec
+(`VIDIOC_ENUM_FRAMESIZES`, step 1/1). Fresh clips at the advertised top were
+decoded through the build-tree driver on boot
+`d843e7b8-f05f-4d2d-885d-cdb0fac5b139`, module `1323d58a…66a5`
+(`capture_sg=Y`), driver `20e65896…d50c`, decoder `/dev/video17` resolved by
+`iris_driver`. Each clip is four pictures of `testsrc2`, generated on the
+target or the host:
+
+| Codec | 8192x4320 | 8192x4352 |
+| --- | --- | --- |
+| H.264 | - | `pool=14 memory=import`, 4/4, `errors=0` |
+| AV1 | - | `pool=14 memory=import`, 4/4, `errors=0` |
+| HEVC | `pool=14`, 4/4, `errors=0` | first DQBUF `Input/output error`, 0 frames |
+| VP9 | `pool=14`, 4/4, `errors=0` | first DQBUF `Input/output error`, 0 frames |
+
+So the advertised 8192 ceiling is real for all four, but the tallest
+geometry above 8K differs by codec: H.264 and AV1 decode 8192x4352, HEVC and
+VP9 stop at 8192x4320. The HEVC clip declares level 6.2, whose MaxLumaPs is
+35651584; 8192x4352 is 35651584 exactly, so the failing geometry is the
+largest one that level allows and the clip is legal at the level it declares.
+The firmware fails it at the first dequeue, before any `capture configure`.
+This is a boundary, not a qualified resolution: the qualified decode limit
+stays 7680x4320 (README).
+
 At 7680x4320, `test/iris-8k-gate.sh` decodes 30-picture clips, one per
 qualified codec, with a software framemd5 oracle: 30/30 exact frames each,
 granted CAPTURE pool 8 under the 384 MiB memory budget, `errors=0 last=1
@@ -80,16 +160,13 @@ drain=1`. Run identity: boot `edd37f6a-cb04-42b0-b9b7-96360172a5ca`, module
 override, source `0e5e82c` with the Direct publish fix in the working tree,
 decoder node resolved by name. Gate record `gate-8k30b`.
 
-The 30-picture clip found a publish-policy defect the 4-picture run could
-not: Direct publish pins one CAPTURE frame per decoded picture the client
-has not consumed, and the 8K pool is the firmware minimum plus one (8), so
-FFmpeg's hwdownload backlog held every slot and the session stopped at 26 of
-30 pictures (`held=8 queued=0`, `sync timeout token=27`). The same clip
-completes 30/30 under Import and under Copy, and 4K keeps the full 32-frame
-pool and Direct. The automatic policy now offers Direct only when the pool
-covers the firmware minimum plus eight pictures and publishes Copy
-otherwise; `V4L2_VA_PUBLISH=direct` still forces the old behaviour and still
-stalls at 26/30, which is what made the mechanism attributable.
+Direct publish pins one CAPTURE frame per decoded picture the client has not
+consumed. At 8K the pool is the firmware minimum plus one (8), so FFmpeg's
+hwdownload backlog holds every slot and the session stops at 26 of 30 pictures
+(`held=8 queued=0`, `sync timeout token=27`); the same clip completes 30/30
+under Import and Copy. The automatic policy therefore offers Direct only when
+the pool covers the firmware minimum plus eight pictures and publishes Copy
+otherwise; `V4L2_VA_PUBLISH=direct` still forces the stall.
 
 Import works at this geometry: `V4L2_VA_PUBLISH=import` decodes all four
 codecs 30/30 framemd5-exact with `pool=8 memory=import` and `errors=0 last=1
@@ -182,51 +259,111 @@ change and 0016 in the working tree, decoder resolved by name:
 
 Sixty-frame 8K clips then measured the frame rate over a longer window, not
 just the pool. Run identity: source `9db1fb5`, `source_dirty=0`, build-tree
-driver `8c85f87d…0d9`, boot `79f5d3e1-0b32-4f3c-ae95-7435870fb362`, kernel
-`7.3.4-sm8550-00104-g87ac0f2347eb`, module `1323d58a…66a5` loaded with
-`capture_sg=1`, decoder `/dev/video0` resolved by `iris_driver`. The
-four-frame gate on the same driver and module passed all four codecs with
-`pool=15`, exact framemd5, `errors=0 last=1 drain=1` (record
-`8k-gate-sg-1119`). Each clip is
-60 frames of `testsrc2` at 24 fps: H.264 `libx264 -preset ultrafast -tune
+driver `8c85f87d…0d9`, boot `79f5d3e1-0b32-4f3c-ae95-7435870fb362`,
+module `1323d58a…66a5` loaded with `capture_sg=1`, decoder `/dev/video0`
+resolved by `iris_driver`. The four-frame gate on the same driver and module
+passed all four codecs with `pool=15`, exact framemd5, `errors=0 last=1
+drain=1` (record `8k-gate-sg-1119`). Each clip is 60 frames of `testsrc2`
+at 24 fps: H.264 `libx264 -preset ultrafast -tune
 zerolatency`, HEVC `libx265 -preset ultrafast -x265-params
 keyint=60:min-keyint=60:scenecut=0`, VP9 `libvpx-vp9 -b:v 8M -deadline
 realtime -cpu-used 8 -g 60`, AV1 `libsvtav1 -preset 12 -g 60`. The throughput
-client leaves frames on the VA surfaces (`-f null`), three rounds per codec;
-the AV1 number comes from the downloading lane because the no-download client
-releases its AV1 surfaces before the show-existing completions are published
-(27 of 60 dropped, the same at 1080p), while the download lane publishes 60
-direct and 13 invisible completions with no drop and exact pixels.
+client leaves frames on the VA surfaces (`-f null`), three rounds per codec.
 
 | Codec | Frames | fps, three rounds | Drops / errors | LAST |
 | --- | ---: | --- | --- | --- |
 | H.264 | 60 | 65.4 / 65.7 / 66.3 | 0 / 0 | yes |
 | HEVC | 60 | 66.5 / 65.9 / 63.8 | 0 / 0 | yes |
 | VP9 | 60 | 70.3 / 71.9 / 67.9 | 0 / 0 | yes |
-| AV1 | 60 | 39.5 (downloading lane, 1.520 s) | 0 / 0 | yes |
 
-H.264, HEVC and VP9 therefore sustain 8K60 on this boot; AV1 decodes all 60
-frames but stays below 60 fps, so it is recorded as a measured value, not an
-8K60 claim. The whole-run figure includes client startup, as the throughput
-table above does. The guarded fps run peaked at 38.6 °C and the pack went from
-73 % to 70 %.
+H.264, HEVC and VP9 therefore sustain 8K60 on this boot. AV1 is measured
+below.
 
-A 60-frame run through the downloading client exposed one drain edge under
-the experimental allocator. When every picture has completed before the
-client destroys its context (`pending=0`, as the download lane produces),
-HEVC and VP9 never receive the terminal LAST while the driver waits: the
-firmware's drain-last message is processed only once the next command
-(STREAMOFF) reaches the queue, so the session reports `session failed: no
-LAST after STOP` after its 2 s bound, and a 6 s bound does not change it. The
-pictures are unaffected: the same 60-frame gate run reported
-`frames=60 framemd5=exact` and `submitted=60 completed=60 errors=0 drops=0`
-for both codecs, and only the LAST check failed. H.264 and AV1 drain
-normally, and the same HEVC stream on the contiguous allocator
-(`capture_sg=0`, `pool=8`, Copy) reaches LAST with `pending=0`. The parameter
-is experimental and off by default, so the qualified path is unaffected.
+The AV1 shortfall against the other three was re-checked on 2026-11-22 and
+the cause is publication, not the decoder. The 27 drops have one signature:
+every dropped token's surface was resubmitted for a later picture before its
+completion arrived, and `Session::submit` releases the still-pending target
+(`session_submit.cc:34`). Under Direct that release forgets the token, so the
+completion has no target and the picture is lost; Import retains it
+(`target detached`) and completes it. Same client, same clip, `-f null`:
 
-The parameter defaults off and is not part of the qualified module, so a
-stock boot keeps the contiguous pool and Copy publication at 8K.
+| AV1 8K lane | completed | drops | shown fps |
+| --- | ---: | ---: | ---: |
+| Direct, no download | 23-24 / 60 | 26-27 | 54.9-57.7 |
+| Import, no download | 60 / 60 | 0 | 63.8-64.1 |
+| Import, no download, 300 frames, two rounds | 300 / 300 | 0 | 62.2 / 62.2 |
+| Direct, `scale_vaapi=3840x2160` (client consumes) | 60 / 60 | 0 | 34.5 / 47.8 |
+
+On the Import lane the four codecs sit in one band over the same 60 frames:
+H.264 60.1-63.4, HEVC 55.6-58.1, VP9 60.7-63.6, AV1 63.8-64.1 shown fps, with
+73 CAPTURE completions for AV1's 60 pictures (13 invisible alt-ref halves).
+That band is the Import policy's, not the decoder's: Import lends one client
+buffer per completion, so it caps every codec at about 62 pictures/s. Pinning
+the CPU clusters moves AV1 by under 1 fps and the installed driver `d15ff198…`
+gives 62.6 fps on the same lane, so the band is neither DVFS nor the build
+tree.
+
+Direct publication with a client that consumes every picture measures the
+decoder itself. Two rounds each, `scale_vaapi` in place so the surface returns
+to the pool only after the filter took it:
+
+| Codec | 8K decode fps | CAPTURE completions |
+| --- | --- | ---: |
+| H.264 | 85.1 / 88.1 | 60 |
+| HEVC | 87.6 / 91.6 | 60 |
+| VP9 | 80.0 / 84.7 | 64 |
+| AV1 | 62.0 / 62.4 | 73 |
+
+AV1 is the slowest decoder at this geometry. AV1 and VP9 return more CAPTURE
+completions than pictures (73 and 64 against 60 and 62), the two-completion
+units their alt-ref and install halves produce.
+
+End to end depends on the video output, not on the codec. mpv 0.41.0 on
+Wayland, Import publication, 60 frames, no drops or errors:
+
+| VO | AV1 | H.264 | HEVC | VP9 |
+| --- | ---: | ---: | ---: | ---: |
+| `dmabuf-wayland` | 48.1 | 69.2 | 77.1 | 60.4 |
+| `gpu` (`gpu-context=wayland`) | 14.0 | 19.8 | 19.6 | 18.6 |
+
+`dmabuf-wayland` hands the decoded DMA-BUF to the compositor; `gpu` exports and
+re-imports every 47.5 MiB frame, which flattens all four codecs to about 19 fps.
+The window size changes nothing on `gpu` (15.3 full size against 15.8 at
+640x360), so it is the export path, not the scaling.
+
+AV1 is therefore the one codec that stays under 60 end to end at 8K on the
+fast path: 48.1 fps against a 62 fps decode ceiling. H.264, HEVC and VP9 clear
+60. An 8K60 AV1 playback claim would need the decoder above 60 with room for
+the compositor, and 62 leaves about 20 % headroom.
+
+Run identity: source `7cdeef2` plus 19 uncommitted files, build-tree driver
+`20e65896…d50c` (installed `d15ff198…`), boot
+`d843e7b8-f05f-4d2d-885d-cdb0fac5b139`, module `1323d58a…66a5` (`capture_sg=Y`),
+decoder `/dev/video17` resolved by `iris_driver`, pack at 49 %. The mpv
+measurements ran with `--untimed --vo=dmabuf-wayland` and
+`V4L2_VA_PUBLISH=import`; the Direct decode table ran under `-f null` with
+`scale_vaapi=w=iw:h=ih`, which reports 23 completed of 60 on AV1 because that
+client releases its surfaces before the show-existing completions, and the
+decode rate is taken over the completion records, not the published count.
+
+A client that holds every slot leaves the drain no buffer for LAST. Under the
+automatic policy at `capture_sg=1` the session publishes Direct, and a Direct
+target pins one CAPTURE slot per picture the client still holds; the 720 MiB
+budget grants fifteen slots, so the client can pin all of them
+(`held=15 pool=15` for HEVC, `held=14 pool=15` for VP9) and STOP has nothing to
+carry LAST. H.264 and AV1 keep a slot free and drain. Copy passes all four
+codecs at the same geometry because it releases the slot at the completion
+(record `scope-8k-copy`).
+
+Copy costs about half the throughput, which is why `capture_sg` exists. On
+one boot and one driver (`226e9374…cff216`), three rounds per codec,
+`V4L2_VA_PUBLISH` selects the policy: Auto (Direct) decoded H.264 at
+40.5/44.7/51.9, HEVC at 52.6/64.0/61.7 and VP9 at 51.8/64.3/58.6 fps, and
+Copy at 21.8/24.4/25.1, 29.2/31.2/29.2 and 27.6/29.0/39.9. The absolute
+figures move between runs on this board; the ratio does not. `capture_sg`
+stays experimental and off by default: the qualified module keeps the
+contiguous pool and Copy publication at 8K, and a drain with no free slot is
+the reason the parameter is not promoted.
 
 VP9 12-bit and AV1 12-bit are refused at profile selection; 4:4:4 and
 large-scale tile are outside the advertised profiles or cleanly refused by
@@ -254,8 +391,7 @@ session, the core moves to its error state and the firmware reloads. A
 known-good H.264 stream decodes to EOS on the same module afterwards. The
 driver's side of the experiment works, so the firmware's codec allow-list is
 what excludes MPEG-2; MPEG-2 runs in software. Run identity: boot
-`770e5fea-096c-491d-ae8f-ab28d0aaf1f1`, kernel
-`7.3.4-sm8550-00104-g87ac0f2347eb`, module `9885d2b4…` installed in
+`770e5fea-096c-491d-ae8f-ab28d0aaf1f1`, module `9885d2b4…` installed in
 `/lib/modules` (patches 0008, 0009, 0013, 0014, 0015), decoder node
 `/dev/video17` resolved by the `iris_driver` name, client GStreamer
 `v4l2mpeg2dec` on a 30-frame 320x240 MPEG-2 elementary stream.
@@ -283,6 +419,16 @@ profiles are not advertised; 6 more are Baseline/Extended pixel differences on
 an unadvertised profile; `FM2_SVA_C` has no readable elementary stream to
 probe. The passing Constrained Baseline and Main vectors are frame-coded
 streams.
+
+Field-coded H.264 is refused in `vaEndPicture` with
+`VA_STATUS_ERROR_UNIMPLEMENTED`, so the 49 field-coded vectors above fail at the
+driver rather than at the kernel. The session still opens in `vaCreateContext`;
+no picture is queued and the DQBUF that used to follow no longer happens. A
+1920x1080 High field-coded clip ends the picture with `status=20` and zero
+DQBUF, against `status=23 DQBUF: Input/output error` before; a progressive
+1080p control decodes 20/20. Run identity: source `561d7fc` plus this change,
+build-tree driver `77b2538f…` under `LIBVA_DRIVERS_PATH`, boot `d843e7b8…`,
+module `1323d58a…`, decoder `/dev/video17`, 0 frames published.
 
 HEVC, 6 failures: two `PICSIZE_A/B_Bossen_1` vectors are 8440 wide, above the
 node's 8192 limit; two `WPP_D_ericsson_MAIN_2`/`_MAIN10_2` are 64 wide, below
@@ -360,16 +506,13 @@ the split stream (58349 bytes); HEVC reported the same attributes, 3 slices
 (144792 bytes) and 4 per picture (144542 bytes). Both split streams pass the
 probe's `slices_per_picture >= 4` check, so the client's slice count reaches
 the firmware through `V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE`.
-Run identity: boot `e6cbc26b-eb9b-457d-b930-79a59deb0985`, kernel
-`7.3.4-sm8550-00104-g87ac0f2347eb`, module
+Run identity: boot `e6cbc26b-eb9b-457d-b930-79a59deb0985`, module
 `5d295a78998b07e919b5c4f616f10e1cee820359ea8ced77b5283682121606b5` (0008,
 0009, 0013), driver `e64c5e10…` as a `LIBVA_DRIVERS_PATH` build-tree override
 (the installed package was not rebuilt), source commit `d817308` with the
 in-progress Main 10 work in the working tree, encoder node `/dev/video18`
 resolved by name. Gate records: `gate-slice-h264c` and `gate-slice-hevc`
-under the run directory. An earlier run against the installed package
-reported `max_slices=1` and refused the split stream, which is the module's
-control probe doing its job: that package predates the kernel patch.
+under the run directory.
 
 B pictures, 11-18: `test/iris-encode-b-gate.sh` encoded 300 frames of
 1280x720 through FFmpeg's `h264_vaapi` with `-bf 1 -async_depth 3 -g 60`.
@@ -382,20 +525,14 @@ opt-in, because the config advertises the future direction and the l1
 reference for H.264 only. An experimental build that advertised both to HEVC
 made FFmpeg request them and the firmware answered with an error completion
 after nine pictures, so `configure()` refuses HEVC B pictures as a backstop.
-Run identity: boot `edd37f6a-cb04-42b0-b9b7-96360172a5ca`, kernel
-`7.3.4-sm8550-00104-g87ac0f2347eb`, module `a3732c1c…` (0008, 0009, 0013,
-0014), driver `246e1c21…` as the installed file, source commit `249a650`
-with the attribute work in the working tree, encoder node `/dev/video18`
-resolved by name. Gate record: `gate-bframes-1118c`.
-Before this change FFmpeg never requested B pictures: the driver answered
-`VAConfigAttribPredictionDirection` with the previous direction alone, which
-FFmpeg reads as a P-only encoder however many l1 references are advertised,
-so the option fell back to intra and P pictures.
+Run identity: boot `edd37f6a-cb04-42b0-b9b7-96360172a5ca`,
+module `a3732c1c…` (0008, 0009, 0013, 0014), driver `246e1c21…` as the
+installed file, source commit `249a650` with the attribute work in the
+working tree, encoder node `/dev/video18` resolved by name. Gate record:
+`gate-bframes-1118c`.
 
-HEVC B-frames and VP9/AV1 encode are not available: the encoder node has no
-VP9/AV1 CAPTURE format, and the experimental HEVC B-frame build returned nine
-pictures at ~23 dB before an error completion. Packed headers are available
-on the HEVC lane only (below).
+VP9 and AV1 encode are not available: the encoder node has no VP9/AV1
+CAPTURE format. Packed headers are available on the HEVC lane only (below).
 
 HEVC Main 10 encode, 11-18: `test/iris-encode-main10-gate.sh` encoded 60
 frames of 640x480 from a 10-bit source through FFmpeg's `hevc_vaapi` with
@@ -406,15 +543,12 @@ the 10-bit source is 0.999480 mean and 0.9973 worst against the 0.90 floor; a
 blank stream scores 0.000032. The decoded luma carries 731 distinct values
 with all four residues modulo 4 present, so the low bits are coded rather than
 padded. The same run's 8-bit HEVC lane still encodes and decodes.
-Run identity: boot `edd37f6a-cb04-42b0-b9b7-96360172a5ca`, kernel
-`7.3.4-sm8550-00104-g87ac0f2347eb`, module
+Run identity: boot `edd37f6a-cb04-42b0-b9b7-96360172a5ca`, module
 `a3732c1c5b6c7ff4403a13734f367a9230680b44bc0e45002e18a4db03110608` (0008,
 0009, 0013, 0014), driver `200773f2…` as a `LIBVA_DRIVERS_PATH` build-tree
 override, source commit `d817308` with the Main 10 work in the working tree,
 encoder node `/dev/video18` resolved by name. Gate record: `gate-main10b`
-under the run directory. The first attempt failed at `createConfig` because
-FFmpeg opens a probe config with no attributes and the driver defaulted a
-Main 10 profile to 8 bits; the default now follows the profile.
+under the run directory.
 
 Temporal layers, 11-18: `test/iris-encode-temporal-probe` encoded one GOP of
 16 HEVC pictures through one CBR context, the first an IDR and the rest P,
@@ -426,9 +560,8 @@ the firmware and it codes a hierarchy. Run identity: boot
 `edd37f6a-cb04-42b0-b9b7-96360172a5ca`, module `a3732c1c…`, driver `4016e6de…`
 as a build-tree override, source commit `2a10c5d` with the temporal layer
 work in the working tree, encoder node `/dev/video18` resolved by name. Gate
-record: `gate-temporal3`. The first attempt was refused by the driver itself
-(`unsupported encode misc parameter`); accepting the structure and bounding
-its layer count and ids is what the unit tests now cover.
+record: `gate-temporal3`. The unit tests bound the structure's layer count
+and ids.
 
 Packed headers, 11-19: `VAConfigAttribEncPackedHeaders` answers
 `VA_ENC_PACKED_HEADER_MISC` for HEVC encode and no type for H.264. With MISC
@@ -446,8 +579,7 @@ libx265 source whose frames carry mastering-display and content-light-level
 side data through FFmpeg's `hevc_vaapi -sei hdr`, and reads both messages
 back out of the coded stream with ffprobe. The input's own side data is
 checked first, so a bare source cannot pass. Run identity: boot
-`d843e7b8-f05f-4d2d-885d-cdb0fac5b139`, kernel
-`7.3.4-sm8550-00104-g87ac0f2347eb`, module `1323d58a…f66a5` (the 0017 set),
+`d843e7b8-f05f-4d2d-885d-cdb0fac5b139`, module `1323d58a…f66a5` (the 0017 set),
 driver `5592247a…533` as a `LIBVA_DRIVERS_PATH` build-tree override from
 source `c9b68ba`, `source_dirty=0`, encoder `/dev/video18` resolved by
 `iris_driver`. Both SEI messages are present in the 60-frame output, the
@@ -456,8 +588,7 @@ encode moved the IRQ counter by 125, and the same module still codes an
 
 ROI metadata, 11-19: `test/iris-encode-roi-probe.cc` and FFmpeg `addroi`
 drive `VAConfigAttribEncROI` with the 0017 module. Run identity: boot
-`79f5d3e1-0b32-4f3c-ae95-7435870fb362`, kernel
-`7.3.4-sm8550-00104-g87ac0f2347eb`, module
+`79f5d3e1-0b32-4f3c-ae95-7435870fb362`, module
 `1323d58a4c69177ccb7b887a4ecca384a2fb7d64e466bb2c8ded3eff4e6c66a5` (0008,
 0009, 0013, 0014, 0017) loaded by `modprobe` after the instrumented
 experiment module was replaced, encoder `/dev/video18` resolved by name,
@@ -488,26 +619,11 @@ and `VAConfigAttribEncROI` is not advertised by default. The module is kept
 as a packaging option: on a firmware that acts on the map, the driver path is
 complete.
 
-HEVC B isolation, 11-19: a scratch build of the same driver relaxed the two
-HEVC gates (the future-direction/l1 advertisement and `configure()`'s
-H.264-only check) and ran FFmpeg `hevc_vaapi -bf 1 -async_depth 3` at
-1080p under VBR. Run identity: same boot, kernel and 0017 module as the ROI
-run above; the scratch driver was built from a copy of the deployed source
-in `~/Lab/Bridge/tmp/hevc-b/exp-src` and loaded through `LIBVA_DRIVERS_PATH`.
-
-- The session submitted 14 pictures, then waited the full 2000 ms sync bound,
-  marked the encoder drained and failed the next `vaEndPicture`. The stream
-  holds 11 pictures and does not decode: `Could not find ref with POC 11` /
-  `Error constructing the frame RPS`.
-- Adding the explicit HEVC hierarchical B layer type and layer count, the
-  shape the kernel's `iris_set_layer_type()` accepts under VBR-CFR, shortened
-  the run to two pictures in the stream before the same 2 s stall.
-- `V4L2_BUF_FLAG_{P,B,KEY}FRAME` is set by the kernel only on completions;
-  nothing reads the flags from QBUF, so a client cannot direct the picture
-  schedule through the buffer API. The schedule is the firmware's own.
-
-HEVC B stays refused in `configure()` and unadvertised; the capability table
-records the boundary.
+HEVC B stays refused in `configure()` and unadvertised: a relaxed build that
+advertised them reached the firmware, which answered with an error completion
+after nine pictures, and `V4L2_BUF_FLAG_{P,B,KEY}FRAME` is set only on
+completions, so a client cannot direct the picture schedule through the buffer
+API. The capability table records the boundary.
 
 Long-term references, 11-19: `test/iris-encode-ltr-probe` drives the encoder
 node directly, because VA 2.23 has no encode-side LTR field and this driver
@@ -603,8 +719,7 @@ set to 4 and then 8 with `IRIS_SOAK_SIZE=1920x1080`, first for 120 s and then
 for 300 s, all four runs directly from the deployed build tree and all
 `profile=SHORTENED`. Run identity: source `aa51a0d`, `source_dirty=0`,
 build-tree driver `8c85f87d…0d9`, boot
-`79f5d3e1-0b32-4f3c-ae95-7435870fb362`, kernel
-`7.3.4-sm8550-00104-g87ac0f2347eb`, module `1323d58a…66a5` (the 0017 set),
+`79f5d3e1-0b32-4f3c-ae95-7435870fb362`, module `1323d58a…66a5` (the 0017 set),
 decoder `/dev/video0` resolved by `iris_driver`.
 
 | Window | Sessions | Clients | Frames each | Preflight | Teardown | Peak `video-thermal` |
@@ -624,21 +739,17 @@ finished with `submitted=7209 completed=7209 errors=0 drops=0 timeouts=0
 drains=1`. Eight simultaneous 1080p sessions therefore stay under the
 firmware's session ceiling.
 
-Twelve and fourteen sessions bound the ceiling at 1080p. Twelve completed the
-same 300 s window with 7200 frames per client, zero drops or timeouts, a
-terminal LAST drain on all twelve, and a peak `video-thermal` of 73.3 °C.
-Fourteen do not start: two clients fail at `createContext` with
-`REQBUFS: Cannot allocate memory`, the kernel logs `dma alloc of size
-7077888 failed` from the contiguous videobuf2 allocator, and the firmware
-reports `session error 0x1000006` and `0x4000004: invalid operation for
-current state`; sixteen fail the same way with four clients. The resource is
-the contiguous carve-out, not a session count: CMA is 768 MiB on this boot
-and the firmware's internal buffers for each session consume part of it, and
-sixteen sessions at 320x240 do start and hold a 60 s window with 1440 frames
-per client, zero drops and a terminal LAST on all sixteen. The fourteen- and
-sixteen-session 1080p runs aborted at startup, so they carry no 300 s frame
-record; the twelve-session run used the same boot, driver and module as the
-table above.
+The session ceiling is fourteen concurrent 1080p clients under
+`capture_sg=1`: at 14 every client holds the 300 s window
+(`submitted=7200 completed=7200`, zero drops, terminal LAST on all fourteen,
+record `scope-soak-14`), and at 15 and 16 the last client to start fails
+`STREAMON: Cannot allocate memory` after `capture configure` with the same
+`pool=21 memory=mmap firmware-min=6` as the others (records `conc14`/`conc15`/
+`conc16`). The qualified contiguous allocator stops at twelve: fourteen fail at
+`createContext` with `REQBUFS: Cannot allocate memory` and `dma alloc of size
+7077888 failed`, which is the CMA carve-out, not the firmware — sixteen
+320x240 sessions start fine. `CmaFree` is not a usable signal here, and the
+runs do not isolate which pool the 15th allocation exhausts.
 
 ## Video processing
 
@@ -687,8 +798,7 @@ after the run.
 Offered by default, `V4L2_VA_UBWC=0` disables it; gate
 `test/iris-ubwc-gate.sh`. Run identity: source `b6e41c6`, `source_dirty=1`
 (this record is the only dirty file), `guard=complete exit=0`, boot
-`d843e7b8-f05f-4d2d-885d-cdb0fac5b139`, kernel
-`7.3.4-sm8550-00104-g87ac0f2347eb`, module
+`d843e7b8-f05f-4d2d-885d-cdb0fac5b139`, module
 `1323d58a…f66a5` (the series adds no kernel patch), decoder `/dev/video17`
 resolved by `iris_driver`, encoder `/dev/video18`. The run used the build-tree
 driver `/home/xinyang/iris-vaapi-lab/src/build/src/v4l2_drv_video.so`, sha256

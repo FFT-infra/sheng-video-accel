@@ -15,7 +15,7 @@
 | VP9 | Profile 0, Profile 2 | Import（零拷贝） | Fluster 176/305 |
 | AV1 | Profile 0（8/10 位） | Import（零拷贝，解码顺序内核） | 与 libdav1d 逐帧一致，含 film grain 合成 |
 
-只有能力表标记 `production: supported` 的编码格式才声明 VA profile。一致性数字来自与软件解码的逐帧比对。Fluster 是语料结果，不是每次构建的回归；失败向量归类见 `TEST-RESULTS.md`。VP9 参考 MD5 早于本机 libvpx，176/305 不是解码缺陷数。
+只有 `data/iris-codec-capabilities.json` 标记 `production: supported` 的编码格式才声明 VA profile。一致性数字来自与软件解码的逐帧比对。Fluster 是语料结果，不是每次构建的回归，失败向量逐个归类。VP9 参考 MD5 早于本机 libvpx，176/305 不是解码缺陷数。
 
 UBWC 表面默认提供，`V4L2_VA_UBWC=0` 关闭。客户端在 `VASurfaceAttribDRMFormatModifiers` 里列出 `DRM_FORMAT_MOD_QCOM_COMPRESSED` 时得到 Q08C 表面，按每个平面一个 R8 层导出，且只能走 Direct 或 Import 发布：本驱动没有 UBWC 解压，Copy、图像入口、film grain、视频处理与编码器都拒绝它。Q10C 不提供——节点按每像素 4/3 字节分配，GPU 的 10-bit 导入要求 2 字节。`test/iris-ubwc-gate.sh` 让四种编码格式都解码到 Q08C，并要求 Turnip 读回（`test/vk-ubwc-read`）与线性解码逐字节一致。
 
@@ -43,7 +43,7 @@ AV1 film grain 合成在用户态完成。客户端给出独立的 `current_disp
 
 输入为 NV12、P010、BGRA 或 RGBA，输出为 NV12 或 P010。
 
-视频处理由 Vulkan 计算内核完成，直接读写表面 DMA-BUF。构建中找到 Vulkan 即提供 `VAProfileNone` / `VAEntrypointVideoProc`，设 `V4L2_VA_VPP=0` 可关闭。细节见 `docs/architecture.md`。
+视频处理由 Vulkan 计算内核完成，直接读写表面 DMA-BUF。构建中找到 Vulkan 即提供 `VAProfileNone` / `VAEntrypointVideoProc`，设 `V4L2_VA_VPP=0` 可关闭。
 
 ## 运行环境
 
@@ -78,11 +78,11 @@ dpkg-buildpackage -b -us -uc
 sudo apt install ../libva-v4l2-iris_0.1.0_arm64.deb
 ```
 
-Debian 包请在 chroot（`sbuild`、`pbuilder`）里构建：`libgbm-dev` 绑定发行版 Mesa，直接装依赖可能降级厂商修改过的图形栈。安装包会放置驱动本体和 `msm_drv_video.so`、`qcom_drv_video.so` 两个别名，libva 无需 `LIBVA_DRIVER_NAME` 即可解析。各客户端（mpv、VLC、Sunshine、Firefox、GStreamer）的设置在 `docs/install.md#client-setup`。
+Debian 包请在 chroot（`sbuild`、`pbuilder`）里构建：`libgbm-dev` 绑定发行版 Mesa，直接装依赖可能降级厂商修改过的图形栈。安装包会放置驱动本体和 `msm_drv_video.so`、`qcom_drv_video.so` 两个别名，libva 无需 `LIBVA_DRIVER_NAME` 即可解析。各客户端设置见 `docs/install.md#client-setup`。
 
 ### 诊断工具
 
-`iris-device-check` 只读：节点、固件版本、绑定的驱动与队列格式。`iris-verify` 编解码一段样例，要求 Iris 中断计数增长。四种编码格式的完整像素比对用 `test/iris-matrix.sh`。浏览器会话只有在媒体表面给出解码器、解码帧数与丢帧数时才算走硬件，流程见 `docs/install.md`。
+`iris-device-check` 只读：节点、固件版本、绑定的驱动与队列格式。`iris-verify` 编解码一段样例，要求 Iris 中断计数增长。四种编码格式的完整像素比对用 `test/iris-matrix.sh`。浏览器会话只有在媒体表面给出解码器、解码帧数与丢帧数时才算走硬件。
 
 ## 性能
 
@@ -93,7 +93,7 @@ HEVC Main 8-bit，FFmpeg 8.1.3。CPU 锁最高频，GPU 锁 680 MHz。解码不�
 | 解码 | 953 fps | 754 fps | 346 fps |
 | 编码 | 679 fps | 585 fps | 172 fps |
 
-这组数字来自已验收的 7.3.4 组合。吞吐主要跟 DVFS 走，不锁频测到的是调频策略。完整数据见 `TEST-RESULTS.md`。
+这组数字来自已验收的 7.3.4 组合。吞吐主要跟 DVFS 走，不锁频测到的是调频策略。
 
 1080p、4 Mbit/s 下，H.264 比 libx264 `veryfast` 快 4.4 倍，HEVC 比 libx265 快 15.2 倍，两种编码都能到 7680x4320（`test/iris-encode-baseline.sh`）。
 
@@ -109,7 +109,8 @@ HEVC Main 8-bit，FFmpeg 8.1.3。CPU 锁最高频，GPU 锁 680 MHz。解码不�
 
 - **AV1 分辨率切换**：上下文内切换后，继续按旧几何导出表面的客户端在这些帧上得到 GPU 拷贝。Chromium 播本地文件时可能选软件 AV1 解码器，是否走硬件以浏览器门禁为准。
 - **原版内核**：解码降级为 GPU 拷贝，IDR 请求改为移动 intra period。
-- **8K Direct**：`capture_sg=1` 让解码器的 CAPTURE 池经 SMMU 从系统内存分配，15 帧 8K 池才放得下；没有它只给八帧，该分辨率下自动策略走 Copy。见 `packaging/kernel/README.md`。
+- **超过 8K**：节点声明上限 8192x8192。H.264 和 AV1 能解 8192x4352；HEVC 和 VP9 停在 8192x4320，再高就在第一次出队失败。
+- **8K Direct**：8K 走 Direct 需要实验性的 `capture_sg=1`，默认关闭，不属于已验证组合；没有它自动策略走 Copy。客户端占满所有槽位时，drain 没有缓冲区接收终止的 LAST，HEVC 和 VP9 会报 drain 失败。
 - **编码**：客户端给出的切片列表变成宏块预算，仅 CBR 或 CQP、≤60 fps、≤4096x2160，并需要 0013 内核补丁；没有补丁时每帧只有一整片。分块返回 `VA_STATUS_ERROR_UNIMPLEMENTED`。ROI 需 `V4L2_VA_ROI` 开启并安装 0017：固件正常完成元数据缓冲区，但编出的图像逐字节相同，所以默认不声明区域。B 帧需 `V4L2_VA_B_FRAMES` 开启，仅 H.264，客户端需保持三帧在途。
 - **时域分层与 intra refresh**：`VAEncMiscParameterTemporalLayerStructure` 给出 1-6 层，固件按层数自行推导成员关系，不支持逐层码率。滚动行 intra refresh 在 CBR 下生效，VBR/CQP 下拒绝。`ltr_count`/`frame_ltr_index`/`use_ltr_frames` 不声明。
 - **封装头**：HEVC 编码答 `VA_ENC_PACKED_HEADER_MISC`，把客户端的原始头插在参数集之后，FFmpeg `hevc_vaapi` 的 HDR10 与字幕 SEI 走这条路。H.264 答 0：`h264_vaapi` 的 buffering period SEI 按 id 引用 SPS，而只声明 MISC 时 FFmpeg 不会自己写参数集，CBR/VBR 编码会在客户端内部失败。序列头与 slice 头仍不支持，固件自己写。
@@ -128,6 +129,7 @@ HEVC Main 8-bit，FFmpeg 8.1.3。CPU 锁最高频，GPU 锁 680 MHz。解码不�
 | `V4L2_VA_B_FRAMES` | off | 启用 H.264 编码器的 B 帧；需保持三帧以上在途（FFmpeg：`-async_depth 3`） |
 | `V4L2_VA_ROI` | off | 启用 ROI 区域声明；需 0017 内核补丁，已验收固件会忽略该图 |
 | `V4L2_VA_UBWC` | on（`0` 关闭） | 向请求 `QCOM_COMPRESSED` 修饰符的客户端提供 UBWC（Q08C）解码表面 |
+| `V4L2_VA_HW_GRAIN` | 关闭 | 让固件按重建后的帧头施加 AV1 film grain，加过 grain 的画面落在 `current_display_picture` 上 |
 | `V4L2_VA_DUMP` | off | 提交的码流单元转储目录路径 |
 
 ## 命名

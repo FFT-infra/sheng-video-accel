@@ -156,7 +156,13 @@ When a CAPTURE completion arrives with a token that has a pending Surface:
   the policies: the 384 MiB budget grants eight frames, which is the
   firmware minimum plus one, so Auto publishes Copy; with the patched
   kernel's `capture_sg=1` the same pool is 720 MiB and fifteen frames, and
-  Auto publishes Direct.
+  Auto publishes Direct. Direct is the faster policy there: a client that
+  consumes every picture decodes 8K at 85-92 fps for H.264 and HEVC, 80-85
+  for VP9 and 62 for AV1, against the Copy lane's roughly half. Fifteen
+  slots are also few enough for a client that declares more to hold all of
+  them, and a drain then has no buffer to carry its terminal LAST: that is
+  why `capture_sg` stays experimental (TEST-RESULTS.md records both the
+  throughput and the failed drains).
 - **Copy**: the surface already owns a `StableBuffer` because the client
   exported it *before* its first decode (Chrome pre-exports its whole
   NativePixmap pool and caches the fd for the surface's lifetime). The
@@ -355,6 +361,14 @@ the CAPTURE queue reports it. What remains is the client's own pipeline depth
 (`-async_depth`), so the measurable quantity is submission-to-completion
 time: `encode frame … latency_us=` reports it, and
 `test/iris-encode-latency.sh` records the first picture, p50 and p95.
+
+The firmware has no encoder low-latency property of its own: no gen2 property
+header on SM8550 defines one. Qualcomm's own driver maps low latency to
+`HFI_PROP_STAGE` (0x0300010a) = `STAGE_1`, which the firmware does carry, and
+forces it under CBR or slice-delivery; the firmware turns it off above 4K and
+with B pictures. The kernel's `iris_set_stage()` sends `STAGE_2` for the
+encoder unconditionally, so the node never asks for it. Enabling it would take
+a kernel patch, a node control and a gate, none of which is in this tree.
 
 #### State Transitions
 
@@ -586,10 +600,14 @@ Read once in `VA_DRIVER_INIT_FUNC`, stored in `Options`, passed down.
 | `V4L2_VA_COPY` | `gpu` | Copy engine for persistent exports: `gpu` or `cpu`. |
 | `V4L2_VA_PUBLISH` | `auto` | Force `copy`, `direct` or `import` for diagnostics. |
 | `V4L2_VA_VPP` | on | Set to `0` to remove the `VAProfileNone` / `VAEntrypointVideoProc` entrypoint. On keeps the decode/encode surface unchanged. |
+| `V4L2_VA_B_FRAMES` | off | Opt in to B pictures in the H.264 encoder; needs three pictures in flight. |
+| `V4L2_VA_ROI` | off | Advertise ROI regions; needs kernel patch 0017, and the firmware ignores the map. |
+| `V4L2_VA_UBWC` | on | Set to `0` to stop offering Q08C surfaces to clients that request `QCOM_COMPRESSED`. |
+| `V4L2_VA_HW_GRAIN` | off | Let the firmware apply AV1 film grain from the rebuilt header and publish the grained picture into `current_display_picture`. Off keeps the software blend (`src/va/grain.cc`). |
 | `V4L2_VA_DUMP` | off | Directory for submitted access units. |
 
-Eight switches, down from eighteen. `test/iris-env-doc-check.sh` keeps README
-and `options.cc` in sync by name, not by sentence.
+Twelve switches. `test/iris-env-doc-check.sh` keeps README and `options.cc` in
+sync by name, not by sentence.
 
 ## 7. Threading and locking
 
@@ -625,8 +643,14 @@ from `vsnprintf`'s return value, not a fixed buffer: a long
 session open node=<path> mode=decode-order|display-order codec=<fourcc> <w>x<h> au=<n> output=<n>
 submit token=<n> bytes=<n> output=<i>
 capture configure <w>x<h> stride=<n> size=<n> visible=<w>x<h> pool=<n> memory=mmap|import firmware-min=<n>
-capture token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu|import
-capture noshow token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu|import
+capture token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu|import latency_us=<n>
+                                                                     (latency_us runs from the
+                                                                      access unit reaching the
+                                                                      OUTPUT queue to this
+                                                                      completion, the same
+                                                                      submit-to-completion span
+                                                                      the encoder reports)
+capture noshow token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu|import latency_us=<n>
                                                                      (AV1 hidden picture: the node
                                                                       returns it with no pixels, no
                                                                       picture-type bit and no payload;
@@ -824,6 +848,12 @@ va grain <w>x<h> source=frame|stable                   (a grained AV1 display
                                                       `source` names where
                                                       the ungrained picture
                                                       came from)
+va grain hw surface=<n> display=<n>                    (V4L2_VA_HW_GRAIN: the
+                                                      firmware grains the
+                                                      picture, so the
+                                                      completion lands on
+                                                      `display`, not
+                                                      `surface`)
 ```
 
 Four VA-side diagnostics are emitted but intentionally stay out of the

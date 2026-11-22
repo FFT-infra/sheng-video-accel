@@ -2,13 +2,16 @@
 
 # AV1 film grain gate for the target. Clients that ask for grain name two
 # surfaces: the picture decodes into current_frame, and the grained picture
-# the client shows is current_display_picture. Mesa's drivers blend it on the
-# GPU; this driver blends it in software from the decode's completion
-# (src/va/grain.cc). This gate is what says the blend is right: every frame's
-# framemd5 must be byte-identical to libdav1d's own grained output.
+# the client shows is current_display_picture. The default path blends it in
+# software from the decode's completion (src/va/grain.cc); with
+# V4L2_VA_HW_GRAIN the firmware applies it and the driver publishes the
+# grained completion into current_display_picture. This gate is what says
+# the result is right either way: every frame's framemd5 must be
+# byte-identical to libdav1d's own grained output.
 #
 # Usage:
 #   IRIS_GRAIN_CLIP_DIR=DIR [IRIS_GRAIN_CLIP_SET=all|nv12|p010] \
+#       [IRIS_GRAIN_PUBLISH=import|direct] [V4L2_VA_HW_GRAIN=1] \
 #       sh test/iris-av1-grain-gate.sh
 #
 # The directory holds the clips and their software framemd5 baselines:
@@ -40,6 +43,7 @@ driver_path=${LIBVA_DRIVERS_PATH:-}
     exit 2
 }
 case $clip_set in all|nv12|p010) ;; *) echo "FAIL unknown IRIS_GRAIN_CLIP_SET=$clip_set" >&2; exit 2 ;; esac
+case $publish in import|direct) ;; *) echo "FAIL unknown IRIS_GRAIN_PUBLISH=$publish (import|direct)" >&2; exit 2 ;; esac
 [ -d "$clip_dir" ] || { echo "FAIL clip directory missing: $clip_dir" >&2; exit 2; }
 [ -e "$render" ] || { echo "FAIL render node missing: $render" >&2; exit 2; }
 command -v ffmpeg >/dev/null 2>&1 || { echo 'FAIL ffmpeg is required' >&2; exit 2; }
@@ -71,19 +75,40 @@ run_ffmpeg() {
 # submitted picture (AV1 also submits frames it never shows), and `invisible`
 # is the install half of each two-completion unit.
 #
-# The counts are keyed by clip hash, not by lane: a count describes one exact
-# file, and a replaced file would otherwise be measured against the old
-# numbers and read as a driver defect. A clip with no row is refused.
+# The counts are keyed by clip hash and by publish policy, not by lane: a
+# count describes one exact file under one policy, and a replaced file or a
+# different policy would otherwise be measured against the old numbers and
+# read as a driver defect. A clip/policy pair with no row is refused.
+#
+# `imports` and `copies` are the two publish paths the checker counts; Direct
+# publishes name neither, so a Direct row is `0 0`. `invisible` counts the
+# install half of each two-completion unit and is the same under every policy.
+#
+# There is no `copy` row: a forced copy publication has no layout mismatch to
+# justify it, and iris-clip-trace-check.sh refuses that on purpose. Only
+# Import and Direct are gate policies.
 expected_counts() {
-    case $1 in
-    # 320x240, film-grain-test=1, 20 displayed pictures. 21 submitted (the
+    case $1:$2 in
+    # 320x240, film-grain-test=1, 21 displayed pictures. 21 submitted (the
     # encoder also wrote a hidden picture), 11 invisible install halves.
-    17495e033ca5449bd37e17c4d30689f1f562018885b155c0bcfca0afd4e3e3f5)
+    17495e033ca5449bd37e17c4d30689f1f562018885b155c0bcfca0afd4e3e3f5:import)
         echo '21 0 11' ;;
+    # 320x240, film-grain-test=1, 21 displayed pictures, regenerated 11-22
+    # with libaom 3.x (21 submitted, 12 invisible halves).
+    a67b0c93d540746710107edc381e743312c6f82587d5851f5117b77921795358:import)
+        echo '21 0 12' ;;
+    a67b0c93d540746710107edc381e743312c6f82587d5851f5117b77921795358:direct)
+        echo '0 0 12' ;;
     # 352x290 10-bit, 2 displayed pictures, no hidden unit and no invisible
     # half: both publications are Import.
-    d8ea6b246e4df8a9c53ad930de24184e1cf16491ed36a1aa9dde12cf584954ad)
+    d8ea6b246e4df8a9c53ad930de24184e1cf16491ed36a1aa9dde12cf584954ad:import)
         echo '2 0 0' ;;
+    # 352x290 10-bit, film-grain-test=1, 10 displayed pictures, regenerated
+    # 11-22 with libaom 3.x (11 submitted, 2 invisible halves).
+    e4dcd293f23c1db5ae23f75d4264026f0f329b0d478f403d080ee3a5ba023778:import)
+        echo '11 0 2' ;;
+    e4dcd293f23c1db5ae23f75d4264026f0f329b0d478f403d080ee3a5ba023778:direct)
+        echo '0 0 2' ;;
     esac
 }
 
@@ -96,9 +121,9 @@ run_clip() {
     [ -r "$clip_dir/$clip" ] || { echo "FAIL clip missing: $clip_dir/$clip" >&2; return 1; }
     sha=$(iris_media_sha "$clip_dir" "$clip")
     [ -n "$sha" ] || { echo "FAIL $name: cannot hash $clip_dir/$clip" >&2; return 1; }
-    counts=$(expected_counts "$sha")
+    counts=$(expected_counts "$sha" "$publish")
     if [ -z "$counts" ]; then
-        echo "FAIL $name: clip $clip (sha256 $sha) has no recorded counts." >&2
+        echo "FAIL $name: clip $clip (sha256 $sha) has no recorded counts for publish=$publish." >&2
         echo "      Measure it once, then add a row to expected_counts() in this script" >&2
         echo "      and the file's hash to $clip_dir/SHA256SUMS." >&2
         return 1
@@ -127,30 +152,51 @@ run_clip() {
         echo "FAIL $name: clip contract failed (artifacts in $out)" >&2
         return 1
     fi
-    # At least one blend per displayed picture. A hidden picture's blend can
-    # be skipped when its display surface is reused before anyone asks for
-    # it, which is why the count is not exact; a displayed picture that lost
-    # its blend shows up as a hash mismatch above, not here.
-    blends=$(grep -c '^va grain ' "$out/driver.trace" || true)
-    [ "$blends" -ge "$frames" ] || {
-        echo "FAIL $name: $blends grain blends, expected at least $frames" >&2
-        return 1
-    }
-    printf 'PASS %s frames=%s blends=%s import=%s copy=%s invisible=%s\n' \
-        "$name" "$frames" "$blends" "$imports" "$copies" "$invisible"
+    # Software mode: at least one blend per displayed picture. A hidden
+    # picture's blend can be skipped when its display surface is reused
+    # before anyone asks for it, which is why the count is not exact; a
+    # displayed picture that lost its blend shows up as a hash mismatch
+    # above, not here. Hardware mode runs no blend, so the same line must
+    # stay at zero: a blend there would mean the firmware was asked for no
+    # grain and the old path ran anyway.
+    # A blend record is `va grain <w>x<h> ...`; hardware mode emits
+    # `va grain hw ...` for the routing, which is not a blend.
+    blends=$(grep -c '^va grain [0-9]' "$out/driver.trace" || true)
+    if [ -n "${V4L2_VA_HW_GRAIN:-}" ]; then
+        [ "$blends" -eq 0 ] || {
+            echo "FAIL $name: hardware grain ran $blends software blends" >&2
+            return 1
+        }
+        # Every displayed picture that asked for grain must have been routed
+        # to its display surface; a picture that silently fell through to
+        # current_frame would still hash correctly here but show ungrained.
+        hw=$(grep -c '^va grain hw ' "$out/driver.trace" || true)
+        [ "$hw" -ge "$frames" ] || {
+            echo "FAIL $name: $hw hardware grain routes, expected at least $frames" >&2
+            return 1
+        }
+    else
+        [ "$blends" -ge "$frames" ] || {
+            echo "FAIL $name: $blends grain blends, expected at least $frames" >&2
+            return 1
+        }
+    fi
+    printf 'PASS %s frames=%s blends=%s import=%s copy=%s invisible=%s mode=%s\n' \
+        "$name" "$frames" "$blends" "$imports" "$copies" "$invisible" \
+        "$([ -n "${V4L2_VA_HW_GRAIN:-}" ] && echo hardware || echo software)"
 }
 
 if [ "$clip_set" = all ] || [ "$clip_set" = nv12 ]; then
     # 320x240, film-grain-test=1: an 8-bit stream whose every visible frame
     # carries grain parameters, so the whole blend path is exercised rather
     # than a single salted frame.
-    run_clip grain8 grain8.webm 20 'hwdownload,format=yuv420p' || failures=$((failures + 1))
+    run_clip grain8 grain8.webm 21 'hwdownload,format=yuv420p' || failures=$((failures + 1))
 fi
 if [ "$clip_set" = all ] || [ "$clip_set" = p010 ]; then
     # 352x290, 10-bit: the same blend over P010 storage, where the 10-bit
     # scaling curve and the right-aligned codes are the parts that can be off
     # by one and still look plausible.
-    run_clip grain10 grain10.webm 2 'hwdownload,format=p010le,format=yuv420p10le' || failures=$((failures + 1))
+    run_clip grain10 grain10.webm 10 'hwdownload,format=p010le,format=yuv420p10le' || failures=$((failures + 1))
 fi
 
 [ "$failures" -eq 0 ] || exit 1

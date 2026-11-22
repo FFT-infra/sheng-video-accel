@@ -77,6 +77,7 @@ void Session::submit(const uint8_t* data, size_t size, const TargetPtr& target)
     slot->queued = true;
     slot->token = token;
     target->token = token;
+    target->submitted_at = std::chrono::steady_clock::now();
     target->pending = true;
     target->completed = false;
     target->error = false;

@@ -49,7 +49,8 @@ struct Pending {
 
 class AV1Dpb final : public Translator {
 public:
-    explicit AV1Dpb(VAProfile profile)
+    AV1Dpb(VAProfile profile, bool hardware_grain)
+        : hardware_grain_(hardware_grain)
     {
         require(profile == VAProfileAV1Profile0, "AV1 profile not supported", VA_STATUS_ERROR_UNSUPPORTED_PROFILE);
     }
@@ -64,6 +65,7 @@ public:
             || params.pic_info_fields.bits.frame_type == 0; // KEY_FRAME
         if (starts_sequence) {
             sequence_ = av1_sequence_state(params);
+            sequence_.hardware_grain = hardware_grain_;
             references_ = {};
             for (Slot& slot : slots_)
                 slot.surface = VA_INVALID_SURFACE;
@@ -268,13 +270,14 @@ private:
     Pending pending_;
     bool seen_sequence_ = false;
     bool emit_sequence_header_ = false;
+    bool hardware_grain_ = false;
 };
 
 } // namespace
 
-std::unique_ptr<Translator> make_av1_dpb(VAProfile profile)
+std::unique_ptr<Translator> make_av1_dpb(VAProfile profile, bool hardware_grain)
 {
-    return std::make_unique<AV1Dpb>(profile);
+    return std::make_unique<AV1Dpb>(profile, hardware_grain);
 }
 
 } // namespace iris::codec

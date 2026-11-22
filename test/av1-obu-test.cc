@@ -241,15 +241,15 @@ void test_held_picture_across_a_resolution_change()
         "the released frame is coded at its own sequence size");
 }
 
-void test_film_grain_is_not_coded()
+// The software blend reads an ungrained CAPTURE slot, so with hardware grain
+// off the header must ask for none: the client's parameters never reach the
+// bitstream and a grained and an ungrained picture rebuild identically.
+void test_film_grain_is_not_coded_without_hardware()
 {
-    // The firmware never applies film grain: the driver writes apply_grain=0
-    // into the rebuilt frame header and blends the grained display picture in
-    // software. So the client's grain parameters must not reach the bitstream
-    // at all, and a picture with and without them rebuilds to the same bytes.
     VADecPictureParameterBufferAV1 picture = key_frame(false, 0);
     picture.seq_info_fields.fields.film_grain_params_present = 1;
-    const AV1SequenceState sequence = av1_sequence_state(picture);
+    AV1SequenceState sequence = av1_sequence_state(picture);
+    sequence.hardware_grain = false;
     const AV1ReferenceState references;
     const std::vector<uint8_t> tile_data = { 0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33 };
     const std::vector<AV1TileEntry> tiles = { { 0, 8 } };
@@ -271,7 +271,41 @@ void test_film_grain_is_not_coded()
     picture.film_grain_info.point_y_value[1] = 255;
     picture.film_grain_info.point_y_scaling[1] = 20;
     build(grained);
-    check(grained == plain, "grain parameters do not change the rebuilt bitstream");
+    check(grained == plain, "without hardware grain the parameters do not reach the bitstream");
+}
+
+// With hardware grain on, the firmware applies the client's parameters, so
+// the header carries film_grain_params(): apply_grain and the seed at least,
+// and the two pictures no longer rebuild identically.
+void test_film_grain_is_coded_with_hardware()
+{
+    VADecPictureParameterBufferAV1 picture = key_frame(false, 0);
+    picture.seq_info_fields.fields.film_grain_params_present = 1;
+    AV1SequenceState sequence = av1_sequence_state(picture);
+    sequence.hardware_grain = true;
+    const AV1ReferenceState references;
+    const std::vector<uint8_t> tile_data = { 0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33 };
+    const std::vector<AV1TileEntry> tiles = { { 0, 8 } };
+    auto build = [&](std::vector<uint8_t>& out) {
+        const char* reject_reason = nullptr;
+        const bool ok = av1_build_temporal_unit(out, picture, sequence, references, false, 0xff,
+            tile_data.data(), tiles, &reject_reason);
+        check(ok && reject_reason == nullptr, "hardware grain picture rebuilds");
+        return out;
+    };
+    std::vector<uint8_t> plain, grained;
+    build(plain);
+
+    picture.film_grain_info.film_grain_info_fields.bits.apply_grain = 1;
+    picture.film_grain_info.grain_seed = 0x5a5a;
+    picture.film_grain_info.num_y_points = 2;
+    picture.film_grain_info.point_y_value[0] = 0;
+    picture.film_grain_info.point_y_scaling[0] = 10;
+    picture.film_grain_info.point_y_value[1] = 255;
+    picture.film_grain_info.point_y_scaling[1] = 20;
+    build(grained);
+    check(grained != plain, "with hardware grain the parameters change the rebuilt bitstream");
+    check(grained.size() > plain.size(), "the coded grain parameters make the header longer");
 }
 
 void test_lr_unit_shift()
@@ -302,7 +336,8 @@ int main()
 {
     try {
         test_lr_unit_shift();
-        test_film_grain_is_not_coded();
+        test_film_grain_is_not_coded_without_hardware();
+        test_film_grain_is_coded_with_hardware();
         test_held_picture_across_a_resolution_change();
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';
@@ -312,6 +347,7 @@ int main()
         std::cerr << failures << " AV1 OBU check(s) failed\n";
         return 1;
     }
-    std::cout << "PASS AV1 frame header rebuild (loop restoration unit shift, held picture across a size change)\n";
+    std::cout << "PASS AV1 frame header rebuild (loop restoration unit shift, film grain in both modes, "
+                 "held picture across a size change)\n";
     return 0;
 }
