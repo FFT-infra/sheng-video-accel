@@ -272,58 +272,56 @@ four-frame gate on the same driver and module passed all four codecs with
 zerolatency`, HEVC `libx265 -preset ultrafast -x265-params
 keyint=60:min-keyint=60:scenecut=0`, VP9 `libvpx-vp9 -b:v 8M -deadline
 realtime -cpu-used 8 -g 60`, AV1 `libsvtav1 -preset 12 -g 60`. The throughput
-client leaves frames on the VA surfaces (`-f null`), three rounds per codec;
-the AV1 number comes from the downloading lane because the no-download client
-releases its AV1 surfaces before the show-existing completions are published
-(27 of 60 dropped, the same at 1080p), while the download lane publishes 60
-direct and 13 invisible completions with no drop and exact pixels.
+client leaves frames on the VA surfaces (`-f null`), three rounds per codec.
 
 | Codec | Frames | fps, three rounds | Drops / errors | LAST |
 | --- | ---: | --- | --- | --- |
 | H.264 | 60 | 65.4 / 65.7 / 66.3 | 0 / 0 | yes |
 | HEVC | 60 | 66.5 / 65.9 / 63.8 | 0 / 0 | yes |
 | VP9 | 60 | 70.3 / 71.9 / 67.9 | 0 / 0 | yes |
-| AV1 | 60 | 39.5 (downloading lane, 1.520 s) | 0 / 0 | yes |
 
-H.264, HEVC and VP9 therefore sustain 8K60 on this boot; AV1 decodes all 60
-frames but stays below 60 fps, so it is recorded as a measured value, not an
-8K60 claim. The whole-run figure includes client startup, as the throughput
-table above does. The guarded fps run peaked at 38.6 °C and the pack went from
-73 % to 70 %.
+H.264, HEVC and VP9 therefore sustain 8K60 on this boot. AV1 has no row here:
+its measurement was taken on a different lane and is superseded by the
+publication analysis below.
 
-The AV1 figure does not reproduce on the current client stack. Re-measured
-on one boot (source `2dd96f3`, driver `5592247a…b533` build tree, boot
-`d843e7b8…`, module `1323d58a…66a5`, `capture_sg=1`), three rounds each:
+The AV1 shortfall against the other three was re-checked on 2026-11-22 and
+the cause is publication, not the decoder. The 27 drops have one signature:
+every dropped token's surface was resubmitted for a later picture before its
+completion arrived, and `Session::submit` releases the still-pending target
+(`session_submit.cc:34`). Under Direct that release forgets the token, so the
+completion has no target and the picture is lost; Import retains it
+(`target detached`) and completes it. Same client, same clip, `-f null`:
 
-| Lane | fps, three rounds |
-| --- | --- |
-| AV1 no-download | 45.2 / 42.4 (27 of 60 dropped) |
-| AV1 download | 19.6 / 19.4 / 19.5 |
+| AV1 8K lane | completed | drops | shown fps |
+| --- | ---: | ---: | ---: |
+| Direct, no download | 23-24 / 60 | 26-27 | 54.9-57.7 |
+| Import, no download | 60 / 60 | 0 | 63.8-64.1 |
+| Import, no download, 300 frames, two rounds | 300 / 300 | 0 | 62.2 / 62.2 |
+| Direct, `scale_vaapi=3840x2160` (client consumes) | 60 / 60 | 0 | 34.5 / 47.8 |
 
-AV1 on the download lane measures half the recorded value, and the installed
-driver `d15ff198…`, which is the binary the 39.5 came from, gives the same
-19.5/19.1/19.8 on that boot, so the driver is not what changed.
-The client is: ffmpeg 8.1.3-2.fc44 and mesa-dri-drivers 26.2.7 were
-installed on 20 November, after the 39.5 run. That version change is the
-only difference found, not a proven cause; the older ffmpeg was not
-reinstalled to confirm it. Decoding alone is 42-45 fps, so the download
-lane's copy of 47.5 MiB per frame (2.85 GiB over 60 frames) is what halves
-it on this stack. AV1 8K is therefore a decode at about 45 fps and a
-client-side download that brings the round trip to about 19.5 fps; the older
-39.5 download-lane number is superseded and not carried forward.
+On the Import lane the four codecs sit in one band over the same 60 frames:
+H.264 60.1-63.4, HEVC 55.6-58.1, VP9 60.7-63.6, AV1 63.8-64.1 shown fps, with
+73 CAPTURE completions for AV1's 60 pictures (13 invisible alt-ref halves).
+Import lends one client buffer per completion, so 62 fps is a floor on the
+decoder's rate at this geometry, not its ceiling. Pinning the CPU clusters
+moves AV1 by under 1 fps, so DVFS is not the limiter, and the installed driver
+`d15ff198…` gives 62.6 fps on the same lane, so this is not a build-tree
+effect.
 
-The AV1 shortfall against the other three was checked on 2026-11-22. H.264,
-HEVC and VP9 decode 8K at 84, 107 and 86 fps steady-state (first completion
-to last, 60 frames each); AV1 reaches 54-57 fps and drops 27 of its 60
-pictures, the same 27 the no-download lane records above, so its frame rate
-is bounded by the release-before-publish behaviour, not by the decoder.
-Pinning all three CPU clusters to `performance` moved AV1 to 52.9-53.5 fps,
-so DVFS is not the limiter. The download lane reaches 60/60 at 35.2 and
-39.8 fps whole-run, which includes startup. Run identity: boot
-`d843e7b8-f05f-4d2d-885d-cdb0fac5b139`, module `1323d58a…66a5`
-(`capture_sg=Y`), driver `20e65896…d50c`. There is no 8K60 AV1 claim to
-make: the codec decodes 8K, but the client that keeps all surfaces loses 45 %
-of the pictures and the one that downloads does so at about half the rate.
+End to end is still below 60 at 8K, for every codec. mpv 0.41.0 on the
+Wayland display plays 8K AV1 at 20.1 fps, H.264 at 19.8 and HEVC at 27.6
+(zero copy, `VO: [gpu] 7680x4320 vaapi[nv12]`); the window size makes no
+difference (15.3 full size against 15.8 at 640x360), so it is the export path,
+not the scaling. The ffmpeg download lane reaches 26-32 fps, bounded by
+copying 47.5 MiB per frame. AV1 8K therefore decodes above 60 pictures/s, and
+8K60 AV1 playback on this stack is a display-path and memory-bandwidth limit
+that H.264 shares, not an AV1 limit.
+
+Run identity: source `7cdeef2` plus 19 uncommitted files, build-tree driver
+`20e65896…d50c` (installed `d15ff198…`), boot
+`d843e7b8-f05f-4d2d-885d-cdb0fac5b139`, kernel
+`7.3.4-sm8550-00104-g87ac0f2347eb`, module `1323d58a…66a5` (`capture_sg=Y`),
+decoder `/dev/video17` resolved by `iris_driver`, pack at 49 %.
 
 A 60-frame run through the downloading client exposed one drain edge under
 the experimental allocator: HEVC and VP9 report `session failed: no LAST
