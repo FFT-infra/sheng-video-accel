@@ -152,10 +152,12 @@ Imported DMA-BUFs must match the native CAPTURE layout: one linear object with a
 - **8K Direct**: the experimental `capture_sg=1` module parameter allocates the
   CAPTURE pool from system memory and is what makes a 15-frame 8K pool fit;
   without it eight frames are granted and the automatic policy publishes Copy
-  at that geometry. With it, 8K publishes Direct at about 60 fps (H.264, HEVC,
-  VP9), but a client that holds every slot leaves the drain no buffer for its
-  terminal LAST, so HEVC and VP9 report a failed drain on the downloading
-  client. The parameter is off by default and not part of the qualified module.
+  at that geometry. With it, 8K publishes Direct and the decoder runs at
+  85-88 fps for H.264, 88-92 for HEVC, 80-85 for VP9 and 62 for AV1, measured
+  with a client that consumes every picture. A client that holds every slot leaves
+  the drain no buffer for its terminal LAST, so HEVC and VP9 report a failed
+  drain on the downloading client. The parameter is off by default and not
+  part of the qualified module.
 - **Encode**: slices become a macroblock budget under CBR or CQP, up to 60 fps
   and 4096x2160, and need 0013. Tiles, long-term references and per-layer
   bitrates are not offered. B pictures, ROI, temporal layers and rolling-row

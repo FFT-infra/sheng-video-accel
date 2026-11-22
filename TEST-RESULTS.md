@@ -302,26 +302,56 @@ completion has no target and the picture is lost; Import retains it
 On the Import lane the four codecs sit in one band over the same 60 frames:
 H.264 60.1-63.4, HEVC 55.6-58.1, VP9 60.7-63.6, AV1 63.8-64.1 shown fps, with
 73 CAPTURE completions for AV1's 60 pictures (13 invisible alt-ref halves).
-Import lends one client buffer per completion, so 62 fps is a floor on the
-decoder's rate at this geometry, not its ceiling. Pinning the CPU clusters
-moves AV1 by under 1 fps, so DVFS is not the limiter, and the installed driver
-`d15ff198…` gives 62.6 fps on the same lane, so this is not a build-tree
-effect.
+That band is the Import policy's, not the decoder's: Import lends one client
+buffer per completion, so it caps every codec at about 62 pictures/s. Pinning
+the CPU clusters moves AV1 by under 1 fps, so DVFS is not the limiter, and the
+installed driver `d15ff198…` gives 62.6 fps on the same lane, so this is not a
+build-tree effect.
 
-End to end is still below 60 at 8K, for every codec. mpv 0.41.0 on the
-Wayland display plays 8K AV1 at 20.1 fps, H.264 at 19.8 and HEVC at 27.6
-(zero copy, `VO: [gpu] 7680x4320 vaapi[nv12]`); the window size makes no
-difference (15.3 full size against 15.8 at 640x360), so it is the export path,
-not the scaling. The ffmpeg download lane reaches 26-32 fps, bounded by
-copying 47.5 MiB per frame. AV1 8K therefore decodes above 60 pictures/s, and
-8K60 AV1 playback on this stack is a display-path and memory-bandwidth limit
-that H.264 shares, not an AV1 limit.
+Direct publication with a client that consumes every picture measures the
+decoder itself. Two rounds each, `scale_vaapi` in place so the surface returns
+to the pool only after the filter took it:
+
+| Codec | 8K decode fps | CAPTURE completions |
+| --- | --- | ---: |
+| H.264 | 85.1 / 88.1 | 60 |
+| HEVC | 87.6 / 91.6 | 60 |
+| VP9 | 80.0 / 84.7 | 64 |
+| AV1 | 62.0 / 62.4 | 73 |
+
+AV1 is the slowest decoder at this geometry. AV1 and VP9 both return more
+CAPTURE completions than pictures (73 and 64 against 60 and 62), the
+two-completion units their alt-ref and install halves produce.
+
+End to end depends on the video output, not on the codec. mpv 0.41.0 on
+Wayland, Import publication, 60 frames, no drops or errors:
+
+| VO | AV1 | H.264 | HEVC | VP9 |
+| --- | ---: | ---: | ---: | ---: |
+| `dmabuf-wayland` | 48.1 | 69.2 | 77.1 | 60.4 |
+| `gpu` (`gpu-context=wayland`) | 14.0 | 19.8 | 19.6 | 18.6 |
+
+`dmabuf-wayland` hands the decoded DMA-BUF to the compositor; `gpu` exports and
+re-imports every 47.5 MiB frame, which flattens all four codecs to about 19 fps
+and is what the earlier whole-run download-lane numbers measured. The window
+size changes nothing on `gpu` (15.3 full size against 15.8 at 640x360), so it
+is the export path, not the scaling.
+
+AV1 is therefore the one codec that stays under 60 end to end at 8K on the
+fast path: 48.1 fps against a 62 fps decode ceiling. H.264, HEVC and VP9 clear
+60. An 8K60 AV1 playback claim would need the decoder above 60 with room for
+the compositor, and 62 leaves about 20 % headroom.
 
 Run identity: source `7cdeef2` plus 19 uncommitted files, build-tree driver
 `20e65896…d50c` (installed `d15ff198…`), boot
 `d843e7b8-f05f-4d2d-885d-cdb0fac5b139`, kernel
 `7.3.4-sm8550-00104-g87ac0f2347eb`, module `1323d58a…66a5` (`capture_sg=Y`),
-decoder `/dev/video17` resolved by `iris_driver`, pack at 49 %.
+decoder `/dev/video17` resolved by `iris_driver`, pack at 49 %. The mpv
+measurements ran with `--untimed --vo=dmabuf-wayland` and
+`V4L2_VA_PUBLISH=import`; the Direct decode table ran under `-f null` with
+`scale_vaapi=w=iw:h=ih`, which reports 23 completed of 60 on AV1 because that
+client releases its surfaces before the show-existing completions, and the
+decode rate is taken over the completion records, not the published count.
 
 A 60-frame run through the downloading client exposed one drain edge under
 the experimental allocator: HEVC and VP9 report `session failed: no LAST

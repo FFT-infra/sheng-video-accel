@@ -156,8 +156,9 @@ When a CAPTURE completion arrives with a token that has a pending Surface:
   the policies: the 384 MiB budget grants eight frames, which is the
   firmware minimum plus one, so Auto publishes Copy; with the patched
   kernel's `capture_sg=1` the same pool is 720 MiB and fifteen frames, and
-  Auto publishes Direct. Direct is the faster policy there, by about 60 fps
-  against 35. Fifteen slots are also few enough for a client that declares
+  Auto publishes Direct. Direct is the faster policy there: a client that
+  consumes every picture decodes 8K at 85-92 fps for H.264 and HEVC, 80-85
+  for VP9 and 62 for AV1, against the Copy lane's roughly half. Fifteen slots are also few enough for a client that declares
   more to hold all of them, and a drain then has no buffer to carry its
   terminal LAST: that is why `capture_sg` stays experimental (TEST-RESULTS.md
   records both the throughput and the failed drains).
