@@ -439,18 +439,16 @@ an unadvertised profile; `FM2_SVA_C` has no readable elementary stream to
 probe. The passing Constrained Baseline and Main vectors are frame-coded
 streams.
 
-Field-coded H.264 is now refused in `vaEndPicture`, before the access unit
-reaches the node: the translator answers `VA_STATUS_ERROR_UNIMPLEMENTED` and
-submits nothing, so the 49 field-coded vectors above fail at the driver rather
-than at the kernel. The context still opens its session (that happens in
-`vaCreateContext`), but no picture is queued and the DQBUF that used to follow
-the first submission no longer happens. Verified on a 1920x1080 High field-coded
-clip: `endPicture status=20` with zero DQBUF, against `status=23 DQBUF:
-Input/output error` before the change; a progressive 1080p control decodes
-20/20. Run identity: source `561d7fc` plus this change, build-tree driver
-`77b2538f…` under `LIBVA_DRIVERS_PATH`, boot `d843e7b8…`, kernel
-`7.3.4-sm8550-00104-g87ac0f2347eb`, module `1323d58a…`, decoder
-`/dev/video17`; the field-coded clip published 0 frames.
+Field-coded H.264 is refused in `vaEndPicture` with
+`VA_STATUS_ERROR_UNIMPLEMENTED`, so the 49 field-coded vectors above fail at the
+driver rather than at the kernel. The session still opens in `vaCreateContext`;
+no picture is queued and the DQBUF that used to follow no longer happens. A
+1920x1080 High field-coded clip ends the picture with `status=20` and zero
+DQBUF, against `status=23 DQBUF: Input/output error` before; a progressive
+1080p control decodes 20/20. Run identity: source `561d7fc` plus this change,
+build-tree driver `77b2538f…` under `LIBVA_DRIVERS_PATH`, boot `d843e7b8…`,
+kernel `7.3.4-sm8550-00104-g87ac0f2347eb`, module `1323d58a…`, decoder
+`/dev/video17`, 0 frames published.
 
 HEVC, 6 failures: two `PICSIZE_A/B_Bossen_1` vectors are 8440 wide, above the
 node's 8192 limit; two `WPP_D_ericsson_MAIN_2`/`_MAIN10_2` are 64 wide, below
