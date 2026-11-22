@@ -47,7 +47,7 @@ oracle.
 | `iris-real-clip-gate.sh` drc | in-context 1280x720 -> 854x480, 80/80 exact, `import=40 copy=40 invisible=1`; the GPU-copy half is the expected fail-safe for a client exporting surfaces at the old geometry |
 | `iris-real-clip-gate.sh` 4k | AV1 3840x2160, 30/30 exact, `import=30 copy=0` |
 | `iris-vp9-p2-gate.sh` | generated 640x360 `yuv420p10le` Profile 2, 30/30 exact, 12 P010 surfaces, 0 NV12, `import=30`, `VAEntrypointVLD` answers `VA_RT_FORMAT_YUV420_10` only |
-| `iris-av1-grain-gate.sh` | 8-bit NV12 and 10-bit P010 clips, every frame byte-identical to libdav1d's grained output under Import, direct and copy |
+| `iris-av1-grain-gate.sh` | 8-bit NV12 and 10-bit P010 clips, every frame byte-identical to libdav1d's grained output under Import and Direct, in both the default software blend and `V4L2_VA_HW_GRAIN` (see below). The gate refuses a forced Copy publication: without a layout mismatch it is a silent Import regression. |
 | `iris-dynamic-resolution.sh` | VP9 Import, 100 alternating 640x360/1280x720 switches in both single- and multi-process lanes, 202 frames over 101 contexts, pixels equal to software, `drops=0 timeouts=0` |
 | `iris-gstreamer-gate.sh` | `GST_VA_ALL_DRIVERS=1` registers 7 elements; `vaav1dec` 120/120 hashes equal to software; `vah264enc`/`vah265enc` encode 60 frames that decode back |
 
@@ -71,6 +71,60 @@ checked on 2026-11-19 on a 720p clip: a backwards seek from ~6.7 s to 5 s
 continued decoding (160 -> 278 frames, `dropped=0`, no media error), with and
 without `--disable-features=ExtendedVideoBitstreamValidation`, so this driver
 needs no seek workaround on that browser.
+
+### AV1 film grain in the firmware
+
+`V4L2_VA_HW_GRAIN` makes the firmware apply film grain and write the grained
+picture into the client's `current_display_picture`; the default path leaves
+the firmware output ungrained and blends in software from the decode
+completion. Both were measured against libdav1d's own grained output on one
+boot (boot `d843e7b8-f05f-4d2d-885d-cdb0fac5b139`, kernel
+`7.3.4-sm8550-00104-g87ac0f2347eb`, module `1323d58a…66a5`, build-tree driver
+`5bb00099…53de` from source `7cdeef2` plus this change, decoder `/dev/video17`
+resolved by the `iris_driver` name, publish policy named per row):
+
+| Clip | Mode | Result |
+| --- | --- | --- |
+| `grain8.webm` 320x240 8-bit, 21 pictures | hardware, Import | `frames=21 blends=0`, framemd5 identical to libdav1d, `session finish submitted=21 completed=21 errors=0 drops=0` |
+| `grain8.webm` | hardware, Direct | same pixels, `import=0 copy=0 invisible=12` |
+| `grain8.webm` | software, Import | `blends=21`, identical to libdav1d |
+| `grain8.webm` | software, Direct | `blends=21`, identical to libdav1d |
+| `grain10.webm` 352x290 P010, 10 pictures | hardware, Import | `frames=10 blends=0`, identical to libdav1d, `submitted=11 completed=11` |
+| `grain10.webm` | hardware, Direct | same pixels, `import=0 copy=0 invisible=2` |
+| `grain10.webm` | software, Import | `blends=10`, identical to libdav1d |
+| `grain-hd.mkv` 1280x720, 90 inter-coded pictures | hardware, Import | 90 hardware routes, framemd5 identical to libdav1d, `submitted=93 completed=93 errors=0 drops=0` |
+
+The hardware path is opt-in and not part of the qualified combination: it
+changes which surface receives the pixels (the completion lands on
+`current_display_picture`, not `current_frame`), and a client that reads
+`current_frame` after `vaEndPicture` would get no picture where the software
+path would have given it the ungrained one. A forced Copy publication is not
+a gate lane: `iris-clip-trace-check.sh` refuses a copy with no recorded
+layout mismatch, and no grain clip has one.
+
+### Decode latency
+
+The session reports `latency_us` on every capture completion: the span from
+the access unit reaching the OUTPUT queue to the picture completing, the same
+submit-to-completion shape the encoder traces. Measured on one boot (boot
+`d843e7b8-f05f-4d2d-885d-cdb0fac5b139`, kernel
+`7.3.4-sm8550-00104-g87ac0f2347eb`, module `1323d58a…66a5`, build-tree driver
+`20e65896…d50c` from source `7cdeef2` plus this change, decoder `/dev/video17`
+resolved by the `iris_driver` name), `av1-720.webm` 1280x720 AV1 through
+`ffmpeg -hwaccel vaapi -f null -` with Import publishing, three rounds:
+
+| Round | First picture | p50 | p95 | max |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 10061 us | 10145 us | 13503 us | 15328 us |
+| 2 | 9558 us | 10120 us | 14211 us | 19256 us |
+| 3 | 11342 us | 10023 us | 13998 us | 16946 us |
+
+Each round is 120 completions. The first picture is not an outlier here
+because the session is already configured by the time the client's second
+picture arrives; the number includes firmware bring-up on the first round
+only. These are one-picture-at-a-time costs through a stateful pipeline, not
+a low-latency claim: the driver submits each AU as `vaEndPicture` returns and
+hands the completion back when the firmware returns it.
 
 At 7680x4320, `test/iris-8k-gate.sh` decodes 30-picture clips, one per
 qualified codec, with a software framemd5 oracle: 30/30 exact frames each,

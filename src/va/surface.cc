@@ -174,8 +174,43 @@ std::unique_ptr<iris::StableBuffer> import_stable(int fd, uint64_t allocation, c
 
 std::shared_ptr<iris::Session> session_of(DriverData& d, const Surface& s)
 {
+    // A surface can hold a session's pixels without owning a context: an
+    // encode context takes a decoded surface, and AV1 hardware grain lands
+    // the grained picture on a client display surface the decode context
+    // never listed. Both name the session explicitly.
+    if (s.pixels_session)
+        return s.pixels_session;
     auto owner = owner_of(d, s);
     return owner ? owner->session : nullptr;
+}
+
+std::shared_ptr<Surface> grain_display(DriverData& d, Context& c,
+    const std::shared_ptr<Surface>& decoded)
+{
+    if (c.profile != VAProfileAV1Profile0 || !c.picture.parameters)
+        return nullptr;
+    const auto& picture = *static_cast<const VADecPictureParameterBufferAV1*>(c.picture.parameters);
+    if (!picture.film_grain_info.film_grain_info_fields.bits.apply_grain)
+        return nullptr;
+    // A client may name the same surface for both (no separate display
+    // buffer): the firmware then grains the one the client already holds.
+    const VASurfaceID display_id = picture.current_display_picture;
+    if (display_id == VA_INVALID_ID || display_id == picture.current_frame)
+        return nullptr;
+    iris::require(picture.current_frame == c.picture.surface_id,
+        "film grain needs the picture on current_frame", VA_STATUS_ERROR_INVALID_PARAMETER);
+    const unsigned depth = picture.bit_depth_idx ? 10 : 8;
+    require_linear(d, *decoded, "film grain");
+    std::lock_guard<std::recursive_mutex> lock(d.mutex);
+    auto display = surface(d, display_id);
+    require_linear(d, *display, "film grain");
+    iris::require(display->width == decoded->width && display->height == decoded->height
+            && display->fourcc == decoded->fourcc
+            && display->fourcc == (depth == 10 ? VA_FOURCC_P010 : VA_FOURCC_NV12),
+        "film grain: the display surface is not this picture's size and format", VA_STATUS_ERROR_INVALID_SURFACE);
+    iris::require(!display->target->pending, "film grain: the display surface is decoding",
+        VA_STATUS_ERROR_SURFACE_BUSY);
+    return display;
 }
 
 std::shared_ptr<Surface::GrainJob> queue_grain(DriverData& d, Context& c,

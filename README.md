@@ -177,6 +177,7 @@ Imported DMA-BUFs must match the native CAPTURE layout: one linear object with a
 | `V4L2_VA_B_FRAMES` | off | Opt in to B pictures in the H.264 encoder; needs three pictures in flight (FFmpeg: `-async_depth 3`) |
 | `V4L2_VA_ROI` | off | Opt in to advertising ROI regions; needs the 0017 kernel patch, and the qualified firmware ignores the map |
 | `V4L2_VA_UBWC` | on (`0` disables) | Offer UBWC (Q08C) decode surfaces to clients that request the `QCOM_COMPRESSED` modifier |
+| `V4L2_VA_HW_GRAIN` | off | Let the firmware apply AV1 film grain from the rebuilt header; the grained picture lands on `current_display_picture` |
 | `V4L2_VA_DUMP` | off | Directory path to dump submitted access units |
 
 ## Naming

@@ -38,7 +38,7 @@ bool starts_with_start_code(const uint8_t* data, size_t size)
     return size >= 3 && data[0] == 0 && data[1] == 0 && data[2] == 1;
 }
 
-std::unique_ptr<iris::codec::Translator> make_translator(VAProfile profile)
+std::unique_ptr<iris::codec::Translator> make_translator(VAProfile profile, bool hardware_grain)
 {
     switch (profile) {
 #pragma GCC diagnostic push
@@ -56,7 +56,7 @@ std::unique_ptr<iris::codec::Translator> make_translator(VAProfile profile)
     case VAProfileVP9Profile2:
         return iris::codec::make_vp9(profile);
     case VAProfileAV1Profile0:
-        return iris::codec::make_av1_dpb(profile);
+        return iris::codec::make_av1_dpb(profile, hardware_grain);
     default:
         throw iris::Error(VA_STATUS_ERROR_UNSUPPORTED_PROFILE, "no translator for profile");
     }
@@ -83,21 +83,46 @@ std::unique_ptr<iris::codec::Encoder> make_encoder(VAProfile profile, iris::Rate
 
 // Submit one AU for `surface` through `context`'s session. Sets the target's
 // publish policy from the surface's export history.
-void submit(DriverData& d, Context& c, Surface& s, const iris::codec::AccessUnit& au)
+//
+// `display`, when set, is where the firmware's picture lands instead: AV1
+// hardware film grain makes the firmware output the grained picture, and VA
+// names the client's display surface for it while current_frame carries no
+// pixels. The decode surface's target is then completed without storage so a
+// client that syncs it still succeeds, and the client's references stay
+// surface ids the DPB remaps to internal slots.
+void submit(DriverData& d, Context& c, Surface& s, const iris::codec::AccessUnit& au,
+    Surface* display = nullptr)
 {
-    s.target->publish = publish_policy(d, s, *c.session);
-    if (s.target->publish != iris::Publish::Direct)
-        s.target->destination = &ensure_stable(d, s);
+    Surface& destination_surface = display ? *display : s;
+    iris::TargetPtr& target = destination_surface.target;
+    target->publish = publish_policy(d, destination_surface, *c.session);
+    if (target->publish != iris::Publish::Direct)
+        target->destination = &ensure_stable(d, destination_surface);
     else
-        s.target->destination = nullptr;
-    s.target->width = s.width;
-    s.target->height = s.height;
-    s.target->fourcc = s.fourcc;
-    s.target->modifier = s.modifier;
-    s.target->hidden = au.hidden;
-    s.target->completions = au.completions;
+        target->destination = nullptr;
+    target->width = destination_surface.width;
+    target->height = destination_surface.height;
+    target->fourcc = destination_surface.fourcc;
+    target->modifier = destination_surface.modifier;
+    target->hidden = au.hidden;
+    target->completions = au.completions;
+    destination_surface.failed = false;
+    if (display) {
+        // The decode surface produced no client-visible picture: the grained
+        // one is on the display surface. It is still a completed picture, so
+        // its own sync and reuse bookkeeping must not see a pending token.
+        s.target->pending = false;
+        s.target->completed = true;
+        s.target->error = false;
+        s.target->frame.reset();
+        // The display surface is not one of the context's render targets, so
+        // it has no owning context to find the session through. A client
+        // syncs or exports it to read the grained picture, and that wait has
+        // to reach this session.
+        destination_surface.pixels_session = c.session;
+    }
     s.failed = false;
-    c.session->submit(au.bytes.data(), au.bytes.size(), s.target);
+    c.session->submit(au.bytes.data(), au.bytes.size(), target);
 }
 
 // The buffer that holds a surface's current pixels: a completed decode frame
@@ -861,7 +886,7 @@ VAStatus createContext(VADriverContextP ctx, VAConfigID config, int width, int h
             return VA_STATUS_SUCCESS;
         }
 
-        c->translator = make_translator(cfg.profile);
+        c->translator = make_translator(cfg.profile, d.options.hardware_grain);
 
         iris::SessionConfig sc;
         sc.codec_pixelformat = c->translator->v4l2_pixelformat();
@@ -1397,6 +1422,19 @@ VAStatus endPicture(VADriverContextP ctx, VAContextID id)
         }
         d.trace("va end_picture ctx=%u surface=%u bytes=%zu seq_start=%d", id, current, c->au.bytes.size(),
             c->au.sequence_start ? 1 : 0);
+        if (d.options.hardware_grain) {
+            // The firmware applies the grain and writes the grained picture,
+            // so the completion belongs on current_display_picture. Resolve
+            // it before the submit: a malformed pair must fail here, not
+            // after the AU is with the firmware.
+            auto display = grain_display(d, *c, s);
+            if (display) {
+                const auto& p = *static_cast<const VADecPictureParameterBufferAV1*>(c->picture.parameters);
+                d.trace("va grain hw surface=%u display=%u", current, p.current_display_picture);
+            }
+            submit(d, *c, *s, c->au, display.get());
+            return VA_STATUS_SUCCESS;
+        }
         // The display surface has to know a blend is coming before the
         // picture does, and the blend itself runs here: the client recycles
         // current_frame at its next submit, so the pixels are gone by then.

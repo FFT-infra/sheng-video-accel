@@ -19,6 +19,11 @@ extern "C" {
 
 namespace iris::codec {
 
-std::unique_ptr<Translator> make_av1_dpb(VAProfile profile);
+// `hardware_grain` lets the rebuilt frame header carry the client's film
+// grain parameters, which this firmware applies itself; the completion then
+// holds the grained picture and the VA glue publishes it into
+// current_display_picture. Off, the header asks for no grain and the glue
+// blends it in software.
+std::unique_ptr<Translator> make_av1_dpb(VAProfile profile, bool hardware_grain = false);
 
 } // namespace iris::codec

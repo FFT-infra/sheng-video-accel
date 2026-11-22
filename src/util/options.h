@@ -45,6 +45,11 @@ struct Options {
     // Off by default: the firmware completes the metadata buffer but codes
     // the picture unchanged, so a client would get no effect and no error.
     bool roi = false;
+    // AV1 film grain: let the firmware synthesise it from the rebuilt frame
+    // header instead of blending it on the CPU. The firmware writes the
+    // grained picture, so the completion publishes into
+    // current_display_picture and current_frame carries no pixels.
+    bool hardware_grain = false;
     // Directory to write each submitted access unit into; empty disables.
     std::string dump_dir;
 

@@ -47,6 +47,12 @@ struct AV1SequenceState {
     unsigned frame_height_bits = 0;
     unsigned seq_level_idx = 0;
     bool separate_uv_delta_q = false;
+    // The firmware applies film grain from the bitstream (proven on this
+    // node), so the rebuilt header carries the client's parameters and the
+    // CAPTURE slot holds the grained picture. Off, the header asks for no
+    // grain and the VA glue blends it in software (src/va/grain.cc), which
+    // is the qualified default until the hardware path is gated.
+    bool hardware_grain = false;
     bool valid = false;
 };
 

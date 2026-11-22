@@ -606,10 +606,14 @@ Read once in `VA_DRIVER_INIT_FUNC`, stored in `Options`, passed down.
 | `V4L2_VA_COPY` | `gpu` | Copy engine for persistent exports: `gpu` or `cpu`. |
 | `V4L2_VA_PUBLISH` | `auto` | Force `copy`, `direct` or `import` for diagnostics. |
 | `V4L2_VA_VPP` | on | Set to `0` to remove the `VAProfileNone` / `VAEntrypointVideoProc` entrypoint. On keeps the decode/encode surface unchanged. |
+| `V4L2_VA_B_FRAMES` | off | Opt in to B pictures in the H.264 encoder; needs three pictures in flight. |
+| `V4L2_VA_ROI` | off | Advertise ROI regions; needs kernel patch 0017, and the firmware ignores the map. |
+| `V4L2_VA_UBWC` | on | Set to `0` to stop offering Q08C surfaces to clients that request `QCOM_COMPRESSED`. |
+| `V4L2_VA_HW_GRAIN` | off | Let the firmware apply AV1 film grain from the rebuilt header and publish the grained picture into `current_display_picture`. Off keeps the software blend (`src/va/grain.cc`). |
 | `V4L2_VA_DUMP` | off | Directory for submitted access units. |
 
-Eight switches, down from eighteen. `test/iris-env-doc-check.sh` keeps README
-and `options.cc` in sync by name, not by sentence.
+Twelve switches. `test/iris-env-doc-check.sh` keeps README and `options.cc` in
+sync by name, not by sentence.
 
 ## 7. Threading and locking
 
@@ -645,8 +649,14 @@ from `vsnprintf`'s return value, not a fixed buffer: a long
 session open node=<path> mode=decode-order|display-order codec=<fourcc> <w>x<h> au=<n> output=<n>
 submit token=<n> bytes=<n> output=<i>
 capture configure <w>x<h> stride=<n> size=<n> visible=<w>x<h> pool=<n> memory=mmap|import firmware-min=<n>
-capture token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu|import
-capture noshow token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu|import
+capture token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu|import latency_us=<n>
+                                                                     (latency_us runs from the
+                                                                      access unit reaching the
+                                                                      OUTPUT queue to this
+                                                                      completion, the same
+                                                                      submit-to-completion span
+                                                                      the encoder reports)
+capture noshow token=<n> index=<i> flags=<hex> publish=direct|copy-gpu|copy-cpu|import latency_us=<n>
                                                                      (AV1 hidden picture: the node
                                                                       returns it with no pixels, no
                                                                       picture-type bit and no payload;
@@ -844,6 +854,12 @@ va grain <w>x<h> source=frame|stable                   (a grained AV1 display
                                                       `source` names where
                                                       the ungrained picture
                                                       came from)
+va grain hw surface=<n> display=<n>                    (V4L2_VA_HW_GRAIN: the
+                                                      firmware grains the
+                                                      picture, so the
+                                                      completion lands on
+                                                      `display`, not
+                                                      `surface`)
 ```
 
 Four VA-side diagnostics are emitted but intentionally stay out of the

@@ -355,9 +355,11 @@ void Session::publish(Target& target, FrameRef frame, const Dequeued& completion
     target.pending = false;
     target.completed = true;
     target.error = false;
-    trace_("%s token=%llu index=%u flags=%#x publish=%s%s", event ? event : "capture",
+    const long long latency_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - target.submitted_at).count();
+    trace_("%s token=%llu index=%u flags=%#x publish=%s%s latency_us=%lld", event ? event : "capture",
         static_cast<unsigned long long>(completion.timestamp_us), completion.index, completion.flags,
-        target.publish == Publish::Copy ? "copy-" : "", how);
+        target.publish == Publish::Copy ? "copy-" : "", how, latency_us);
 }
 
 // ---------------------------------------------------------------------------

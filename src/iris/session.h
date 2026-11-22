@@ -51,6 +51,10 @@ enum class Publish { Direct, Copy, Import };
 struct Target {
     uint64_t token = 0;
     bool pending = false;
+    // When the access unit reached the OUTPUT queue. The capture record's
+    // latency_us is the distance to the completion, which is the number a
+    // client can act on and the same shape the encoder traces.
+    std::chrono::steady_clock::time_point submitted_at;
     // Filled by the session on completion.
     FrameRef frame; // Direct: the held CAPTURE slot
     bool completed = false;

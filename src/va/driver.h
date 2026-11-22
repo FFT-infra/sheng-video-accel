@@ -93,12 +93,14 @@ struct Surface {
     // vaPutImage. Nothing on the hardware side has to happen before a
     // download may read them, so this counts as "has pixels" on its own.
     bool client_pixels = false;
-    // AV1 film grain synthesis. The picture decodes into current_frame and
-    // the grained pixels belong on current_display_picture, this surface.
-    // The blend is synchronous with that picture's endPicture: a Direct
-    // completion releases its CAPTURE slot with the next submit and a Copy
-    // one overwrites the surface's buffer, so the source pixels are only the
-    // picture's while endPicture still holds them.
+    // AV1 film grain, software mode (V4L2_VA_HW_GRAIN off). The picture
+    // decodes into current_frame and the grained pixels belong on
+    // current_display_picture, this surface. The blend is synchronous with
+    // that picture's endPicture: a Direct completion releases its CAPTURE
+    // slot with the next submit and a Copy one overwrites the surface's
+    // buffer, so the source pixels are only the picture's while endPicture
+    // still holds them. With hardware grain on the firmware does this and
+    // no job is queued.
     struct GrainJob {
         // The display surface owns the job; the job names it weakly so the
         // pair cannot keep itself alive.
@@ -353,8 +355,15 @@ bool p010_decode_profile(VAProfile profile);
 // Queue the AV1 film grain picture the client described, if it asked for one:
 // the picture decodes into `decoded` (current_frame, the ungrained reference)
 // and the grained picture is owed on current_display_picture. Called before
-// the submit, so the display surface knows a blend is coming.
+// the submit, so the display surface knows a blend is coming. Software mode
+// only; with V4L2_VA_HW_GRAIN the firmware applies grain and grain_display()
+// names the surface instead.
 std::shared_ptr<Surface::GrainJob> queue_grain(DriverData& d, Context& c, const std::shared_ptr<Surface>& decoded);
+
+// Hardware film grain: the display surface the firmware's grained picture
+// belongs on, or null when the client named none (or named current_frame
+// itself). Validates the pair the same way queue_grain() does.
+std::shared_ptr<Surface> grain_display(DriverData& d, Context& c, const std::shared_ptr<Surface>& decoded);
 
 // Settle that picture: wait for its completion through the session and blend
 // the grain into the display surface. Must run before endPicture returns and
