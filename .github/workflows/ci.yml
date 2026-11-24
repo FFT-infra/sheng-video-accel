@@ -59,8 +59,11 @@ jobs:
             deferred-copy \
             va-vpp-query \
             va-vtable \
+            va-config-attributes \
+            va-gst-filter \
             iris-va-vtable-surface \
             annexb \
+            h264-translator \
             hevc-parameter-sets \
             av1-obu \
             av1-translator \
