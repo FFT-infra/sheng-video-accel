@@ -4,7 +4,7 @@
 # with glslangValidator, then rewrite SHA256SUMS. The target has no glslang,
 # so every module is checked in and pinned by hash; the target gates verify
 # the pin at run time instead of compiling on the device. The gates and probes
-# named below are in test/vulkan-vpp.
+# named below are in test/target/vulkan-vpp.
 #
 #   copy.spv          flat read/write prereq (prereq.sh / probe.c)
 #   nv12_scale.spv    NV12 scale with crop, rotation and the two

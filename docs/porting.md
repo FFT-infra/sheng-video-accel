@@ -30,7 +30,7 @@ policy may be advertised on a new SoC until its own hardware gate passes and
    whichever kernel branch the port runs: 7.3.4 needs two patches where 7.2.6
    needed four, and the difference is what the kernel already implements, not
    what the driver needs.
-   `test/iris-kernel-patch-check.sh` pins the current hashes and paths; refresh
+   `test/static/iris-kernel-patch-check.sh` pins the current hashes and paths; refresh
    `SHA256SUMS` in the same commit as any patch change.
 2. **Kernel build identity.** The target config has BTI/PAC enabled
    (`CONFIG_ARM64_BTI=y`, `CONFIG_ARM64_PTR_AUTH=y`,
@@ -50,7 +50,7 @@ policy may be advertised on a new SoC until its own hardware gate passes and
 4. **Capability table.** `data/iris-codec-capabilities.json` records the VA
    profiles, capture formats, Import qualification and rejected features for
    this firmware. `src/va/driver.cc` and
-   `test/iris-codec-matrix-check.sh` read it. A new SoC may expose a different
+   `test/static/iris-codec-matrix-check.sh` read it. A new SoC may expose a different
    set of compressed formats or bit depths; re-probe and re-record every entry
    before changing the table. Keep `production: supported` only for codecs
    with exact pixel evidence.

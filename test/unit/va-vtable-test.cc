@@ -12,7 +12,7 @@
 // sub-table, which follows vpp_available() and the client's own pointer.
 //
 // A libva upgrade that adds a slot fails the source check
-// (test/iris-va-vtable-surface-check.py), not this test; this one proves the
+// (test/static/iris-va-vtable-surface-check.py), not this test; this one proves the
 // shipped build still fills what the guard list claims.
 
 #include "../../src/va/driver.h"

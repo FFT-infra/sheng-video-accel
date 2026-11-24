@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //
 // Every environment variable the driver reads, read once. Only options.cc
-// touches the environment; test/iris-env-doc-check.sh enforces that and
+// touches the environment; test/static/iris-env-doc-check.sh enforces that and
 // keeps README.md and this file in agreement by name.
 
 #pragma once

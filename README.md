@@ -30,7 +30,7 @@ UBWC surfaces are offered unless `V4L2_VA_UBWC=0`: a client that lists
 per plane, publishing Direct or Import only, because nothing here decompresses
 UBWC. AV1 film grain is blended in user space onto `current_display_picture`
 before the client can recycle `current_frame`. Both gates require byte-exact
-read-back: `test/iris-ubwc-gate.sh` through Turnip, `test/iris-av1-grain-gate.sh`
+read-back: `test/target/iris-ubwc-gate.sh` through Turnip, `test/target/iris-av1-grain-gate.sh`
 against libdav1d.
 
 ### Encode
@@ -104,7 +104,7 @@ Per-client settings are in `docs/install.md#client-setup`.
 `iris-device-check` is read-only: nodes, firmware version, bound driver and
 queue formats. `iris-verify` decodes and encodes a sample clip and requires the
 Iris interrupt counters to move. The full four-codec pixel oracle is
-`test/iris-matrix.sh`. A browser session counts as hardware only when the
+`test/target/iris-matrix.sh`. A browser session counts as hardware only when the
 media surface names the selected decoder and reports decoded and dropped
 frames.
 

@@ -221,7 +221,7 @@ public:
                 "unsupported HEVC slice features", VA_STATUS_ERROR_UNIMPLEMENTED);
             // The count only has to be non-zero. It is deliberately not
             // compared with the CTU grid: clients send a nominal value here
-            // (test/encode-params-test.cc records the shape FFmpeg renders)
+            // (test/unit/encode-params-test.cc records the shape FFmpeg renders)
             // and the firmware decides the slice layout from the picture
             // parameters. Zero describes no slice at all, so it is refused.
             require(slice->slice_segment_address == 0 && slice->num_ctu_in_slice != 0,

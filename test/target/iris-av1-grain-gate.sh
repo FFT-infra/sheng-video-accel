@@ -1,0 +1,203 @@
+#!/bin/sh
+
+# AV1 film grain gate for the target. Clients that ask for grain name two
+# surfaces: the picture decodes into current_frame, and the grained picture
+# the client shows is current_display_picture. The default path blends it in
+# software from the decode's completion (src/va/grain.cc); with
+# V4L2_VA_HW_GRAIN the firmware applies it and the driver publishes the
+# grained completion into current_display_picture. This gate is what says
+# the result is right either way: every frame's framemd5 must be
+# byte-identical to libdav1d's own grained output.
+#
+# Usage:
+#   IRIS_GRAIN_CLIP_DIR=DIR [IRIS_GRAIN_CLIP_SET=all|nv12|p010] \
+#       [IRIS_GRAIN_PUBLISH=import|direct] [V4L2_VA_HW_GRAIN=1] \
+#       sh test/target/iris-av1-grain-gate.sh
+#
+# The directory holds the clips and their software framemd5 baselines:
+#   grain8.webm  + grain8-sw.md5   (8-bit NV12, every frame grained)
+#   grain10.webm + grain10-sw.md5  (10-bit P010, every frame grained)
+# Generate a baseline once with a decoder that applies grain itself:
+#   ffmpeg -c:v libdav1d -i grain8.webm -f framemd5 grain8-sw.md5
+# Do not generate it with this driver: a broken blend would bless its own
+# output.
+#
+# The driver is chosen by the caller's environment. Leave LIBVA_DRIVERS_PATH
+# unset to test the installed package, or point it at a build tree. A
+# DESTDIR staging run is not an installation: record which one ran.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+. "$here/../lib/iris-env.sh"
+
+clip_dir=${IRIS_GRAIN_CLIP_DIR:-}
+clip_set=${IRIS_GRAIN_CLIP_SET:-all}
+out_base=${IRIS_GRAIN_OUT:-$(iris_artifact_dir av1-grain-gate)}
+publish=${IRIS_GRAIN_PUBLISH:-import}
+render=${IRIS_RENDER_NODE:-/dev/dri/renderD128}
+driver_path=${LIBVA_DRIVERS_PATH:-}
+
+[ -n "$clip_dir" ] || {
+    echo 'FAIL IRIS_GRAIN_CLIP_DIR must name the directory holding the clips and their software framemd5 files' >&2
+    exit 2
+}
+case $clip_set in all|nv12|p010) ;; *) echo "FAIL unknown IRIS_GRAIN_CLIP_SET=$clip_set" >&2; exit 2 ;; esac
+case $publish in import|direct) ;; *) echo "FAIL unknown IRIS_GRAIN_PUBLISH=$publish (import|direct)" >&2; exit 2 ;; esac
+[ -d "$clip_dir" ] || { echo "FAIL clip directory missing: $clip_dir" >&2; exit 2; }
+[ -e "$render" ] || { echo "FAIL render node missing: $render" >&2; exit 2; }
+command -v ffmpeg >/dev/null 2>&1 || { echo 'FAIL ffmpeg is required' >&2; exit 2; }
+iris_require_media_pin "$clip_dir" || exit 2
+if [ -n "$driver_path" ]; then
+    [ -f "$driver_path/v4l2_drv_video.so" ] \
+        || { echo "FAIL no v4l2_drv_video.so in $driver_path" >&2; exit 2; }
+fi
+
+mkdir -p "$out_base"
+failures=0
+
+# The driver the run exercises: a build tree when the caller pointed
+# LIBVA_DRIVERS_PATH at one, the installed package otherwise. Both variables
+# go together; libva picks the built .so by name.
+run_ffmpeg() {
+    if [ -n "$driver_path" ]; then
+        env LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH="$driver_path" "$@"
+    else
+        env -u LIBVA_DRIVER_NAME -u LIBVA_DRIVERS_PATH "$@"
+    fi
+}
+
+# The download: the planar form libdav1d writes. hwdownload yields the
+# surface's own sample layout (NV12 or P010), so a P010 clip converts to
+# yuv420p10le here; a mismatch in this chain fails the hash comparison for a
+# reason that has nothing to do with the grain. The counts are the clip's
+# picture structure, recorded from the reference run: `imports` is one per
+# submitted picture (AV1 also submits frames it never shows), and `invisible`
+# is the install half of each two-completion unit.
+#
+# The counts are keyed by clip hash and by publish policy, not by lane: a
+# count describes one exact file under one policy, and a replaced file or a
+# different policy would otherwise be measured against the old numbers and
+# read as a driver defect. A clip/policy pair with no row is refused.
+#
+# `imports` and `copies` are the two publish paths the checker counts; Direct
+# publishes name neither, so a Direct row is `0 0`. `invisible` counts the
+# install half of each two-completion unit and is the same under every policy.
+#
+# There is no `copy` row: a forced copy publication has no layout mismatch to
+# justify it, and iris-clip-trace-check.sh refuses that on purpose. Only
+# Import and Direct are gate policies.
+expected_counts() {
+    case $1:$2 in
+    # 320x240, film-grain-test=1, 21 displayed pictures. 21 submitted (the
+    # encoder also wrote a hidden picture), 11 invisible install halves.
+    17495e033ca5449bd37e17c4d30689f1f562018885b155c0bcfca0afd4e3e3f5:import)
+        echo '21 0 11' ;;
+    # 320x240, film-grain-test=1, 21 displayed pictures, regenerated 11-22
+    # with libaom 3.x (21 submitted, 12 invisible halves).
+    a67b0c93d540746710107edc381e743312c6f82587d5851f5117b77921795358:import)
+        echo '21 0 12' ;;
+    a67b0c93d540746710107edc381e743312c6f82587d5851f5117b77921795358:direct)
+        echo '0 0 12' ;;
+    # 352x290 10-bit, 2 displayed pictures, no hidden unit and no invisible
+    # half: both publications are Import.
+    d8ea6b246e4df8a9c53ad930de24184e1cf16491ed36a1aa9dde12cf584954ad:import)
+        echo '2 0 0' ;;
+    # 352x290 10-bit, film-grain-test=1, 10 displayed pictures, regenerated
+    # 11-22 with libaom 3.x (11 submitted, 2 invisible halves).
+    e4dcd293f23c1db5ae23f75d4264026f0f329b0d478f403d080ee3a5ba023778:import)
+        echo '11 0 2' ;;
+    e4dcd293f23c1db5ae23f75d4264026f0f329b0d478f403d080ee3a5ba023778:direct)
+        echo '0 0 2' ;;
+    esac
+}
+
+run_clip() {
+    name=$1
+    clip=$2
+    frames=$3
+    filter=$4
+
+    [ -r "$clip_dir/$clip" ] || { echo "FAIL clip missing: $clip_dir/$clip" >&2; return 1; }
+    sha=$(iris_media_sha "$clip_dir" "$clip")
+    [ -n "$sha" ] || { echo "FAIL $name: cannot hash $clip_dir/$clip" >&2; return 1; }
+    counts=$(expected_counts "$sha" "$publish")
+    if [ -z "$counts" ]; then
+        echo "FAIL $name: clip $clip (sha256 $sha) has no recorded counts for publish=$publish." >&2
+        echo "      Measure it once, then add a row to expected_counts() in this script" >&2
+        echo "      and the file's hash to $clip_dir/SHA256SUMS." >&2
+        return 1
+    fi
+    set -- $counts
+    imports=$1 copies=$2 invisible=$3
+    [ -r "$clip_dir/$name-sw.md5" ] || {
+        echo "FAIL software baseline missing: $clip_dir/$name-sw.md5" >&2
+        return 1
+    }
+    out="$out_base/$name"
+    mkdir -p "$out"
+
+    if ! run_ffmpeg V4L2_VA_TRACE=1 V4L2_VA_PUBLISH="$publish" \
+        ffmpeg -y -hide_banner -loglevel error -vaapi_device "$render" \
+        -hwaccel vaapi -hwaccel_output_format vaapi -i "$clip_dir/$clip" \
+        -vf "$filter" -f framemd5 "$out/va.md5" \
+        2>"$out/driver.trace"; then
+        echo "FAIL $name: ffmpeg VA decode failed" >&2
+        return 1
+    fi
+    if ! sh "$here/iris-clip-trace-check.sh" \
+        --trace "$out/driver.trace" --va-md5 "$out/va.md5" \
+        --sw-md5 "$clip_dir/$name-sw.md5" --frames "$frames" \
+        --import "$imports" --copy "$copies" --allow-invisible "$invisible"; then
+        echo "FAIL $name: clip contract failed (artifacts in $out)" >&2
+        return 1
+    fi
+    # Software mode: at least one blend per displayed picture. A hidden
+    # picture's blend can be skipped when its display surface is reused
+    # before anyone asks for it, which is why the count is not exact; a
+    # displayed picture that lost its blend shows up as a hash mismatch
+    # above, not here. Hardware mode runs no blend, so the same line must
+    # stay at zero: a blend there would mean the firmware was asked for no
+    # grain and the old path ran anyway.
+    # A blend record is `va grain <w>x<h> ...`; hardware mode emits
+    # `va grain hw ...` for the routing, which is not a blend.
+    blends=$(grep -c '^va grain [0-9]' "$out/driver.trace" || true)
+    if [ -n "${V4L2_VA_HW_GRAIN:-}" ]; then
+        [ "$blends" -eq 0 ] || {
+            echo "FAIL $name: hardware grain ran $blends software blends" >&2
+            return 1
+        }
+        # Every displayed picture that asked for grain must have been routed
+        # to its display surface; a picture that silently fell through to
+        # current_frame would still hash correctly here but show ungrained.
+        hw=$(grep -c '^va grain hw ' "$out/driver.trace" || true)
+        [ "$hw" -ge "$frames" ] || {
+            echo "FAIL $name: $hw hardware grain routes, expected at least $frames" >&2
+            return 1
+        }
+    else
+        [ "$blends" -ge "$frames" ] || {
+            echo "FAIL $name: $blends grain blends, expected at least $frames" >&2
+            return 1
+        }
+    fi
+    printf 'PASS %s frames=%s blends=%s import=%s copy=%s invisible=%s mode=%s\n' \
+        "$name" "$frames" "$blends" "$imports" "$copies" "$invisible" \
+        "$([ -n "${V4L2_VA_HW_GRAIN:-}" ] && echo hardware || echo software)"
+}
+
+if [ "$clip_set" = all ] || [ "$clip_set" = nv12 ]; then
+    # 320x240, film-grain-test=1: an 8-bit stream whose every visible frame
+    # carries grain parameters, so the whole blend path is exercised rather
+    # than a single salted frame.
+    run_clip grain8 grain8.webm 21 'hwdownload,format=yuv420p' || failures=$((failures + 1))
+fi
+if [ "$clip_set" = all ] || [ "$clip_set" = p010 ]; then
+    # 352x290, 10-bit: the same blend over P010 storage, where the 10-bit
+    # scaling curve and the right-aligned codes are the parts that can be off
+    # by one and still look plausible.
+    run_clip grain10 grain10.webm 10 'hwdownload,format=p010le,format=yuv420p10le' || failures=$((failures + 1))
+fi
+
+[ "$failures" -eq 0 ] || exit 1
+echo "PASS AV1 film grain gate set=$clip_set publish=$publish driver=${driver_path:-installed}"

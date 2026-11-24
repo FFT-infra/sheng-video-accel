@@ -57,7 +57,7 @@ earlier runs; the sg series is the wider no-regression evidence for the set.
 
 `SHA256SUMS` records the authoritative hash for each patch file. Integrity is checked automatically via:
 ```sh
-sh test/iris-kernel-patch-check.sh
+sh test/static/iris-kernel-patch-check.sh
 ```
 
 The downstream kernel spec pins these patches by commit hash against the tag `iris-kernel-patches-v1`.

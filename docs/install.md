@@ -78,7 +78,7 @@ start, and the isolated profile meant a user who clicked the entry got a
 browser with no bookmarks and no login state. Chrome needs none of it: measured
 on the qualified target with `LIBVA_DRIVER_NAME` and both node overrides
 removed, `--type=gpu-process` maps `/usr/lib64/dri/v4l2_drv_video.so` and holds
-the decoder node while a clip plays. `test/iris-browser-acceptance.sh` launches
+the decoder node while a clip plays. `test/target/iris-browser-acceptance.sh` launches
 the browser directly and samples the holders during playback, so the same
 claim is re-checked on every run.
 

@@ -211,7 +211,7 @@ to force a policy in diagnostics and is not read on the hot path.
 
 Whether Import is even offered comes from one place,
 `data/iris-codec-capabilities.json` (`publish_import` per codec), enforced
-against `src/va/driver.cc` by `test/iris-codec-matrix-check.sh`; the session
+against `src/va/driver.cc` by `test/static/iris-codec-matrix-check.sh`; the session
 carries the resulting flag in its config and never guesses from the fourcc.
 
 ### 3.4 Stable buffers
@@ -268,7 +268,7 @@ per-thread current-surface maps; `reference_wrapper` into device vectors.
 Client-owned CAPTURE buffers (true zero-copy for Chrome) left the research
 track and became the Import publish policy above. The §9
 acceptance program found that the firmware does *not* fill CAPTURE buffers
-in QBUF order (`test/iris-import-probe.cc`, results in TEST-RESULTS.md);
+in QBUF order (`test/target/iris-import-probe.cc`, results in TEST-RESULTS.md);
 the policy exists because the session queues exactly one client picture at a
 time and never skips a submitted picture. Creating a surface over client
 memory is not the path that went: it allocates nothing (§3.4) and enters the
@@ -363,7 +363,7 @@ holds none for batching, and hands each completion to the client as soon as
 the CAPTURE queue reports it. What remains is the client's own pipeline depth
 (`-async_depth`), so the measurable quantity is submission-to-completion
 time: `encode frame … latency_us=` reports it, and
-`test/iris-encode-latency.sh` records the first picture, p50 and p95.
+`test/target/iris-encode-latency.sh` records the first picture, p50 and p95.
 
 The firmware has no encoder low-latency property of its own: no gen2 property
 header on SM8550 defines one. Qualcomm's own driver maps low latency to
@@ -478,7 +478,7 @@ test/
                       with scripted DQBUF/event sequences, codec golden bitstreams,
                       encode parameter translation
   iris-*.sh           tablet gates: matrix (framemd5), structure matrix, DRC, soak,
-                      browser acceptance, concurrency soak; test/iris-import-probe.cc
+                      browser acceptance, concurrency soak; test/target/iris-import-probe.cc
                       is the client-owned-buffer acceptance program (§9), and
                       iris-va-import-probe.cc the same memory entered through
                       vaCreateSurfaces2
@@ -497,7 +497,7 @@ Each layer includes only the ones below it: `util/` none, `codec/` only
 `util/`, `iris/` `util/` and the single header `codec/annexb.h` (the encoder
 session reassembles access units with its splitter), `va/` all three. A
 translator never reaches the session and the session never reaches a
-translator. `test/iris-layering-check.sh` enforces the direction, and that
+translator. `test/static/iris-layering-check.sh` enforces the direction, and that
 the list above names every file under `src/`. `context.cc` and the stateless
 request-API classes do
 not survive; MPEG2/VP8 translators leave with them (no Iris node advertises
@@ -563,19 +563,19 @@ lands fails the picture. The entrypoint is advertised only when the
 build found Vulkan and the client did not set `V4L2_VA_VPP=0` (§6), so an
 installed decode/encode client sees the surface it qualified against. The kernel and the
 VA surface path are gated separately in §9:
-`test/vulkan-vpp/nv12_scale_gate.sh` and `test/vulkan-vpp/p010_scale_gate.sh`
+`test/target/vulkan-vpp/nv12_scale_gate.sh` and `test/target/vulkan-vpp/p010_scale_gate.sh`
 check every pixel of the primitive, for both interpolation methods — the point
 map byte for byte, the bilinear blend within one code of its model plus a
 constant picture and a 1:1 scale as the two invariants the weights must satisfy
 — and
-`test/vulkan-vpp/scale_vaapi_gate.sh` checks a `scale_vaapi` + `hwdownload`
-frame against swscale; `test/vulkan-vpp/crop_vaapi_gate.sh` checks a
+`test/target/vulkan-vpp/scale_vaapi_gate.sh` checks a `scale_vaapi` + `hwdownload`
+frame against swscale; `test/target/vulkan-vpp/crop_vaapi_gate.sh` checks a
 `surface_region` picture against `crop,scale=...:flags=neighbor`, and
-`test/vulkan-vpp/transpose_vaapi_gate.sh` checks all seven `transpose_vaapi`
+`test/target/vulkan-vpp/transpose_vaapi_gate.sh` checks all seven `transpose_vaapi`
 directions — the three quarter turns and the four mirrored ones — against the
-software filters, `test/vulkan-vpp/tonemap_gate.sh` checks the tone
+software filters, `test/target/vulkan-vpp/tonemap_gate.sh` checks the tone
 mapper against the pipeline `tonemap.comp` documents, and
-`test/vulkan-vpp/overlay_gate.sh` checks the composite against the mix
+`test/target/vulkan-vpp/overlay_gate.sh` checks the composite against the mix
 `overlay.comp` documents plus both of its endpoint frames byte for byte.
 
 ### Bounds and refusals
@@ -637,7 +637,7 @@ Read once in `VA_DRIVER_INIT_FUNC`, stored in `Options`, passed down.
 | `V4L2_VA_HW_GRAIN` | off | Let the firmware apply AV1 film grain from the rebuilt header and publish the grained picture into `current_display_picture`. Off keeps the software blend (`src/va/grain.cc`). |
 | `V4L2_VA_DUMP` | off | Directory for submitted access units. |
 
-Twelve switches. `test/iris-env-doc-check.sh` keeps README and `options.cc` in
+Twelve switches. `test/static/iris-env-doc-check.sh` keeps README and `options.cc` in
 sync by name, not by sentence.
 
 ## 7. Threading and locking
@@ -668,7 +668,7 @@ concurrent context splice `publish=invisibleva end_picture` into the log,
 which loses a vocabulary entry and fails the clip checker. The body is sized
 from `vsnprintf`'s return value, not a fixed buffer: a long
 `import rejected: <why>` record must keep its trailing fields intact.
-`test/trace-test.cc` covers concurrent writers and a record over 1024 bytes.
+`test/unit/trace-test.cc` covers concurrent writers and a record over 1024 bytes.
 
 ```
 session open node=<path> mode=decode-order|display-order codec=<fourcc> <w>x<h> au=<n> output=<n>
@@ -746,7 +746,7 @@ import rejected: <why> (client stride=<n> chroma=<n> size=<n>; capture stride=<n
                                                                       geometry, so the rebuilt pool
                                                                       uses Mmap and the pictures
                                                                       publish with copy-gpu;
-                                                                      test/iris-clip-trace-check.sh
+                                                                      test/target/iris-clip-trace-check.sh
                                                                       requires this line before
                                                                       accepting those copies)
 import fence token=<n> fd=<n> waited=<n>ms          (only when the wait exceeds 20 ms)
@@ -891,7 +891,7 @@ Four VA-side diagnostics are emitted but intentionally stay out of the
 checker-oriented list above: `va init node=<path>`, `va error where=<name>`,
 `va sync failed ...` and `va destroy_context encode finish failed: <reason>`.
 They name driver startup or teardown failures, not session completions.
-These are the accepted exceptions for `test/iris-trace-vocab-check.py`, which
+These are the accepted exceptions for `test/static/iris-trace-vocab-check.py`, which
 compares every trace format prefix in `src/` against the list above.
 
 ## 9. Verification and gates
@@ -912,13 +912,13 @@ the trace vocabulary; `test/meson.build` registers the same host tests CI
 requires.
 
 The Import policy accepts only the ownership model that the acceptance
-program `test/iris-import-probe.cc` can prove: the firmware does not honour
+program `test/target/iris-import-probe.cc` can prove: the firmware does not honour
 QBUF order when it has several buffers to choose from, so the session queues
 exactly one client picture at a time and never skips a submitted picture (one
 picture in flight, no holes). A completion whose token does not match its
 buffer's token fails both surfaces and is never published.
 
-The UBWC surface is gated the same way. `test/iris-ubwc-gate.sh` decodes its
+The UBWC surface is gated the same way. `test/target/iris-ubwc-gate.sh` decodes its
 own stream per codec twice, into Q08C and into NV12, and `test/vk-ubwc-read`
 imports the exported compressed buffer through
 `VK_EXT_image_drm_format_modifier` and requires every luma and chroma sample to
@@ -934,40 +934,40 @@ has to be refused and a list carrying a linear fallback has to get `LINEAR`.
 
 Client memory entering through `vaCreateSurfaces2` (DRM_PRIME_2 or PRIME_1,
 §3.4) is the same policy reached from the API. Its gates are `prime-import`
-(host: the layout and refusal rules) and `test/iris-va-import-probe.cc`
+(host: the layout and refusal rules) and `test/target/iris-va-import-probe.cc`
 (target: the surface aliases the client's bytes and a firmware encode reads
 them). The allocation chain behind those surfaces is gated on the target by
-`test/iris-alloc-chain.sh` (§3.4); it is not a Meson test because every rung
+`test/target/iris-alloc-chain.sh` (§3.4); it is not a Meson test because every rung
 below the first needs an MSM render node.
 
 The geometry and concurrency edges are gated on the target.
-`test/iris-8k-gate.sh` decodes one finite 7680x4320 clip per qualified codec,
+`test/target/iris-8k-gate.sh` decodes one finite 7680x4320 clip per qualified codec,
 compares every frame with a software framemd5 baseline, and requires the
 granted CAPTURE pool to respect the memory budget: 32 8K NV12 frames are
 1.5 GiB, more than the video SMMU's shared IOVA space holds, so `STREAMON`
 fails with ENOMEM. The cap is eight frames from the 384 MiB budget,
 or fifteen when the module reports `capture_sg=Y` and the 720 MiB
 system-memory budget applies; the gate reads the same module parameter the
-driver reads. `test/iris-two-player-gate.sh` runs two independent ffmpeg
+driver reads. `test/target/iris-two-player-gate.sh` runs two independent ffmpeg
 processes at 1920x1080, each with its own VA display and driver trace, and
 requires both to finish with exact pixels, no completion errors and a terminal
 LAST. Neither is a Meson test: both need an Iris node.
 
-The video processor is gated at two levels. `test/vulkan-vpp/nv12_scale_gate.sh`
+The video processor is gated at two levels. `test/target/vulkan-vpp/nv12_scale_gate.sh`
 checks the 8-bit nearest kernel byte for byte against a CPU oracle over both
 DMA-BUF origins and a matrix of ratios, crops and rotations;
-`test/vulkan-vpp/p010_scale_gate.sh` does the same for the 10-bit kernel,
+`test/target/vulkan-vpp/p010_scale_gate.sh` does the same for the 10-bit kernel,
 including a crop away from the origin, which is the only geometry that
 separates a chroma pair at four bytes from one at two;
-`test/vulkan-vpp/scale_vaapi_gate.sh` checks `scale_vaapi` + `hwdownload`
+`test/target/vulkan-vpp/scale_vaapi_gate.sh` checks `scale_vaapi` + `hwdownload`
 frames against swscale over the same ratios, in both directions across bit
 depth: a P010 source into an NV12 output and an NV12 source into a P010 output
 must match `scale` then `format` byte for byte;
-`test/vulkan-vpp/transpose_vaapi_gate.sh` checks every direction the pipeline
+`test/target/vulkan-vpp/transpose_vaapi_gate.sh` checks every direction the pipeline
 caps advertise — three quarter turns, a horizontal and a vertical mirror, and a
 quarter turn with each — against the software filters, in NV12 and P010. Both
 VA-level gates check that `V4L2_VA_VPP=0` still refuses the entrypoint.
-`test/vulkan-vpp/tonemap_gate.sh` drives the one filter through
+`test/target/vulkan-vpp/tonemap_gate.sh` drives the one filter through
 `iris-va-vpp-probe tonemap`: no FFmpeg in 8.1 can feed `tonemap_vaapi` a raw
 P010 frame, so the probe builds the HDR10 metadata buffer itself and compares
 every output byte with its own implementation of the documented pipeline,
@@ -976,7 +976,7 @@ would not satisfy (PQ black on 16/128/128, the mastering peak on 235, a
 monotone ramp). It also proves the curve follows the metadata by running two
 mastering peaks over one frame, and requires an NV12 source, a filter without
 its parameters and a rotation in a tone-mapped picture to be refused.
-`test/vulkan-vpp/overlay_gate.sh` drives `iris-va-vpp-probe overlay`, which
+`test/target/vulkan-vpp/overlay_gate.sh` drives `iris-va-vpp-probe overlay`, which
 submits the two pipeline buffers overlay_vaapi submits — and, with `--layers`,
 a stack of them up to the sixteen the driver accepts: thirty-two geometries
 across both sample widths — including a main surface padded wider than its
@@ -996,7 +996,7 @@ area average and the four-tap blend genuinely differ — at an exact 2:1 they
 coincide by construction. Luma keying, a seventeenth pass, a blend before its
 base pass, an odd or out-of-bounds rectangle, a crop of the main surface, an
 overlay region that leaves its own surface, and an alpha outside 0..1 are
-required to be refused. `test/vulkan-vpp/overlay_vaapi_gate.sh` then
+required to be refused. `test/target/vulkan-vpp/overlay_vaapi_gate.sh` then
 drives `overlay_vaapi` itself over a BGRA upload, because two things about the
 real client are invisible from the probe: FFmpeg asks for
 `VA_BLEND_PREMULTIPLIED_ALPHA` whenever its overlay input carries an alpha

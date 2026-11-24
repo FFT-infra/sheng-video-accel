@@ -18,7 +18,7 @@ test('deferred-copy', deferred_copy_test)
 # Annex-B reassembly for a requested IDR (src/codec/annexb.cc).
 annexb_test = executable(
   'annexb-test',
-  'annexb-test.cc',
+  'unit/annexb-test.cc',
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('annexb', annexb_test)
@@ -26,7 +26,7 @@ test('annexb', annexb_test)
 # Concurrent trace writers must keep one record per line.
 trace_test = executable(
   'trace-test',
-  'trace-test.cc',
+  'unit/trace-test.cc',
   dependencies: [iris_core_dep, threads_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('trace', trace_test)
@@ -37,7 +37,7 @@ test('trace', trace_test)
 # docs/architecture.md §9 requires for the Import policy.
 executable(
   'iris-import-probe',
-  'iris-import-probe.cc',
+  'target/iris-import-probe.cc',
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 
 # Hardware probe, built but not registered as a meson test: a VA client that
@@ -48,7 +48,7 @@ va_drm_dep = dependency('libva-drm', required: false)
 if va_drm_dep.found()
   executable(
     'iris-va-import-probe',
-    'iris-va-import-probe.cc',
+    'target/iris-va-import-probe.cc',
     dependencies: [iris_core_dep, va_drm_dep],
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
@@ -61,7 +61,7 @@ endif
 if va_drm_dep.found()
   executable(
     'iris-encode-ir-probe',
-    'iris-encode-ir-probe.cc',
+    'target/iris-encode-ir-probe.cc',
     dependencies: [va_drm_dep],
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
@@ -74,7 +74,7 @@ endif
 if va_drm_dep.found()
   executable(
     'iris-encode-roi-probe',
-    'iris-encode-roi-probe.cc',
+    'target/iris-encode-roi-probe.cc',
     dependencies: [va_drm_dep],
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
@@ -86,7 +86,7 @@ endif
 if va_drm_dep.found()
   executable(
     'iris-encode-slice-probe',
-    'iris-encode-slice-probe.cc',
+    'target/iris-encode-slice-probe.cc',
     dependencies: [va_drm_dep],
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
@@ -98,7 +98,7 @@ endif
 if va_drm_dep.found()
   executable(
     'iris-encode-temporal-probe',
-    'iris-encode-temporal-probe.cc',
+    'target/iris-encode-temporal-probe.cc',
     dependencies: [va_drm_dep],
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
@@ -109,30 +109,30 @@ endif
 # so only the node can say whether the firmware itself accepts the stream.
 executable(
   'iris-decode-stream-probe',
-  'iris-decode-stream-probe.cc',
+  'target/iris-decode-stream-probe.cc',
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 
 # Hardware probe, built but not registered as a meson test: the only reader of
 # UBWC in this tree is the GPU, through VK_EXT_image_drm_format_modifier, and
-# only a build with Vulkan can build the reader. test/iris-ubwc-gate.sh runs it
+# only a build with Vulkan can build the reader. test/target/iris-ubwc-gate.sh runs it
 # over the frames iris-decode-stream-probe dumps.
 if have_vulkan_vpp
   executable(
     'vk-ubwc-read',
-    'vk-ubwc-read.cc',
+    'target/vk-ubwc-read.cc',
     dependencies: [iris_core_dep, vulkan_dep],
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
 
 # Hardware probe, built but not registered as a meson test: the VA half of a
-# UBWC surface. test/iris-ubwc-gate.sh runs it with and without V4L2_VA_UBWC,
+# UBWC surface. test/target/iris-ubwc-gate.sh runs it with and without V4L2_VA_UBWC,
 # so the grant, the exported four-plane descriptor and the image-entry-point
 # refusals all come from the public API rather than from a unit test.
 if va_drm_dep.found()
   executable(
     'iris-va-ubwc-probe',
-    'iris-va-ubwc-probe.cc',
+    'target/iris-va-ubwc-probe.cc',
     dependencies: [iris_core_dep, va_drm_dep],
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
@@ -144,7 +144,7 @@ endif
 if va_drm_dep.found()
   executable(
     'iris-va-image-probe',
-    'iris-va-image-probe.cc',
+    'target/iris-va-image-probe.cc',
     dependencies: [va_drm_dep],
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
@@ -156,7 +156,7 @@ endif
 if va_drm_dep.found()
   executable(
     'iris-va-vpp-probe',
-    'iris-va-vpp-probe.cc',
+    'target/iris-va-vpp-probe.cc',
     dependencies: [va_drm_dep],
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
@@ -167,7 +167,7 @@ endif
 # invariant 13 gate a scripted node cannot give a verdict on.
 executable(
   'iris-encode-control-probe',
-  'iris-encode-control-probe.cc',
+  'target/iris-encode-control-probe.cc',
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 
@@ -178,7 +178,7 @@ executable(
 # on the request: byte-identical streams mean it ignores it.
 executable(
   'iris-encode-ltr-probe',
-  'iris-encode-ltr-probe.cc',
+  'target/iris-encode-ltr-probe.cc',
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 
@@ -189,7 +189,7 @@ executable(
 if va_drm_dep.found()
   executable(
     'iris-encode-misc-bound-probe',
-    'iris-encode-misc-bound-probe.cc',
+    'target/iris-encode-misc-bound-probe.cc',
     dependencies: [va_drm_dep],
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
@@ -201,7 +201,7 @@ endif
 # below. Covers docs/architecture.md §3.4.
 executable(
   'iris-alloc-probe',
-  'iris-alloc-probe.cc',
+  'target/iris-alloc-probe.cc',
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 
@@ -209,7 +209,7 @@ executable(
 # the driver's retry and fallthrough run on real hardware.
 shared_module(
   'alloc-fault',
-  'alloc-fault.c',
+  'target/alloc-fault.c',
   dependencies: [libdrm_dep],
   c_args: ['-Wall', '-Wextra'],
   name_prefix: '')
@@ -221,7 +221,7 @@ shared_module(
 if have_gpu_copy
   executable(
     'gpu-fence-check',
-    'gpu-fence-check.cc',
+    'target/gpu-fence-check.cc',
     dependencies: [iris_core_dep, egl_dep, glesv2_dep, gbm_dep],
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
@@ -234,7 +234,7 @@ endif
 if have_gpu_copy
   executable(
     'iris-encode-fence-probe',
-    'iris-encode-fence-probe.cc',
+    'target/iris-encode-fence-probe.cc',
     dependencies: [iris_core_dep, egl_dep, glesv2_dep, gbm_dep],
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
@@ -247,7 +247,7 @@ endif
 if va_drm_dep.found()
   executable(
     'iris-fd-leak-probe',
-    'iris-fd-leak-probe.cc',
+    'target/iris-fd-leak-probe.cc',
     dependencies: [iris_core_dep, va_drm_dep],
     cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 endif
@@ -256,7 +256,7 @@ endif
 # and the one definition of that layout. No hardware.
 prime_import_test = executable(
   'prime-import-test',
-  'prime-import-test.cc',
+  'unit/prime-import-test.cc',
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('prime-import', prime_import_test)
@@ -264,7 +264,7 @@ test('prime-import', prime_import_test)
 # Parameter-set bitstream round trips for the HEVC translator.
 hevc_parameter_sets_test = executable(
   'hevc-parameter-sets-test',
-  'hevc-parameter-sets-test.cc',
+  'unit/hevc-parameter-sets-test.cc',
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('hevc-parameter-sets', hevc_parameter_sets_test)
@@ -273,7 +273,7 @@ test('hevc-parameter-sets', hevc_parameter_sets_test)
 # submission rather than failing at the first DQBUF. No hardware.
 h264_translator_test = executable(
   'h264-translator-test',
-  'h264-translator-test.cc',
+  'unit/h264-translator-test.cc',
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('h264-translator', h264_translator_test)
@@ -282,7 +282,7 @@ test('h264-translator', h264_translator_test)
 # fields whose coding is not a plain copy of the VA value. No hardware.
 av1_obu_test = executable(
   'av1-obu-test',
-  'av1-obu-test.cc',
+  'unit/av1-obu-test.cc',
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('av1-obu', av1_obu_test)
@@ -292,7 +292,7 @@ test('av1-obu', av1_obu_test)
 # while the default translator is make_av1_dpb().
 av1_translator_test = executable(
   'av1-translator-test',
-  'av1-translator-test.cc',
+  'unit/av1-translator-test.cc',
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('av1-translator', av1_translator_test)
@@ -303,7 +303,7 @@ test('av1-translator', av1_translator_test)
 # av1-install-tu-roundtrip.sh, invoked from run-static-checks.sh.
 av1_install_tu_test = executable(
   'av1-install-tu-test',
-  'av1-install-tu-test.cc',
+  'unit/av1-install-tu-test.cc',
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('av1-install-tu', av1_install_tu_test)
@@ -313,7 +313,7 @@ test('av1-install-tu', av1_install_tu_test)
 # coverage for the hidden install path that Firefox 158 needs.
 av1_dpb_test = executable(
   'av1-dpb-test',
-  'av1-dpb-test.cc',
+  'unit/av1-dpb-test.cc',
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('av1-dpb', av1_dpb_test)
@@ -321,7 +321,7 @@ test('av1-dpb', av1_dpb_test)
 # VA encode parameters -> V4L2 controls, both codecs, no hardware.
 encode_params_test = executable(
   'encode-params-test',
-  'encode-params-test.cc',
+  'unit/encode-params-test.cc',
   dependencies: [iris_core_dep],
   cpp_args: ['-Wall', '-Wextra', '-std=c++20'])
 test('encode-params', encode_params_test)
@@ -392,41 +392,41 @@ test('va-gst-filter', va_gst_filter_test)
 # headroom while the individual checkers run beside it.
 test('static-checks', find_program('run-static-checks.sh'),
      args: [meson.project_source_root()], timeout: 300)
-test('iris-source-invariants', find_program('iris-source-invariants.sh'),
+test('iris-source-invariants', find_program('static/iris-source-invariants.sh'),
      args: [meson.project_source_root()])
-test('iris-layering-check', find_program('iris-layering-check.sh'),
+test('iris-layering-check', find_program('static/iris-layering-check.sh'),
      args: [meson.project_source_root()])
-test('iris-env-doc-check', find_program('iris-env-doc-check.sh'),
+test('iris-env-doc-check', find_program('static/iris-env-doc-check.sh'),
      args: [meson.project_source_root()])
-test('iris-codec-matrix-check', find_program('iris-codec-matrix-check.sh'),
+test('iris-codec-matrix-check', find_program('static/iris-codec-matrix-check.sh'),
      args: [meson.project_source_root()])
 test('iris-trace-vocab-check', find_program('python3'),
-     args: ['-I', files('iris-trace-vocab-check.py'), meson.project_source_root()])
+     args: ['-I', files('static/iris-trace-vocab-check.py'), meson.project_source_root()])
 test('iris-va-vtable-surface', find_program('python3'),
-     args: ['-I', files('iris-va-vtable-surface-check.py'), meson.project_source_root()])
-test('iris-experiment-guard-self-test', find_program('iris-experiment-guard-self-test.sh'),
+     args: ['-I', files('static/iris-va-vtable-surface-check.py'), meson.project_source_root()])
+test('iris-experiment-guard-self-test', find_program('static/iris-experiment-guard-self-test.sh'),
      args: [meson.project_source_root()])
-test('iris-eos-check-self-test', find_program('iris-eos-check-self-test.sh'),
+test('iris-eos-check-self-test', find_program('static/iris-eos-check-self-test.sh'),
      args: [meson.project_source_root()])
-test('iris-clip-trace-check-self-test', find_program('iris-clip-trace-check-self-test.sh'),
+test('iris-clip-trace-check-self-test', find_program('static/iris-clip-trace-check-self-test.sh'),
      args: [meson.project_source_root()])
-test('iris-gate-output-self-test', find_program('iris-gate-output-self-test.sh'),
+test('iris-gate-output-self-test', find_program('static/iris-gate-output-self-test.sh'),
      args: [meson.project_source_root()])
-test('iris-deploy-path-check', find_program('iris-deploy-path-check.sh'),
+test('iris-deploy-path-check', find_program('static/iris-deploy-path-check.sh'),
      args: [meson.project_source_root()], timeout: 120)
-test('iris-setup-path-check', find_program('iris-setup-path-check.sh'),
+test('iris-setup-path-check', find_program('static/iris-setup-path-check.sh'),
      args: [meson.project_source_root()])
-test('iris-packaging-check', find_program('iris-packaging-check.sh'),
+test('iris-packaging-check', find_program('static/iris-packaging-check.sh'),
      args: [meson.project_source_root()])
-test('iris-spec-selfobsolete-check', find_program('iris-spec-selfobsolete-check.sh'),
+test('iris-spec-selfobsolete-check', find_program('static/iris-spec-selfobsolete-check.sh'),
      args: ['--self-test', meson.project_source_root()])
-test('iris-make-dist-check', find_program('iris-make-dist-check.sh'),
+test('iris-make-dist-check', find_program('static/iris-make-dist-check.sh'),
      args: [meson.project_source_root()], timeout: 120)
-test('iris-kernel-patch-check', find_program('iris-kernel-patch-check.sh'),
+test('iris-kernel-patch-check', find_program('static/iris-kernel-patch-check.sh'),
      args: [meson.project_source_root()], timeout: 120)
-test('iris-install-manifest-check', find_program('iris-install-manifest-check.sh'),
+test('iris-install-manifest-check', find_program('static/iris-install-manifest-check.sh'),
      args: [meson.project_source_root()])
-test('provenance-self-test', find_program('provenance-self-test.sh'),
+test('provenance-self-test', find_program('static/provenance-self-test.sh'),
      args: [meson.project_source_root()])
-test('iris-node-check', find_program('iris-node-check.sh'),
+test('iris-node-check', find_program('static/iris-node-check.sh'),
      args: [meson.project_source_root()])

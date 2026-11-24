@@ -35,7 +35,8 @@ run() {
 # of the trace checkers shipped broken for a while because a typo made it grep
 # a path instead of a file, so parse every script we own on every run.
 echo "== shell syntax"
-for script in "$test_dir"/*.sh "$test_dir"/remote/*.sh "$test_dir"/vulkan-vpp/*.sh "$shader_dir"/*.sh \
+for script in "$test_dir"/*.sh "$test_dir"/static/*.sh "$test_dir"/target/*.sh \
+    "$test_dir"/target/vulkan-vpp/*.sh "$test_dir"/remote/*.sh "$shader_dir"/*.sh \
     "$root"/scripts/*.sh "$root"/packaging/kernel/*.sh; do
     [ -f "$script" ] || continue
     run "syntax $(basename "$script")" sh -n "$script"
@@ -56,17 +57,17 @@ run vpp-spv-tonemap-pinned grep -Fq 'tonemap.spv' "$shader_dir/SHA256SUMS"
 run vpp-spv-overlay-pinned grep -Fq 'overlay.spv' "$shader_dir/SHA256SUMS"
 # The scale gate must stay a per-pixel oracle, not a spot check: a stride or
 # chroma-offset bug can otherwise hide behind a handful of sampled bytes.
-run vpp-scale-pixel-oracle grep -Fq 'check_pixels(src, dst, &g)' "$test_dir/vulkan-vpp/scale_probe.c"
+run vpp-scale-pixel-oracle grep -Fq 'check_pixels(src, dst, &g)' "$test_dir/target/vulkan-vpp/scale_probe.c"
 # The probe is shared by both kernels and both gates; a rename or a moved
 # helper would leave a gate compiling nothing.
-run vpp-p010-gate-uses-probe grep -Fq 'scale_probe.c' "$test_dir/vulkan-vpp/p010_scale_gate.sh"
-run vpp-rotate-gate-uses-driver grep -Fq 'transpose_vaapi' "$test_dir/vulkan-vpp/transpose_vaapi_gate.sh"
+run vpp-p010-gate-uses-probe grep -Fq 'scale_probe.c' "$test_dir/target/vulkan-vpp/p010_scale_gate.sh"
+run vpp-rotate-gate-uses-driver grep -Fq 'transpose_vaapi' "$test_dir/target/vulkan-vpp/transpose_vaapi_gate.sh"
 # The bilinear method is advertised in the pipeline caps, so both scale gates
 # have to measure it: the blend against its model, and the two invariants that
 # hold whatever the ratio is.
 for gate in nv12_scale_gate p010_scale_gate; do
-    run "vpp-$gate-bilinear" grep -Fq -- '--interp 1' "$test_dir/vulkan-vpp/$gate.sh"
-    run "vpp-$gate-bilinear-constant" grep -Fq -- '--constant' "$test_dir/vulkan-vpp/$gate.sh"
+    run "vpp-$gate-bilinear" grep -Fq -- '--interp 1' "$test_dir/target/vulkan-vpp/$gate.sh"
+    run "vpp-$gate-bilinear-constant" grep -Fq -- '--constant' "$test_dir/target/vulkan-vpp/$gate.sh"
 done
 # The driver maps the client's filter_flags onto the kernel's methods. All
 # three are accepted and the caps name the best of them; a method the caps name
@@ -76,32 +77,32 @@ run vpp-advanced-accepted grep -Fq 'VA_FILTER_INTERPOLATION_ADVANCED' "$root/src
 run vpp-advanced-advertised grep -Fq 'VA_FILTER_INTERPOLATION_ADVANCED' "$root/src/va/vpp.cc"
 # Advanced is a real kernel (the area average on a downscale, the cubic on an
 # upscale), so the gate has to prove it runs and that it differs from bilinear.
-run vpp-advanced-gate grep -Fq -- '--interp=advanced' "$test_dir/vulkan-vpp/crop_vaapi_gate.sh"
+run vpp-advanced-gate grep -Fq -- '--interp=advanced' "$test_dir/target/vulkan-vpp/crop_vaapi_gate.sh"
 run vpp-advanced-differs grep -Fq 'advanced and bilinear produced the same frame' \
-    "$test_dir/vulkan-vpp/crop_vaapi_gate.sh"
+    "$test_dir/target/vulkan-vpp/crop_vaapi_gate.sh"
 # The tone mapper has no byte-exact reference, so the gate's verdict is the
 # probe's own model; a gate that stopped comparing, or a probe whose model went
 # missing, would leave the kernel unmeasured.
-run vpp-tonemap-gate-uses-probe grep -Fq 'iris-va-vpp-probe' "$test_dir/vulkan-vpp/tonemap_gate.sh"
-run vpp-tonemap-oracle grep -Fq 'expected_sdr' "$test_dir/iris-va-vpp-probe.cc"
-run vpp-tonemap-refusals grep -Fq -- '--source-nv12' "$test_dir/vulkan-vpp/tonemap_gate.sh"
+run vpp-tonemap-gate-uses-probe grep -Fq 'iris-va-vpp-probe' "$test_dir/target/vulkan-vpp/tonemap_gate.sh"
+run vpp-tonemap-oracle grep -Fq 'expected_sdr' "$test_dir/target/iris-va-vpp-probe.cc"
+run vpp-tonemap-refusals grep -Fq -- '--source-nv12' "$test_dir/target/vulkan-vpp/tonemap_gate.sh"
 # The composite has an exact reference, so the gate compares both endpoint
 # frames byte for byte as well as the model. Losing either comparison would
 # let a kernel that ignored the alpha pass on a loose tolerance alone.
-run vpp-overlay-gate-uses-probe grep -Fq 'iris-va-vpp-probe' "$test_dir/vulkan-vpp/overlay_gate.sh"
+run vpp-overlay-gate-uses-probe grep -Fq 'iris-va-vpp-probe' "$test_dir/target/vulkan-vpp/overlay_gate.sh"
 # The probe's model composites one layer at a time onto the pixels the
 # previous one left, which is what makes a stack correct; a model that reset
 # to the main frame each time would pass every single-layer case and be wrong
 # for every stack.
-run vpp-overlay-oracle grep -Fq 'apply_composite' "$test_dir/iris-va-vpp-probe.cc"
-run vpp-overlay-layers grep -Fq -- '--layers=' "$test_dir/vulkan-vpp/overlay_gate.sh"
+run vpp-overlay-oracle grep -Fq 'apply_composite' "$test_dir/target/iris-va-vpp-probe.cc"
+run vpp-overlay-layers grep -Fq -- '--layers=' "$test_dir/target/vulkan-vpp/overlay_gate.sh"
 run vpp-overlay-endpoints grep -Fq 'alpha 0 did not reproduce the main frame' \
-    "$test_dir/vulkan-vpp/overlay_gate.sh"
-run vpp-overlay-refusals grep -Fq -- '--premultiplied' "$test_dir/vulkan-vpp/overlay_gate.sh"
+    "$test_dir/target/vulkan-vpp/overlay_gate.sh"
+run vpp-overlay-refusals grep -Fq -- '--premultiplied' "$test_dir/target/vulkan-vpp/overlay_gate.sh"
 # The rotation map is the one piece of the kernel a host can check: it mirrors
 # scale_probe.c's coordinates and compares them with FFmpeg's software filters,
 # so a swapped axis fails here instead of on the target as a pixel mismatch.
-run vpp-rotation-model python3 "$test_dir/vulkan-vpp/rotation_model_check.py"
+run vpp-rotation-model python3 "$test_dir/static/rotation_model_check.py"
 # The driver embeds the shader, so the array in src/ is a second copy of the
 # pinned binary. Regenerate it from the .spv and require an identical file; a
 # hand edit here would ship a kernel no gate ever measured.
@@ -140,7 +141,7 @@ run gate-driver-path grep -Fq 'driver_path=' "$test_dir/remote/gate.sh"
 run gate-driver-absolute grep -Fq 'LIBVA_DRIVERS_PATH must be absolute' "$test_dir/remote/gate.sh"
 
 echo "== python syntax"
-for script in "$test_dir"/*.py "$test_dir"/remote/*.py "$test_dir"/vulkan-vpp/*.py "$shader_dir"/*.py; do
+for script in "$test_dir"/static/*.py "$test_dir"/target/*.py "$test_dir"/remote/*.py "$shader_dir"/*.py; do
     [ -f "$script" ] || continue
     run "syntax $(basename "$script")" python3 -m py_compile "$script"
 done
@@ -170,27 +171,27 @@ run no-desktop-entry sh -c '! ls "$1"/*.desktop >/dev/null 2>&1' sh "$root/data"
 # it across the whole shipped tree.
 run no-video-feature-override sh -c \
     '! grep -rFq -- "AcceleratedVideoDecode" "$1/scripts" "$1/data"' sh "$root"
-run iris-node-check sh "$test_dir/iris-node-check.sh" "$root"
+run iris-node-check sh "$test_dir/static/iris-node-check.sh" "$root"
 
 echo "== source invariants"
-run iris-source-invariants sh "$test_dir/iris-source-invariants.sh" "$root"
-run iris-layering-check sh "$test_dir/iris-layering-check.sh" "$root"
-run iris-env-doc-check sh "$test_dir/iris-env-doc-check.sh" "$root"
-run iris-codec-matrix-check sh "$test_dir/iris-codec-matrix-check.sh" "$root"
-run iris-trace-vocab-check python3 -I "$test_dir/iris-trace-vocab-check.py" "$root"
-run iris-va-vtable-surface python3 -I "$test_dir/iris-va-vtable-surface-check.py" "$root"
-run iris-experiment-guard-self-test sh "$test_dir/iris-experiment-guard-self-test.sh" "$root"
-run iris-eos-check-self-test sh "$test_dir/iris-eos-check-self-test.sh" "$root"
-run iris-clip-trace-check-self-test sh "$test_dir/iris-clip-trace-check-self-test.sh" "$root"
-run iris-gate-output-self-test sh "$test_dir/iris-gate-output-self-test.sh" "$root"
-run av1-install-tu-roundtrip sh "$test_dir/av1-install-tu-roundtrip.sh" "$root"
-run av1-dpb-oracle sh "$test_dir/av1-dpb-oracle.sh" "$root"
-run iris-setup-path-check sh "$test_dir/iris-setup-path-check.sh" "$root"
-run iris-packaging-check sh "$test_dir/iris-packaging-check.sh" "$root"
-run iris-spec-selfobsolete-check sh "$test_dir/iris-spec-selfobsolete-check.sh" --self-test "$root"
-run iris-make-dist-check sh "$test_dir/iris-make-dist-check.sh" "$root"
-run iris-kernel-patch-check sh "$test_dir/iris-kernel-patch-check.sh" "$root"
-run iris-install-manifest-check sh "$test_dir/iris-install-manifest-check.sh" "$root"
+run iris-source-invariants sh "$test_dir/static/iris-source-invariants.sh" "$root"
+run iris-layering-check sh "$test_dir/static/iris-layering-check.sh" "$root"
+run iris-env-doc-check sh "$test_dir/static/iris-env-doc-check.sh" "$root"
+run iris-codec-matrix-check sh "$test_dir/static/iris-codec-matrix-check.sh" "$root"
+run iris-trace-vocab-check python3 -I "$test_dir/static/iris-trace-vocab-check.py" "$root"
+run iris-va-vtable-surface python3 -I "$test_dir/static/iris-va-vtable-surface-check.py" "$root"
+run iris-experiment-guard-self-test sh "$test_dir/static/iris-experiment-guard-self-test.sh" "$root"
+run iris-eos-check-self-test sh "$test_dir/static/iris-eos-check-self-test.sh" "$root"
+run iris-clip-trace-check-self-test sh "$test_dir/static/iris-clip-trace-check-self-test.sh" "$root"
+run iris-gate-output-self-test sh "$test_dir/static/iris-gate-output-self-test.sh" "$root"
+run av1-install-tu-roundtrip sh "$test_dir/static/av1-install-tu-roundtrip.sh" "$root"
+run av1-dpb-oracle sh "$test_dir/static/av1-dpb-oracle.sh" "$root"
+run iris-setup-path-check sh "$test_dir/static/iris-setup-path-check.sh" "$root"
+run iris-packaging-check sh "$test_dir/static/iris-packaging-check.sh" "$root"
+run iris-spec-selfobsolete-check sh "$test_dir/static/iris-spec-selfobsolete-check.sh" --self-test "$root"
+run iris-make-dist-check sh "$test_dir/static/iris-make-dist-check.sh" "$root"
+run iris-kernel-patch-check sh "$test_dir/static/iris-kernel-patch-check.sh" "$root"
+run iris-install-manifest-check sh "$test_dir/static/iris-install-manifest-check.sh" "$root"
 run provenance-python-syntax python3 -c \
     'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' \
     "$test_dir/remote/provenance.py"
@@ -199,7 +200,7 @@ for helper in cdp; do
         'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' \
         "$test_dir/remote/$helper.py"
 done
-run provenance-self-test sh "$test_dir/provenance-self-test.sh" "$root"
+run provenance-self-test sh "$test_dir/static/provenance-self-test.sh" "$root"
 
 if [ "$failures" -ne 0 ]; then
     printf 'FAIL static checks: %d failing\n' "$failures" >&2

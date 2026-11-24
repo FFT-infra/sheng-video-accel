@@ -10,7 +10,7 @@
 
 namespace iris {
 
-// Trace lines are an API consumed by test/iris-*-check.sh; see
+// Trace lines are an API consumed by test/target/iris-*-check.sh; see
 // docs/architecture.md §8 before renaming a record.
 class Trace {
 public:

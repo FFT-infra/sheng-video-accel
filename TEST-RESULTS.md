@@ -30,12 +30,12 @@ shaders, kernel patch hashes, media pins, install manifest and source-archive
 boundary are each pinned by a host check.
 
 `test/remote/gate.sh` refuses a run whose guarded child printed nothing
-(exit 5); `test/iris-gate-output-self-test.sh` pins the empty, missing,
+(exit 5); `test/static/iris-gate-output-self-test.sh` pins the empty, missing,
 opt-out and real-output cases on the host and is red on the old behaviour.
 
 ## Decode: pixel oracles
 
-`test/iris-matrix.sh`: H.264, HEVC, VP9 and AV1, 48/48 frames each with exact
+`test/target/iris-matrix.sh`: H.264, HEVC, VP9 and AV1, 48/48 frames each with exact
 framemd5 against a software decode, `submitted=48 capture=48 drops=0
 timeouts=0`, AV1 `noshow=23`. This is the authoritative positive VA-API pixel
 oracle.
@@ -191,7 +191,7 @@ The firmware fails it at the first dequeue, before any `capture configure`.
 This is a boundary, not a qualified resolution: the qualified decode limit
 stays 7680x4320 (README).
 
-At 7680x4320, `test/iris-8k-gate.sh` decodes 30-picture clips, one per
+At 7680x4320, `test/target/iris-8k-gate.sh` decodes 30-picture clips, one per
 qualified codec, with a software framemd5 oracle: 30/30 exact frames each,
 granted CAPTURE pool 8 under the 384 MiB memory budget, `errors=0 last=1
 drain=1`. Run identity: boot `edd37f6a-cb04-42b0-b9b7-96360172a5ca`, module
@@ -238,7 +238,7 @@ and publishes Direct. One boot, module `ca7aa394…`, driver `d15ff198…` as a
 `LIBVA_DRIVERS_PATH` build-tree override, source `ec282f5` with the budget
 change and 0016 in the working tree, decoder resolved by name:
 
-- `test/iris-8k-gate.sh` under the automatic policy: 30/30 H.264 and 4/4
+- `test/target/iris-8k-gate.sh` under the automatic policy: 30/30 H.264 and 4/4
   HEVC, VP9 and AV1 frames framemd5-exact, `pool=15 memory=mmap`,
   `publish=direct` on every frame, `errors=0 last=1 drain=1` (record
   `gate-8k-sg2`).
@@ -435,7 +435,7 @@ what excludes MPEG-2; MPEG-2 runs in software. Run identity: boot
 `/dev/video17` resolved by the `iris_driver` name, client GStreamer
 `v4l2mpeg2dec` on a 30-frame 320x240 MPEG-2 elementary stream.
 
-`test/iris-two-player-gate.sh` runs two independent 1920x1080 H.264 clients
+`test/target/iris-two-player-gate.sh` runs two independent 1920x1080 H.264 clients
 with their own VA display and trace, a and b 90/90 exact, `errors=0 last=1`.
 These gates are short exact-pixel checks, not throughput or thermal results.
 
@@ -496,7 +496,7 @@ regressions.
 
 ## Encode
 
-`test/iris-encode-quality.sh` requires the encode to move the Iris IRQ
+`test/target/iris-encode-quality.sh` requires the encode to move the Iris IRQ
 counter, the stream to decode with the requested frame count and geometry,
 the platform decode to match a software decode byte for byte, per-frame SSIM
 above a floor that a blank stream fails, and a decode-to-encode pass to keep
@@ -521,7 +521,7 @@ now exercises 30 frames end to end instead of the first few. Run record
 
 A blank control scores 0.000034 against the 0.90 floor. H.264 VBR at a
 4 Mbit/s target produced 4007485 bit/s over 300 1080p pictures, HEVC
-3985581 bit/s, both within 0.4 % of the target. `test/iris-encode-baseline.sh`
+3985581 bit/s, both within 0.4 % of the target. `test/target/iris-encode-baseline.sh`
 at the same 1080p settings: H.264 507 fps against libx264 116 (4.4x) at 3.1
 against 37.3 ms client CPU per frame, HEVC 549 against libx265 36 (15.2x) at
 2.6 against 161.5 ms. Whole-device power over idle is 2.8 W / 3.0 W against
@@ -529,11 +529,11 @@ against 37.3 ms client CPU per frame, HEVC 549 against libx265 36 (15.2x) at
 
 Rolling-row intra refresh through a `VAEncMiscParameterRIR` is honoured under
 CBR only and refused under VBR/CQP, where the firmware produces a
-byte-identical stream. `test/iris-encode-ir-probe.cc` drives it through the
+byte-identical stream. `test/target/iris-encode-ir-probe.cc` drives it through the
 public VA API. FFmpeg 8.1.3 and GStreamer do not request it, LTR has no VA
 encode-side field, and hierarchical coding has no client: these are driver
 capabilities with no client gate, recorded as such in the capability table.
-`test/iris-encode-misc-bound-probe.cc` requires `renderPicture` to refuse a
+`test/target/iris-encode-misc-bound-probe.cc` requires `renderPicture` to refuse a
 1-byte and a header-only misc element with
 `VA_STATUS_ERROR_INVALID_PARAMETER`.
 
@@ -553,7 +553,7 @@ in-progress Main 10 work in the working tree, encoder node `/dev/video18`
 resolved by name. Gate records: `gate-slice-h264c` and `gate-slice-hevc`
 under the run directory.
 
-B pictures, 11-18: `test/iris-encode-b-gate.sh` encoded 300 frames of
+B pictures, 11-18: `test/target/iris-encode-b-gate.sh` encoded 300 frames of
 1280x720 through FFmpeg's `h264_vaapi` with `-bf 1 -async_depth 3 -g 60`.
 With `V4L2_VA_B_FRAMES` set, the stream carries 145 B, 145 P and 10 I
 pictures, all 300 decode, SSIM against the source is 0.996038 against the
@@ -573,7 +573,7 @@ working tree, encoder node `/dev/video18` resolved by name. Gate record:
 VP9 and AV1 encode are not available: the encoder node has no VP9/AV1
 CAPTURE format. Packed headers are available on the HEVC lane only (below).
 
-HEVC Main 10 encode, 11-18: `test/iris-encode-main10-gate.sh` encoded 60
+HEVC Main 10 encode, 11-18: `test/target/iris-encode-main10-gate.sh` encoded 60
 frames of 640x480 from a 10-bit source through FFmpeg's `hevc_vaapi` with
 `-profile:v main10`. The encode moved the Iris IRQ counter by 123, `ffprobe`
 reports `profile=Main 10` and `pix_fmt=yuv420p10le`, all 60 frames decode, and
@@ -613,7 +613,7 @@ the HDR10 SEI; H.264 keeps the firmware's own headers. After the correction,
 bytes, HEVC 541745 bytes) through the build-tree driver (artifact
 `2b897cdf…`, source commit `6c216ba` plus the working-tree changes).
 
-HDR10 SEI, 11-22: `test/iris-encode-hdr-sei-gate.sh` encodes a 10-bit
+HDR10 SEI, 11-22: `test/target/iris-encode-hdr-sei-gate.sh` encodes a 10-bit
 libx265 source whose frames carry mastering-display and content-light-level
 side data through FFmpeg's `hevc_vaapi -sei hdr`, and reads both messages
 back out of the coded stream with ffprobe. The input's own side data is
@@ -625,7 +625,7 @@ source `c9b68ba`, `source_dirty=0`, encoder `/dev/video18` resolved by
 encode moved the IRQ counter by 125, and the same module still codes an
 8-bit NV12 lane. Record `hdr-sei-1122b`.
 
-ROI metadata, 11-19: `test/iris-encode-roi-probe.cc` and FFmpeg `addroi`
+ROI metadata, 11-19: `test/target/iris-encode-roi-probe.cc` and FFmpeg `addroi`
 drive `VAConfigAttribEncROI` with the 0017 module. Run identity: boot
 `79f5d3e1-0b32-4f3c-ae95-7435870fb362`, module
 `1323d58a4c69177ccb7b887a4ecca384a2fb7d64e466bb2c8ded3eff4e6c66a5` (0008,
@@ -684,7 +684,7 @@ changes and resolves the encoder node itself by `iris_driver` QUERYCAP name.
 The kernel and firmware support LTR end to end. There is still no VA interface
 and no client, so the driver advertises none; the capability table says so.
 
-Encode latency, 11-19: `test/iris-encode-latency.sh` runs 300 frames of
+Encode latency, 11-19: `test/target/iris-encode-latency.sh` runs 300 frames of
 1920x1080 at CBR 8 Mbit/s with `-async_depth 1`, so the client keeps one
 picture in flight and the number is the firmware's, not a queue it built.
 Run identity: same boot and 0017 module as the ROI run; build-tree driver
@@ -738,7 +738,7 @@ from these tables.
 
 ## Long-window
 
-`test/iris-concurrency-soak.sh mixed` ran 1800 s, `profile=SHORTENED`, under
+`test/target/iris-concurrency-soak.sh mixed` ran 1800 s, `profile=SHORTENED`, under
 `test/remote/gate.sh` on source `1670977` (`source_dirty=0`). Two independent
 VA contexts decoded H.264 and HEVC 640x360 at 24 fps.
 
@@ -835,9 +835,9 @@ installed `35cdab55…d591`. They are not part of the qualified combination.
 
 | Gate | Result |
 | --- | --- |
-| `test/iris-real-clip-gate.sh` `set=plain` | `120/120` Import, `invisible=15`, byte-exact against the software decode, `guard=complete` |
-| `test/iris-matrix.sh` | H.264, HEVC, VP9, AV1 `48/48` each, `drops=0 timeouts=0`, AV1 `noshow=23` |
-| `test/iris-av1-grain-gate.sh` `set=all` | grain8 `20/20`, grain10 `2/2`, byte-exact |
+| `test/target/iris-real-clip-gate.sh` `set=plain` | `120/120` Import, `invisible=15`, byte-exact against the software decode, `guard=complete` |
+| `test/target/iris-matrix.sh` | H.264, HEVC, VP9, AV1 `48/48` each, `drops=0 timeouts=0`, AV1 `noshow=23` |
+| `test/target/iris-av1-grain-gate.sh` `set=all` | grain8 `20/20`, grain10 `2/2`, byte-exact |
 | DRC clip, qualified module | sequence-change LAST `flags=0x104040`, `invisible=63`, `84/84`, byte-exact |
 | DRC clip, experimental set | sequence-change LAST `flags=0x104000`, `invisible=62`, `84/84`, byte-exact |
 | H.264 encode, 30 frames | `encode drain result=complete`, no sync timeout |
@@ -854,7 +854,7 @@ after the run.
 ## UBWC surfaces
 
 Offered by default, `V4L2_VA_UBWC=0` disables it; gate
-`test/iris-ubwc-gate.sh`. Run identity: source `b6e41c6`, `source_dirty=1`
+`test/target/iris-ubwc-gate.sh`. Run identity: source `b6e41c6`, `source_dirty=1`
 (this record is the only dirty file), `guard=complete exit=0`, boot
 `d843e7b8-f05f-4d2d-885d-cdb0fac5b139`, module
 `1323d58a…f66a5` (the series adds no kernel patch), decoder `/dev/video17`

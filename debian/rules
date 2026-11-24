@@ -7,7 +7,7 @@
 # path that resolves libva's canonical driverdir, installs the msm_drv_video.so
 # alias libva resolves by DRM name, and writes the provenance manifest the
 # runtime checks read. Three package formats, one layout: if the file list here
-# and the installer disagree, test/iris-packaging-check.sh fails.
+# and the installer disagree, test/static/iris-packaging-check.sh fails.
 
 export DH_VERBOSE = 1
 

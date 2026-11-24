@@ -5,9 +5,9 @@
 # CI metadata and agent instructions stay in the repo; git archive honours
 # export-ignore while the working tree keeps the files.
 # Distribution packaging stays in the archive: the shipped spec's %check runs
-# test/iris-packaging-check.sh, which reads all three formats from the unpacked
+# test/static/iris-packaging-check.sh, which reads all three formats from the unpacked
 # tree. The archive self-check needs a git checkout and skips there; its
-# exclusions are asserted in test/iris-make-dist-check.sh from a fixture.
+# exclusions are asserted in test/static/iris-make-dist-check.sh from a fixture.
 /.gitattributes export-ignore
 /.gitignore export-ignore
 /.github/ export-ignore

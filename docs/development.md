@@ -92,7 +92,7 @@ ssh "$IRIS_REMOTE_HOST" 'cd "$HOME/iris-vaapi-lab/src" && \
   LIBVA_DRIVER_NAME=v4l2 \
   LIBVA_DRIVERS_PATH=$PWD/build/src \
   LIBVA_V4L2_VIDEO_PATH="$device" \
-  ./test/iris-matrix.sh'
+  ./test/target/iris-matrix.sh'
 ```
 
 The matrix requires exact software/VA frame MD5 equality and strict stateful
@@ -110,7 +110,7 @@ status, the guard state and the source commit next to the command's output:
 ```sh
 IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh \
     --out "$HOME/iris-vaapi-lab/artifacts/gstreamer" \
-    -- sh test/iris-gstreamer-gate.sh --clip CLIP
+    -- sh test/target/iris-gstreamer-gate.sh --clip CLIP
 ```
 
 The record is `summary.json` with schema `qualcomm-iris-vaapi/target-run-v1`,
@@ -242,7 +242,7 @@ stack and reports `V4L2VideoDecoder` without loading this driver at all.
 Google Chrome has no such path and is the client this driver exists for; it is
 the one that moves from `FFmpegVideoDecoder` to `VaapiVideoDecoder`.
 
-`test/iris-packaging-check.sh` runs in CI and fails when an installed path is
+`test/static/iris-packaging-check.sh` runs in CI and fails when an installed path is
 missing from the spec's `%files`, when any of the three manifests stops
 delegating to `install-system.sh`, when a manifest stops refreshing the
 provenance file after its own strip step, when `v4l-utils` is dropped, when a
@@ -313,7 +313,7 @@ device=$(iris_resolve_device)
 LIBVA_DRIVER_NAME=v4l2 \
 LIBVA_DRIVERS_PATH=$PWD/build/src \
 LIBVA_V4L2_VIDEO_PATH="$device" \
-./test/iris-dynamic-resolution.sh
+./test/target/iris-dynamic-resolution.sh
 ```
 
 The production default assembles deterministic 640x360 and 1280x720 keyframe
@@ -340,10 +340,10 @@ results must retain the defaults.
 The concurrent runner has separate dual-H.264 and mixed H.264+HEVC scenarios:
 
 ```sh
-./test/iris-concurrency-soak.sh dual-h264
-./test/iris-concurrency-soak.sh mixed
+./test/target/iris-concurrency-soak.sh dual-h264
+./test/target/iris-concurrency-soak.sh mixed
 # Run both sequentially:
-./test/iris-concurrency-soak.sh all
+./test/target/iris-concurrency-soak.sh all
 ```
 
 Each selected scenario defaults to 7200 seconds of wall-clock playback, using
@@ -414,12 +414,12 @@ own VA display and driver trace:
 ```sh
 IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh \
     --out ~/iris-vaapi-lab/artifacts/run-8k \
-    -- env IRIS_8K_DIR=/path/to/8k-clips sh test/iris-8k-gate.sh
+    -- env IRIS_8K_DIR=/path/to/8k-clips sh test/target/iris-8k-gate.sh
 
 IRIS_REMOTE_HOST=your-tablet-host test/remote/gate.sh \
     --out ~/iris-vaapi-lab/artifacts/run-two-player \
     -- env IRIS_TWO_PLAYER_CLIP_A=/path/to/a.mp4 \
-        IRIS_TWO_PLAYER_CLIP_B=/path/to/b.mp4 sh test/iris-two-player-gate.sh
+        IRIS_TWO_PLAYER_CLIP_B=/path/to/b.mp4 sh test/target/iris-two-player-gate.sh
 ```
 
 Leave `LIBVA_DRIVERS_PATH` unset to gate the installed package; set it to an

@@ -2,7 +2,7 @@
 #
 # The spec installs through scripts/install-system.sh, not `meson install`:
 # that helper resolves libva's canonical driverdir and writes the provenance
-# manifest. test/iris-packaging-check.sh holds all three package formats to
+# manifest. test/static/iris-packaging-check.sh holds all three package formats to
 # that one layout.
 #
 # Building from a git checkout:
