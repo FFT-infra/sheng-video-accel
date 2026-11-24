@@ -169,7 +169,7 @@ struct Context {
     iris::codec::Picture picture;
     iris::codec::AccessUnit au;
 
-    // Encode contexts: the translator and the synchronous V4L2 session are
+    // Encode contexts: the translator and the V4L2 session are
     // separate objects; exactly one of translator/session and
     // encoder/encode_session is set.
     std::unique_ptr<iris::codec::Encoder> encoder;

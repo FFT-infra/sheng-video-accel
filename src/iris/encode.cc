@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 //
-// The synchronous encoder transaction (docs/architecture.md §4). The
-// decoder keeps a slot pool so completions can be published zero-copy;
-// encoding has nothing to publish, so one picture in means one access unit
-// out and vaEndPicture can return the bytes.
+// The encoder transaction (docs/architecture.md §4.1). The decoder keeps a
+// slot pool so completions can be published zero-copy; encoding has nothing
+// to publish, so one picture in means one access unit out: submit() queues
+// the raw frame and wait() takes the bytes.
 
 #include "encode.h"
 
