@@ -23,8 +23,8 @@ from source `65686a2`, so `rpm -V` reports the live file as `S.5....T.`.
 
 ## Host verification
 
-`sh test/run-static-checks.sh` PASS, `meson test -C build-local` 35/35,
-`meson test -C build-asan` 35/35, `git diff --check` clean. Both CI jobs
+`sh test/run-static-checks.sh` PASS, `meson test -C build-local` 36/36,
+`meson test -C build-asan` 36/36, `git diff --check` clean. Both CI jobs
 (`build-and-check`, `sanitizers`) are green on the pushed head. The VPP
 shaders, kernel patch hashes, media pins, install manifest and source-archive
 boundary are each pinned by a host check.
@@ -49,7 +49,7 @@ oracle.
 | `iris-vp9-p2-gate.sh` | generated 640x360 `yuv420p10le` Profile 2, 30/30 exact, 12 P010 surfaces, 0 NV12, `import=30`, `VAEntrypointVLD` answers `VA_RT_FORMAT_YUV420_10` only |
 | `iris-av1-grain-gate.sh` | 8-bit NV12 and 10-bit P010 clips, every frame byte-identical to libdav1d's grained output under Import and Direct, in both the default software blend and `V4L2_VA_HW_GRAIN` (see below). The gate refuses a forced Copy publication: without a layout mismatch it is a silent Import regression. |
 | `iris-dynamic-resolution.sh` | VP9 Import, 100 alternating 640x360/1280x720 switches in both single- and multi-process lanes, 202 frames over 101 contexts, pixels equal to software, `drops=0 timeouts=0` |
-| `iris-gstreamer-gate.sh` | `GST_VA_ALL_DRIVERS=1` registers 7 elements; `vaav1dec` 120/120 hashes equal to software; `vah264enc`/`vah265enc` encode 60 frames that decode back |
+| `iris-gstreamer-gate.sh` | `GST_VA_ALL_DRIVERS=1` registers 7 elements from the installed `d15ff198…`, 9 from source `a6e454e` (see Video processing); `vaav1dec` 120/120 hashes equal to software; `vah264enc`/`vah265enc` encode 60 frames that decode back |
 
 Import keeps one client buffer in flight and never skips a submitted picture.
 The bare-V4L2 probe states the same rule from the other side: with 12 access
@@ -805,6 +805,25 @@ CAPTURE DMA-BUFs as Vulkan external memory.
 | `overlay_gate.sh` | within 2 codes of a double-precision mixing model; alpha 0/1 byte-exact |
 | `overlay_vaapi_gate.sh` | exact against a BT.709 reference with premultiplied BGRA |
 | `prereq.sh` | coherent CPU read-back of imported DMA-BUFs |
+
+GStreamer's `vapostproc` and `vacompositor` register from source `a6e454e`
+on. Under `GST_VA_ALL_DRIVERS=1` the installed `d15ff198…` lists 7 elements
+and the build tree (`64518c7c…`, `source_dirty=0`) lists 9 on the same boot.
+`iris-gstreamer-gate.sh --driver` passes against that build tree with
+`guard=complete exit=0`: `vaav1dec` 48/48 on the matrix clip, `vah264enc` and
+`vah265enc` 60/60.
+
+Two three-frame 1280x720 checks ran under the same guard and driver; neither
+is a tracked gate. `vapostproc` uploading I420 to NV12 is byte-identical to
+`videoconvert`. `vacompositor` laying a 640x360 layer over the base at alpha
+0.5 leaves every row outside the rectangle equal to the base and every sample
+inside it equal to the rounded mean of its two inputs. Each ran three
+`videoproc` passes with no VA error. Both pipelines pin `colorimetry=bt709`,
+because the processor refuses a colour conversion.
+
+Run identity: boot `fde9a964-9460-4879-a18c-1db2371253e1`, kernel
+`7.3.4-sm8550-00104-g87ac0f2347eb`, module `1323d58a…`, decoder `/dev/video17`
+and encoder `/dev/video18` resolved by `iris_driver`.
 
 ## Experimental kernel patches
 
