@@ -370,6 +370,16 @@ va_config_attributes_test = executable(
              '-DVA_DRIVER_INIT_FUNC=' + va_driver_init_func])
 test('va-config-attributes', va_config_attributes_test)
 
+# The calls GStreamer's VA filter makes that FFmpeg's does not, against the
+# real image.cc and picture.cc.
+va_gst_filter_test = executable(
+  'va-gst-filter-test',
+  files('unit/va-gst-filter-test.cc') + va_driver_sources,
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20',
+             '-DVA_DRIVER_INIT_FUNC=' + va_driver_init_func])
+test('va-gst-filter', va_gst_filter_test)
+
 # Hardware-independent regression guards for the browser-facing queue and
 # stable-export invariants. The integration probe above remains opt-in because
 # hosts without /dev/video nodes cannot execute it.

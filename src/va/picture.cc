@@ -200,7 +200,10 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
         VA_STATUS_ERROR_INVALID_PARAMETER);
     VAProcPipelineParameterBuffer p = {};
     std::memcpy(&p, b.data.data(), sizeof(p));
-    const bool blending = p.blend_state != nullptr;
+    // GStreamer's compositor attaches a blend state to every layer, the
+    // bottom one included; one that sets no flag there asks for nothing.
+    const bool bottom = !c.vpp.has_value() && c.vpp_overlays.empty();
+    const bool blending = p.blend_state != nullptr && !(bottom && p.blend_state->flags == 0);
     iris::require(blending ? c.vpp.has_value() : !c.vpp.has_value() && c.vpp_overlays.empty(),
         "the first VideoProc pipeline buffer is the main pass and every later one blends",
         VA_STATUS_ERROR_UNSUPPORTED_FILTER);
@@ -834,13 +837,17 @@ VAStatus createContext(VADriverContextP ctx, VAConfigID config, int width, int h
     return guarded(ctx, "createContext", [&] {
         auto& d = data(ctx);
         (void)flags;
-        iris::require(width > 0 && height > 0, "invalid context geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
         Config cfg;
         {
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
             auto it = d.configs.find(config);
             iris::require(it != d.configs.end(), "invalid config", VA_STATUS_ERROR_INVALID_CONFIG);
             cfg = it->second;
+            // A processing context has no picture size of its own: each
+            // pipeline names its surfaces, and GStreamer opens one with 0x0.
+            const bool sized = cfg.entrypoint == VAEntrypointVideoProc ? width >= 0 && height >= 0
+                                                                       : width > 0 && height > 0;
+            iris::require(sized, "invalid context geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
             // The copy engine is built on the first copy, not here: GPU copy
             // initialises EGL, worth about 0.1 s per process, and Direct and
             // Import clients never copy. A VideoProc context never copies at

@@ -579,7 +579,9 @@ VA error status instead of dropping operations silently):
   Constant overlay uploads via packed BGRA produce exact BT.709 codes.
 - **Explicit refusals**:
   - Luma keying (`VA_BLEND_LUMA_KEY`).
-  - More than sixteen blending passes, or a blend state on the first pass.
+  - More than sixteen blending passes, or a first pass that blends. A blend
+    state that sets no flag on the first pass is accepted as the main pass:
+    GStreamer's compositor attaches one to every layer.
   - Any second filter or multiple filters in one picture.
   - HDR-to-HDR tone mapping, or NV12 input to the HDR tone mapper.
   - Colour conversion outside the HDR10-to-SDR tone mapper.
