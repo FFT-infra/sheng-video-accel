@@ -904,15 +904,18 @@ VAStatus createContext(VADriverContextP ctx, VAConfigID config, int width, int h
         sc.import_allowed = d.capabilities.import_formats.count(sc.codec_pixelformat) != 0;
         // A compressed render target turns the session's CAPTURE format into
         // Q08C, and one CAPTURE format cannot serve two layouts.
-        for (int i = 0; i < count; ++i) {
-            auto it = d.surfaces.find(render_targets[i]);
-            if (it == d.surfaces.end())
-                continue;
-            if (i == 0)
-                sc.capture_modifier = it->second->modifier;
-            iris::require(it->second->modifier == sc.capture_modifier,
-                "every render target of a context must carry the same DRM modifier",
-                VA_STATUS_ERROR_INVALID_PARAMETER);
+        {
+            std::lock_guard<std::recursive_mutex> lock(d.mutex);
+            for (int i = 0; i < count; ++i) {
+                auto it = d.surfaces.find(render_targets[i]);
+                if (it == d.surfaces.end())
+                    continue;
+                if (i == 0)
+                    sc.capture_modifier = it->second->modifier;
+                iris::require(it->second->modifier == sc.capture_modifier,
+                    "every render target of a context must carry the same DRM modifier",
+                    VA_STATUS_ERROR_INVALID_PARAMETER);
+            }
         }
         // Opening the node and OUTPUT STREAMON happen here, outside the
         // table lock. SOURCE_CHANGE and CAPTURE follow the first AU.
@@ -966,10 +969,10 @@ VAStatus destroyContext(VADriverContextP ctx, VAContextID id)
             {
                 std::lock_guard<std::recursive_mutex> lock(d.mutex);
                 d.contexts.erase(id);
+                for (auto& s : owned)
+                    if (s->owner == id)
+                        s->owner = VA_INVALID_ID;
             }
-            for (auto& s : owned)
-                if (s->owner == id)
-                    s->owner = VA_INVALID_ID;
             c->encode_session.reset();
             c->encoder.reset();
             return VA_STATUS_SUCCESS;
@@ -997,9 +1000,10 @@ VAStatus destroyContext(VADriverContextP ctx, VAContextID id)
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
             d.contexts.erase(id);
         }
-        for (auto& s : owned) {
+        for (auto& s : owned)
             if (s->rendering())
                 c->session->release(s->target);
+        {
             // A completed Direct frame stays with its surface: the Frame
             // owns an exported fd, and vb2 orphans exported buffers when
             // the queue is freed, so the pixels remain readable after the
@@ -1008,7 +1012,9 @@ VAStatus destroyContext(VADriverContextP ctx, VAContextID id)
             // The frame is simply the last reference to its slot now;
             // nothing can requeue it, and it is dropped when the surface is
             // reused or destroyed.
-            s->owner = VA_INVALID_ID;
+            std::lock_guard<std::recursive_mutex> lock(d.mutex);
+            for (auto& s : owned)
+                s->owner = VA_INVALID_ID;
         }
         c->session.reset();
         return VA_STATUS_SUCCESS;
