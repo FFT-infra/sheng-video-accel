@@ -3,7 +3,8 @@
 # Regenerate the checked-in SPIR-V binaries from their .comp sources on a host
 # with glslangValidator, then rewrite SHA256SUMS. The target has no glslang,
 # so every module is checked in and pinned by hash; the target gates verify
-# the pin at run time instead of compiling on the device.
+# the pin at run time instead of compiling on the device. The gates and probes
+# named below are in test/vulkan-vpp.
 #
 #   copy.spv          flat read/write prereq (prereq.sh / probe.c)
 #   nv12_scale.spv    NV12 scale with crop, rotation and the two
@@ -13,13 +14,13 @@
 #   p010_scale.spv    the same kernel for P010 surfaces, blending codes rather
 #                     than the padded words
 #                     (p010_scale_gate.sh / scale_probe.c)
-#   tonemap.spv       HDR10 P010 to SDR NV12 (tonemap_gate.sh / tonemap_probe.c)
+#   tonemap.spv       HDR10 P010 to SDR NV12 (tonemap_gate.sh / the probe's tonemap mode)
 #   overlay.spv       global-alpha compositing of two surfaces into one output
 #                     (overlay_gate.sh / the probe's overlay mode)
 #   overlay_rgb.spv   the same composite with a packed BGRA/RGBA overlay
 #                     (overlay_gate.sh's rgb cases)
 #
-# Usage: test/vulkan-vpp/make-spv.sh [-c]
+# Usage: src/iris/vpp/shaders/make-spv.sh [-c]
 #   -c  check that every current .spv file matches a fresh compile and
 #       SHA256SUMS, without writing (glslang is still needed for the compile)
 #

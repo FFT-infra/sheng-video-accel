@@ -440,14 +440,17 @@ src/
                       duplicate of a client's DMA-BUF for an imported surface
     msm_alloc.c       the MSM GEM ioctl, in C because msm_drm.h names a field
                       `or`
-    vpp/scale.{h,cc}  optional Vulkan compute video processor: imports two
-                      surface DMA-BUFs, runs the pinned scale kernel for
-                      the surface's sample width, embedded from
-                      test/vulkan-vpp/{nv12,p010}_scale.spv (nearest point map
-                      and the four-tap bilinear blend)
+    vpp/processor.{h,cc} optional Vulkan compute video processor: imports the
+                      surface DMA-BUFs and runs one pinned kernel over them
+                      (scale with crop and rotation, tone map, and the two
+                      composites)
     vpp/nv12_scale_spv.h vpp/p010_scale_spv.h vpp/tonemap_spv.h
     vpp/overlay_spv.h vpp/overlay_rgb_spv.h
                       the pinned SPIR-V as arrays, generated
+    vpp/shaders/      the kernels' GLSL, the SPIR-V compiled from it and
+                      pinned in SHA256SUMS, make-spv.sh (host, glslang) and
+                      spv-to-header.py, which writes the arrays above;
+                      copy.comp is the prerequisite gate's and is not embedded
   codec/              VA parameters -> bytestream the firmware accepts; pure functions
     translator.h      the Translator interface and one factory per codec
     bitwriter.h

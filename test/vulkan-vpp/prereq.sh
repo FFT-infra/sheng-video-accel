@@ -22,6 +22,7 @@
 set -eu
 
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+shaders=$here/../../src/iris/vpp/shaders
 
 for tool in cc pkg-config sha256sum; do
     command -v "$tool" >/dev/null 2>&1 || { echo "FAIL missing target tool: $tool" >&2; exit 2; }
@@ -31,8 +32,8 @@ pkg-config --exists vulkan libdrm || { echo "FAIL missing vulkan/libdrm pkg-conf
 
 # The checked-in binary is the source of truth; a stale or hand-edited copy.spv
 # must fail here rather than produce a pass the shader source cannot reproduce.
-(cd "$here" && sha256sum -c SHA256SUMS) || { echo "FAIL copy.spv does not match SHA256SUMS" >&2; exit 2; }
-spv_hash=$(sha256sum "$here/copy.spv" | cut -d' ' -f1)
+(cd "$shaders" && sha256sum -c SHA256SUMS) || { echo "FAIL copy.spv does not match SHA256SUMS" >&2; exit 2; }
+spv_hash=$(sha256sum "$shaders/copy.spv" | cut -d' ' -f1)
 
 # Resolve the MSM render node; a numbered default would go stale across boots.
 render=${IRIS_RENDER_DEVICE:-}
@@ -58,9 +59,9 @@ cc -std=c11 -O2 -Wall -Wextra -x c "$here/probe.c" \
 heap_rc=0
 msm_rc=0
 echo "== origin: system DMA heap"
-"$work/probe" "$here/copy.spv" heap || heap_rc=$?
+"$work/probe" "$shaders/copy.spv" heap || heap_rc=$?
 echo "== origin: MSM GEM PRIME fd"
-"$work/probe" "$here/copy.spv" msm "$render" || msm_rc=$?
+"$work/probe" "$shaders/copy.spv" msm "$render" || msm_rc=$?
 
 printf 'spv_sha256=%s\n' "$spv_hash"
 printf 'render_node=%s\n' "$render"

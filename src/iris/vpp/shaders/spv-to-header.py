@@ -3,7 +3,7 @@
 
 The Vulkan VPP backend embeds the shader in the driver .so: libva loads the
 driver into arbitrary client processes, so there is no reliable install path
-to read a .spv from at runtime. The pinned test/vulkan-vpp/*.spv is the single
+to read a .spv from at runtime. The pinned .spv beside this script is the single
 source of truth; run-static-checks.sh regenerates this header and compares it,
 so a hand-edited binary or array cannot drift.
 
@@ -28,7 +28,7 @@ def main() -> None:
     symbol = "k" + "".join(part.capitalize() for part in pathlib.Path(module).stem.split("_")) + "Spv"
     out = []
     out.append("// SPDX-License-Identifier: MIT\n")
-    out.append(f"// Generated from test/vulkan-vpp/{module} by spv-to-header.py.\n")
+    out.append(f"// Generated from src/iris/vpp/shaders/{module} by spv-to-header.py.\n")
     out.append("// Do not edit by hand; run-static-checks.sh verifies this against the pinned module.\n")
     out.append("#pragma once\n")
     out.append("#include <cstdint>\n")

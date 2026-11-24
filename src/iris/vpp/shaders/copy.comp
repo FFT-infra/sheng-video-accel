@@ -3,7 +3,8 @@
 // Minimal compute shader for the VPP prerequisite gate. It is deliberately a
 // byte copy-plus-one: the gate measures whether the ICD can import a DMA-BUF
 // and run a compute pipeline over it, not whether a tone map is correct. The
-// real filters live in src/iris/vpp once this gate passes on the target.
+// real filters are the other kernels in this directory; this one is not
+// embedded in the driver.
 #version 450
 layout(local_size_x = 64) in;
 layout(set = 0, binding = 0) readonly buffer Src { uint s[]; };

@@ -148,7 +148,7 @@ Target-compiled diagnostic probe binaries:
 - **`test/iris-hevc-scaling-check.sh`**: Opt-in target regression for `scaling_list_enabled_flag`: a VA IQ buffer is required even when the stream uses the default scaling lists.
 - **`test/av1-obu-roundtrip.sh`**: Decodes the driver's rebuilt AV1 OBU stream (`V4L2_VA_DUMP`) with libdav1d and compares it with a software decode of the source.
 - **`test/iris-av1-browser-matrix.sh`**: One AV1 clip through Firefox (WebDriver BiDi) and Chrome (CDP) plus the driver trace, against the installed package with no overrides.
-- **`test/vulkan-vpp/make-spv.sh`**: Host-only regeneration of the checked-in SPIR-V modules and `SHA256SUMS`; the target has no glslang.
+- **`src/iris/vpp/shaders/make-spv.sh`**: Host-only regeneration of the checked-in SPIR-V modules and `SHA256SUMS`; the target has no glslang.
 
 ---
 

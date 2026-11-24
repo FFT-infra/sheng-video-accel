@@ -27,7 +27,7 @@ core_sources = [
 	'iris/session_publish.cc',
 	'iris/session_submit.cc',
 	'iris/encode.cc',
-	'iris/vpp/scale.cc',
+	'iris/vpp/processor.cc',
 	'codec/h264.cc',
 	'codec/hevc.cc',
 	'codec/vp9.cc',

@@ -5,7 +5,7 @@
 // pinned scale kernel for the surface's sample width runs over them
 // (nv12_scale.spv, or p010_scale.spv for 10-bit surfaces). This is the same
 // import path the flat read/write prereq and the per-pixel scale gate prove
-// on the target; the kernel is embedded from test/vulkan-vpp/nv12_scale.spv
+// on the target; the kernel is embedded from shaders/nv12_scale.spv
 // and samples the source at swscale's point positions, so `scale_vaapi=w=W:h=H`
 // reproduces `scale=WxH:flags=neighbor` byte for byte. One kernel serves both
 // interpolation methods the driver advertises: the point map, and the
@@ -14,16 +14,16 @@
 // quarter turn applied before the scale, as VA specifies, and the same kernel
 // reproduces FFmpeg's `transpose` filter. A third kernel, tonemap.spv, converts
 // a P010 HDR10 surface to SDR NV12; it does not scale, crop or rotate, and its
-// pipeline is written down in test/vulkan-vpp/tonemap.comp. A fourth,
+// pipeline is written down in shaders/tonemap.comp. A fourth,
 // overlay.spv, composites an overlay surface into one rectangle of the main
 // surface with a global alpha, importing three DMA-BUFs instead of two (see
-// test/vulkan-vpp/overlay.comp).
+// shaders/overlay.comp).
 //
 // Built only when the Vulkan headers are present (meson's optional `vulkan`
 // dependency). CI has no Vulkan, so the driver still builds and the VPP
 // entrypoint is simply not advertised there.
 
-#include "scale.h"
+#include "processor.h"
 
 #ifdef IRIS_HAVE_VULKAN_VPP
 
@@ -55,7 +55,7 @@ int dup_fd(int fd)
     return fcntl(fd, F_DUPFD_CLOEXEC, 0);
 }
 
-// Must mirror the push-constant block in test/vulkan-vpp/nv12_scale.comp.
+// Must mirror the push-constant block in shaders/nv12_scale.comp.
 struct PushParams {
     uint32_t src_stride, src_uv, dst_stride, dst_uv;
     uint32_t src_y, dst_y;
@@ -70,7 +70,7 @@ struct PushParams {
     uint32_t src_wide;
 };
 
-// Must mirror the push-constant block in test/vulkan-vpp/overlay_rgb.comp.
+// Must mirror the push-constant block in shaders/overlay_rgb.comp.
 struct OverlayRgbParams {
     uint32_t m_stride, m_uv, m_y;
     uint32_t m_x, m_row;
@@ -86,7 +86,7 @@ struct OverlayRgbParams {
     float alpha;
 };
 
-// Must mirror the push-constant block in test/vulkan-vpp/tonemap.comp.
+// Must mirror the push-constant block in shaders/tonemap.comp.
 struct ToneMapParams {
     uint32_t src_stride, src_uv, dst_stride, dst_uv;
     uint32_t src_y, dst_y;
@@ -117,7 +117,7 @@ struct PlaneBuffers {
     }
 };
 
-// Must mirror the push-constant block in test/vulkan-vpp/overlay.comp.
+// Must mirror the push-constant block in shaders/overlay.comp.
 struct OverlayParams {
     uint32_t main_stride, main_uv, main_y;
     uint32_t main_x, main_row;

@@ -7,7 +7,7 @@
 #include "driver.h"
 
 #include "../codec/av1_dpb.h"
-#include "../iris/vpp/scale.h"
+#include "../iris/vpp/processor.h"
 #include "../util/error.h"
 
 #include <algorithm>

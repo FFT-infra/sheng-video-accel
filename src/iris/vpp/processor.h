@@ -4,7 +4,7 @@
 // installation path it can read at runtime, so the pinned SPIR-V module is
 // embedded in the .so; the Vulkan headers stay out of this header so the
 // driver still builds on hosts without a Vulkan SDK (CI). The only public
-// surface is a plain job struct and two functions.
+// surface is one plain job struct and one function per kernel.
 
 #pragma once
 

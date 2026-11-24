@@ -13,6 +13,7 @@ set -eu
 
 root=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
 test_dir="$root/test"
+shader_dir="$root/src/iris/vpp/shaders"
 # Host-only self-tests create temporary fixtures. Keep them under the project's
 # scratch root, not /tmp, unless the caller names a different directory.
 : "${IRIS_TEST_SCRATCH_ROOT:=$HOME/iris-vaapi-lab/tmp}"
@@ -34,7 +35,7 @@ run() {
 # of the trace checkers shipped broken for a while because a typo made it grep
 # a path instead of a file, so parse every script we own on every run.
 echo "== shell syntax"
-for script in "$test_dir"/*.sh "$test_dir"/remote/*.sh "$test_dir"/vulkan-vpp/*.sh \
+for script in "$test_dir"/*.sh "$test_dir"/remote/*.sh "$test_dir"/vulkan-vpp/*.sh "$shader_dir"/*.sh \
     "$root"/scripts/*.sh "$root"/packaging/kernel/*.sh; do
     [ -f "$script" ] || continue
     run "syntax $(basename "$script")" sh -n "$script"
@@ -42,17 +43,17 @@ done
 
 echo "== VPP SPIR-V pin"
 # Both Vulkan gates run only on the target (CI has no GPU), so the checked-in
-# SPIR-V binaries are pinned by hash here. A stale or hand-edited .spv must
+# SPIR-V binaries in src/iris/vpp/shaders are pinned by hash here. A stale or hand-edited .spv must
 # fail a host check rather than silently change what the target gate measures.
 # SHA256SUMS lists copy.spv (flat read/write prereq), nv12_scale.spv (the
 # nearest NV12 scale with crop and rotation), p010_scale.spv (the same map for
 # P010), tonemap.spv (HDR10 P010 to SDR NV12) and overlay.spv (global-alpha
 # compositing of two surfaces); sha256sum -c verifies every entry.
-run vpp-spv-pin sh -c 'cd "$1" && sha256sum -c SHA256SUMS' sh "$test_dir/vulkan-vpp"
-run vpp-spv-scale-pinned grep -Fq 'nv12_scale.spv' "$test_dir/vulkan-vpp/SHA256SUMS"
-run vpp-spv-p010-pinned grep -Fq 'p010_scale.spv' "$test_dir/vulkan-vpp/SHA256SUMS"
-run vpp-spv-tonemap-pinned grep -Fq 'tonemap.spv' "$test_dir/vulkan-vpp/SHA256SUMS"
-run vpp-spv-overlay-pinned grep -Fq 'overlay.spv' "$test_dir/vulkan-vpp/SHA256SUMS"
+run vpp-spv-pin sh -c 'cd "$1" && sha256sum -c SHA256SUMS' sh "$shader_dir"
+run vpp-spv-scale-pinned grep -Fq 'nv12_scale.spv' "$shader_dir/SHA256SUMS"
+run vpp-spv-p010-pinned grep -Fq 'p010_scale.spv' "$shader_dir/SHA256SUMS"
+run vpp-spv-tonemap-pinned grep -Fq 'tonemap.spv' "$shader_dir/SHA256SUMS"
+run vpp-spv-overlay-pinned grep -Fq 'overlay.spv' "$shader_dir/SHA256SUMS"
 # The scale gate must stay a per-pixel oracle, not a spot check: a stride or
 # chroma-offset bug can otherwise hide behind a handful of sampled bytes.
 run vpp-scale-pixel-oracle grep -Fq 'check_pixels(src, dst, &g)' "$test_dir/vulkan-vpp/scale_probe.c"
@@ -105,19 +106,19 @@ run vpp-rotation-model python3 "$test_dir/vulkan-vpp/rotation_model_check.py"
 # pinned binary. Regenerate it from the .spv and require an identical file; a
 # hand edit here would ship a kernel no gate ever measured.
 run vpp-spv-header sh -c 'python3 "$1" "$2" | cmp -s - "$3"' sh \
-    "$test_dir/vulkan-vpp/spv-to-header.py" "$test_dir/vulkan-vpp/nv12_scale.spv" \
+    "$shader_dir/spv-to-header.py" "$shader_dir/nv12_scale.spv" \
     "$root/src/iris/vpp/nv12_scale_spv.h"
 run vpp-spv-p010-header sh -c 'python3 "$1" "$2" | cmp -s - "$3"' sh \
-    "$test_dir/vulkan-vpp/spv-to-header.py" "$test_dir/vulkan-vpp/p010_scale.spv" \
+    "$shader_dir/spv-to-header.py" "$shader_dir/p010_scale.spv" \
     "$root/src/iris/vpp/p010_scale_spv.h"
 run vpp-spv-tonemap-header sh -c 'python3 "$1" "$2" | cmp -s - "$3"' sh \
-    "$test_dir/vulkan-vpp/spv-to-header.py" "$test_dir/vulkan-vpp/tonemap.spv" \
+    "$shader_dir/spv-to-header.py" "$shader_dir/tonemap.spv" \
     "$root/src/iris/vpp/tonemap_spv.h"
 run vpp-spv-overlay-header sh -c 'python3 "$1" "$2" | cmp -s - "$3"' sh \
-    "$test_dir/vulkan-vpp/spv-to-header.py" "$test_dir/vulkan-vpp/overlay.spv" \
+    "$shader_dir/spv-to-header.py" "$shader_dir/overlay.spv" \
     "$root/src/iris/vpp/overlay_spv.h"
 run vpp-spv-overlay-rgb-header sh -c 'python3 "$1" "$2" | cmp -s - "$3"' sh \
-    "$test_dir/vulkan-vpp/spv-to-header.py" "$test_dir/vulkan-vpp/overlay_rgb.spv" \
+    "$shader_dir/spv-to-header.py" "$shader_dir/overlay_rgb.spv" \
     "$root/src/iris/vpp/overlay_rgb_spv.h"
 
 echo "== remote gate command transport"
@@ -139,7 +140,7 @@ run gate-driver-path grep -Fq 'driver_path=' "$test_dir/remote/gate.sh"
 run gate-driver-absolute grep -Fq 'LIBVA_DRIVERS_PATH must be absolute' "$test_dir/remote/gate.sh"
 
 echo "== python syntax"
-for script in "$test_dir"/*.py "$test_dir"/remote/*.py "$test_dir"/vulkan-vpp/*.py; do
+for script in "$test_dir"/*.py "$test_dir"/remote/*.py "$test_dir"/vulkan-vpp/*.py "$shader_dir"/*.py; do
     [ -f "$script" ] || continue
     run "syntax $(basename "$script")" python3 -m py_compile "$script"
 done

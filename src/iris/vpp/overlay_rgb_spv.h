@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Generated from test/vulkan-vpp/overlay_rgb.spv by spv-to-header.py.
+// Generated from src/iris/vpp/shaders/overlay_rgb.spv by spv-to-header.py.
 // Do not edit by hand; run-static-checks.sh verifies this against the pinned module.
 #pragma once
 #include <cstdint>

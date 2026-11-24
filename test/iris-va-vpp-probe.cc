@@ -25,7 +25,7 @@
 // metadata naming `peak-nits` as the mastering display peak, converts a
 // synthetic HDR10 P010 surface to SDR NV12, and compares every output byte
 // with the probe's own implementation of the pipeline documented in
-// test/vulkan-vpp/tonemap.comp. FFmpeg's tonemap_vaapi refuses a raw P010
+// src/iris/vpp/shaders/tonemap.comp. FFmpeg's tonemap_vaapi refuses a raw P010
 // frame (it demands mastering-display side data), so this is the only client
 // that can drive the filter at all.
 //
@@ -39,7 +39,7 @@
 // overlay_vaapi does: the main surface over the whole output, then the
 // overlay surface into one rectangle with a VABlendState naming a global
 // alpha. It compares the result with the mix documented in
-// test/vulkan-vpp/overlay.comp, and checks that the caps advertise
+// src/iris/vpp/shaders/overlay.comp, and checks that the caps advertise
 // VA_BLEND_GLOBAL_ALPHA, which is what overlay_vaapi refuses to run without.
 //
 // `--expect-refusal` inverts the verdict: the picture must fail (an odd or
@@ -165,7 +165,7 @@ bool download(VADisplay display, VASurfaceID surface, std::vector<uint8_t>& fram
 
 // ---- HDR10 to SDR tone mapping ---------------------------------------------
 //
-// The pipeline test/vulkan-vpp/tonemap.comp documents, in double precision.
+// The pipeline src/iris/vpp/shaders/tonemap.comp documents, in double precision.
 // The kernel runs it in float32, so agreement is a tolerance, not a hash:
 // byte-exactness is not defined for a tone curve, but the curve is.
 
@@ -352,7 +352,7 @@ void expected_sdr(const std::vector<uint8_t>& hdr, unsigned width, unsigned heig
     }
 }
 
-// The scale kernel's map (test/vulkan-vpp/nv12_scale.comp) applied to a
+// The scale kernel's map (src/iris/vpp/shaders/nv12_scale.comp) applied to a
 // converted frame: the crop is rotated clockwise, mirrored, then sampled at
 // swscale's point positions into the destination. This is the pass the
 // processor runs after the tone mapper, so the probe's model composes them in
@@ -674,7 +674,7 @@ int run_tonemap(int argc, char** argv)
 
 // ---- global-alpha compositing ----------------------------------------------
 //
-// The contract test/vulkan-vpp/overlay.comp documents: the main surface stays
+// The contract src/iris/vpp/shaders/overlay.comp documents: the main surface stays
 // in place, the overlay surface is scaled into one rectangle of the output at
 // swscale's point positions, and inside it
 //

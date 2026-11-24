@@ -29,6 +29,7 @@
 set -eu
 
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+shaders=$here/../../src/iris/vpp/shaders
 
 for tool in cc pkg-config sha256sum spirv-val; do
     command -v "$tool" >/dev/null 2>&1 || { echo "FAIL missing target tool: $tool" >&2; exit 2; }
@@ -36,11 +37,11 @@ done
 pkg-config --exists vulkan libdrm || { echo "FAIL missing vulkan/libdrm pkg-config files" >&2; exit 2; }
 [ -r /dev/dma_heap/system ] || { echo "FAIL /dev/dma_heap/system is not available" >&2; exit 2; }
 
-(cd "$here" && sha256sum -c SHA256SUMS) || { echo "FAIL SPIR-V does not match SHA256SUMS" >&2; exit 2; }
-spv_hash=$(sha256sum "$here/p010_scale.spv" | cut -d' ' -f1)
+(cd "$shaders" && sha256sum -c SHA256SUMS) || { echo "FAIL SPIR-V does not match SHA256SUMS" >&2; exit 2; }
+spv_hash=$(sha256sum "$shaders/p010_scale.spv" | cut -d' ' -f1)
 
 echo "== validate SPIR-V"
-spirv-val "$here/p010_scale.spv" || { echo "FAIL p010_scale.spv is not valid SPIR-V" >&2; exit 1; }
+spirv-val "$shaders/p010_scale.spv" || { echo "FAIL p010_scale.spv is not valid SPIR-V" >&2; exit 1; }
 
 render=${IRIS_RENDER_DEVICE:-}
 if [ -z "$render" ]; then
@@ -146,7 +147,7 @@ for origin in heap msm; do
         set -- $c
         IFS=$old_ifs
         src=$1 dst=$2 crop=$3 rot=$4 mirror=${5:-0}
-        set -- "$here/p010_scale.spv" "$origin" "$render" "$src" "$dst"
+        set -- "$shaders/p010_scale.spv" "$origin" "$render" "$src" "$dst"
         [ "$crop" = - ] || set -- "$@" "$crop"
         rc=0
         "$work/probe" "$@" --rot "$rot" --mirror "$mirror" --p010 || rc=$?
@@ -165,7 +166,7 @@ for origin in heap msm; do
         set -- $c
         IFS=$old_ifs
         src=$1 dst=$2 crop=$3 rot=$4 mirror=${5:-0}
-        set -- "$here/p010_scale.spv" "$origin" "$render" "$src" "$dst"
+        set -- "$shaders/p010_scale.spv" "$origin" "$render" "$src" "$dst"
         [ "$crop" = - ] || set -- "$@" "$crop"
         rc=0
         "$work/probe" "$@" --rot "$rot" --mirror "$mirror" --interp 1 --p010 || rc=$?
@@ -179,7 +180,7 @@ done
 # weights and the clamp in one case.
 for origin in heap msm; do
     rc=0
-    "$work/probe" "$here/p010_scale.spv" "$origin" "$render" 64x32 200x100 --interp 1 --constant 1023 --p010 \
+    "$work/probe" "$shaders/p010_scale.spv" "$origin" "$render" 64x32 200x100 --interp 1 --constant 1023 --p010 \
         || rc=$?
     printf 'case=%s 64x32->200x100 constant=1023 interp=bilinear exit=%s\n' "$origin" "$rc"
     [ "$rc" -eq 0 ] || failed=1
@@ -196,7 +197,7 @@ for method in area cubic advanced; do
             set -- $c
             IFS=$old_ifs
             src=$1 dst=$2 crop=$3 rot=$4 mirror=${5:-0}
-            set -- "$here/p010_scale.spv" "$origin" "$render" "$src" "$dst"
+            set -- "$shaders/p010_scale.spv" "$origin" "$render" "$src" "$dst"
             [ "$crop" = - ] || set -- "$@" "$crop"
             rc=0
             case $method in
@@ -214,7 +215,7 @@ done
 for origin in heap msm; do
     for interp in 2 3 4; do
         rc=0
-        "$work/probe" "$here/p010_scale.spv" "$origin" "$render" 64x32 200x100 --interp "$interp" \
+        "$work/probe" "$shaders/p010_scale.spv" "$origin" "$render" 64x32 200x100 --interp "$interp" \
             --constant 1023 --p010 || rc=$?
         printf 'case=%s 64x32->200x100 constant=1023 interp=%s exit=%s\n' "$origin" "$interp" "$rc"
         [ "$rc" -eq 0 ] || failed=1
@@ -233,7 +234,7 @@ for origin in heap msm; do
         set -- $c
         IFS=$old_ifs
         src=$1 dst=$2 crop=$3 rot=$4 mirror=${5:-0}
-        set -- "$here/p010_scale.spv" "$origin" "$render" "$src" "$dst"
+        set -- "$shaders/p010_scale.spv" "$origin" "$render" "$src" "$dst"
         [ "$crop" = - ] || set -- "$@" "$crop"
         rc=0
         "$work/probe" "$@" --rot "$rot" --mirror "$mirror" --up || rc=$?
@@ -247,7 +248,7 @@ for origin in heap msm; do
         [ "$rc" -eq 0 ] || failed=1
     done
     rc=0
-    "$work/probe" "$here/p010_scale.spv" "$origin" "$render" 64x32 200x100 --interp 1 --constant 255 --up \
+    "$work/probe" "$shaders/p010_scale.spv" "$origin" "$render" 64x32 200x100 --interp 1 --constant 255 --up \
         || rc=$?
     printf 'case=%s 64x32->200x100 constant=255 up interp=bilinear exit=%s\n' "$origin" "$rc"
     [ "$rc" -eq 0 ] || failed=1

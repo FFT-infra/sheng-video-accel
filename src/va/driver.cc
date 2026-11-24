@@ -5,7 +5,7 @@
 
 #include "driver.h"
 
-#include "../iris/vpp/scale.h"
+#include "../iris/vpp/processor.h"
 #include "../util/error.h"
 
 #include <algorithm>
