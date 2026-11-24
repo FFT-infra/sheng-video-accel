@@ -173,6 +173,7 @@ run iris-node-check sh "$test_dir/iris-node-check.sh" "$root"
 
 echo "== source invariants"
 run iris-source-invariants sh "$test_dir/iris-source-invariants.sh" "$root"
+run iris-layering-check sh "$test_dir/iris-layering-check.sh" "$root"
 run iris-env-doc-check sh "$test_dir/iris-env-doc-check.sh" "$root"
 run iris-codec-matrix-check sh "$test_dir/iris-codec-matrix-check.sh" "$root"
 run iris-trace-vocab-check python3 -I "$test_dir/iris-trace-vocab-check.py" "$root"

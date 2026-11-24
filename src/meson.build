@@ -2,11 +2,12 @@
 # Copyright (C) 2023 Max Schettler
 # SPDX-License-Identifier: MIT
 #
-# Three layers (docs/architecture.md §5):
+# Four layers, each including only the ones above it in this list
+# (docs/architecture.md §5):
 #   util/   options, trace, error, the encode parameter contract
-#   iris/   the only code that touches a codec node
 #   codec/  VA parameters <-> bitstream, pure
-#   va/     libva entry points on top of the two above
+#   iris/   the only code that touches a codec node
+#   va/     libva entry points on top of the three above
 # iris + codec are a static library so the unit tests link them without the
 # VA glue.
 

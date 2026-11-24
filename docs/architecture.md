@@ -399,6 +399,8 @@ Closed -> Configured -> Streaming -> Finishing -> Closed
 ```
 src/
   va/                 VA entry points; thin, no ioctl, no policy
+    driver.h          the object tables (DriverData) and every entry point's
+                      declaration
     driver.cc         vtable, init/terminate, capability probe; one recursive
                       mutex for tables only
     tables.cc         id -> object lookups (surface, context, buffer, owner)
@@ -412,6 +414,12 @@ src/
     vpp.cc            the three vtable_vpp queries over ABI-free answer
                       functions taking DriverData&; no GPU probe
     image.cc          images and subpictures (minimal); derive aliases a surface
+    buffer.cc         VA buffers, and a coded buffer's access unit claimed once
+    report.cc         exception -> VAStatus, in its own unit so a test can link
+                      one VA source file without the driver
+    grain.{h,cc}      AV1 film grain synthesis into the display surface: the
+                      one pixel algorithm in va/, here because it reads VA's
+                      grain structure and an iris::Layout
   iris/               the only code that touches /dev/videoN
     device.{h,cc}     Device interface (ioctl/poll/mmap virtuals) + real implementation;
                       discovery by `iris_driver` QUERYCAP name, decoder and
@@ -421,6 +429,7 @@ src/
     session_submit.cc access units into OUTPUT, the one-buffer Import window,
                       token bookkeeping and release
     session_publish.cc servicing both queues, completion handling, publish, wait
+    session_internal.h constants the three session units share; not interface
     encode.{h,cc}     EncoderSession: configure, submit/wait split, STOP/drain
                       on finish (§4.1)
     slots.{h,cc}      Frame + SlotPool: allocate, export, requeue, and the
@@ -429,17 +438,25 @@ src/
     gpu_copy.{h,cc}   EGL/GLES blit on one worker thread, view cache by Frame id
     alloc.{h,cc}      StableBuffer allocation (MSM GEM -> dma-heap), or a
                       duplicate of a client's DMA-BUF for an imported surface
+    msm_alloc.c       the MSM GEM ioctl, in C because msm_drm.h names a field
+                      `or`
     vpp/scale.{h,cc}  optional Vulkan compute video processor: imports two
                       surface DMA-BUFs, runs the pinned scale kernel for
                       the surface's sample width, embedded from
                       test/vulkan-vpp/{nv12,p010}_scale.spv (nearest point map
                       and the four-tap bilinear blend)
+    vpp/nv12_scale_spv.h vpp/p010_scale_spv.h vpp/tonemap_spv.h
+    vpp/overlay_spv.h vpp/overlay_rgb_spv.h
+                      the pinned SPIR-V as arrays, generated
   codec/              VA parameters -> bytestream the firmware accepts; pure functions
+    translator.h      the Translator interface and one factory per codec
     bitwriter.h
     h264.cc           SPS/PPS synthesis, AU assembly
     hevc.cc           VPS/SPS/PPS/RPS synthesis (fix PTL from profile, LTR, non-uniform tiles)
     vp9.cc            raw frame passthrough, superframe for invisible frames
-    av1.cc av1_obu.cc VA tiles -> OBU temporal unit
+    av1.cc av1_obu.{h,cc} VA tiles -> OBU temporal unit
+    av1_dpb.{h,cc}    the default AV1 translator: an internal eight-slot DPB,
+                      a hidden install frame when all eight are live
     encode.h          EncodePicture + Encoder interface shared by both codecs
     encode_h264.cc    VA encode buffers -> EncodeParams, H.264 menu values
     encode_hevc.cc    the same for HEVC, Main only
@@ -452,6 +469,7 @@ src/
                       without including each other
     trace.h           stable trace vocabulary (§8); every record ends ` t=<ms>`
     error.h
+    fourcc.h          fourccs the vendored kernel headers may predate
 test/
   unit/               host-only: slot lifetime, publish policy with FakeDevice, session ordering
                       with scripted DQBUF/event sequences, codec golden bitstreams,
@@ -472,8 +490,13 @@ scripts/
   install-system.sh / uninstall-system.sh  the one install path both packages use
 ```
 
-`va/` may include `iris/` and `codec/`; `iris/` and `codec/` never include
-`va/` or each other. `context.cc` and the stateless request-API classes do
+Each layer includes only the ones below it: `util/` none, `codec/` only
+`util/`, `iris/` `util/` and the single header `codec/annexb.h` (the encoder
+session reassembles access units with its splitter), `va/` all three. A
+translator never reaches the session and the session never reaches a
+translator. `test/iris-layering-check.sh` enforces the direction, and that
+the list above names every file under `src/`. `context.cc` and the stateless
+request-API classes do
 not survive; MPEG2/VP8 translators leave with them (no Iris node advertises
 those formats).
 

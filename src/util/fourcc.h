@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //
 // Fourcc definitions the vendored kernel headers may predate. One place,
-// because `iris/` and `codec/` both need them and neither includes the other.
+// because `iris/` and `codec/` both need them and `util/` is under both.
 
 #pragma once
 

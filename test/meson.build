@@ -394,6 +394,8 @@ test('static-checks', find_program('run-static-checks.sh'),
      args: [meson.project_source_root()], timeout: 300)
 test('iris-source-invariants', find_program('iris-source-invariants.sh'),
      args: [meson.project_source_root()])
+test('iris-layering-check', find_program('iris-layering-check.sh'),
+     args: [meson.project_source_root()])
 test('iris-env-doc-check', find_program('iris-env-doc-check.sh'),
      args: [meson.project_source_root()])
 test('iris-codec-matrix-check', find_program('iris-codec-matrix-check.sh'),
