@@ -474,15 +474,25 @@ src/
     error.h
     fourcc.h          fourccs the vendored kernel headers may predate
 test/
-  unit/               host-only: slot lifetime, publish policy with FakeDevice, session ordering
-                      with scripted DQBUF/event sequences, codec golden bitstreams,
-                      encode parameter translation
-  iris-*.sh           tablet gates: matrix (framemd5), structure matrix, DRC, soak,
-                      browser acceptance, concurrency soak; test/target/iris-import-probe.cc
-                      is the client-owned-buffer acceptance program (§9), and
+  run-static-checks.sh  the host entry point CI runs; calls everything in static/
+  unit/               compiled host tests: slot lifetime, publish policy with
+                      FakeDevice, session ordering with scripted DQBUF/event
+                      sequences, codec golden bitstreams, encode parameter
+                      translation, the VA entry points against a constructed
+                      driver
+  static/             host checks that read the tree: source invariants,
+                      layering, the five single-source checks, packaging, and
+                      the self-tests of the trace analysers and the gate runner
+  target/             needs an Iris node: the gates (matrix by framemd5,
+                      structure matrix, DRC, soak, browser acceptance), the
+                      trace analysers they call, and the probes meson builds
+                      but does not register. iris-import-probe.cc is the
+                      client-owned-buffer acceptance program (§9), and
                       iris-va-import-probe.cc the same memory entered through
                       vaCreateSurfaces2
-  remote/             deploy, provenance, cdp
+  target/vulkan-vpp/  the video processor's gates and its two C probes
+  remote/             deploy, the guarded gate runner, provenance, cdp
+  lib/ fixtures/      the environment the gates source; one AV1 fixture
 scripts/
   lib/iris-node.sh    the only place the node-resolution rule lives; sourced by
                       both diagnostics, so neither can drift from the other

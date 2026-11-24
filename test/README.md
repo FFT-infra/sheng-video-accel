@@ -4,6 +4,14 @@ Test suite and verification gates for the Qualcomm Iris VA-API driver: host-side
 unit tests (runnable in CI without V4L2 hardware), diagnostics for installed
 systems, target hardware gates, and external conformance corpora.
 
+| Directory | Runs on | Holds |
+| --- | --- | --- |
+| `test/unit/` | host | Compiled tests `meson test` registers. |
+| `test/static/` | host | Checks that read the tree; `test/run-static-checks.sh` runs them all. |
+| `test/target/` | a device with an Iris node | Gates, the trace analysers they call, and probes that are built but not registered as tests. |
+| `test/target/vulkan-vpp/` | the same device | The video processor's gates and probes. |
+| `test/remote/` | host | Deploy to the device and run one gate under the experiment guard. |
+
 ---
 
 ## 1. Host-Side Static Checks & Unit Tests
