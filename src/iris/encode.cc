@@ -252,8 +252,8 @@ void EncoderSession::configure(
 
     // Per-context control; apply_dynamic() refuses a later change.
     if (params.slices > 1) {
-        // The kernel compares its truncated denominator-over-numerator rate.
-        const unsigned fps = rate_num_ ? rate_den_ / rate_num_ : 0;
+        // The kernel compares its own truncated rate, so 60000/1001 is 59.
+        const unsigned fps = rate_num_ / rate_den_;
         require(params.rate_mode != RateMode::Vbr,
             "multi-slice encode needs CBR or CQP; the firmware refuses it under VBR",
             VA_STATUS_ERROR_INVALID_PARAMETER);
