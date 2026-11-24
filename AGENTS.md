@@ -10,27 +10,26 @@ under `src/`.
 - Find the decoder and encoder nodes by their `iris_driver` QUERYCAP name at
   runtime. They are told apart by which queue carries the compressed format:
   OUTPUT for the decoder, CAPTURE for the encoder. No `/dev/videoN` literal
-  anywhere in code, launcher or packaging.
+  anywhere in code, scripts or packaging.
 - One source of truth per fact, updated in the same commit as the change:
   codec capability and publish-policy qualification live in
   `data/iris-codec-capabilities.json`; the environment surface lives in
-  `README.md`; the trace vocabulary lives in `docs/architecture.md` §8;
-  kernel patch hashes live in `packaging/kernel/SHA256SUMS`; the source
-  archive boundary lives in `.gitattributes` and `scripts/make-dist.sh`.
-  Checks enforce all five. The current qualified combination in `README.md`
-  and the current hardware evidence in `TEST-RESULTS.md` are maintained
-  together with the table; the patch rationale in
-  `packaging/kernel/README.md` is prose. Superseded runs, refuted hypotheses
-  and interrupted experiments are not kept in the tree — they live in git
-  history.
+  `README.md` and `README.zh-CN.md`; the trace vocabulary lives in
+  `docs/architecture.md` §8; kernel patch hashes live in
+  `packaging/kernel/SHA256SUMS`; the source archive boundary lives in
+  `.gitattributes` and `scripts/make-dist.sh`. Checks enforce all five. The
+  current qualified combination in `README.md` and the current hardware
+  evidence in `TEST-RESULTS.md` are maintained together with the table.
+  Superseded runs, refuted hypotheses and interrupted experiments are not
+  kept in the tree — they live in git history.
 - Evidence before capability. A codec, profile or publish policy is
   advertised only after its hardware gate passed and TEST-RESULTS.md records
-  the run (docs/architecture.md §9). The Import policy additionally keeps one
-  client buffer in flight and never skips a submitted picture; both rules are
-  load-bearing, and a completion that lands in a neighbour's buffer must fail
-  both surfaces, never publish.
-- VA profiles are exposed only for codecs the capability table marks
-  `production: supported`.
+  the run (docs/architecture.md §9). VA profiles are exposed only for codecs
+  the capability table marks `production: supported`, and the table's
+  `target` is not widened to imply another SoC (docs/porting.md). The Import
+  policy additionally keeps one client buffer in flight and never skips a
+  submitted picture; both rules are load-bearing, and a completion that lands
+  in a neighbour's buffer must fail both surfaces, never publish.
 - Do not edit the vendored UAPI headers in `include/linux/`.
 - A browser decode counts as hardware only when a media surface reports the
   selected decoder with frame and drop evidence. A mapped node, a running GPU
@@ -63,8 +62,6 @@ is not an installation.
   push unless the user asked for that action in this turn.
 - Keep traces, media and build trees out of the repository; large lab
   artifacts belong on the target, not in git.
-- Functional package conflicts, patch authorship and `SHA256SUMS` stay as
-  they are.
 - Experiments that can reset firmware follow the guard procedure in
   `docs/development.md`. A reset or a thermal breach is a failed experiment,
   not evidence of codec support.
