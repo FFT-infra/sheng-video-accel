@@ -62,6 +62,12 @@ assert entries["av1"]["encode"]["production"] == "absent"
 # The driver decides the publish policy from its own import table; it must
 # agree with this document in both directions.
 driver = (pathlib.Path(sys.argv[1]).parent.parent / "src/va/driver.cc").read_text()
+# Every entry below is evidence from the platforms this document names. The
+# driver withholds its profiles from any other, so the two lists are one fact.
+block = driver[driver.index("platform-qualified-begin"):driver.index("platform-qualified-end")]
+platforms = set(re.findall(r'"([a-z0-9]+,[a-z0-9-]+)"', block))
+assert doc["qualified_platforms"] and platforms == set(doc["qualified_platforms"]), (
+    platforms, doc["qualified_platforms"])
 # The decode profiles the driver advertises are exactly the qualified ones
 # this document lists for a supported codec.
 block = driver[driver.index("profile-qualified-begin"):driver.index("profile-qualified-end")]
@@ -113,5 +119,6 @@ for name in ("README.md", "README.zh-CN.md"):
         else:
             assert "Copy" in mode and "Import" not in mode, (name, label, mode, "fallback")
 print(f"PASS codec capability matrix entries={len(entries)} profiles={sorted(decode_profiles)}"
-      f" import-qualified={sorted(names)} encode-qualified={sorted(encode_profiles)}")
+      f" import-qualified={sorted(names)} encode-qualified={sorted(encode_profiles)}"
+      f" platforms={sorted(platforms)}")
 PY

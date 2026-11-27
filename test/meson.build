@@ -370,6 +370,16 @@ va_config_attributes_test = executable(
              '-DVA_DRIVER_INIT_FUNC=' + va_driver_init_func])
 test('va-config-attributes', va_config_attributes_test)
 
+# The capability table's evidence is one platform's: what a node that names
+# another, or none, gets to advertise.
+va_platform_test = executable(
+  'va-platform-test',
+  files('unit/va-platform-test.cc') + va_driver_sources,
+  dependencies: [iris_core_dep],
+  cpp_args: ['-Wall', '-Wextra', '-std=c++20',
+             '-DVA_DRIVER_INIT_FUNC=' + va_driver_init_func])
+test('va-platform', va_platform_test)
+
 # The calls GStreamer's VA filter makes that FFmpeg's does not, against the
 # real image.cc and picture.cc.
 va_gst_filter_test = executable(

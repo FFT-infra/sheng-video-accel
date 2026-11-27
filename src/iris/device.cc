@@ -11,6 +11,7 @@
 #include <cstring>
 #include <fstream>
 #include <glob.h>
+#include <sstream>
 #include <system_error>
 
 extern "C" {
@@ -18,6 +19,8 @@ extern "C" {
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 }
 
@@ -67,6 +70,21 @@ public:
         std::ifstream file("/sys/module/qcom_iris/parameters/capture_sg");
         std::string value;
         return static_cast<bool>(file >> value) && value == "Y";
+    }
+
+    std::string platform() const override
+    {
+        // By device number, not by name: the node's name is not stable
+        // across boots and the fd is the node that was probed.
+        struct stat node = {};
+        if (fstat(fd_, &node) < 0 || !S_ISCHR(node.st_mode))
+            return {};
+        std::ifstream file("/sys/dev/char/" + std::to_string(major(node.st_rdev)) + ":"
+                + std::to_string(minor(node.st_rdev)) + "/device/of_node/compatible",
+            std::ios::binary);
+        std::ostringstream property;
+        property << file.rdbuf();
+        return first_compatible(property.str());
     }
 
     FormatInfo get_format(Queue queue) override
@@ -431,6 +449,11 @@ bool is_iris_node(int fd, NodeRole role)
 }
 
 } // namespace
+
+std::string first_compatible(const std::string& property)
+{
+    return property.substr(0, property.find('\0'));
+}
 
 std::unique_ptr<Device> open_device(const std::string& explicit_path, NodeRole role)
 {

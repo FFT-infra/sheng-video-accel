@@ -58,6 +58,7 @@ Options Options::from_environment()
     options.b_frames = env("V4L2_VA_B_FRAMES") != nullptr;
     options.roi = env("V4L2_VA_ROI") != nullptr;
     options.hardware_grain = env("V4L2_VA_HW_GRAIN") != nullptr;
+    options.unverified_platform = env("V4L2_VA_UNVERIFIED_PLATFORM") != nullptr;
     const char* ubwc = env("V4L2_VA_UBWC");
     options.ubwc = !ubwc || std::strcmp(ubwc, "0") != 0;
     if (const char* dump = env("V4L2_VA_DUMP"))

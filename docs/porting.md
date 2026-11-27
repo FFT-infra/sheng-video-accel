@@ -47,28 +47,40 @@ policy may be advertised on a new SoC until its own hardware gate passes and
    different card name needs no code change if the same rule still resolves a
    decoder and an encoder; verify with `scripts/lib/iris-node.sh` and
    `iris-device-check`.
-4. **Capability table.** `data/iris-codec-capabilities.json` records the VA
+4. **Platform identity.** The driver advertises only on a platform
+   `qualified_platforms` in `data/iris-codec-capabilities.json` lists, which
+   is `qcom,sm8550-iris` alone. The identity is the first entry of the
+   node's devicetree `compatible` list; on any other value `vainfo` shows no
+   decode or encode profile, and libva's info message names the value that
+   was read. `V4L2_VA_UNVERIFIED_PLATFORM=1` advertises what the node
+   enumerates so the gates below can run. It is a porting switch: nothing it
+   exposes has evidence, and it is not a way to ship. A port is finished when
+   its gates pass, `TEST-RESULTS.md` records them, and the new value is added
+   to the table and to `platform_qualified()` in `src/va/driver.cc` in the
+   same commit; `test/static/iris-codec-matrix-check.sh` keeps the two lists
+   equal.
+5. **Capability table.** `data/iris-codec-capabilities.json` records the VA
    profiles, capture formats, Import qualification and rejected features for
    this firmware. `src/va/driver.cc` and
    `test/static/iris-codec-matrix-check.sh` read it. A new SoC may expose a different
    set of compressed formats or bit depths; re-probe and re-record every entry
    before changing the table. Keep `production: supported` only for codecs
    with exact pixel evidence.
-5. **Defaults and guards.** `src/iris/session.cc` uses 2000 ms LAST/fence
+6. **Defaults and guards.** `src/iris/session.cc` uses 2000 ms LAST/fence
    waits, `src/util/options.cc` defaults `V4L2_VA_SYNC_TIMEOUT_MS` to 2000
    with a 30000 ms cold start, and `scripts/iris-experiment-guard.sh` defaults
    to 7200 s and 100000 millidegrees Celsius (10 K below this tablet's
    critical trip; the firmware throttles passively at 90000/95000). These were chosen for this
    tablet's firmware; a slower device needs its own guarded measurement, not a
    global knob change.
-6. **Packaging.** `packaging/fedora/libva-v4l2-iris.spec`,
+7. **Packaging.** `packaging/fedora/libva-v4l2-iris.spec`,
    `packaging/arch/PKGBUILD` and `debian/` assume the Fedora 44 / Arch /
    Debian arm64 layouts and install through `scripts/install-system.sh`. The
    Arch PKGBUILD comment names an `arch-xiaomi-sheng` image. The Debian
    package is built in a clean chroot: `libgbm-dev` is pinned to the distro's
    Mesa and is not safe to install over a vendor-patched stack. See
    `docs/development.md` for the chroot recipe.
-7. **Validation records.** Every hardware result in `TEST-RESULTS.md` came
+8. **Validation records.** Every hardware result in `TEST-RESULTS.md` came
    from this target's installed package, driver hash, boot ID, resolved node,
    decoder name, frame/drop counts and kernel module. Those records do not
    transfer to a new SoC. `docs/architecture.md` §2 and §9 describe the kernel
@@ -83,6 +95,8 @@ policy may be advertised on a new SoC until its own hardware gate passes and
   toolchain; keep a rollback copy of the previous module.
 - Resolve nodes by name and confirm the decoder/encoder queue roles with
   `iris-device-check`.
+- Run every gate with `V4L2_VA_UNVERIFIED_PLATFORM=1` until the platform is
+  in the table, and record that the switch was set.
 - Re-derive the capability table from `vainfo`, `v4l2-ctl` and exact
   software/VA framemd5 runs. Update the table, `src/va/driver.cc`, both
   READMEs and the required checks in one commit.

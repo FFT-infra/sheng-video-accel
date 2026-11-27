@@ -15,7 +15,7 @@
 | VP9 | Profile 0, Profile 2 | Import（零拷贝） | Fluster 176/305 |
 | AV1 | Profile 0（8/10 位） | Import（零拷贝，解码顺序内核） | 与 libdav1d 逐帧一致，含 film grain 合成 |
 
-只有 `data/iris-codec-capabilities.json` 标记 `production: supported` 的编码格式才声明 VA profile。一致性数字来自与软件解码的逐帧比对。Fluster 是语料结果，不是每次构建的回归，失败向量逐个归类。VP9 参考 MD5 早于本机 libvpx，176/305 不是解码缺陷数。
+只有 `data/iris-codec-capabilities.json` 标记 `production: supported` 的编码格式才声明 VA profile，并且只在该文件列出的平台上声明：节点的 devicetree `compatible` 指向别的 SoC 的 Iris 时不声明任何 profile，客户端回退到软件解码。一致性数字来自与软件解码的逐帧比对。Fluster 是语料结果，不是每次构建的回归，失败向量逐个归类。VP9 参考 MD5 早于本机 libvpx，176/305 不是解码缺陷数。
 
 UBWC 表面默认提供，`V4L2_VA_UBWC=0` 关闭。客户端在 `VASurfaceAttribDRMFormatModifiers` 里列出 `DRM_FORMAT_MOD_QCOM_COMPRESSED` 时得到 Q08C 表面，按每个平面一个 R8 层导出，且只能走 Direct 或 Import 发布：本驱动没有 UBWC 解压，Copy、图像入口、film grain、视频处理与编码器都拒绝它。Q10C 不提供——节点按每像素 4/3 字节分配，GPU 的 10-bit 导入要求 2 字节。`test/target/iris-ubwc-gate.sh` 让四种编码格式都解码到 Q08C，并要求 Turnip 读回（`test/vk-ubwc-read`）与线性解码逐字节一致。
 
@@ -129,6 +129,7 @@ HEVC Main 8-bit，FFmpeg 8.1.3。CPU 锁最高频，GPU 锁 680 MHz。解码不�
 | `V4L2_VA_B_FRAMES` | off | 启用 H.264 编码器的 B 帧；需保持三帧以上在途（FFmpeg：`-async_depth 3`） |
 | `V4L2_VA_ROI` | off | 启用 ROI 区域声明；需 0017 内核补丁，已验收固件会忽略该图 |
 | `V4L2_VA_UBWC` | on（`0` 关闭） | 向请求 `QCOM_COMPRESSED` 修饰符的客户端提供 UBWC（Q08C）解码表面 |
+| `V4L2_VA_UNVERIFIED_PLATFORM` | off | 在已验收的 `qcom,sm8550-iris` 之外的 Iris 平台上也声明 profile；移植用，见 `docs/porting.md` |
 | `V4L2_VA_HW_GRAIN` | 关闭 | 让固件按重建后的帧头施加 AV1 film grain，加过 grain 的画面落在 `current_display_picture` 上 |
 | `V4L2_VA_DUMP` | off | 提交的码流单元转储目录路径 |
 

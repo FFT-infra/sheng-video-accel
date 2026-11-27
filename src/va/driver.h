@@ -260,6 +260,8 @@ struct Context {
 // What the decoder and encoder nodes offered when the driver was initialised.
 struct Capabilities {
     std::string node;
+    // iris::Device::platform(); empty when the node did not say.
+    std::string platform;
     std::string encoder_node; // empty when the encoder node is absent
     std::set<uint32_t> output_formats; // V4L2 compressed fourccs (decode)
     std::set<uint32_t> encoder_formats; // V4L2 compressed CAPTURE fourccs (encode)
@@ -394,6 +396,16 @@ void require_linear(DriverData& d, const Surface& surface, const char* operation
 
 // Probe the node once at init.
 Capabilities probe_capabilities(const iris::Options& options);
+
+// Whether `platform` is one the capability table's evidence was taken on.
+bool platform_qualified(const std::string& platform);
+// The qualification is per platform: the same formats on another SoC's Iris
+// block are a different firmware nobody here has run. A node that names an
+// unqualified platform keeps what it enumerates but advertises no profile and
+// no Import codec unless the user overrides. A node that names nothing is
+// left as probed: a sandbox that hides sysfs must not turn the qualified
+// tablet into a software decoder. Returns the word the init trace reports.
+const char* apply_platform_policy(Capabilities& caps, bool allow_unverified);
 
 // Fill the version and table-size fields, the vendor string, the entry points
 // and, when the client offers the VPP sub-table and this build has the

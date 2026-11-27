@@ -86,11 +86,34 @@ iris::StableBuffer& ensure_stable(DriverData& d, Surface& surface)
     return *surface.stable;
 }
 
+bool platform_qualified(const std::string& platform)
+{
+    // platform-qualified-begin
+    static const char* const qualified[] = { "qcom,sm8550-iris" };
+    // platform-qualified-end
+    return std::find(std::begin(qualified), std::end(qualified), platform) != std::end(qualified);
+}
+
+const char* apply_platform_policy(Capabilities& caps, bool allow_unverified)
+{
+    if (caps.platform.empty())
+        return "unidentified";
+    if (platform_qualified(caps.platform))
+        return "qualified";
+    if (allow_unverified)
+        return "override";
+    caps.profiles.clear();
+    caps.encode_profiles.clear();
+    caps.import_formats.clear();
+    return "withheld";
+}
+
 Capabilities probe_capabilities(const iris::Options& options)
 {
     Capabilities caps;
     auto device = iris::open_device(options.video_path);
     caps.node = device->path();
+    caps.platform = device->platform();
     for (uint32_t format : { V4L2_PIX_FMT_H264, V4L2_PIX_FMT_HEVC, V4L2_PIX_FMT_VP9, V4L2_PIX_FMT_AV1 })
         if (device->format_supported(iris::Queue::Output, format))
             caps.output_formats.insert(format);
@@ -314,13 +337,22 @@ extern "C" VAStatus __attribute__((visibility("default"))) VA_DRIVER_INIT_FUNC(V
         delete d;
         return VA_STATUS_ERROR_OPERATION_FAILED;
     }
+    const char* policy = apply_platform_policy(d->capabilities, d->options.unverified_platform);
+    if (!std::strcmp(policy, "withheld") && ctx->info_callback)
+        ctx->info_callback(ctx,
+            const_cast<char*>(("iris: " + d->capabilities.platform
+                + " is not a qualified platform; no profile is advertised"
+                  " (V4L2_VA_UNVERIFIED_PLATFORM=1 overrides, docs/porting.md)\n")
+                    .c_str()));
     d->render_fd = render_fd_of(ctx);
     // Defer copy-engine creation until context creation so capability probing
     // stays thread-free for Chromium GPU sandbox initialization.
-    d->trace("va init node=%s encoder=%s render_fd=%d copy=deferred profiles=%zu encode_profiles=%zu",
+    d->trace("va init node=%s encoder=%s render_fd=%d copy=deferred profiles=%zu encode_profiles=%zu"
+             " platform=%s policy=%s",
         d->capabilities.node.c_str(),
         d->capabilities.encoder_node.empty() ? "-" : d->capabilities.encoder_node.c_str(), d->render_fd,
-        d->capabilities.profiles.size(), d->capabilities.encode_profiles.size());
+        d->capabilities.profiles.size(), d->capabilities.encode_profiles.size(),
+        d->capabilities.platform.empty() ? "-" : d->capabilities.platform.c_str(), policy);
 
     fill_context(ctx, *d);
 

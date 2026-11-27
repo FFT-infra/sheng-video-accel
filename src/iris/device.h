@@ -87,6 +87,11 @@ public:
     // memory, so the system-memory budget applies.
     virtual bool capture_from_system() const { return false; }
 
+    // The first entry of the node's devicetree `compatible` list, which names
+    // the SoC's Iris block ("qcom,sm8550-iris"). Empty when the node has no
+    // readable devicetree identity.
+    virtual std::string platform() const { return {}; }
+
     // Format negotiation.
     virtual FormatInfo get_format(Queue queue) = 0;
     virtual FormatInfo set_format(Queue queue, const FormatInfo& request) = 0;
@@ -143,6 +148,11 @@ public:
     // Wait for POLLIN/POLLPRI/POLLOUT activity; returns revents or 0 on timeout.
     virtual short poll(short events, int timeout_ms) = 0;
 };
+
+// The identity in a devicetree `compatible` property: NUL-separated strings,
+// most specific first. Later entries are fallbacks a related SoC lists to bind
+// the same kernel driver, and name a platform the node is not.
+std::string first_compatible(const std::string& property);
 
 // Open an Iris codec node. With an explicit path the node is verified to be
 // an iris_driver M2M node of the requested role; otherwise /dev/video* is

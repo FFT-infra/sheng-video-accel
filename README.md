@@ -19,7 +19,9 @@ mpv, GStreamer and Sunshine use it through VA-API.
 | AV1 | Profile 0 (8/10-bit) | Import (zero-copy, decode-order kernel) | Bit-exact against libdav1d; film grain included |
 
 A profile is advertised only for codecs `data/iris-codec-capabilities.json`
-marks `production: supported`. The conformance numbers are frame-by-frame
+marks `production: supported`, and only on a platform that file lists: a node
+whose devicetree `compatible` names another SoC's Iris block advertises
+nothing, and clients fall back to software. The conformance numbers are frame-by-frame
 comparisons against a software decode; Fluster counts are corpus results, not
 per-build regressions, and every failing vector is classified. Decode is
 qualified up to 7680x4320 for all four codecs, and for two concurrent 1080p
@@ -175,6 +177,7 @@ Imported DMA-BUFs must match the native CAPTURE layout: one linear object with a
 | `V4L2_VA_B_FRAMES` | off | Opt in to B pictures in the H.264 encoder; needs three pictures in flight (FFmpeg: `-async_depth 3`) |
 | `V4L2_VA_ROI` | off | Opt in to advertising ROI regions; needs the 0017 kernel patch, and the qualified firmware ignores the map |
 | `V4L2_VA_UBWC` | on (`0` disables) | Offer UBWC (Q08C) decode surfaces to clients that request the `QCOM_COMPRESSED` modifier |
+| `V4L2_VA_UNVERIFIED_PLATFORM` | off | Advertise on an Iris platform other than the qualified `qcom,sm8550-iris`; for porting, see `docs/porting.md` |
 | `V4L2_VA_HW_GRAIN` | off | Let the firmware apply AV1 film grain from the rebuilt header; the grained picture lands on `current_display_picture` |
 | `V4L2_VA_DUMP` | off | Directory path to dump submitted access units |
 

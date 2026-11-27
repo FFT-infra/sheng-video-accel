@@ -87,6 +87,30 @@ control at session open and runs in one of two session modes:
   guesses end-of-stream from silence is how the previous tree got a thread
   waking every 25 ms in every context.
 
+The qualification belongs to the platform it was measured on. At init the
+driver reads the first entry of the node's devicetree `compatible` list,
+through the node's device number
+(`/sys/dev/char/<major>:<minor>/device/of_node/compatible`), and compares it
+with `qualified_platforms` in `data/iris-codec-capabilities.json`:
+
+- **qualified** (`qcom,sm8550-iris`): everything the probe found is
+  advertised.
+- **another platform**: the node is opened and probed, but no decode or
+  encode profile is advertised and no codec takes the Import policy, so a
+  client falls back to software. `V4L2_VA_UNVERIFIED_PLATFORM` lifts this for
+  a port that is collecting its own evidence (`docs/porting.md`).
+- **no identity** (the property cannot be read): advertised as probed. The
+  read is one sysfs file, and a client that sandboxes it away must not turn
+  the qualified tablet into a software decoder. Chrome 156's GPU process
+  reads it on the target.
+
+Only the first entry counts. Upstream's binding lets `qcom,x1e80100-iris`
+and `qcom,sa8775p-iris` list `qcom,sm8550-iris` second, as the driver they
+bind to; that is a statement about the kernel driver, not about the firmware
+this table was measured against. The video-processing entrypoint is not part
+of this: it runs on the GPU and has no Iris firmware under it. The `va init`
+trace record ends with `platform=<compatible|-> policy=<word>`.
+
 Kernel version, Iris module hash and firmware identity are part of every
 hardware result (`test/remote/provenance.py` and `test/remote/gate.sh` record
 them).
@@ -644,10 +668,11 @@ Read once in `VA_DRIVER_INIT_FUNC`, stored in `Options`, passed down.
 | `V4L2_VA_B_FRAMES` | off | Opt in to B pictures in the H.264 encoder; needs three pictures in flight. |
 | `V4L2_VA_ROI` | off | Advertise ROI regions; needs kernel patch 0017, and the firmware ignores the map. |
 | `V4L2_VA_UBWC` | on | Set to `0` to stop offering Q08C surfaces to clients that request `QCOM_COMPRESSED`. |
+| `V4L2_VA_UNVERIFIED_PLATFORM` | off | Advertise on a platform `data/iris-codec-capabilities.json` does not list (§2). For porting. |
 | `V4L2_VA_HW_GRAIN` | off | Let the firmware apply AV1 film grain from the rebuilt header and publish the grained picture into `current_display_picture`. Off keeps the software blend (`src/va/grain.cc`). |
 | `V4L2_VA_DUMP` | off | Directory for submitted access units. |
 
-Twelve switches. `test/static/iris-env-doc-check.sh` keeps README and `options.cc` in
+Thirteen switches. `test/static/iris-env-doc-check.sh` keeps README and `options.cc` in
 sync by name, not by sentence.
 
 ## 7. Threading and locking
@@ -898,7 +923,7 @@ va grain hw surface=<n> display=<n>                    (V4L2_VA_HW_GRAIN: the
 ```
 
 Four VA-side diagnostics are emitted but intentionally stay out of the
-checker-oriented list above: `va init node=<path>`, `va error where=<name>`,
+checker-oriented list above: `va init node=<path> ...`, `va error where=<name>`,
 `va sync failed ...` and `va destroy_context encode finish failed: <reason>`.
 They name driver startup or teardown failures, not session completions.
 These are the accepted exceptions for `test/static/iris-trace-vocab-check.py`, which

@@ -1,6 +1,9 @@
 {
   "schema_version": 2,
   "target": "Qualcomm Iris stateful V4L2 on ARM64 (SM8550, decode-order kernel module)",
+  "qualified_platforms": [
+    "qcom,sm8550-iris"
+  ],
   "policy": {
     "production_va_requires_exact_evidence": true,
     "unknown_codec_action": "software-fallback",

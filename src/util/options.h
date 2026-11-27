@@ -50,6 +50,9 @@ struct Options {
     // grained picture, so the completion publishes into
     // current_display_picture and current_frame carries no pixels.
     bool hardware_grain = false;
+    // Advertise on an Iris platform nothing here was qualified on. Off by
+    // default: a port brings its own evidence first (docs/porting.md).
+    bool unverified_platform = false;
     // Directory to write each submitted access unit into; empty disables.
     std::string dump_dir;
 
