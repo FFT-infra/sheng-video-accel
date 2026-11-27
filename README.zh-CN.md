@@ -107,6 +107,7 @@ HEVC Main 8-bit，FFmpeg 8.1.3。CPU 锁最高频，GPU 锁 680 MHz。解码不�
 
 ## 已知限制
 
+- **从 GOP 中间起解**：解码上下文必须从 intra 图像开始（H.264：IDR 或任意全 intra 图像；HEVC：IRAP）。固件对它之前的图像不产生任何完成，所以这些图像的 `vaEndPicture` 返回 `VA_STATUS_ERROR_DECODING_ERROR`，客户端不用空等。
 - **AV1 分辨率切换**：上下文内切换后，继续按旧几何导出表面的客户端在这些帧上得到 GPU 拷贝。Chromium 播本地文件时可能选软件 AV1 解码器，是否走硬件以浏览器门禁为准。
 - **原版内核**：解码降级为 GPU 拷贝，IDR 请求改为移动 intra period。
 - **超过 8K**：节点声明上限 8192x8192。H.264 和 AV1 能解 8192x4352；HEVC 和 VP9 停在 8192x4320，再高就在第一次出队失败。

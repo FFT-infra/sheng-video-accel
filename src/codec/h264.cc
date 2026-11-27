@@ -116,6 +116,13 @@ public:
         require(parameters.seq_fields.bits.frame_mbs_only_flag
                 && !(parameters.CurrPic.flags & (VA_PICTURE_H264_TOP_FIELD | VA_PICTURE_H264_BOTTOM_FIELD)),
             "interlaced H.264 unsupported", VA_STATUS_ERROR_UNIMPLEMENTED);
+        // The firmware consumes a picture that depends on one it never saw
+        // and completes nothing for it, so a client that syncs it waits out
+        // the cold-start bound per picture. Any all-intra picture is a start:
+        // the node decodes from an open-GOP I picture as it does from an IDR.
+        const bool intra = std::all_of(picture.slice_parameters.begin(), picture.slice_parameters.end(),
+            [](const void* slice) { return static_cast<const VASliceParameterBufferH264*>(slice)->slice_type % 5 == 2; });
+        require(started_ || intra, "H.264 decode must start at an intra picture", VA_STATUS_ERROR_DECODING_ERROR);
 
         out.bytes.clear();
         out.deferred = false;
@@ -151,6 +158,7 @@ public:
         }
         out.bytes.insert(out.bytes.begin(), prefix.begin(), prefix.end());
         out.sequence_start = sequence_start;
+        started_ = true;
     }
 
     bool flush(AccessUnit&) override { return false; }
@@ -161,6 +169,7 @@ private:
     // repeated. Per translator, which is per VA context.
     std::vector<uint8_t> last_sps_;
     std::vector<uint8_t> last_pps_;
+    bool started_ = false;
 };
 
 } // namespace

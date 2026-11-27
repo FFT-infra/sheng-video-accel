@@ -141,6 +141,11 @@ Imported DMA-BUFs must match the native CAPTURE layout: one linear object with a
 
 ## Known limits
 
+- **Starting mid-GOP**: a decode context has to open at an intra picture
+  (H.264: an IDR or any all-intra picture; HEVC: an IRAP). The firmware
+  completes nothing for pictures before one, so `vaEndPicture` returns
+  `VA_STATUS_ERROR_DECODING_ERROR` for them instead of leaving the client to
+  wait.
 - **AV1 resolution change**: after an in-context change, a client that keeps
   exporting surfaces at the old geometry gets GPU copy for those pictures.
 - **Stock kernel**: decode degrades to GPU copy, and IDR requests move the intra
