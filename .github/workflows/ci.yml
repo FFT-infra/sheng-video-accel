@@ -61,6 +61,7 @@ jobs:
             va-vtable \
             va-config-attributes \
             va-gst-filter \
+            va-platform \
             iris-va-vtable-surface \
             annexb \
             h264-translator \
