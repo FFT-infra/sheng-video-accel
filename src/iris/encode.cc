@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 //
-// The synchronous encoder transaction (docs/architecture.md §4). The
-// decoder keeps a slot pool so completions can be published zero-copy;
-// encoding has nothing to publish, so one picture in means one access unit
-// out and vaEndPicture can return the bytes.
+// The encoder transaction (docs/architecture.md §4.1). The decoder keeps a
+// slot pool so completions can be published zero-copy; encoding has nothing
+// to publish, so one picture in means one access unit out: submit() queues
+// the raw frame and wait() takes the bytes.
 
 #include "encode.h"
 
@@ -252,8 +252,8 @@ void EncoderSession::configure(
 
     // Per-context control; apply_dynamic() refuses a later change.
     if (params.slices > 1) {
-        // The kernel compares its truncated denominator-over-numerator rate.
-        const unsigned fps = rate_num_ ? rate_den_ / rate_num_ : 0;
+        // The kernel compares its own truncated rate, so 60000/1001 is 59.
+        const unsigned fps = rate_num_ / rate_den_;
         require(params.rate_mode != RateMode::Vbr,
             "multi-slice encode needs CBR or CQP; the firmware refuses it under VBR",
             VA_STATUS_ERROR_INVALID_PARAMETER);

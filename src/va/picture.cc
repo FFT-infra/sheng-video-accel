@@ -200,7 +200,10 @@ void accept_vpp_pipeline(Context& c, const Buffer& b)
         VA_STATUS_ERROR_INVALID_PARAMETER);
     VAProcPipelineParameterBuffer p = {};
     std::memcpy(&p, b.data.data(), sizeof(p));
-    const bool blending = p.blend_state != nullptr;
+    // GStreamer's compositor attaches a blend state to every layer, the
+    // bottom one included; one that sets no flag there asks for nothing.
+    const bool bottom = !c.vpp.has_value() && c.vpp_overlays.empty();
+    const bool blending = p.blend_state != nullptr && !(bottom && p.blend_state->flags == 0);
     iris::require(blending ? c.vpp.has_value() : !c.vpp.has_value() && c.vpp_overlays.empty(),
         "the first VideoProc pipeline buffer is the main pass and every later one blends",
         VA_STATUS_ERROR_UNSUPPORTED_FILTER);
@@ -834,13 +837,17 @@ VAStatus createContext(VADriverContextP ctx, VAConfigID config, int width, int h
     return guarded(ctx, "createContext", [&] {
         auto& d = data(ctx);
         (void)flags;
-        iris::require(width > 0 && height > 0, "invalid context geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
         Config cfg;
         {
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
             auto it = d.configs.find(config);
             iris::require(it != d.configs.end(), "invalid config", VA_STATUS_ERROR_INVALID_CONFIG);
             cfg = it->second;
+            // A processing context has no picture size of its own: each
+            // pipeline names its surfaces, and GStreamer opens one with 0x0.
+            const bool sized = cfg.entrypoint == VAEntrypointVideoProc ? width >= 0 && height >= 0
+                                                                       : width > 0 && height > 0;
+            iris::require(sized, "invalid context geometry", VA_STATUS_ERROR_INVALID_PARAMETER);
             // The copy engine is built on the first copy, not here: GPU copy
             // initialises EGL, worth about 0.1 s per process, and Direct and
             // Import clients never copy. A VideoProc context never copies at
@@ -897,15 +904,18 @@ VAStatus createContext(VADriverContextP ctx, VAConfigID config, int width, int h
         sc.import_allowed = d.capabilities.import_formats.count(sc.codec_pixelformat) != 0;
         // A compressed render target turns the session's CAPTURE format into
         // Q08C, and one CAPTURE format cannot serve two layouts.
-        for (int i = 0; i < count; ++i) {
-            auto it = d.surfaces.find(render_targets[i]);
-            if (it == d.surfaces.end())
-                continue;
-            if (i == 0)
-                sc.capture_modifier = it->second->modifier;
-            iris::require(it->second->modifier == sc.capture_modifier,
-                "every render target of a context must carry the same DRM modifier",
-                VA_STATUS_ERROR_INVALID_PARAMETER);
+        {
+            std::lock_guard<std::recursive_mutex> lock(d.mutex);
+            for (int i = 0; i < count; ++i) {
+                auto it = d.surfaces.find(render_targets[i]);
+                if (it == d.surfaces.end())
+                    continue;
+                if (i == 0)
+                    sc.capture_modifier = it->second->modifier;
+                iris::require(it->second->modifier == sc.capture_modifier,
+                    "every render target of a context must carry the same DRM modifier",
+                    VA_STATUS_ERROR_INVALID_PARAMETER);
+            }
         }
         // Opening the node and OUTPUT STREAMON happen here, outside the
         // table lock. SOURCE_CHANGE and CAPTURE follow the first AU.
@@ -959,10 +969,10 @@ VAStatus destroyContext(VADriverContextP ctx, VAContextID id)
             {
                 std::lock_guard<std::recursive_mutex> lock(d.mutex);
                 d.contexts.erase(id);
+                for (auto& s : owned)
+                    if (s->owner == id)
+                        s->owner = VA_INVALID_ID;
             }
-            for (auto& s : owned)
-                if (s->owner == id)
-                    s->owner = VA_INVALID_ID;
             c->encode_session.reset();
             c->encoder.reset();
             return VA_STATUS_SUCCESS;
@@ -990,9 +1000,10 @@ VAStatus destroyContext(VADriverContextP ctx, VAContextID id)
             std::lock_guard<std::recursive_mutex> lock(d.mutex);
             d.contexts.erase(id);
         }
-        for (auto& s : owned) {
+        for (auto& s : owned)
             if (s->rendering())
                 c->session->release(s->target);
+        {
             // A completed Direct frame stays with its surface: the Frame
             // owns an exported fd, and vb2 orphans exported buffers when
             // the queue is freed, so the pixels remain readable after the
@@ -1001,7 +1012,9 @@ VAStatus destroyContext(VADriverContextP ctx, VAContextID id)
             // The frame is simply the last reference to its slot now;
             // nothing can requeue it, and it is dropped when the surface is
             // reused or destroyed.
-            s->owner = VA_INVALID_ID;
+            std::lock_guard<std::recursive_mutex> lock(d.mutex);
+            for (auto& s : owned)
+                s->owner = VA_INVALID_ID;
         }
         c->session.reset();
         return VA_STATUS_SUCCESS;

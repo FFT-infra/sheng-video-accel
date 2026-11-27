@@ -16,7 +16,7 @@
 //   default /dev/dri/renderD128.
 //   A build tree needs LIBVA_DRIVER_NAME=v4l2 with LIBVA_DRIVERS_PATH, or
 //   libva resolves msm_drv_video.so instead of v4l2_drv_video.so:
-//     LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH=/path/to/build/src \
+//     env LIBVA_DRIVER_NAME=v4l2 LIBVA_DRIVERS_PATH=/path/to/build/src
 //         iris-encode-misc-bound-probe
 
 #include <va/va.h>

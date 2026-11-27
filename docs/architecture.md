@@ -28,14 +28,17 @@ second entrypoint, not a second product: it exists so FFmpeg's `h264_vaapi`
 and `hevc_vaapi` (and anything else that asks a VA display for an encode
 entrypoint) can use the VPU without a second display or a second driver.
 Scope: H.264 Constrained Baseline/Main/High and HEVC Main, CBR, VBR or CQP,
-NV12 input, Annex-B output, one reference picture in flight per context. B
+NV12 input, and HEVC Main 10 with P010 input on a module carrying kernel
+patch 0014; Annex-B output, one reference picture in flight per context. B
 pictures are opt-in (`V4L2_VA_B_FRAMES`) and H.264 only; the session then
 queues pictures in display order and the client needs one more picture in
-flight than the default (invariant 10).
+flight than the default (invariant 10). Slices are a macroblock budget under
+CBR or CQP, up to 60 fps and 4096x2160 (kernel patch 0013); ROI is opt-in
+(`V4L2_VA_ROI`, kernel patch 0017, §4.1).
 
 Non-goals: being a generic backend for stateless request-API decoders (that
-is upstream `mxsrc/libva-v4l2`'s job and stays on `master`), VP9, AV1 and
-10-bit encode, HEVC B-frames, ROI, multi-slice and tiles, `VAEntrypointEncSliceLP`,
+is upstream `mxsrc/libva-v4l2`'s job and stays on `master`), VP9 and AV1
+encode, HEVC B-frames, tiles, `VAEntrypointEncSliceLP`,
 and shipping a custom Chromium. (Video post-processing is supported via
 a Vulkan compute backend, on by default and disabled by `V4L2_VA_VPP=0`).
 
@@ -383,7 +386,7 @@ Closed -> Configured -> Streaming -> Finishing -> Closed
 
 #### Driver Invariants
 
-- **Attribution**: Completions are attributed in strict FIFO submission order matching hardware processing.
+- **Attribution**: A completion is matched to its picture by the timestamp the firmware echoes, because B pictures come back ahead of the reference submitted before them. A zero echo falls back to submission order.
 - **Queue Sizing**: CAPTURE queue negotiation occurs strictly after rate-control and bitrate configuration to guarantee proper buffer allocation sizing by firmware.
 - **Crop Alignment**: Non-mplane OUTPUT selection applies `V4L2_SEL_TGT_CROP`, aligning dimensions to codec macroblock boundaries (16 for H.264, 32 for HEVC) to avoid geometry distortion.
 - **Picture Geometry**: The coded picture is the geometry the client declared at `vaCreateContext`, narrowed for H.264 by the sequence's frame crop; FFmpeg creates a macroblock-aligned H.264 context (1920x1088) for a 1920x1080 picture, while its HEVC context already carries the visible size. The input surface may be larger than the picture (an aligned decode allocation) and is queued without a copy, so the narrowing stops where the encoder's own raw layout would move the chroma plane; there the surface geometry stands and the decoded layout stays the one the encoder reads.
@@ -402,7 +405,7 @@ src/
     config.cc         profiles/entrypoints from the capability table
     surface.cc        create/destroy/sync/query/export/derive/getImage
     picture.cc        begin/render/end -> codec translator -> Session::submit,
-                      or for an EncSlice context -> EncoderSession::encode,
+                      or for an EncSlice context -> EncoderSession::submit,
                       or for a VideoProc context -> iris::vpp::scale_nv12_or_p010
                       or iris::vpp::tonemap_hdr10_to_sdr
                       or iris::vpp::overlay
@@ -579,7 +582,9 @@ VA error status instead of dropping operations silently):
   Constant overlay uploads via packed BGRA produce exact BT.709 codes.
 - **Explicit refusals**:
   - Luma keying (`VA_BLEND_LUMA_KEY`).
-  - More than sixteen blending passes, or a blend state on the first pass.
+  - More than sixteen blending passes, or a first pass that blends. A blend
+    state that sets no flag on the first pass is accepted as the main pass:
+    GStreamer's compositor attaches one to every layer.
   - Any second filter or multiple filters in one picture.
   - HDR-to-HDR tone mapping, or NV12 input to the HDR tone mapper.
   - Colour conversion outside the HDR10-to-SDR tone mapper.

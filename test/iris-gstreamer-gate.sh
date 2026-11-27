@@ -4,7 +4,7 @@
 #
 # libgstva checks the VA driver's vendor string before it builds an element, so
 # on this machine `gst-inspect-1.0 va` lists 0 features and `vaav1dec` does not
-# exist. `GST_VA_ALL_DRIVERS=1` lifts that filter and the plugin lists seven
+# exist. `GST_VA_ALL_DRIVERS=1` lifts that filter and the plugin lists nine
 # elements. Nothing else is set: libva reaches this driver through its
 # msm_drv_video.so alias, the same way the browser gate reaches it.
 #

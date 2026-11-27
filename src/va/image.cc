@@ -200,11 +200,10 @@ void copy_pixels(DriverData& d, Surface& s, const VAImage& image, uint8_t* desti
 VAStatus queryImageFormats(VADriverContextP ctx, VAImageFormat* formats, int* count)
 {
     auto& d = data(ctx);
-    // count is in/out: on entry it is the caller's list size, and the driver
-    // may write at most that many entries. FFmpeg sizes its array from
-    // vaMaxNumImageFormats (kMaxImageFormats) and hands that number back, so
-    // writing more entries than the driver advertised overflows the client's
-    // heap instead of returning an error.
+    // count is out-only (va.h): GStreamer leaves it at zero, FFmpeg sets it
+    // to its array size. The caller's array holds vaMaxNumImageFormats
+    // (kMaxImageFormats) entries either way, and that number is the bound:
+    // writing more than it overflows the client's heap.
     VAImageFormat list[kMaxImageFormats] = {};
     int n = 0;
     list[n].fourcc = VA_FOURCC_NV12;
@@ -232,8 +231,8 @@ VAStatus queryImageFormats(VADriverContextP ctx, VAImageFormat* formats, int* co
         fill_masks(list[n]);
         ++n;
     }
-    if (formats != nullptr && count != nullptr && *count > 0)
-        std::copy_n(list, std::min(n, *count), formats);
+    if (formats != nullptr)
+        std::copy_n(list, n, formats);
     if (count != nullptr)
         *count = n;
     return VA_STATUS_SUCCESS;
@@ -379,6 +378,14 @@ VAStatus getImage(VADriverContextP ctx, VASurfaceID id, int x, int y, unsigned w
         if (b->alias) {
             iris::require(b->alias_surface == id, "vaGetImage into an image derived from another surface",
                 VA_STATUS_ERROR_INVALID_PARAMETER);
+            return VA_STATUS_SUCCESS;
+        }
+        // A surface nothing has written yet has no pixels to copy, which is
+        // not an error: GStreamer fetches the image before every map it could
+        // not derive, the write-only map of a fresh upload included.
+        if (!s->has_pixels() && !s->failed) {
+            require_linear(d, *s, "vaGetImage");
+            std::fill(b->data.begin(), b->data.end(), 0);
             return VA_STATUS_SUCCESS;
         }
         copy_pixels(d, *s, image, b->data.data());

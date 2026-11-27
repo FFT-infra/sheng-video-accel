@@ -1054,6 +1054,26 @@ void test_multi_slice_controls()
     check(status_of([&] { vbr_session.configure(vbr, 1920, 1080); })
             == VA_STATUS_ERROR_INVALID_PARAMETER,
         "slices under VBR are refused");
+
+    // The kernel drops the slice budget above 60 fps and codes one slice per
+    // picture, with the control write and the stream both succeeding, so the
+    // rate is refused here. Its rate is the truncated integer: 60000/1001 is
+    // 59 and passes.
+    const auto at_rate = [&](unsigned num, unsigned den) {
+        iris::EncoderSession session(std::make_unique<FakeEncoderNode>(true, false, true), config,
+            iris::Options {}, iris::Trace(false));
+        iris::EncodeParams sliced = params(0, 0, 0);
+        sliced.rate_mode = iris::RateMode::Cbr;
+        sliced.slices = 2;
+        sliced.slice_mb = 4080;
+        sliced.frame_rate_num = num;
+        sliced.frame_rate_den = den;
+        return status_of([&] { session.configure(sliced, 1920, 1080); });
+    };
+    check(at_rate(60, 1) == -1, "slices at 60 fps configure");
+    check(at_rate(60000, 1001) == -1, "slices at 59.94 fps configure");
+    check(at_rate(61, 1) == VA_STATUS_ERROR_INVALID_PARAMETER, "slices at 61 fps are refused");
+    check(at_rate(120, 1) == VA_STATUS_ERROR_INVALID_PARAMETER, "slices at 120 fps are refused");
 }
 
 // The layer count is a per-context control, like the slice budget: written

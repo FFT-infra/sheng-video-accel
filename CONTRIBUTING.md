@@ -46,16 +46,7 @@ Remote scripts intentionally have no private-host default. Keep downloaded media
 
 ## Core Development Rules
 
-Before modifying code, review the automated agent contract in [AGENTS.md](AGENTS.md):
-
-- **Dynamic Node Resolution**: Never hardcode boot-specific `/dev/videoN` nodes in code, scripts, launchers, or packaging. Always resolve nodes dynamically at runtime via the `iris_driver` QUERYCAP name.
-- **Single Source of Truth**: Update documentation, capabilities, and code in the same commit:
-  - Codec capability and publish policies: `data/iris-codec-capabilities.json`
-  - Environment switches: `README.md` and `README.zh-CN.md`
-  - Trace vocabulary: `docs/architecture.md` §8
-  - Kernel patch hashes: `packaging/kernel/SHA256SUMS`
-- **Evidence Before Capability**: Codecs, profiles, and publish policies are advertised only after the hardware gate passes and `TEST-RESULTS.md` records the run.
-- **Vendored Headers**: Do not edit vendored UAPI headers in `include/linux/`.
+The hard rules live in [AGENTS.md](AGENTS.md) and apply to every change, whoever makes it: node resolution, one source of truth per fact, evidence before capability, and the vendored headers. Read them before modifying code; they are stated once, there.
 
 ---
 
