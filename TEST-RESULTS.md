@@ -23,8 +23,8 @@ from source `65686a2`, so `rpm -V` reports the live file as `S.5....T.`.
 
 ## Host verification
 
-`sh test/run-static-checks.sh` PASS, `meson test -C build-local` 36/36,
-`meson test -C build-asan` 36/36, `git diff --check` clean. Both CI jobs
+`sh test/run-static-checks.sh` PASS, `meson test -C build-local` 38/38,
+`meson test -C build-asan` 38/38, `git diff --check` clean. Both CI jobs
 (`build-and-check`, `sanitizers`) are green on the pushed head. The VPP
 shaders, kernel patch hashes, media pins, install manifest and source-archive
 boundary are each pinned by a host check.
@@ -71,6 +71,54 @@ checked on 2026-11-19 on a 720p clip: a backwards seek from ~6.7 s to 5 s
 continued decoding (160 -> 278 frames, `dropped=0`, no media error), with and
 without `--disable-features=ExtendedVideoBitstreamValidation`, so this driver
 needs no seek workaround on that browser.
+
+### Platform identity and the start of a context
+
+Both ran on the build tree of source `183c5f6` (`e0128855…`,
+`source_dirty=0`, no installed package involved), each under the guard with
+`guard=complete`.
+
+The node reports `qcom,sm8550-iris` and the driver advertises what it did
+before: 8 decode and 5 encode profiles, `policy=qualified`; the four-codec
+matrix is 48/48 exact per codec and Chrome 156.0.8078.79 plays the 720p H.264
+clip on `VaapiVideoDecoder` (`kIsPlatformVideoDecoder=true`, 299 frames, 0
+dropped, GPU process holding the node). No second SoC was available, so the
+other outcomes were produced on the same driver binary by answering that one
+sysfs read from a file through a preloaded `fopen`:
+
+| `compatible` read | Decode profiles | Encode profiles | `policy` |
+| --- | ---: | ---: | --- |
+| `qcom,sm8550-iris` (the node's own) | 8 | 5 | `qualified` |
+| `qcom,sm8650-iris` | 0 | 0 | `withheld` |
+| `qcom,x1e80100-iris`, `qcom,sm8550-iris` | 0 | 0 | `withheld` |
+| empty | 8 | 5 | `unidentified` |
+| `qcom,sm8650-iris` with `V4L2_VA_UNVERIFIED_PLATFORM=1` | 8 | 5 | `override` |
+
+`VAEntrypointVideoProc` is listed in all five. This shows the policy, not
+that any other SoC decodes.
+
+The firmware completes nothing for an H.264 picture that precedes the first
+intra picture of a context. A 1280x720 open-GOP stream (one IDR, then a
+non-IDR I picture every 30) was fed to the node through
+`iris-decode-stream-probe`, whole and cut at two access units:
+
+| First access unit | Probe |
+| --- | --- |
+| IDR (uncut) | 180/180 |
+| non-IDR I picture | 150/150 |
+| B picture, four after an I picture | `surface sync timeout` on the first, no completion; 30.05 s at the default bound on a second clip cut at a P picture |
+
+The probe drives the session below the translator, so those rows are the
+firmware with or without the guard. With the guard the same three streams through FFmpeg `-hwaccel vaapi` give
+180, 150 and 120 frames, every one equal to the software decode. The 120 are
+the pictures from the next I picture on: before the guard the driver
+submitted the 26 ahead of it and the firmware swallowed them, now
+`vaEndPicture` returns `VA_STATUS_ERROR_DECODING_ERROR` for those 26.
+GStreamer's `vah264dec` delivers the same 180, 150 and 120 buffers.
+
+Run identity: boot `a3eb4f1b-70a3-4a4c-9892-b40141d42135`, kernel
+`7.3.4-sm8550-00104-g87ac0f2347eb`, module `1323d58a…`, decoder
+`/dev/video17` and encoder `/dev/video18` resolved by `iris_driver`.
 
 ### Media clients
 
